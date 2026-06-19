@@ -10,6 +10,7 @@ import {
   X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
+import { FileDropZone } from "@/components/ui/FileDropZone";
 import { aiParseCarrierAppetite } from "@/lib/ai";
 import { api } from "@/lib/api";
 import type { AiParsedCarrierAppetite, Carrier } from "@/types";
@@ -80,6 +81,17 @@ export function AiAppetiteUploader({
     setAppliedAt(null);
   }
 
+  function handleFiles(files: File[]) {
+    const f = files[0];
+    if (!f) return;
+    setFileName(f.name);
+    // Best-effort text read for plaintext-ish files so the
+    // heuristics get more signal than just the filename.
+    if (f.type.startsWith("text/") || /\.(txt|md)$/i.test(f.name)) {
+      f.text().then((t) => setText(t));
+    }
+  }
+
   return (
     <div className="space-y-4">
       <div className="rounded-md border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-900 flex items-start gap-2">
@@ -93,7 +105,16 @@ export function AiAppetiteUploader({
       </div>
 
       <div className="grid sm:grid-cols-2 gap-3">
-        <label className="rounded-md border border-dashed border-ink-200 px-4 py-6 text-sm text-center cursor-pointer hover:bg-ink-50">
+        <>
+          <FileDropZone
+            title={fileName ? `Replace: ${fileName}` : "Upload appetite guide"}
+            help="PDF, DOCX, TXT, or pasted screenshot. Text files are read locally for extra AI signal."
+            accept=".pdf,.txt,.doc,.docx,.md,.jpg,.jpeg,.png"
+            icon="ai"
+            onFiles={handleFiles}
+          />
+          {false && (
+        <label className="hidden">
           <input
             type="file"
             className="hidden"
@@ -118,6 +139,8 @@ export function AiAppetiteUploader({
             PDF / DOCX / TXT — the LLM reads it server-side in production.
           </div>
         </label>
+          )}
+        </>
 
         <div>
           <textarea

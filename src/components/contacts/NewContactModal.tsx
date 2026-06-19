@@ -3,16 +3,21 @@ import { CheckCircle2, FileUp, Loader2, Pencil, Sparkles, Upload } from "lucide-
 import { Modal } from "@/components/ui/Modal";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { AddressAutocomplete } from "@/components/ui/AddressAutocomplete";
+import { FileDropZone } from "@/components/ui/FileDropZone";
 import { api } from "@/lib/api";
 import { aiExtractContactFromFile } from "@/lib/ai";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
+import { readAiFileForExtraction } from "@/lib/fileIntakeExtraction";
 import type { AiExtractedContact, AssetType } from "@/types";
 
 type Kind = "prospect" | "client";
 type Mode = "choose" | "upload" | "manual";
+type ClientLineOfBusiness = "personal" | "commercial";
 
 interface FormState {
+  lineOfBusiness: ClientLineOfBusiness;
+  businessName: string;
   name: string;
   email: string;
   phone: string;
@@ -25,6 +30,8 @@ interface FormState {
 }
 
 const EMPTY: FormState = {
+  lineOfBusiness: "personal",
+  businessName: "",
   name: "",
   email: "",
   phone: "",
@@ -100,16 +107,33 @@ export function NewContactModal({
     setBusy(false);
   }
 
-  async function handleFiles(files: FileList | null) {
-    if (!files || files.length === 0) return;
+  async function handleFiles(files: File[]) {
+    if (files.length === 0) return;
     const file = files[0];
     setAiFileName(file.name);
     setBusy(true);
+    setError(null);
     try {
-      const out = await aiExtractContactFromFile({ fileName: file.name, fileType: file.type });
-      setExtracted(out);
+      const payload = await readAiFileForExtraction(file);
+      const out = await aiExtractContactFromFile({
+        fileName: file.name,
+        fileType: file.type,
+        text: payload.text,
+        dataUrl: payload.dataUrl,
+      });
+      const mergedSources = Array.from(new Set([...payload.sources, ...out.sources]));
+      const extractedContact = { ...out, sources: mergedSources };
+      setExtracted(extractedContact);
       const next: FormState = { ...EMPTY };
       const filled: string[] = [];
+      if (out.lineOfBusiness === "commercial" || out.businessName) {
+        next.lineOfBusiness = "commercial";
+        filled.push("lineOfBusiness");
+      } else if (out.lineOfBusiness === "personal") {
+        next.lineOfBusiness = "personal";
+        filled.push("lineOfBusiness");
+      }
+      if (out.businessName) { next.businessName = out.businessName; filled.push("businessName"); }
       if (out.name) { next.name = out.name; filled.push("name"); }
       if (out.email) { next.email = out.email; filled.push("email"); }
       if (out.phone) { next.phone = out.phone; filled.push("phone"); }
@@ -120,6 +144,12 @@ export function NewContactModal({
       setForm(next);
       setEnriched(new Set(filled));
       setMode("upload"); // keep on upload mode to show the form with results
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "The file could not be read. Try a clearer PDF, image, or text document."
+      );
     } finally {
       setBusy(false);
     }
@@ -129,6 +159,10 @@ export function NewContactModal({
     setError(null);
     if (!form.name.trim()) { setError("Name is required."); return; }
     if (!form.email.trim()) { setError("Email is required."); return; }
+    if (kind === "client" && form.lineOfBusiness === "commercial" && !form.businessName.trim()) {
+      setError("Business name is required for commercial-lines clients.");
+      return;
+    }
 
     if (kind === "prospect") {
       const summary = extracted?.summary ??
@@ -138,6 +172,7 @@ export function NewContactModal({
         name: form.name.trim(),
         email: form.email.trim(),
         phone: form.phone.trim() || undefined,
+        lineOfBusiness: form.lineOfBusiness,
         assetType: form.assetType,
         estimatedValue: form.estimatedValue,
         aiSummary: summary,
@@ -146,7 +181,6 @@ export function NewContactModal({
         recommendedFollowUp:
           "Personal outreach within 24h to confirm details and schedule a 15-min review.",
         marketingStatus: "active",
-        assignedAgentId: user!.id,
         status: "new",
       });
       api.status.create({
@@ -177,6 +211,8 @@ export function NewContactModal({
       const created = api.customers.create({
         tenantId: agency!.id,
         userId: newUser.id,
+        lineOfBusiness: form.lineOfBusiness,
+        businessName: form.lineOfBusiness === "commercial" ? form.businessName.trim() : undefined,
         name: form.name.trim(),
         email: form.email.trim(),
         phone: form.phone.trim() || undefined,
@@ -184,14 +220,41 @@ export function NewContactModal({
         marketingOptInEmail: form.marketingOptInEmail,
         marketingOptInSms: form.marketingOptInSms,
       });
+      const shouldCreateAsset =
+        !!extracted &&
+        (enriched.has("assetType") ||
+          enriched.has("estimatedValue") ||
+          enriched.has("mailingAddress") ||
+          form.notes.trim().length > 0);
+      const createdAsset = shouldCreateAsset
+        ? api.assets.create({
+            tenantId: agency!.id,
+            customerId: created.id,
+            type: form.assetType,
+            label:
+              form.lineOfBusiness === "commercial" && form.businessName.trim()
+                ? `${form.businessName.trim()} - ${ASSET_LABEL[form.assetType]}`
+                : `${ASSET_LABEL[form.assetType]} - ${form.name.trim()}`,
+            estimatedValue: form.estimatedValue ?? 0,
+            details: {
+              source: aiFileName ? `Extracted from ${aiFileName}` : "AI contact intake",
+              address: form.mailingAddress.trim() || undefined,
+              notes: form.notes.trim() || undefined,
+              lineOfBusiness: form.lineOfBusiness,
+              businessName: form.businessName.trim() || undefined,
+            },
+            status: "pending",
+          })
+        : undefined;
       api.status.create({
         tenantId: agency!.id,
         source: extracted ? "ai" : "agent",
         message: extracted
-          ? `Client created from uploaded document "${aiFileName}".`
-          : `Client created manually by ${user!.name}.`,
+          ? `Client created from uploaded document "${aiFileName}" as a ${form.lineOfBusiness === "commercial" ? "commercial-lines" : "personal-lines"} client${form.lineOfBusiness === "commercial" ? ` for ${form.businessName.trim()}` : ""}${createdAsset ? ` with ${ASSET_LABEL[createdAsset.type]} added to the profile` : ""}.`
+          : `Client created manually by ${user!.name} as a ${form.lineOfBusiness === "commercial" ? "commercial-lines" : "personal-lines"} client${form.lineOfBusiness === "commercial" ? ` for ${form.businessName.trim()}` : ""}.`,
         visibility: "internal",
         customerId: created.id,
+        assetId: createdAsset?.id,
         createdById: user!.id,
       });
       onCreated(created.id);
@@ -260,15 +323,32 @@ export function NewContactModal({
           {mode === "upload" && !extracted && (
             <div>
               <Disclaimer>
+                Demo only - files are read in this browser session for extraction and are not stored
+                unless you save the profile. Review AI-filled fields before creating the contact.
+              </Disclaimer>
+              {false && (
+              <Disclaimer>
                 Demo only — files are not uploaded or stored. The AI extraction returns plausible
                 seed values based on the filename so the agent flow can be demonstrated end-to-end.
               </Disclaimer>
-              <label className="block mt-4 border-2 border-dashed border-ink-200 rounded-lg p-8 text-center cursor-pointer hover:border-gold-300 hover:bg-ink-50/40">
+              )}
+              <div className="mt-4">
+                <FileDropZone
+                  title="Choose, drop, or paste a file"
+                  help="PDF, image, document, referral note, or copied screenshot. AI fills the profile fields below."
+                  accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.txt"
+                  busy={busy}
+                  busyLabel="Extracting contact details..."
+                  icon="ai"
+                  onFiles={handleFiles}
+                />
+                {false && (
+              <label className="hidden">
                 <input
                   type="file"
                   className="hidden"
                   accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.txt"
-                  onChange={(e) => handleFiles(e.target.files)}
+                  onChange={(e) => handleFiles(Array.from(e.target.files ?? []))}
                 />
                 {busy ? (
                   <>
@@ -283,6 +363,8 @@ export function NewContactModal({
                   </>
                 )}
               </label>
+                )}
+              </div>
             </div>
           )}
 
@@ -297,6 +379,49 @@ export function NewContactModal({
               )}
 
               <div className="grid sm:grid-cols-2 gap-3">
+                {(kind === "client" || kind === "prospect") && (
+                  <>
+                    <div className="sm:col-span-2">
+                      <FieldRow
+                        label={kind === "client" ? "Client line *" : "Prospect line *"}
+                        ai={enriched.has("lineOfBusiness")}
+                      >
+                        <div className="flex flex-wrap gap-2">
+                          {(["personal", "commercial"] as const).map((line) => {
+                            const active = form.lineOfBusiness === line;
+                            return (
+                              <button
+                                key={line}
+                                type="button"
+                                className={`min-h-10 rounded-md border px-4 py-2 text-sm font-semibold transition-all ${
+                                  active
+                                    ? "border-ink-900 bg-ink-900 text-white shadow-sm"
+                                    : "border-ink-200 bg-white text-ink-700 shadow-sm hover:border-ink-300 hover:bg-ink-50"
+                                }`}
+                                onClick={() => set("lineOfBusiness", line)}
+                              >
+                                {line === "personal" ? "Personal lines" : "Commercial lines"}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </FieldRow>
+                    </div>
+                    {kind === "client" && form.lineOfBusiness === "commercial" && (
+                      <div className="sm:col-span-2">
+                        <FieldRow label="Business name *" ai={enriched.has("businessName")}>
+                          <input
+                            className="input"
+                            required
+                            value={form.businessName}
+                            onChange={(e) => set("businessName", e.target.value)}
+                            placeholder="e.g., Palm Coast Marine Holdings LLC"
+                          />
+                        </FieldRow>
+                      </div>
+                    )}
+                  </>
+                )}
                 <FieldRow label="Full name *" ai={enriched.has("name")}>
                   <input className="input" required value={form.name} onChange={(e) => set("name", e.target.value)} />
                 </FieldRow>

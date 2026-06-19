@@ -1,5 +1,9 @@
 node_modules
 dist
+dist-app
+dist-website
+dist-software
+dist-checkout
 dist-ssr
 *.local
 .env
@@ -15,3 +19,13 @@ coverage
 server/node_modules
 server/dist
 server/.env
+
+.codex-screenshots
+.codex-*.png
+app-*-check.png
+.tmp-training-recordings
+.tmp-*
+artifacts
+work
+tmp-*
+*.wav

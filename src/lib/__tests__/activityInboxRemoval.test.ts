@@ -95,11 +95,15 @@ describe("tasks.markInProgress auto-texts the customer", () => {
       customerId: customer.id,
       assignedToId: agent.id,
     });
-    const before = api.communications.listByCustomer(customer.id).length;
+    const startedText = /started working on your request/i;
+    const before = api.communications.listByCustomer(customer.id);
+    const beforeStartedTexts = before.filter((c) => startedText.test(c.body)).length;
     api.tasks.markInProgress(task.id, agent.id);
     const afterFirst = api.communications.listByCustomer(customer.id);
-    expect(afterFirst.length).toBe(before + 1);
-    const sms = afterFirst.find((c) => /started working on your request/i.test(c.body))!;
+    expect(afterFirst.filter((c) => startedText.test(c.body)).length).toBe(
+      beforeStartedTexts + 1
+    );
+    const sms = afterFirst.find((c) => startedText.test(c.body))!;
     expect(sms).toBeTruthy();
     expect(sms.channel).toBe("sms");
     expect(sms.direction).toBe("outbound");
@@ -107,7 +111,11 @@ describe("tasks.markInProgress auto-texts the customer", () => {
     // Snooze then resume — no duplicate text.
     api.tasks.snooze(task.id, 1, agent.id);
     api.tasks.markInProgress(task.id, agent.id);
-    expect(api.communications.listByCustomer(customer.id).length).toBe(before + 1);
+    expect(
+      api.communications
+        .listByCustomer(customer.id)
+        .filter((c) => startedText.test(c.body)).length
+    ).toBe(beforeStartedTexts + 1);
   });
 
   it("a no-customer activity sends no text", async () => {

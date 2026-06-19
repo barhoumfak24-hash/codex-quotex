@@ -8,7 +8,7 @@ import { DocumentUploader } from "@/components/ui/DocumentUploader";
 import { AiAppetiteUploader } from "@/components/carriers/AiAppetiteUploader";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
-import type { CarrierAppetite, CarrierAppetiteLine } from "@/types";
+import type { Carrier, CarrierAppetite, CarrierAppetiteLine } from "@/types";
 
 export function CarrierDetailPage() {
   const { carrierId } = useParams();
@@ -72,7 +72,7 @@ export function CarrierDetailPage() {
               placeholder="https://..."
             />
             <p className="text-[11px] text-ink-400 mt-1">
-              Deep-link target for the "Edit on carrier" button in the agent + manager portals.
+              Deep-link target for the "View on carrier" button in the agent + manager portals.
             </p>
           </div>
           <div className="sm:col-span-2"><label className="label">Appetite</label><textarea name="appetiteNotes" className="input min-h-[80px]" defaultValue={carrier.appetiteNotes ?? ""} /></div>
@@ -96,74 +96,117 @@ export function CarrierDetailPage() {
 
       <Card>
         <CardHeader
-          title="Quoting API"
-          subtitle="Master-only wiring for this carrier's real-time quoting endpoint. Once Configured, the agent's AI quoting workspace will fan a quote request out to this carrier alongside the rest of the agency's book."
+          title="AI carrier portal runner"
+          subtitle="Store the approved carrier portal entry points. Production runs this from the secure backend worker with encrypted credentials, MFA handling, and audit logs."
         />
         <form
           className="grid sm:grid-cols-2 gap-3"
           onSubmit={(e) => {
             e.preventDefault();
             const data = new FormData(e.currentTarget);
-            const endpoint = String(data.get("qaEndpoint") ?? "").trim();
-            const provider = String(data.get("qaProvider") ?? "").trim();
-            const notes = String(data.get("qaNotes") ?? "").trim();
+            const agentPortalUrl = String(data.get("automationAgentUrl") ?? "").trim();
+            const customerPortalUrl = String(data.get("automationCustomerUrl") ?? "").trim();
+            const provider = String(data.get("automationProvider") ?? "").trim();
+            const credentialReference = String(data.get("automationCredential") ?? "").trim();
+            const mfaMode = String(data.get("automationMfa") ?? "staff_prompt") as NonNullable<
+              Carrier["quotingAutomation"]
+            >["mfaMode"];
+            const notes = String(data.get("automationNotes") ?? "").trim();
             api.carriers.update(carrier.id, {
-              quotingApi: {
+              quotingAutomation: {
                 provider: provider || undefined,
-                endpoint: endpoint || undefined,
+                agentPortalUrl: agentPortalUrl || undefined,
+                customerPortalUrl: customerPortalUrl || undefined,
+                credentialReference: credentialReference || undefined,
+                mfaMode,
                 notes: notes || undefined,
-                status: endpoint ? "configured" : "not_configured",
+                status: agentPortalUrl || customerPortalUrl ? "configured" : "not_configured",
               },
             });
             refresh();
           }}
         >
-          <div className="sm:col-span-2">
-            <label className="label">Endpoint URL</label>
-            <input
-              name="qaEndpoint"
-              className="input"
-              defaultValue={carrier.quotingApi?.endpoint ?? ""}
-              placeholder="https://api.example-carrier.com/quote"
-            />
-            <p className="text-[11px] text-ink-400 mt-1">
-              HTTPS only. Auth (OAuth / API key) is provisioned per agency once the
-              endpoint is on file.
-            </p>
-          </div>
           <div>
-            <label className="label">Provider name</label>
+            <label className="label">Runner provider</label>
             <input
-              name="qaProvider"
+              name="automationProvider"
               className="input"
-              defaultValue={carrier.quotingApi?.provider ?? ""}
-              placeholder="e.g. HX Pro, Bridge, Nationwide DI"
+              defaultValue={carrier.quotingAutomation?.provider ?? ""}
+              placeholder="AI carrier portal runner"
             />
           </div>
           <div>
             <label className="label">Status</label>
             <div className="input bg-ink-50 text-ink-700">
-              {carrier.quotingApi?.status === "connected"
-                ? "Connected — live quotes available"
-                : carrier.quotingApi?.status === "configured"
-                ? "Configured — pending first call"
-                : carrier.quotingApi?.status === "error"
-                ? "Error on last test — review credentials"
-                : "Not configured — quoting workspace falls back to the AI estimator"}
+              {carrier.quotingAutomation?.status === "connected"
+                ? "Connected - live portal automation available"
+                : carrier.quotingAutomation?.status === "configured"
+                ? "Configured - pending live carrier test"
+                : carrier.quotingAutomation?.status === "error"
+                ? "Error on last portal automation test"
+                : "Not configured - use underwriter workflow until the runner is ready"}
             </div>
           </div>
-          <div className="sm:col-span-2">
-            <label className="label">Notes</label>
-            <textarea
-              name="qaNotes"
-              className="input min-h-[60px]"
-              defaultValue={carrier.quotingApi?.notes ?? ""}
-              placeholder="Anything the agency should know: rate limits, supported asset types, business hours, etc."
+          <div>
+            <label className="label">Agent portal quote URL</label>
+            <input
+              name="automationAgentUrl"
+              className="input"
+              defaultValue={carrier.quotingAutomation?.agentPortalUrl ?? carrier.agentPortalUrl ?? ""}
+              placeholder="https://carrier-agent-portal.example/quote"
             />
+          </div>
+          <div>
+            <label className="label">Customer quote URL</label>
+            <input
+              name="automationCustomerUrl"
+              className="input"
+              defaultValue={carrier.quotingAutomation?.customerPortalUrl ?? ""}
+              placeholder="https://carrier-consumer-quote.example/start"
+            />
+          </div>
+          <div>
+            <label className="label">Credential reference</label>
+            <input
+              name="automationCredential"
+              className="input"
+              defaultValue={carrier.quotingAutomation?.credentialReference ?? ""}
+              placeholder="vault://agency/carrier/rater"
+            />
+            <p className="text-[11px] text-ink-400 mt-1">
+              Store only the vault key or secret reference here, never a raw password.
+            </p>
+          </div>
+          <div>
+            <label className="label">MFA mode</label>
+            <select
+              name="automationMfa"
+              className="input"
+              defaultValue={carrier.quotingAutomation?.mfaMode ?? "staff_prompt"}
+            >
+              <option value="staff_prompt">Prompt staff when MFA is required</option>
+              <option value="carrier_push">Carrier push approval</option>
+              <option value="service_account">Carrier-approved service account</option>
+              <option value="none">No MFA required</option>
+            </select>
+          </div>
+          <div className="sm:col-span-2">
+            <label className="label">Runner notes</label>
+            <textarea
+              name="automationNotes"
+              className="input min-h-[70px]"
+              defaultValue={carrier.quotingAutomation?.notes ?? ""}
+              placeholder="Carrier-specific steps, supported lines, field mapping caveats, allowed hours, or MFA notes."
+            />
+          </div>
+          <div className="sm:col-span-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-950">
+            This is not stealth scraping. Use only carrier-approved automation, authorized
+            agency credentials, and a server-side worker that records every submission,
+            screenshot, MFA prompt, and carrier response.
           </div>
           <div className="sm:col-span-2">
             <button type="submit" className="btn-primary">
-              <Save className="h-4 w-4" /> Save quoting API
+              <Save className="h-4 w-4" /> Save AI runner
             </button>
           </div>
         </form>

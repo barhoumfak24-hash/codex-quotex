@@ -2,11 +2,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 // =====================================================================
-// AI e-sign workflow. Two sides:
-//   • Customer — outbound email when customerEsignRequired flips on.
-//   • Agent    — Activity Center task when agentEsignRequired flips on.
-// Both sides are idempotent — re-running the sweep skips already-
-// dispatched docs and already-tasked agent signatures.
+// E-sign workflow. Tagging a document only records who must sign.
+// Explicit sweeps / send actions handle customer emails and agent
+// work items, and those dispatch helpers remain idempotent.
 // =====================================================================
 
 beforeEach(async () => {
@@ -19,6 +17,33 @@ afterEach(() => {
 });
 
 describe("esign.runAll", () => {
+  it("setRequirements only tags the document and does not dispatch anything", async () => {
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const someDoc = db
+      .list("documents")
+      .find((d) => d.tenantId === agency.id && d.customerId);
+    if (!someDoc) return;
+    const commsBefore = api.communications.listByTenant(agency.id).length;
+    const tasksBefore = api.tasks.listByTenant(agency.id).length;
+
+    const updated = api.esign.setRequirements(someDoc.id, {
+      customerEsignRequired: true,
+      agentEsignRequired: true,
+      agentEsignAssignedToId: agent.id,
+    })!;
+
+    expect(updated.customerEsignRequired).toBe(true);
+    expect(updated.agentEsignRequired).toBe(true);
+    expect(updated.customerEsignSentAt).toBeUndefined();
+    expect(updated.esignCommunicationId).toBeUndefined();
+    expect(updated.agentEsignTaskId).toBeUndefined();
+    expect(api.communications.listByTenant(agency.id).length).toBe(commsBefore);
+    expect(api.tasks.listByTenant(agency.id).length).toBe(tasksBefore);
+  });
+
   it("seeds a renewal packet for any upcoming renewal without one", async () => {
     const { api } = await import("../api");
     const { db } = await import("../db");

@@ -3,23 +3,23 @@ import type {
   HeroSection,
   PamphletAccent,
 } from "./ai";
+import { aiImageUrl as serverImageUrl, serverAiEnabled } from "./aiGateway";
 
 // =====================================================================
-// AI-generated pamphlet hero imagery (Pollinations.ai / Flux).
+// AI-generated pamphlet hero imagery.
 //
-// Pollinations is a free, no-auth image generation endpoint backed by
-// Flux. Hitting the URL triggers a fresh generation; subsequent
-// requests for the same URL are cached by their CDN, so a deterministic
+// The server image route triggers generation; subsequent requests can
+// be cached by the browser/CDN, so a deterministic
 // `seed` per pamphlet means the same picture renders every time until
 // the manager bumps the seed via Regenerate image.
 //
 // No API key is involved — this works in a frontend-only app. The
-// provider abstraction below is structured so DALL-E 3, Imagen, or
-// fal.ai (Flux Pro) could be slotted in later by adding a new entry to
-// `IMAGE_PROVIDERS` and pointing `activeProvider` at it.
+// provider abstraction is structured so OpenAI image models or any
+// additional provider could be slotted in later by adding a new entry
+// to `IMAGE_PROVIDERS` and pointing `activeProvider` at it.
 // =====================================================================
 
-export type ImageProviderId = "pollinations";
+export type ImageProviderId = "openai" | "local";
 
 interface ImageProvider {
   id: ImageProviderId;
@@ -32,30 +32,53 @@ interface ImageProvider {
   heroImageUrl(prompt: string, opts: { seed: number; width: number; height: number }): string;
 }
 
-const POLLINATIONS: ImageProvider = {
-  id: "pollinations",
+const OPENAI_GATEWAY: ImageProvider = {
+  id: "openai",
   heroImageUrl(prompt, { seed, width, height }) {
-    const params = new URLSearchParams({
-      width: String(width),
-      height: String(height),
-      seed: String(seed),
-      model: "flux",
-      nologo: "true",
-      enhance: "true",
-      private: "true",
-    });
-    return `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}?${params.toString()}`;
+    if (!serverAiEnabled()) return localHeroImageUrl(prompt, { seed, width, height });
+    return serverImageUrl("/ai/pamphlet-image", { prompt, seed, width, height });
   },
 };
 
-const IMAGE_PROVIDERS: Record<ImageProviderId, ImageProvider> = {
-  pollinations: POLLINATIONS,
+const LOCAL_PLACEHOLDER: ImageProvider = {
+  id: "local",
+  heroImageUrl: localHeroImageUrl,
 };
 
-let activeProvider: ImageProviderId = "pollinations";
+const IMAGE_PROVIDERS: Record<ImageProviderId, ImageProvider> = {
+  openai: OPENAI_GATEWAY,
+  local: LOCAL_PLACEHOLDER,
+};
+
+let activeProvider: ImageProviderId = "openai";
 
 export function setImageProvider(id: ImageProviderId): void {
   activeProvider = id;
+}
+
+function localHeroImageUrl(
+  prompt: string,
+  { seed, width, height }: { seed: number; width: number; height: number }
+): string {
+  const hue = Math.abs(seed % 360);
+  const title = prompt
+    .replace(/\s+/g, " ")
+    .replace(/[<>&"]/g, "")
+    .slice(0, 90);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+  <defs>
+    <linearGradient id="g" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="hsl(${hue},18%,18%)"/>
+      <stop offset="0.55" stop-color="hsl(${(hue + 24) % 360},28%,34%)"/>
+      <stop offset="1" stop-color="hsl(${(hue + 48) % 360},42%,68%)"/>
+    </linearGradient>
+  </defs>
+  <rect width="100%" height="100%" fill="url(#g)"/>
+  <rect x="${width * 0.08}" y="${height * 0.08}" width="${width * 0.84}" height="${height * 0.84}" rx="18" fill="rgba(255,255,255,0.08)" stroke="rgba(255,255,255,0.22)"/>
+  <text x="${width * 0.12}" y="${height * 0.72}" fill="rgba(255,255,255,0.86)" font-family="Georgia, serif" font-size="${Math.max(22, width * 0.045)}">AI image pending</text>
+  <text x="${width * 0.12}" y="${height * 0.78}" fill="rgba(255,255,255,0.64)" font-family="Arial, sans-serif" font-size="${Math.max(13, width * 0.022)}">${title}</text>
+</svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
 // ---------------------------------------------------------------------

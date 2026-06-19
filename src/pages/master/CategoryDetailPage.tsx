@@ -3,7 +3,7 @@ import { useState } from "react";
 import { ArrowLeft, Plus, Save, Trash2, X } from "lucide-react";
 import { Card, CardHeader, EmptyState } from "@/components/ui/Card";
 import { api } from "@/lib/api";
-import type { AssetType, CategoryQuestion, InsuranceCategory } from "@/types";
+import type { AssetType, CategoryQuestion, InsuranceCategory, InsuranceLineOfBusiness } from "@/types";
 
 const ASSET_TYPE_OPTIONS: { value: AssetType; label: string }[] = [
   { value: "coastal_home", label: "Coastal Home (uses home intake form)" },
@@ -13,6 +13,11 @@ const ASSET_TYPE_OPTIONS: { value: AssetType; label: string }[] = [
   { value: "umbrella_liability", label: "Umbrella Liability (uses generic intake)" },
   { value: "full_portfolio", label: "Full Portfolio (uses generic intake)" },
   { value: "other", label: "Other (uses generic intake)" },
+];
+
+const LINE_OPTIONS: { value: InsuranceLineOfBusiness; label: string }[] = [
+  { value: "personal", label: "Personal lines" },
+  { value: "commercial", label: "Commercial lines" },
 ];
 
 const INPUT_TYPES: CategoryQuestion["inputType"][] = [
@@ -110,6 +115,7 @@ export function CategoryDetailPage() {
             saveProfile({
               label: String(data.get("label")),
               description: String(data.get("description")),
+              lineOfBusiness: String(data.get("lineOfBusiness")) as InsuranceLineOfBusiness,
               assetType: String(data.get("assetType")) as AssetType,
               icon: String(data.get("icon")),
               sortOrder: Number(data.get("sortOrder") || 100),
@@ -125,6 +131,14 @@ export function CategoryDetailPage() {
           <div>
             <label className="label">Icon (Lucide name)</label>
             <input name="icon" className="input" defaultValue={cat.icon ?? "HelpCircle"} />
+          </div>
+          <div>
+            <label className="label">Line</label>
+            <select name="lineOfBusiness" className="input" defaultValue={cat.lineOfBusiness ?? "personal"}>
+              {LINE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
           </div>
           <div className="sm:col-span-2">
             <label className="label">Description (shown on the category card)</label>

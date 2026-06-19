@@ -55,6 +55,158 @@ export function slugifyAgency(name: string): string {
   );
 }
 
+export function normalizeAgencyCode(code: string): string {
+  return code.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+const AGENCY_CODE_CIPHER_PREFIX = "qac1.";
+const AGENCY_CODE_DEMO_KEY = "quotex-agency-code";
+const CONNECTION_SECRET_CIPHER_PREFIX = "qcs1.";
+const CONNECTION_SECRET_DEMO_KEY = "quotex-connection-secret";
+
+function xorText(value: string, key: string): string {
+  let out = "";
+  for (let i = 0; i < value.length; i++) {
+    out += String.fromCharCode(value.charCodeAt(i) ^ key.charCodeAt(i % key.length));
+  }
+  return out;
+}
+
+function toHex(value: string): string {
+  return Array.from(value)
+    .map((char) => char.charCodeAt(0).toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function fromHex(value: string): string {
+  let out = "";
+  for (let i = 0; i < value.length; i += 2) {
+    out += String.fromCharCode(parseInt(value.slice(i, i + 2), 16));
+  }
+  return out;
+}
+
+export function encryptAgencyCode(code: string): string {
+  const normalized = normalizeAgencyCode(code);
+  return `${AGENCY_CODE_CIPHER_PREFIX}${toHex(xorText(normalized, AGENCY_CODE_DEMO_KEY))}`;
+}
+
+export function decryptAgencyCode(encrypted?: string | null): string | null {
+  if (!encrypted?.startsWith(AGENCY_CODE_CIPHER_PREFIX)) return null;
+  try {
+    const payload = encrypted.slice(AGENCY_CODE_CIPHER_PREFIX.length);
+    return normalizeAgencyCode(xorText(fromHex(payload), AGENCY_CODE_DEMO_KEY));
+  } catch {
+    return null;
+  }
+}
+
+export function agencyCodePreview(code: string): string {
+  const normalized = normalizeAgencyCode(code);
+  return normalized.slice(-4);
+}
+
+export function maskedAgencyCode(preview?: string | null): string {
+  return preview ? `**** ${preview}` : "Encrypted";
+}
+
+export function protectAgencyCode(code: string): {
+  agencyCodeEncrypted: string;
+  agencyCodePreview: string;
+} {
+  const normalized = normalizeAgencyCode(code);
+  return {
+    agencyCodeEncrypted: encryptAgencyCode(normalized),
+    agencyCodePreview: agencyCodePreview(normalized),
+  };
+}
+
+export function generateConnectionSecret(prefix = "qtx_site"): string {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+  let out = "";
+  for (let i = 0; i < 32; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  return `${prefix}_${out}`;
+}
+
+export function encryptConnectionSecret(secret: string): string {
+  return `${CONNECTION_SECRET_CIPHER_PREFIX}${toHex(xorText(secret, CONNECTION_SECRET_DEMO_KEY))}`;
+}
+
+export function decryptConnectionSecret(encrypted?: string | null): string | null {
+  if (!encrypted?.startsWith(CONNECTION_SECRET_CIPHER_PREFIX)) return null;
+  try {
+    const payload = encrypted.slice(CONNECTION_SECRET_CIPHER_PREFIX.length);
+    return xorText(fromHex(payload), CONNECTION_SECRET_DEMO_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function connectionSecretPreview(secret: string): string {
+  return secret.slice(-6);
+}
+
+export function maskedConnectionSecret(preview?: string | null): string {
+  return preview ? `****** ${preview}` : "Protected";
+}
+
+export function protectConnectionSecret(secret: string): {
+  encrypted: string;
+  preview: string;
+} {
+  return {
+    encrypted: encryptConnectionSecret(secret),
+    preview: connectionSecretPreview(secret),
+  };
+}
+
+export function revealProtectedAgencyCode(agency: {
+  agencyCode?: string;
+  agencyCodeEncrypted?: string;
+}): string | null {
+  const decrypted = decryptAgencyCode(agency.agencyCodeEncrypted);
+  if (decrypted) return decrypted;
+  const legacy = normalizeAgencyCode(agency.agencyCode ?? "");
+  return legacy || null;
+}
+
+export function agencyCodeMatches(
+  agency: { agencyCode?: string; agencyCodeEncrypted?: string },
+  submittedCode: string
+): boolean {
+  const protectedCode = revealProtectedAgencyCode(agency);
+  return !!protectedCode && protectedCode === normalizeAgencyCode(submittedCode);
+}
+
+function agencyCodePrefix(name: string): string {
+  const words = slugifyAgency(name).split("-").filter(Boolean);
+  const initials = words.map((word) => word[0]).join("").toUpperCase();
+  const compact = words.join("").toUpperCase();
+  return (initials || compact || "QTX").slice(0, 5).padEnd(3, "X");
+}
+
+function randomCodeSuffix(): string {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let out = "";
+  for (let i = 0; i < 4; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  return out;
+}
+
+export function generateAgencyCode(
+  agencyName: string,
+  existingCodes: Iterable<string> = []
+): string {
+  const used = new Set(Array.from(existingCodes, normalizeAgencyCode));
+  const prefix = agencyCodePrefix(agencyName);
+  for (let i = 0; i < 50; i++) {
+    const next = normalizeAgencyCode(`${prefix}${randomCodeSuffix()}`);
+    if (!used.has(next)) return next;
+  }
+  let seq = used.size + 1;
+  while (used.has(normalizeAgencyCode(`${prefix}${seq}`))) seq++;
+  return normalizeAgencyCode(`${prefix}${seq}`);
+}
+
 export function generateUsername(role: Role, agencyName: string, idx: number): string {
   const slug = slugifyAgency(agencyName);
   const seq = String(idx).padStart(2, "0");

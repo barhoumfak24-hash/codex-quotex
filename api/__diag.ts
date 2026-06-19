@@ -39,6 +39,9 @@ export default async function handler(req: any, res: any) {
     env: {
       SMARTY_AUTH_ID: !!process.env.SMARTY_AUTH_ID,
       SMARTY_AUTH_TOKEN: !!process.env.SMARTY_AUTH_TOKEN,
+      CARRIER_AUTOMATION_ENABLE_LIVE: process.env.CARRIER_AUTOMATION_ENABLE_LIVE === "true",
+      CARRIER_AUTOMATION_WORKER_URL: !!process.env.CARRIER_AUTOMATION_WORKER_URL,
+      CARRIER_AUTOMATION_WORKER_TOKEN: !!process.env.CARRIER_AUTOMATION_WORKER_TOKEN,
     },
     vercel: {
       region: process.env.VERCEL_REGION ?? null,

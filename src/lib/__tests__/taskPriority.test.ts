@@ -55,6 +55,24 @@ describe("tasks priority + severity", () => {
     expect(order[1]).toBe(a.id);
   });
 
+  it("reorderQueue persists an exact manual board order", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const a = api.tasks.create({ tenantId: agency.id, title: "A" });
+    const b = api.tasks.create({ tenantId: agency.id, title: "B" });
+    const c = api.tasks.create({ tenantId: agency.id, title: "C" });
+    api.tasks.setSeverity(c.id, "urgent");
+
+    api.tasks.reorderQueue([b.id, a.id, c.id], b.id);
+
+    const order = api.tasks
+      .listByTenant(agency.id)
+      .map((t) => t.id)
+      .filter((id) => id === a.id || id === b.id || id === c.id);
+    expect(order).toEqual([b.id, a.id, c.id]);
+    expect(api.tasks.history(b.id).map((h) => h.action)).toContain("task.reordered_queue");
+  });
+
   it("clearPriority returns the task to its default position", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];

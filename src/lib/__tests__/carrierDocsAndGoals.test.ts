@@ -120,6 +120,68 @@ describe("agencies performance goals (company + personal)", () => {
     expect(g.dueDate).toBe(due);
   });
 
+  it("tracks new prospects and preserves custom AI metric metadata", async () => {
+    const { api } = await import("../api");
+    const {
+      actualForMetric,
+      goalActual,
+      goalMetricMeta,
+      inferCustomGoalMetric,
+    } = await import("../performanceGoals");
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const prospect = api.prospects.create({
+      tenantId: agency.id,
+      name: "Goal Test Prospect",
+      email: "goal-prospect@example.com",
+      assetType: "coastal_home",
+      estimatedValue: 1_250_000,
+      aiSummary: "High-value coastal home prospect.",
+      lastAction: "Submitted quote start",
+      lastActivityAt: new Date().toISOString(),
+      recommendedFollowUp: "Call today",
+      marketingStatus: "none",
+      assignedAgentId: agent.id,
+      status: "new",
+    });
+
+    expect(prospect.assignedAgentId).toBe(agent.id);
+    expect(actualForMetric(agency.id, "newProspects", "monthly", [agent.id])).toBeGreaterThanOrEqual(1);
+
+    const customer = api.customers.list(agency.id)[0];
+    const policy = api.policies.listByCustomer(customer.id)[0];
+    const draft = inferCustomGoalMetric("claims closed");
+    api.claims.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      policyId: policy.id,
+      carrierId: policy.carrierId,
+      status: "closed",
+      closedAt: new Date().toISOString(),
+    });
+    const custom = api.agencies.addPerformanceGoal(agency.id, {
+      metric: "custom",
+      target: 1,
+      period: "monthly",
+      scope: "company",
+      customMetricLabel: draft.label,
+      customMetricPrompt: draft.prompt,
+      customMetricHelper: draft.helper,
+      customMetricFormula: draft.formula,
+    })!;
+
+    expect(goalMetricMeta(custom).label).toBe("Claims closed");
+    expect(goalActual(agency.id, custom)).toBeGreaterThanOrEqual(1);
+
+    api.agencies.archivePerformanceGoal(agency.id, custom.id, goalActual(agency.id, custom));
+    const archived = api.agencies
+      .get(agency.id)!
+      .performanceGoalHistory?.find((g) => g.id === custom.id);
+    expect(archived?.customMetricPrompt).toBe("claims closed");
+    expect(archived?.customMetricFormula).toBe("claimsClosed");
+    expect(archived?.customMetricHelper).toContain("claims closed");
+  });
+
   it("archives a goal into met / not-met history with a timestamp", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];

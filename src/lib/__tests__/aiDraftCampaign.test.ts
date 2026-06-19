@@ -22,8 +22,13 @@ describe("aiDraftCampaign", () => {
     expect(out.recurrence).toBe("none");
     expect(out.subject.toLowerCase()).toMatch(/coastal|prep|storm/);
     expect(out.body).toMatch(/Hi \{first_name\}/);
+    expect(out.body).toMatch(/wind-mitigation|wind mitigation/i);
+    expect(out.body).toMatch(/flood|roof|documents/i);
+    expect(out.body).toMatch(/rather not receive/i);
     expect(out.body).toMatch(/Olivia Marsh/);
     expect(out.body).toMatch(/Palm Coast/);
+    expect(out.pamphletDescription).toMatch(/coastal|storm/i);
+    expect(out.imagePrompt).toMatch(/coastal|storm|shutters|clouds/i);
   });
 
   it("infers renewal audience + monthly recurrence + SMS for a short text prompt", () => {
@@ -51,6 +56,21 @@ describe("aiDraftCampaign", () => {
     });
     expect(out.summary).toMatch(/SMS/);
     expect(out.summary).toMatch(/prospect/);
+    expect(out.body).toMatch(/Reply YES|Reply STOP/i);
+    expect(out.subject).toMatch(/quote/i);
+  });
+
+  it("creates prompt-specific pamphlet and image direction for niche briefs", () => {
+    const out = aiDraftCampaign({
+      prompt:
+        "Create a commercial umbrella pamphlet for business owners who have added new locations and company vehicles.",
+      agencyName: "Palm Coast",
+    });
+    expect(out.name).toMatch(/commercial umbrella liability/i);
+    expect(out.subject.toLowerCase()).toMatch(/liability|umbrella|commercial/);
+    expect(out.pamphletDescription?.toLowerCase()).toMatch(/liability|umbrella|commercial/);
+    expect(out.imagePrompt?.toLowerCase()).not.toMatch(/generic insurance|handshake/);
+    expect(out.imagePrompt?.toLowerCase()).toMatch(/estate|vehicle|liability|business|editorial/);
   });
 });
 

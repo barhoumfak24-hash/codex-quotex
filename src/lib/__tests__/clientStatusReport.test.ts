@@ -105,20 +105,20 @@ describe("communications.create auto-emits a status event", () => {
     expect(event.source).toBe("agent");
   });
 
-  it("inbound SMS from the customer surfaces as a customer-source event", async () => {
+  it("inbound email from the customer surfaces as a customer-source event", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     const customer = api.customers.list(agency.id)[0];
     api.communications.create({
       tenantId: agency.id,
       customerId: customer.id,
-      channel: "sms",
+      channel: "email",
       direction: "inbound",
       body: "Can we add my new car?",
     });
     const event = api.status.listFor({ customerId: customer.id })[0];
     expect(event.source).toBe("customer");
-    expect(event.message).toMatch(/SMS received/);
+    expect(event.message).toMatch(/Email received/);
   });
 
   it("internal channel=note stays internal so customers don't see staff scratch", async () => {

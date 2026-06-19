@@ -1,14 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { Check, Download, Pause, Pencil, Play, Plus, Search, Send, Trash2, X } from "lucide-react";
+import { Check, Download, Eye, Pause, Pencil, Play, Plus, Search, Send, Trash2, X } from "lucide-react";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
+import { Modal } from "@/components/ui/Modal";
+import { EmployeeBackButton } from "@/components/layout/EmployeeBackButton";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { useDemoNotice } from "@/lib/demo";
 import { api } from "@/lib/api";
 import { fmt } from "@/lib/format";
-import type { MarketingMessage } from "@/types";
+import type { MarketingCampaign, MarketingMessage } from "@/types";
 import {
   CustomMessageComposer,
   CustomMessageList,
@@ -29,6 +31,7 @@ export function MarketingActivityPage() {
   // banner for after a launch fires.
   const [campaignComposerOpen, setCampaignComposerOpen] = useState(false);
   const [campaignBanner, setCampaignBanner] = useState<string | null>(null);
+  const [viewingCampaignId, setViewingCampaignId] = useState<string | null>(null);
   // Search bar inside the Messages card — filters both the custom +
   // AI sub-lists by subject / body / recipient name.
   const [messageQuery, setMessageQuery] = useState("");
@@ -66,7 +69,15 @@ export function MarketingActivityPage() {
       .listVisible(agency.id, user ? { id: user.id, role: user.role } : undefined)
       .map((c) => c.id)
   );
-  const campaigns = api.marketing.listCampaigns(agency.id);
+  const campaigns = api.marketing
+    .listCampaigns(agency.id)
+    .sort((a, b) => {
+      const aPaused = a.status === "paused" ? 1 : 0;
+      const bPaused = b.status === "paused" ? 1 : 0;
+      if (aPaused !== bPaused) return aPaused - bPaused;
+      return a.createdAt < b.createdAt ? 1 : -1;
+    });
+  const viewingCampaign = campaigns.find((c) => c.id === viewingCampaignId) ?? null;
   const allMessages = api.marketing
     .listMessages(agency.id)
     // Agents only see marketing messages tied to their assigned
@@ -154,9 +165,18 @@ export function MarketingActivityPage() {
     api.marketing.requeueMessage(m.id);
     refresh();
   }
+  function deleteCampaign(c: MarketingCampaign) {
+    if (!confirm(`Delete "${c.name}"? This removes it from the AI campaigns list.`)) return;
+    if (viewingCampaignId === c.id) setViewingCampaignId(null);
+    api.marketing.deleteCampaign(c.id);
+    setCampaignBanner(`Campaign "${c.name}" deleted.`);
+    window.setTimeout(() => setCampaignBanner(null), 6000);
+    refresh();
+  }
 
   return (
     <div className="space-y-6">
+      <EmployeeBackButton />
       <div>
         <h1 className="font-display text-3xl">AI marketing activity</h1>
         <p className="text-ink-500 text-sm mt-1">
@@ -193,6 +213,7 @@ export function MarketingActivityPage() {
         />
       )}
 
+      {results && false && (
       <Card>
         <CardHeader title="Look up a client or prospect" subtitle="Find anyone in your agency by name or email." />
         <div className="relative">
@@ -208,13 +229,13 @@ export function MarketingActivityPage() {
           <div className="mt-3 grid sm:grid-cols-2 gap-4">
             <div>
               <div className="text-xs uppercase tracking-wider text-ink-500 mb-2">
-                Clients ({results.clients.length})
+                Clients ({results!.clients.length})
               </div>
-              {results.clients.length === 0 ? (
+              {results!.clients.length === 0 ? (
                 <div className="text-xs text-ink-400">No matches.</div>
               ) : (
                 <ul className="divide-y divide-ink-100">
-                  {results.clients.map((c) => (
+                  {results!.clients.map((c) => (
                     <li key={c.id} className="py-2">
                       <Link
                         to={`/employee/clients/${c.id}`}
@@ -230,13 +251,13 @@ export function MarketingActivityPage() {
             </div>
             <div>
               <div className="text-xs uppercase tracking-wider text-ink-500 mb-2">
-                Prospects ({results.prospects.length})
+                Prospects ({results!.prospects.length})
               </div>
-              {results.prospects.length === 0 ? (
+              {results!.prospects.length === 0 ? (
                 <div className="text-xs text-ink-400">No matches.</div>
               ) : (
                 <ul className="divide-y divide-ink-100">
-                  {results.prospects.map((p) => (
+                  {results!.prospects.map((p) => (
                     <li key={p.id} className="py-2">
                       <Link
                         to={`/employee/prospects/${p.id}`}
@@ -255,6 +276,8 @@ export function MarketingActivityPage() {
           </div>
         )}
       </Card>
+
+      )}
 
       {isManager && user && (
         <NewCampaignComposer
@@ -311,7 +334,7 @@ export function MarketingActivityPage() {
       <Card>
         <CardHeader
           title="AI campaigns"
-          subtitle="AI-drafted outreach (separate from custom messages above). Pause or resume per campaign."
+          subtitle="Active, paused, scheduled, and completed campaign activity."
           action={
             <div className="flex items-center gap-2">
               {isManager && (
@@ -369,29 +392,48 @@ export function MarketingActivityPage() {
                     )}
                   </div>
                 </div>
-                <div className="flex gap-2">
-                  {isManager &&
-                    (c.status === "paused" ? (
+                <div className="flex flex-wrap justify-end gap-2">
+                  {isManager && (
+                    <>
                       <button
-                        className="btn-ghost text-xs"
-                        onClick={() => {
-                          api.marketing.resumeCampaign(c.id);
-                          refresh();
-                        }}
+                        type="button"
+                        className="btn-outline text-xs"
+                        onClick={() => setViewingCampaignId(c.id)}
                       >
-                        <Play className="h-3.5 w-3.5" /> Resume
+                        <Eye className="h-3.5 w-3.5" /> View
                       </button>
-                    ) : (
+                      {c.status === "paused" ? (
+                        <button
+                          type="button"
+                          className="btn-outline text-xs"
+                          onClick={() => {
+                            api.marketing.resumeCampaign(c.id);
+                            refresh();
+                          }}
+                        >
+                          <Play className="h-3.5 w-3.5" /> Resume
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          className="btn-outline text-xs"
+                          onClick={() => {
+                            api.marketing.pauseCampaign(c.id);
+                            refresh();
+                          }}
+                        >
+                          <Pause className="h-3.5 w-3.5" /> Pause
+                        </button>
+                      )}
                       <button
-                        className="btn-ghost text-xs"
-                        onClick={() => {
-                          api.marketing.pauseCampaign(c.id);
-                          refresh();
-                        }}
+                        type="button"
+                        className="btn-outline text-xs border-red-200 text-red-700 hover:border-red-300 hover:bg-red-50 hover:text-red-800"
+                        onClick={() => deleteCampaign(c)}
                       >
-                        <Pause className="h-3.5 w-3.5" /> Pause
+                        <Trash2 className="h-3.5 w-3.5" /> Delete
                       </button>
-                    ))}
+                    </>
+                  )}
                 </div>
               </li>
             ))}
@@ -399,22 +441,245 @@ export function MarketingActivityPage() {
         )}
       </Card>
 
+      <CampaignDetailModal
+        campaign={viewingCampaign}
+        onClose={() => setViewingCampaignId(null)}
+      />
+
       <Card>
-        <CardHeader
-          title="Messages have moved"
-          subtitle="Inbound replies, custom message threads, and AI sends now live in the unified Messages inbox."
-          action={
-            <Link to="/employee/messages" className="btn-outline text-xs inline-flex">
-              Open Messages
-            </Link>
-          }
-        />
-        <div className="text-sm text-ink-500">
-          The Messages page splits client / prospect conversations and internal staff
-          DMs into a two-column inbox. Compose a custom message from there or from
-          the Activity Center.
+        <CardHeader title="Look up a client or prospect" subtitle="Find anyone in your agency by name or email." />
+        <div className="relative">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-ink-400" />
+          <input
+            className="input pl-9"
+            placeholder="Search clients and prospects"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
         </div>
+        {results && (
+          <div className="mt-3 grid sm:grid-cols-2 gap-4">
+            <div>
+              <div className="text-xs uppercase tracking-wider text-ink-500 mb-2">
+                Clients ({results.clients.length})
+              </div>
+              {results.clients.length === 0 ? (
+                <div className="text-xs text-ink-400">No matches.</div>
+              ) : (
+                <ul className="divide-y divide-ink-100">
+                  {results.clients.map((c) => (
+                    <li key={c.id} className="py-2">
+                      <Link
+                        to={`/employee/clients/${c.id}`}
+                        className="text-sm text-ink-900 hover:text-gold-700"
+                      >
+                        {c.name}
+                      </Link>
+                      <div className="text-[11px] text-ink-500">{c.email}</div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+            <div>
+              <div className="text-xs uppercase tracking-wider text-ink-500 mb-2">
+                Prospects ({results.prospects.length})
+              </div>
+              {results.prospects.length === 0 ? (
+                <div className="text-xs text-ink-400">No matches.</div>
+              ) : (
+                <ul className="divide-y divide-ink-100">
+                  {results.prospects.map((p) => (
+                    <li key={p.id} className="py-2">
+                      <Link
+                        to={`/employee/prospects/${p.id}`}
+                        className="text-sm text-ink-900 hover:text-gold-700"
+                      >
+                        {p.name}
+                      </Link>
+                      <div className="text-[11px] text-ink-500">
+                        {p.email} - {api.helpers.assetTypeLabel(p.assetType)} - {fmt.titleCase(p.status)}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
+        )}
       </Card>
     </div>
   );
+}
+
+function CampaignDetailModal({
+  campaign,
+  onClose,
+}: {
+  campaign: MarketingCampaign | null;
+  onClose: () => void;
+}) {
+  if (!campaign) return null;
+
+  const filter = campaign.audienceFilter ?? {};
+  const customerIds = stringList(filter.customerIds);
+  const prospectIds = stringList(filter.prospectIds);
+  const includeAllClients = filter.includeAllClients === true;
+  const includeAllProspects = filter.includeAllProspects === true;
+  const clientRows = (customerIds.length
+    ? customerIds.map((id) => api.customers.get(id)).filter(Boolean)
+    : includeAllClients
+    ? api.customers.list(campaign.tenantId)
+    : []
+  ).map((customer) => ({
+    id: customer!.id,
+    name: customer!.name,
+    email: customer!.email,
+    meta: customer!.phone ?? "Client",
+  }));
+  const prospectRows = (prospectIds.length
+    ? prospectIds.map((id) => api.prospects.get(id)).filter(Boolean)
+    : includeAllProspects
+    ? api.prospects.listByTenant(campaign.tenantId).filter((p) => !p.archived)
+    : []
+  ).map((prospect) => ({
+    id: prospect!.id,
+    name: prospect!.name,
+    email: prospect!.email,
+    meta: `${api.helpers.assetTypeLabel(prospect!.assetType)} · ${fmt.titleCase(prospect!.status)}`,
+  }));
+  const attachments = campaignAttachmentList(filter.attachments);
+  const brief = typeof filter.brief === "string" ? filter.brief.trim() : "";
+  const totalRecipients = clientRows.length + prospectRows.length;
+
+  return (
+    <Modal open={!!campaign} onClose={onClose} title="AI campaign details" size="xl">
+      <div className="space-y-5">
+        <div className="flex flex-col gap-1">
+          <div className="text-lg font-semibold">{campaign.name}</div>
+          <div className="text-sm text-ink-500">
+            {(campaign.channels ?? [campaign.channel]).map((ch) => ch.toUpperCase()).join(" + ")} ·{" "}
+            {fmt.titleCase(campaign.status)}
+            {campaign.scheduledFor ? ` · Scheduled ${fmt.dateTime(campaign.scheduledFor)}` : ""}
+          </div>
+        </div>
+
+        <div className="grid sm:grid-cols-4 gap-3">
+          <CampaignStat label="Status" value={fmt.titleCase(campaign.status)} />
+          <CampaignStat
+            label="Recipients"
+            value={`${totalRecipients}`}
+            detail={
+              includeAllClients || includeAllProspects
+                ? [
+                    includeAllClients ? "All clients" : "",
+                    includeAllProspects ? "All prospects" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" + ")
+                : "Hand-picked"
+            }
+          />
+          <CampaignStat
+            label="Created"
+            value={fmt.date(campaign.createdAt)}
+            detail={campaign.recurrence && campaign.recurrence !== "none" ? `Repeats ${campaign.recurrence}` : "One-time"}
+          />
+          <CampaignStat
+            label="Attachments"
+            value={`${attachments.length}`}
+            detail={attachments.length === 1 ? "File included" : "Files included"}
+          />
+        </div>
+
+        <section className="rounded-md border border-ink-100 bg-cream-50/60 p-4">
+          <div className="text-xs uppercase tracking-wider text-ink-500 mb-2">Campaign prompt</div>
+          <p className="text-sm text-ink-700 whitespace-pre-wrap">
+            {brief || "Campaign prompt was not stored for this older campaign."}
+          </p>
+        </section>
+
+        {attachments.length > 0 && (
+          <section>
+            <div className="text-xs uppercase tracking-wider text-ink-500 mb-2">Attached files</div>
+            <div className="grid sm:grid-cols-2 gap-2">
+              {attachments.map((attachment, index) => (
+                <div
+                  key={`${attachment.fileName}-${index}`}
+                  className="rounded-md border border-ink-100 px-3 py-2 text-sm"
+                >
+                  <div className="font-medium">{attachment.fileName}</div>
+                  <div className="text-xs text-ink-500">
+                    {[attachment.fileType, attachment.description].filter(Boolean).join(" · ") || "Campaign attachment"}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
+
+        <div className="grid lg:grid-cols-2 gap-4">
+          <CampaignAudienceList title={`Clients (${clientRows.length})`} rows={clientRows} />
+          <CampaignAudienceList title={`Prospects (${prospectRows.length})`} rows={prospectRows} />
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function CampaignStat({ label, value, detail }: { label: string; value: string; detail?: string }) {
+  return (
+    <div className="rounded-md border border-ink-100 p-3">
+      <div className="text-[11px] uppercase tracking-wider text-ink-500">{label}</div>
+      <div className="mt-1 text-base font-semibold">{value}</div>
+      {detail && <div className="mt-0.5 text-xs text-ink-500">{detail}</div>}
+    </div>
+  );
+}
+
+function CampaignAudienceList({
+  title,
+  rows,
+}: {
+  title: string;
+  rows: { id: string; name: string; email: string; meta: string }[];
+}) {
+  return (
+    <section className="rounded-md border border-ink-100">
+      <div className="hairline px-4 py-3 text-xs uppercase tracking-wider text-ink-500">{title}</div>
+      {rows.length === 0 ? (
+        <div className="px-4 py-5 text-sm text-ink-400">No recipients in this group.</div>
+      ) : (
+        <ul className="max-h-80 overflow-y-auto divide-y divide-ink-100">
+          {rows.map((row) => (
+            <li key={row.id} className="px-4 py-3">
+              <div className="text-sm font-medium">{row.name}</div>
+              <div className="text-xs text-ink-500">{row.email}</div>
+              <div className="text-[11px] text-ink-400 mt-0.5">{row.meta}</div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function campaignAttachmentList(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!item || typeof item !== "object") return [];
+    const record = item as Record<string, unknown>;
+    if (typeof record.fileName !== "string") return [];
+    return [
+      {
+        fileName: record.fileName,
+        fileType: typeof record.fileType === "string" ? record.fileType : undefined,
+        description: typeof record.description === "string" ? record.description : undefined,
+      },
+    ];
+  });
 }

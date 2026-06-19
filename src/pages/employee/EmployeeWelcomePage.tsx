@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Check, KeyRound, Sparkles } from "lucide-react";
 import { Card, CardHeader } from "@/components/ui/Card";
@@ -7,22 +7,40 @@ import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
 import { fmt } from "@/lib/format";
+import {
+  inferMailProvider,
+  isValidBusinessEmail,
+  MAIL_PROVIDER_OPTIONS,
+} from "@/lib/mailProvider";
+import type { MailProvider } from "@/types";
 
 // First-time profile completion for an auto-provisioned staff account.
 // Master admin generated the username + initial password; the staff member
-// fills in their real name + contact details (and optionally rotates the
-// password) the first time they sign in.
+// fills in their real identity, contact details, and permanent password
+// the first time they sign in.
 export function EmployeeWelcomePage() {
   const { user, signOut, refreshUser } = useAuth();
   const { agency } = useTenant();
   const nav = useNavigate();
-  const [name, setName] = useState("");
+  const [firstName, setFirstName] = useState("");
+  const [lastName, setLastName] = useState("");
   const [phone, setPhone] = useState("");
   const [title, setTitle] = useState("");
   const [bio, setBio] = useState("");
+  const [businessEmail, setBusinessEmail] = useState(user?.businessEmail ?? user?.email ?? "");
+  const [mailProvider, setMailProvider] = useState<MailProvider>(
+    inferMailProvider(user?.businessEmail ?? user?.email ?? "")
+  );
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!user) return;
+    const email = user.businessEmail ?? user.email ?? "";
+    setBusinessEmail(email);
+    setMailProvider(user.mailProvider ?? inferMailProvider(email));
+  }, [user?.id]);
 
   if (!user || !agency) return null;
 
@@ -30,32 +48,49 @@ export function EmployeeWelcomePage() {
     e.preventDefault();
     setError(null);
     if (!user) return;
-    if (!name.trim()) {
-      setError("Please enter your full name.");
+    const cleanFirstName = firstName.trim();
+    const cleanLastName = lastName.trim();
+    if (!cleanFirstName || !cleanLastName) {
+      setError("Please enter your first and last name.");
       return;
     }
-    if (newPassword) {
-      if (newPassword.length < 8) {
-        setError("New password must be at least 8 characters.");
-        return;
-      }
-      if (newPassword !== confirmPassword) {
-        setError("Passwords don't match.");
-        return;
-      }
+    if (!phone.trim()) {
+      setError("Please enter your phone number.");
+      return;
+    }
+    const cleanBusinessEmail = businessEmail.trim().toLowerCase();
+    if (!isValidBusinessEmail(cleanBusinessEmail)) {
+      setError("Please enter the business email you use every day.");
+      return;
+    }
+    const existing = api.users.byEmail(cleanBusinessEmail);
+    if (existing && existing.id !== user.id) {
+      setError("That business email is already connected to another staff account.");
+      return;
+    }
+    if (newPassword.length < 8) {
+      setError("Create a password with at least 8 characters.");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setError("Passwords don't match.");
+      return;
     }
 
     const patch: Parameters<typeof api.users.update>[1] = {
-      name: name.trim(),
-      phone: phone.trim() || undefined,
+      firstName: cleanFirstName,
+      lastName: cleanLastName,
+      name: `${cleanFirstName} ${cleanLastName}`,
+      email: cleanBusinessEmail,
+      businessEmail: cleanBusinessEmail,
+      mailProvider,
+      phone: phone.trim(),
       title: title.trim() || undefined,
       bio: bio.trim() || undefined,
       profileCompleted: true,
+      generatedPassword: newPassword,
+      passwordUpdatedAt: new Date().toISOString(),
     };
-    if (newPassword) {
-      patch.generatedPassword = newPassword;
-      patch.passwordUpdatedAt = new Date().toISOString();
-    }
     api.users.update(user.id, patch);
     // Sync the in-memory user so the RequireProfile gate stops bouncing.
     refreshUser();
@@ -73,7 +108,7 @@ export function EmployeeWelcomePage() {
             <h1 className="font-display text-3xl">Welcome to {agency.name}</h1>
             <p className="text-ink-500 text-sm mt-1">
               Your master admin generated this account for you. Take 30 seconds to fill in your
-              details — this is the last time you'll see this page.
+              details and create your password. This is the last time you'll see this page.
             </p>
           </div>
         </div>
@@ -84,21 +119,65 @@ export function EmployeeWelcomePage() {
         </Disclaimer>
 
         <form onSubmit={handleSubmit} className="mt-6 space-y-4">
-          <CardHeader title="Your profile" subtitle="Visible to clients on your agency's portal." />
+          <CardHeader
+            title="Your sign-in profile"
+            subtitle="Your business email becomes your staff sign-in and connects the Messages center."
+          />
           <div className="grid sm:grid-cols-2 gap-3">
-            <div className="sm:col-span-2">
-              <label className="label">Full name *</label>
+            <div>
+              <label className="label">First name *</label>
               <input
                 className="input"
                 required
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="e.g. Jordan Park"
-                autoFocus
+                value={firstName}
+                onChange={(e) => setFirstName(e.target.value)}
+                placeholder="Jordan"
+                autoComplete="given-name"
+              />
+            </div>
+            <div>
+              <label className="label">Last name *</label>
+              <input
+                className="input"
+                required
+                value={lastName}
+                onChange={(e) => setLastName(e.target.value)}
+                placeholder="Park"
+                autoComplete="family-name"
+              />
+            </div>
+            <div>
+              <label className="label">Business email *</label>
+              <input
+                className="input"
+                required
+                type="email"
+                value={businessEmail}
+                onChange={(e) => {
+                  const next = e.target.value;
+                  setBusinessEmail(next);
+                  setMailProvider(inferMailProvider(next));
+                }}
+                placeholder="you@agency.com"
+                autoComplete="email"
               />
               <p className="mt-1 text-[11px] text-ink-400">
-                Current placeholder: <span className="font-mono">{user.name}</span>
+                This becomes your staff sign-in and connects the Messages center.
               </p>
+            </div>
+            <div>
+              <label className="label">Mailbox provider</label>
+              <select
+                className="input"
+                value={mailProvider}
+                onChange={(e) => setMailProvider(e.target.value as MailProvider)}
+              >
+                {MAIL_PROVIDER_OPTIONS.map((provider) => (
+                  <option key={provider.value} value={provider.value}>
+                    {provider.label}
+                  </option>
+                ))}
+              </select>
             </div>
             <div>
               <label className="label">Title (optional)</label>
@@ -110,12 +189,14 @@ export function EmployeeWelcomePage() {
               />
             </div>
             <div>
-              <label className="label">Phone (optional)</label>
+              <label className="label">Phone *</label>
               <input
                 className="input"
+                required
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
                 placeholder="+1 (555) 000-0000"
+                autoComplete="tel"
               />
             </div>
             <div className="sm:col-span-2">
@@ -133,17 +214,18 @@ export function EmployeeWelcomePage() {
             <CardHeader
               title={
                 <span className="flex items-center gap-2">
-                  <KeyRound className="h-4 w-4 text-gold-600" /> Set your own password
+                  <KeyRound className="h-4 w-4 text-gold-600" /> Create your password
                 </span>
               }
-              subtitle="Optional but recommended. Leave blank to keep the password your master admin generated."
+              subtitle="Required. After this setup, use your business email and this password to sign in."
             />
             <div className="grid sm:grid-cols-2 gap-3">
               <div>
-                <label className="label">New password</label>
+                <label className="label">Password *</label>
                 <input
                   className="input"
                   type="password"
+                  required
                   value={newPassword}
                   onChange={(e) => setNewPassword(e.target.value)}
                   autoComplete="new-password"
@@ -151,10 +233,11 @@ export function EmployeeWelcomePage() {
                 />
               </div>
               <div>
-                <label className="label">Confirm new password</label>
+                <label className="label">Confirm password *</label>
                 <input
                   className="input"
                   type="password"
+                  required
                   value={confirmPassword}
                   onChange={(e) => setConfirmPassword(e.target.value)}
                   autoComplete="new-password"

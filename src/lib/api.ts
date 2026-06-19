@@ -9,47 +9,154 @@ import {
   aiRankCarrierQuotes,
   aiClassifyActivityResolution,
   aiClassifyInboundForActivity,
+  aiGeneratePersonalQuestionnaire,
+  aiGenerateCommercialQuestionnaire,
 } from "./ai";
 import type { ActivityResolution } from "./ai";
 import { db } from "./db";
 import { fmt } from "./format";
 import { uid, nowIso } from "./id";
 import {
+  generateConnectionSecret,
   generatePassword,
+  generateAgencyCode,
   generateUsername,
+  agencyCodeMatches,
+  maskedAgencyCode,
+  normalizeAgencyCode,
+  protectAgencyCode,
+  revealProtectedAgencyCode,
   slugifyAgency,
   tierProvisionPlan,
 } from "./credentials";
+import {
+  assessWebsiteConnection,
+  ensureWebsiteConnection,
+  protectWebsiteApiKey,
+  protectWebsiteWebhookSecret,
+  revealWebsiteApiKey,
+  revealWebsiteWebhookSecret,
+} from "./websiteConnection";
+import {
+  addMonthsToDateInput,
+  agencyPlanRenewalIso,
+  agencyPlanTermMonths,
+  dateInputFromIso,
+  isoFromDateInput,
+} from "./agencyContract";
+import {
+  billingHasMissingInfo,
+  billingMethodLabel,
+  billingStatusFor,
+} from "./billing";
+import {
+  CARRIER_RUNNER_RENEWAL_LOOKAHEAD_DAYS,
+  carrierRunnerJobIsOpen,
+  carrierRunnerTriggerLabel,
+  shouldQueueCarrierRunnerRenewalJob,
+} from "./carrierRunnerJobs";
+import { categoryQuotingQuestions } from "./categoryQuestionnaires";
+import {
+  appendEmailSignatureBlock,
+  emailSignatureBlockForUser,
+} from "./emailSignature";
+import {
+  appendMarketingContactCta,
+  MARKETING_SMART_CTA_LABEL,
+  marketingSmartContactUrl,
+  prependMarketingHeroImage,
+} from "./marketingSmartLinks";
+import { inferMailProvider } from "./mailProvider";
+import {
+  getCarrierQuoteProviderReadiness,
+  runCarrierQuoteProviders,
+} from "./quoteProviders";
+import { runCarrierPortalRunner } from "./carrierPortalRunner";
+import {
+  prepareCarrierPolicyBinding,
+  runCarrierPolicyBinding,
+} from "./carrierBindingProviders";
+import { TIER_LIMITS } from "./tiers";
+import {
+  buildDocumentTemplateFields,
+  documentTypeLabelForTemplate,
+  normalizeTemplateFields,
+} from "./documentTemplateFields";
+import { detectFillableDocumentFields } from "./fillableDocumentFields";
+import {
+  acordDefinitionForTemplate,
+  acordQuestionCountForTemplate,
+  buildAcordQuestionsForTemplate,
+  countAcordAutoFilledFields,
+  getAcordFormNumber,
+} from "./acordQuestionnaires";
+import { fillAcordFromClientDossier } from "./acordAiFillEngine";
+import {
+  activeStaffCount,
+  isRoutableStaffRole,
+  isRoutingManagerRole,
+  isStaffRole,
+  staffRoleLabel,
+  type StaffRole,
+} from "./roles";
 import type {
   Agency,
+  AccountingSettings,
   AiNotification,
   Asset,
   AssetType,
   AuditLog,
+  CalendarEvent,
   Carrier,
   CarrierAgencyLink,
+  CarrierAppetite,
   CarrierContact,
+  CarrierDownload,
+  CarrierDownloadChange,
+  CarrierDownloadDocumentPayload,
+  CarrierDownloadKind,
+  CarrierRunnerJob,
+  CarrierRunnerJobOutcome,
+  CarrierRunnerJobStatus,
+  CarrierRunnerJobTrigger,
+  CarrierQuote,
   Claim,
   Communication,
+  ConnectedMailbox,
+  ConnectedMailboxStatus,
   CustomerProfile,
   Deposit,
   Document,
   DocumentType,
   DocumentVisibility,
+  DemoLead,
+  DemoLeadStatus,
+  TemplateFieldMap,
   CustomDocumentType,
   CustomMessage,
   CustomMessageAudience,
   CustomMessageFilter,
   CustomMessageAttachment,
   CustomMessageRecurrence,
+  CommunicationAttachment,
   CategoryAgencyLink,
   InsuranceCategory,
+  HrSubmission,
+  HrSubmissionKind,
+  HrSubmissionStatus,
   MarketingCampaign,
+  MarketingAutoMessageRule,
+  MasterAgencyActivity,
+  MasterAgencyActivityKind,
+  MailProvider,
   MarketingMessage,
   Note,
   Payment,
+  PersonalLinesCarrierApiDiagnostic,
+  PersonalLinesCarrierApiDiagnosticRow,
   Policy,
   PolicyStatus,
+  PublicDataEvidenceMap,
   MarketingConfig,
   MarketingAttachment,
   InternalMessage,
@@ -59,22 +166,540 @@ import type {
   Prospect,
   ProspectStatus,
   QuoteRequest,
+  CommercialCarrierRecommendation,
+  CommercialCarrierSubmission,
   QuotingQuestion,
+  QuotingLineOfBusiness,
   QuotingSession,
+  QuotingSessionStatus,
+  QuestionnaireEditorRole,
+  QuestionnaireResponseMeta,
   Reminder,
   Renewal,
   Role,
+  SoftwareSale,
+  SoftwareSaleStatus,
   StatusEvent,
   StatusEventSource,
   SubscriptionTier,
   Task,
   TaskSeverity,
   TaskStatus,
+  Timesheet,
+  TimesheetEntry,
+  TimesheetFrequency,
+  TimesheetStatus,
   User,
+  PerformanceGoalRequest,
 } from "@/types";
+
+type QuestionnaireResponseActor = {
+  id?: string;
+  name?: string;
+  role?: QuestionnaireEditorRole;
+};
+
+function questionnaireResponseMetaFor(
+  actor: QuestionnaireResponseActor | undefined,
+  updatedAt: string
+): QuestionnaireResponseMeta {
+  return {
+    updatedAt,
+    updatedById: actor?.id,
+    updatedByName: actor?.name?.trim() || "Unknown editor",
+    updatedByRole: actor?.role ?? "agent",
+  };
+}
+
+function mergeQuestionnaireResponseMeta(
+  session: QuotingSession,
+  responses: Record<string, string>,
+  actor: QuestionnaireResponseActor | undefined,
+  updatedAt: string
+): Record<string, QuestionnaireResponseMeta> {
+  const next = { ...(session.questionnaireResponseMeta ?? {}) };
+  const existing = session.questionnaireResponses ?? {};
+  for (const [questionId, value] of Object.entries(responses)) {
+    if (existing[questionId] === value && next[questionId]) continue;
+    next[questionId] = questionnaireResponseMetaFor(actor, updatedAt);
+  }
+  return next;
+}
+
+function normalizeQuestionnaireLookup(value: unknown): string {
+  return String(value ?? "")
+    .toLowerCase()
+    .replace(/&/g, "and")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function compactQuestionnaireLookup(value: unknown): string {
+  return normalizeQuestionnaireLookup(value).replace(/\s+/g, "");
+}
+
+function cleanQuestionnairePrefillValue(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  return String(value).trim();
+}
+
+function questionnaireQuestionLookupKeys(question: QuotingQuestion): string[] {
+  return [
+    question.acordFieldKey,
+    question.label,
+    ...(question.acordFieldLabels ?? []),
+    question.id.split("-").pop(),
+  ]
+    .map((value) => cleanQuestionnairePrefillValue(value))
+    .filter(Boolean);
+}
+
+function questionnaireRecordValueFor(
+  question: QuotingQuestion,
+  record?: Record<string, unknown>
+): string | undefined {
+  if (!record) return undefined;
+  const keys = questionnaireQuestionLookupKeys(question);
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
+    const value = cleanQuestionnairePrefillValue(record[key]);
+    if (value) return value;
+  }
+
+  const normalizedKeys = new Set(keys.map(normalizeQuestionnaireLookup).filter(Boolean));
+  const compactKeys = new Set(keys.map(compactQuestionnaireLookup).filter(Boolean));
+  for (const [recordKey, rawValue] of Object.entries(record)) {
+    if (
+      !normalizedKeys.has(normalizeQuestionnaireLookup(recordKey)) &&
+      !compactKeys.has(compactQuestionnaireLookup(recordKey))
+    ) {
+      continue;
+    }
+    const value = cleanQuestionnairePrefillValue(rawValue);
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function questionCanUseQuoteAddress(question: QuotingQuestion): boolean {
+  const lookup = compactQuestionnaireLookup(`${question.acordFieldKey ?? ""} ${question.label}`);
+  if (lookup.includes("email") || lookup.includes("ifdifferent")) return false;
+  return (
+    lookup.includes("propertyaddress") ||
+    lookup.includes("riskaddress") ||
+    lookup.includes("primaryresidenceaddress") ||
+    lookup.includes("residenceaddress") ||
+    lookup.includes("locationaddress")
+  );
+}
+
+function questionCanUseEstimatedValue(question: QuotingQuestion): boolean {
+  const lookup = compactQuestionnaireLookup(`${question.acordFieldKey ?? ""} ${question.label}`);
+  return (
+    lookup.includes("estimatedvalue") ||
+    lookup.includes("appraisedvalue") ||
+    lookup.includes("agreedvalue") ||
+    lookup.includes("scheduledvalue") ||
+    lookup.includes("requestedamount") ||
+    lookup.includes("requestedlimit")
+  );
+}
+
+function knownQuestionnaireAnswerFor(
+  question: QuotingQuestion,
+  input: {
+    address?: string;
+    estimatedValue?: number;
+    assetDetails?: Record<string, string>;
+    publicFields: Record<string, unknown>;
+  }
+): string | undefined {
+  const fromAssetDetails = questionnaireRecordValueFor(question, input.assetDetails);
+  if (fromAssetDetails) return fromAssetDetails;
+  const fromPublicFields = questionnaireRecordValueFor(question, input.publicFields);
+  if (fromPublicFields) return fromPublicFields;
+  if (input.address && questionCanUseQuoteAddress(question)) return input.address.trim();
+  if (
+    typeof input.estimatedValue === "number" &&
+    Number.isFinite(input.estimatedValue) &&
+    input.estimatedValue > 0 &&
+    questionCanUseEstimatedValue(question)
+  ) {
+    return String(input.estimatedValue);
+  }
+  return undefined;
+}
+
+function seedKnownQuestionnaireResponses(input: {
+  questions: QuotingQuestion[];
+  address?: string;
+  estimatedValue?: number;
+  assetDetails?: Record<string, string>;
+  publicFields: Record<string, unknown>;
+  updatedAt: string;
+}): {
+  questionnaireResponses?: Record<string, string>;
+  questionnaireResponseMeta?: Record<string, QuestionnaireResponseMeta>;
+  missingFields: string[];
+} {
+  const questionnaireResponses: Record<string, string> = {};
+  const questionnaireResponseMeta: Record<string, QuestionnaireResponseMeta> = {};
+  input.questions.forEach((question) => {
+    const answer = knownQuestionnaireAnswerFor(question, input);
+    if (!answer) return;
+    questionnaireResponses[question.id] = answer;
+    questionnaireResponseMeta[question.id] = {
+      updatedAt: input.updatedAt,
+      updatedById: "ai",
+      updatedByName: "QuoteX AI",
+      updatedByRole: "ai",
+    };
+  });
+
+  const missingFields = input.questions
+    .filter((question) => question.required && !questionnaireResponses[question.id]?.trim())
+    .map((question) => question.label);
+
+  return {
+    questionnaireResponses:
+      Object.keys(questionnaireResponses).length > 0 ? questionnaireResponses : undefined,
+    questionnaireResponseMeta:
+      Object.keys(questionnaireResponseMeta).length > 0 ? questionnaireResponseMeta : undefined,
+    missingFields,
+  };
+}
+
+function dedupeQuotingQuestionsByLabel(questions: QuotingQuestion[]): QuotingQuestion[] {
+  const seen = new Set<string>();
+  const out: QuotingQuestion[] = [];
+  questions.forEach((question) => {
+    const key = normalizeQuestionnaireLookup(question.label);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    out.push(question);
+  });
+  return out;
+}
+
+function completePersonalQuestionnaireQuestions(input: {
+  assetType: AssetType;
+  category?: InsuranceCategory;
+  publicFields: Record<string, unknown>;
+  missingFields: string[];
+  existingQuestions?: QuotingQuestion[];
+}): QuotingQuestion[] {
+  const labels = [...Object.keys(input.publicFields), ...input.missingFields]
+    .map((label) => label.trim())
+    .filter(Boolean);
+  const aiQuestions =
+    labels.length > 0
+      ? aiGeneratePersonalQuestionnaire({
+          assetType: input.assetType,
+          missingFields: labels,
+        })
+      : [];
+  return dedupeQuotingQuestionsByLabel([
+    ...(input.category ? categoryQuotingQuestions(input.category) : []),
+    ...aiQuestions,
+    ...(input.existingQuestions ?? []),
+  ]);
+}
+
+function quoteSessionAddressContext(session: QuotingSession): string | undefined {
+  const candidates = [
+    session.assetDetails?.propertyAddress,
+    session.assetDetails?.riskAddress,
+    session.assetDetails?.primaryResidenceAddress,
+    session.assetDetails?.address,
+    typeof session.publicFields.address === "string" ? session.publicFields.address : undefined,
+    typeof session.publicFields.assetIdentifier === "string"
+      ? session.publicFields.assetIdentifier
+      : undefined,
+  ];
+  return candidates.find((value) => !!value?.trim());
+}
+
+function ensureCompletePersonalCategoryQuestionnaire(session: QuotingSession): QuotingSession {
+  if (session.lineOfBusiness === "commercial") return session;
+  const category = session.categoryId ? api.categories.get(session.categoryId) : undefined;
+  const fullQuestions = completePersonalQuestionnaireQuestions({
+    assetType: session.assetType,
+    category,
+    publicFields: session.publicFields,
+    missingFields: session.missingFields,
+    existingQuestions: session.questionnaireQuestions,
+  });
+  if (fullQuestions.length === 0) return session;
+
+  const existingQuestions = session.questionnaireQuestions ?? [];
+  const existingResponses = session.questionnaireResponses ?? {};
+  const existingMeta = session.questionnaireResponseMeta ?? {};
+  const seeded = seedKnownQuestionnaireResponses({
+    questions: fullQuestions,
+    address: quoteSessionAddressContext(session),
+    estimatedValue: session.estimatedValue,
+    assetDetails: session.assetDetails,
+    publicFields: session.publicFields,
+    updatedAt: session.updatedAt,
+  });
+  const questionnaireResponses: Record<string, string> = {
+    ...(seeded.questionnaireResponses ?? {}),
+  };
+  const questionnaireResponseMeta: Record<string, QuestionnaireResponseMeta> = {
+    ...(seeded.questionnaireResponseMeta ?? {}),
+  };
+
+  fullQuestions.forEach((question) => {
+    const exactValue = cleanQuestionnairePrefillValue(existingResponses[question.id]);
+    if (exactValue) {
+      questionnaireResponses[question.id] = exactValue;
+      if (existingMeta[question.id]) questionnaireResponseMeta[question.id] = existingMeta[question.id];
+      return;
+    }
+    const labelMatch = existingQuestions.find(
+      (existingQuestion) =>
+        normalizeQuestionnaireLookup(existingQuestion.label) ===
+        normalizeQuestionnaireLookup(question.label)
+    );
+    if (!labelMatch) return;
+    const labelValue = cleanQuestionnairePrefillValue(existingResponses[labelMatch.id]);
+    if (!labelValue) return;
+    questionnaireResponses[question.id] = labelValue;
+    questionnaireResponseMeta[question.id] =
+      existingMeta[labelMatch.id] ??
+      ({
+        updatedAt: session.updatedAt,
+        updatedById: session.createdById,
+        updatedByName: "Agent",
+        updatedByRole: "agent",
+      } satisfies QuestionnaireResponseMeta);
+  });
+
+  const missingFields = fullQuestions
+    .filter((question) => question.required && !questionnaireResponses[question.id]?.trim())
+    .map((question) => question.label);
+  const hasCompleteQuestionSet =
+    existingQuestions.length === fullQuestions.length &&
+    fullQuestions.every((question) => existingQuestions.some((existing) => existing.id === question.id));
+  const responsesChanged = fullQuestions.some(
+    (question) =>
+      cleanQuestionnairePrefillValue(existingResponses[question.id]) !==
+      cleanQuestionnairePrefillValue(questionnaireResponses[question.id])
+  );
+  const missingFieldsChanged =
+    session.missingFields.length !== missingFields.length ||
+    session.missingFields.some((field, index) => field !== missingFields[index]);
+
+  if (hasCompleteQuestionSet && !responsesChanged && !missingFieldsChanged) return session;
+  return (
+    db.update("quotingSessions", session.id, {
+      questionnaireQuestions: fullQuestions,
+      questionnaireResponses,
+      questionnaireResponseMeta,
+      missingFields,
+    }) ?? session
+  );
+}
+
+const DEFAULT_TIMESHEET_SETTINGS: Pick<
+  AccountingSettings,
+  "timesheetFrequency" | "dueWeekday" | "dueDayOfMonth" | "reminderTime"
+> = {
+  timesheetFrequency: "weekly",
+  dueWeekday: 5,
+  dueDayOfMonth: 28,
+  reminderTime: "09:00",
+};
+
+function defaultTimesheetRecipientIds(tenantId: string): string[] {
+  return db
+    .list("users")
+    .filter((user) => user.tenantId === tenantId && user.active && isStaffRole(user.role))
+    .map((user) => user.id);
+}
+
+function timesheetNotificationSummary(settings: AccountingSettings): string {
+  const period = currentTimesheetPeriod(settings);
+  return `Your timesheet for ${fmt.date(period.periodStart)} - ${fmt.date(
+    period.periodEnd
+  )} is due ${fmt.date(period.dueDate)} at ${settings.reminderTime}.`;
+}
+
+function totalTimesheetHours(entries: TimesheetEntry[]): number {
+  return Number(entries.reduce((sum, entry) => sum + Number(entry.hours || 0), 0).toFixed(2));
+}
+
+function dateOnly(date: Date): string {
+  const next = new Date(date);
+  next.setHours(0, 0, 0, 0);
+  return next.toISOString();
+}
+
+function addDays(date: Date, days: number): Date {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function clampDay(year: number, month: number, day: number): number {
+  return Math.min(day, new Date(year, month + 1, 0).getDate());
+}
+
+function currentTimesheetPeriod(settings: AccountingSettings, now = new Date()) {
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+
+  if (settings.timesheetFrequency === "monthly") {
+    const start = new Date(today.getFullYear(), today.getMonth(), 1);
+    const end = new Date(today.getFullYear(), today.getMonth() + 1, 0);
+    const due = new Date(
+      today.getFullYear(),
+      today.getMonth(),
+      clampDay(today.getFullYear(), today.getMonth(), settings.dueDayOfMonth)
+    );
+    return { periodStart: dateOnly(start), periodEnd: dateOnly(end), dueDate: dateOnly(due) };
+  }
+
+  if (settings.timesheetFrequency === "semi_monthly") {
+    const firstHalf = today.getDate() <= 15;
+    const start = new Date(today.getFullYear(), today.getMonth(), firstHalf ? 1 : 16);
+    const end = firstHalf
+      ? new Date(today.getFullYear(), today.getMonth(), 15)
+      : new Date(today.getFullYear(), today.getMonth() + 1, 0);
+    const due = firstHalf
+      ? new Date(today.getFullYear(), today.getMonth(), 15)
+      : new Date(
+          today.getFullYear(),
+          today.getMonth(),
+          clampDay(today.getFullYear(), today.getMonth(), settings.dueDayOfMonth)
+        );
+    return { periodStart: dateOnly(start), periodEnd: dateOnly(end), dueDate: dateOnly(due) };
+  }
+
+  const mondayOffset = (today.getDay() + 6) % 7;
+  const weekStart = addDays(today, -mondayOffset);
+  const spanWeeks = settings.timesheetFrequency === "bi_weekly" ? 2 : 1;
+  let start = weekStart;
+  if (spanWeeks === 2) {
+    const anchor = new Date(2026, 0, 5);
+    anchor.setHours(0, 0, 0, 0);
+    const weeksSinceAnchor = Math.floor((weekStart.getTime() - anchor.getTime()) / (7 * 86_400_000));
+    if (weeksSinceAnchor % 2 !== 0) start = addDays(weekStart, -7);
+  }
+  const end = addDays(start, spanWeeks * 7 - 1);
+  const targetWeekStart = spanWeeks === 2 ? addDays(start, 7) : start;
+  const due = addDays(targetWeekStart, (settings.dueWeekday + 6) % 7);
+  return { periodStart: dateOnly(start), periodEnd: dateOnly(end), dueDate: dateOnly(due) };
+}
+
+function isDueTodayOrPast(iso: string, now = new Date()): boolean {
+  return new Date(dateOnly(new Date(iso))).getTime() <= new Date(dateOnly(now)).getTime();
+}
 
 const tenantFilter = <T extends { tenantId?: string | null }>(rows: T[], tenantId?: string | null) =>
   tenantId == null ? rows : rows.filter((r) => r.tenantId === tenantId);
+
+function contactOwnerIds(row: {
+  assignedAgentId?: string;
+  additionalAgentIds?: string[];
+  assignedCsrId?: string;
+  additionalCsrIds?: string[];
+}): string[] {
+  return Array.from(
+    new Set(
+      [
+        row.assignedAgentId,
+        ...(row.additionalAgentIds ?? []),
+        row.assignedCsrId,
+        ...(row.additionalCsrIds ?? []),
+      ].filter((id): id is string => !!id)
+    )
+  );
+}
+
+function contactIsOwnedBy(
+  row: {
+    assignedAgentId?: string;
+    additionalAgentIds?: string[];
+    assignedCsrId?: string;
+    additionalCsrIds?: string[];
+  },
+  userId?: string
+): boolean {
+  return !!userId && contactOwnerIds(row).includes(userId);
+}
+
+type ContactLineOfBusiness = "personal" | "commercial";
+
+type AutoRoutableContact = {
+  tenantId: string;
+  assignedAgentId?: string;
+  additionalAgentIds?: string[];
+  lineOfBusiness?: ContactLineOfBusiness;
+  archived?: boolean;
+};
+
+function activeLineAgents(tenantId: string, line: ContactLineOfBusiness): User[] {
+  const activeAgents = db
+    .list("users")
+    .filter(
+      (user) =>
+        user.tenantId === tenantId &&
+        user.active !== false &&
+        user.role === "agent" &&
+        user.staffAccessStatus !== "banned" &&
+        user.staffAccessStatus !== "deleted"
+    );
+  const exact = activeAgents.filter((user) => user.lineOfBusiness === line);
+  return (exact.length > 0 ? exact : activeAgents.filter((user) => !user.lineOfBusiness)).sort(
+    (a, b) => a.name.localeCompare(b.name)
+  );
+}
+
+function contactLine(row: Pick<AutoRoutableContact, "lineOfBusiness">): ContactLineOfBusiness | undefined {
+  return row.lineOfBusiness === "commercial" || row.lineOfBusiness === "personal"
+    ? row.lineOfBusiness
+    : undefined;
+}
+
+function contactLoadForAgent(agentId: string, tenantId: string, line: ContactLineOfBusiness): number {
+  const owns = (row: AutoRoutableContact) =>
+    row.tenantId === tenantId &&
+    !row.archived &&
+    contactLine(row) === line &&
+    contactOwnerIds(row).includes(agentId);
+
+  const customerLoad = db.list("customers").filter(owns).length;
+  const prospectLoad = db
+    .list("prospects")
+    .filter((prospect) => owns(prospect) && prospect.status !== "converted").length;
+  return customerLoad + prospectLoad;
+}
+
+function chooseAutoRouteAgent(
+  tenantId: string,
+  line: ContactLineOfBusiness | undefined
+): User | undefined {
+  if (!line) return undefined;
+  return activeLineAgents(tenantId, line)
+    .map((agent) => ({
+      agent,
+      load: contactLoadForAgent(agent.id, tenantId, line),
+      createdAt: agent.createdAt,
+    }))
+    .sort((a, b) => a.load - b.load || a.createdAt.localeCompare(b.createdAt) || a.agent.name.localeCompare(b.agent.name))[0]
+    ?.agent;
+}
+
+function syncPolicyClaimStatus(claim: Claim) {
+  const stillHasOpenClaim = db
+    .list("claims")
+    .some((c) => c.id !== claim.id && c.policyId === claim.policyId && c.status !== "closed");
+  const nextStatus: PolicyStatus =
+    claim.status === "closed" && !stillHasOpenClaim ? "claim_closed" : "claim_opened";
+  db.update("policies", claim.policyId, { status: nextStatus });
+}
 
 // ---------------------------------------------------------------------
 // Lightweight keyword classifier for customer-submitted policy edit
@@ -352,19 +977,349 @@ function applySenderEmailSignature(
   channel: string,
   direction: "inbound" | "outbound" | undefined,
   body: string,
-  createdById?: string
+  createdById?: string,
+  mailboxOrigin?: Communication["mailboxOrigin"]
 ): string {
   if (channel !== "email" || direction !== "outbound" || !createdById) return body;
+  if (mailboxOrigin === "provider_sync") return body;
   const sender = db.list("users").find((u) => u.id === createdById);
   if (!sender) return body;
-  const sig = (sender.emailSignature ?? "").trim();
-  const images = sender.emailSignatureImages ?? [];
-  if (!sig && images.length === 0) return body;
-  const imageMarkers = images.map((img) => `[Image: ${img.name}]`).join("\n");
-  const parts = [body.trimEnd(), "—"];
-  if (sig) parts.push(sig);
-  if (imageMarkers) parts.push(imageMarkers);
-  return parts.join("\n\n");
+  const senderAgency = db.list("agencies").find((agency) => agency.id === sender.tenantId);
+  const agencyLogo = senderAgency?.logoUrl
+    ? { name: `${senderAgency.name} logo`, dataUrl: senderAgency.logoUrl }
+    : null;
+  const signatureBlock = emailSignatureBlockForUser(sender, agencyLogo);
+  return appendEmailSignatureBlock(body, signatureBlock);
+}
+
+function normalizeEmail(value?: string): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
+function mailboxForUser(userId?: string): {
+  account?: string;
+  provider?: MailProvider;
+  connectionId?: string;
+  status?: ConnectedMailboxStatus;
+} {
+  if (!userId) return {};
+  const connection = db
+    .list("connectedMailboxes")
+    .find((mailbox) => mailbox.ownerType === "staff" && mailbox.userId === userId);
+  if (connection) {
+    return {
+      account: connection.address,
+      provider: connection.provider,
+      connectionId: connection.id,
+      status: connection.status,
+    };
+  }
+  const user = db.list("users").find((u) => u.id === userId);
+  if (!user) return {};
+  const account = user.businessEmail ?? user.email;
+  return {
+    account,
+    provider: user.mailProvider ?? inferMailProvider(account),
+    status: "needs_auth",
+  };
+}
+
+function agencyMarketingSender(tenantId: string): {
+  fromName: string;
+  fromEmail?: string;
+  provider?: MailProvider;
+  connectionId?: string;
+  status?: ConnectedMailboxStatus;
+} {
+  const agency = db.list("agencies").find((row) => row.id === tenantId);
+  const mailbox = db
+    .list("connectedMailboxes")
+    .find(
+      (row) =>
+        row.tenantId === tenantId &&
+        row.ownerType === "agency_marketing" &&
+        row.status !== "disabled"
+    );
+  const address = mailbox?.address ?? agency?.contactEmail;
+  return {
+    fromName: mailbox?.displayName ?? (agency ? `${agency.name} Concierge Team` : "Your Insurance Concierge"),
+    fromEmail: address,
+    provider: mailbox?.provider ?? (address ? inferMailProvider(address) : undefined),
+    connectionId: mailbox?.id,
+    status: mailbox?.status ?? (address ? "needs_auth" : undefined),
+  };
+}
+
+function markMailboxSent(connectionId?: string) {
+  if (!connectionId) return;
+  db.update("connectedMailboxes", connectionId, { lastSendAt: nowIso(), updatedAt: nowIso() });
+}
+
+type MarketingCampaignPamphletPayload = {
+  eyebrow?: string;
+  headline?: string;
+  subheadline?: string;
+  intro?: string;
+  highlightsTitle?: string;
+  highlights?: string[];
+  ctaButton?: string;
+  imagePrompt?: string;
+};
+
+const MARKETING_EMAIL_BODY_MARKER = "[[quotex:marketing-email-body]]";
+const MARKETING_PAMPHLET_MARKER = "[[quotex:marketing-pamphlet]]";
+const MARKETING_PAMPHLET_DATA_PREFIX = "[[quotex:marketing-pamphlet-data:";
+const MARKETING_PAMPHLET_DATA_SUFFIX = "]]";
+
+function buildMarketingPamphletMessage(input: {
+  emailBody: string;
+  pamphlet: MarketingCampaignPamphletPayload;
+  heroImageUrl?: string;
+  heroImageAlt: string;
+  href: string;
+  ctaLabel: string;
+  recipientName?: string;
+  pamphletTheme?: string;
+}): string {
+  const emailParts = splitMarketingEmailForPamphlet(input.emailBody, input.recipientName);
+  const pamphlet = input.pamphlet;
+  const emailBody = compactMarkdownBlocks([
+    emailParts.greeting,
+    emailParts.note,
+    emailParts.closing,
+  ]);
+  const pamphletBody = compactMarkdownBlocks([
+    markdownImage(input.heroImageUrl, input.heroImageAlt || pamphlet.headline || "Campaign image"),
+    pamphlet.eyebrow ? `**${pamphlet.eyebrow.trim()}**` : "",
+    pamphlet.headline ? `# ${pamphlet.headline.trim()}` : "",
+    pamphlet.subheadline?.trim(),
+    pamphlet.intro?.trim(),
+    pamphlet.highlightsTitle ? `**${pamphlet.highlightsTitle.trim()}**` : "",
+    marketingHighlightList(pamphlet.highlights),
+    `[${input.ctaLabel}](${input.href})`,
+  ]);
+  return compactMarkdownBlocks([
+    MARKETING_EMAIL_BODY_MARKER,
+    emailBody,
+    marketingPamphletDataBlock({
+      pamphlet,
+      imageUrl: input.heroImageUrl,
+      imageAlt: input.heroImageAlt || pamphlet.headline || "Campaign image",
+      ctaHref: input.href,
+      ctaLabel: input.ctaLabel,
+      themeId: input.pamphletTheme,
+    }),
+    MARKETING_PAMPHLET_MARKER,
+    pamphletBody,
+  ]);
+}
+
+function marketingPamphletDataBlock(input: {
+  pamphlet: MarketingCampaignPamphletPayload;
+  imageUrl?: string;
+  imageAlt: string;
+  ctaHref: string;
+  ctaLabel: string;
+  themeId?: string;
+}): string {
+  return `${MARKETING_PAMPHLET_DATA_PREFIX}${encodeURIComponent(JSON.stringify(input))}${MARKETING_PAMPHLET_DATA_SUFFIX}`;
+}
+
+function splitMarketingEmailForPamphlet(body: string, recipientName?: string): {
+  greeting: string;
+  note: string;
+  closing: string;
+} {
+  const fallbackGreeting = `Hi ${firstNameFromDisplayName(recipientName) || "there"},`;
+  const blocks = body
+    .replace(/\r\n/g, "\n")
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean);
+  let greeting = fallbackGreeting;
+  if (blocks[0] && /^hi\b[^,\n]*,/i.test(blocks[0])) {
+    greeting = blocks.shift() ?? fallbackGreeting;
+  }
+  let closing = "";
+  const last = blocks[blocks.length - 1];
+  if (last && isMarketingClosingBlock(last)) {
+    closing = blocks.pop() ?? "";
+  }
+  return {
+    greeting,
+    note: blocks.join("\n\n").trim(),
+    closing,
+  };
+}
+
+function isMarketingClosingBlock(block: string): boolean {
+  return /^(best|warm regards|regards|thank you|thanks|sincerely),?\b/i.test(block.trim());
+}
+
+function personalizeMarketingMergeFields(
+  text: string,
+  contact?: { name?: string; email?: string } | null
+): string {
+  const name = contact?.name?.trim() || "there";
+  const firstName = firstNameFromDisplayName(name) || name;
+  const email = contact?.email?.trim() || "";
+  return text
+    .replace(/\{\{\s*first_name\s*\}\}|\{\s*first_name\s*\}/gi, firstName)
+    .replace(/\{\{\s*firstName\s*\}\}|\{\s*firstName\s*\}/g, firstName)
+    .replace(/\{\{\s*name\s*\}\}|\{\s*name\s*\}/gi, name)
+    .replace(/\{\{\s*full_name\s*\}\}|\{\s*full_name\s*\}/gi, name)
+    .replace(/\{\{\s*email\s*\}\}|\{\s*email\s*\}/gi, email);
+}
+
+function firstNameFromDisplayName(value?: string): string {
+  const clean = value?.trim();
+  if (!clean) return "";
+  if (clean.includes("@")) return clean.split("@")[0] || "";
+  return clean.split(/\s+/)[0] || clean;
+}
+
+function marketingHighlightList(items?: string[]): string {
+  const lines = (items ?? []).map((item) => item.trim()).filter(Boolean);
+  if (lines.length === 0) return "";
+  return lines.map((item) => `- ${item}`).join("\n");
+}
+
+function markdownImage(imageUrl?: string, alt = "Campaign image"): string {
+  const cleanUrl = imageUrl?.trim();
+  if (!cleanUrl) return "";
+  return `![${cleanMarkdownLabel(alt)}](${cleanUrl})`;
+}
+
+function cleanMarkdownLabel(value: string): string {
+  return value.replace(/[\]\n\r]/g, " ").replace(/\s{2,}/g, " ").trim() || "Campaign image";
+}
+
+function compactMarkdownBlocks(blocks: Array<string | undefined | null>): string {
+  return blocks
+    .map((block) => block?.trim() ?? "")
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function normalizeMarketingMessageForDisplay(row: MarketingMessage): MarketingMessage {
+  const contact = row.customerId
+    ? db.list("customers").find((customer) => customer.id === row.customerId)
+    : row.prospectId
+    ? db.list("prospects").find((prospect) => prospect.id === row.prospectId)
+    : null;
+  if (!contact || (!hasMarketingMergeField(row.content) && !hasMarketingMergeField(row.subject ?? ""))) {
+    return row;
+  }
+  return {
+    ...row,
+    subject: row.subject ? personalizeMarketingMergeFields(row.subject, contact) : row.subject,
+    content: personalizeMarketingMergeFields(row.content, contact),
+  };
+}
+
+function hasMarketingMergeField(value: string): boolean {
+  return /\{\{?\s*(first_name|firstName|name|full_name|email)\s*\}?\}/i.test(value);
+}
+
+function upsertDemoStaffMailbox(user: User, byUserId?: string): ConnectedMailbox | null {
+  if (!user.tenantId || !isStaffRole(user.role)) return null;
+  const address = (user.businessEmail ?? user.email).trim().toLowerCase();
+  if (!address) return null;
+  const provider = user.mailProvider ?? inferMailProvider(address);
+  const id = `mailbox_staff_${user.id}`;
+  const existing = db.list("connectedMailboxes").find((mailbox) => mailbox.id === id);
+  const patch: Partial<ConnectedMailbox> = {
+    tenantId: user.tenantId,
+    ownerType: "staff",
+    userId: user.id,
+    address,
+    provider,
+    displayName: user.name,
+    status: "connected",
+    authMode: "demo",
+    scopes: ["send", "read", "sync"],
+    updatedAt: nowIso(),
+    updatedById: byUserId,
+  };
+  if (existing) return db.update("connectedMailboxes", id, patch);
+  return db.insert("connectedMailboxes", {
+    ...(patch as Omit<ConnectedMailbox, "id" | "connectedAt">),
+    id,
+    connectedAt: nowIso(),
+  });
+}
+
+function upsertDemoAgencyMarketingMailbox(agency: Agency, byUserId?: string): ConnectedMailbox | null {
+  const address = agency.contactEmail.trim().toLowerCase();
+  if (!address) return null;
+  const id = `mailbox_agency_marketing_${agency.id}`;
+  const existing = db.list("connectedMailboxes").find((mailbox) => mailbox.id === id);
+  const patch: Partial<ConnectedMailbox> = {
+    tenantId: agency.id,
+    ownerType: "agency_marketing",
+    agencyId: agency.id,
+    address,
+    provider: inferMailProvider(address),
+    displayName: `${agency.name} Marketing`,
+    status: "connected",
+    authMode: "demo",
+    scopes: ["send"],
+    updatedAt: nowIso(),
+    updatedById: byUserId,
+  };
+  if (existing) return db.update("connectedMailboxes", id, patch);
+  return db.insert("connectedMailboxes", {
+    ...(patch as Omit<ConnectedMailbox, "id" | "connectedAt">),
+    id,
+    connectedAt: nowIso(),
+  });
+}
+
+function resolveEmailContact(
+  tenantId: string,
+  email: string
+): Pick<Communication, "customerId" | "prospectId" | "carrierContactId"> | null {
+  const target = normalizeEmail(email);
+  if (!target) return null;
+  const customer = db.list("customers").find(
+    (c) =>
+      c.tenantId === tenantId &&
+      (normalizeEmail(c.email) === target ||
+        (c.additionalContacts ?? []).some((a) => normalizeEmail(a.email) === target))
+  );
+  if (customer) return { customerId: customer.id };
+  const prospect = db
+    .list("prospects")
+    .find((p) => p.tenantId === tenantId && normalizeEmail(p.email) === target);
+  if (prospect) return { prospectId: prospect.id };
+  const carrierContact = db
+    .list("carrierContacts")
+    .find((c) => c.tenantId === tenantId && normalizeEmail(c.email) === target);
+  if (carrierContact) return { carrierContactId: carrierContact.id };
+  return null;
+}
+
+function communicationStatusEvent(row: Communication) {
+  if (!row.customerId && !row.prospectId) return;
+  const channelLabel =
+    row.channel === "email" ? "Email"
+    : row.channel === "call" ? "Call"
+    : row.channel === "note" ? "Note"
+    : String(row.channel);
+  const dirVerb = row.direction === "outbound" ? "sent" : "received";
+  const subject = row.subject ? `: ${row.subject}` : "";
+  db.insert("statusEvents", {
+    id: uid("se"),
+    tenantId: row.tenantId,
+    source: row.direction === "inbound" ? "customer" : "agent",
+    message: `${channelLabel} ${dirVerb}${subject}.`,
+    visibility: row.channel === "note" ? "internal" : "customer_visible",
+    customerId: row.customerId,
+    prospectId: row.prospectId,
+    communicationId: row.id,
+    createdAt: nowIso(),
+    createdById: row.createdById,
+  });
 }
 
 // state change on a Task (created, viewed, replied, in-progress,
@@ -388,6 +1343,1440 @@ function logTaskAudit(input: {
     metadata: input.metadata,
     createdAt: nowIso(),
   });
+}
+
+function createActionTaskOnce(input: {
+  tenantId: string;
+  activityKey: string;
+  title: string;
+  description?: string;
+  customerId?: string;
+  prospectId?: string;
+  assetId?: string;
+  policyId?: string;
+  claimId?: string;
+  documentId?: string;
+  quoteSessionId?: string;
+  quoteRequestId?: string;
+  renewalId?: string;
+  messageId?: string;
+  topic?: Task["topic"];
+  severity?: TaskSeverity;
+  severityReason?: string;
+  assignedToId?: string;
+  awaitingManagerAssignment?: boolean;
+  createdById?: string;
+  createdAt?: string;
+  auditAction?: string;
+  auditMetadata?: Record<string, unknown>;
+}): Task {
+  const existing = db
+    .list("tasks")
+    .find((t) => t.tenantId === input.tenantId && t.activityKey === input.activityKey && !t.completedAt);
+  if (existing) return existing;
+  const row: Task = {
+    id: uid("task"),
+    tenantId: input.tenantId,
+    activityKey: input.activityKey,
+    title: input.title,
+    description: input.description,
+    customerId: input.customerId,
+    prospectId: input.prospectId,
+    assetId: input.assetId,
+    policyId: input.policyId,
+    claimId: input.claimId,
+    documentId: input.documentId,
+    quoteSessionId: input.quoteSessionId,
+    quoteRequestId: input.quoteRequestId,
+    renewalId: input.renewalId,
+    messageId: input.messageId,
+    source: "ai_notification",
+    topic: input.topic,
+    severity: input.severity ?? "warning",
+    severityReason: input.severityReason,
+    status: "open",
+    assignedToId: input.assignedToId,
+    awaitingManagerAssignment: input.awaitingManagerAssignment,
+    createdById: input.createdById ?? "ai",
+    createdAt: input.createdAt ?? nowIso(),
+  };
+  db.insert("tasks", row);
+  logTaskAudit({
+    tenantId: input.tenantId,
+    actorId: input.createdById ?? "ai",
+    action: input.auditAction ?? "task.created_from_trigger",
+    taskId: row.id,
+    metadata: { activityKey: input.activityKey, ...(input.auditMetadata ?? {}) },
+  });
+  return row;
+}
+
+function resolveActionTasks(
+  tenantId: string,
+  activityKeys: string[],
+  actorId?: string,
+  auditAction = "task.resolved_by_trigger"
+) {
+  const keySet = new Set(activityKeys);
+  db
+    .list("tasks")
+    .filter((t) => t.tenantId === tenantId && !!t.activityKey && keySet.has(t.activityKey) && !t.completedAt)
+    .forEach((task) => {
+      db.update("tasks", task.id, {
+        status: "resolved",
+        completedAt: nowIso(),
+        completedById: actorId ?? "system",
+      });
+      logTaskAudit({
+        tenantId,
+        actorId: actorId ?? "system",
+        action: auditAction,
+        taskId: task.id,
+        metadata: { activityKey: task.activityKey },
+      });
+    });
+}
+
+function logQuotingWorkflowProgress(
+  session: Pick<
+    QuotingSession,
+    "id" | "tenantId" | "customerId" | "prospectId" | "assetId" | "createdById"
+  >,
+  input: {
+    message: string;
+    detail?: string;
+    createdAt?: string;
+    createdById?: string;
+    policyId?: string;
+    assetId?: string;
+    communicationId?: string;
+    documentId?: string;
+    source?: StatusEventSource;
+  }
+) {
+  const createdAt = input.createdAt ?? nowIso();
+  const actorId = input.createdById ?? "ai";
+  const body = input.detail ? `${input.message}\n\n${input.detail}` : input.message;
+  db.insert("statusEvents", {
+    id: uid("se"),
+    tenantId: session.tenantId,
+    source: input.source ?? "ai",
+    message: input.message,
+    visibility: "internal",
+    customerId: session.customerId,
+    prospectId: session.prospectId,
+    assetId: input.assetId ?? session.assetId,
+    policyId: input.policyId,
+    communicationId: input.communicationId,
+    documentId: input.documentId,
+    createdAt,
+    createdById: actorId,
+  });
+  db.insert("notes", {
+    id: uid("note"),
+    tenantId: session.tenantId,
+    authorId: actorId,
+    customerId: session.customerId,
+    prospectId: session.prospectId,
+    policyId: input.policyId,
+    body: `AI quoting workflow: ${body}`,
+    visibility: "internal",
+    createdAt,
+  });
+}
+
+function quoteSessionContact(session: Pick<QuotingSession, "customerId" | "prospectId">): {
+  name: string;
+  assignedAgentId?: string;
+  assignedCsrId?: string;
+} {
+  if (session.customerId) {
+    const customer = db.list("customers").find((c) => c.id === session.customerId);
+    if (customer) {
+      return {
+        name: customer.name,
+        assignedAgentId: customer.assignedAgentId,
+        assignedCsrId: customer.assignedCsrId,
+      };
+    }
+  }
+  if (session.prospectId) {
+    const prospect = db.list("prospects").find((p) => p.id === session.prospectId);
+    if (prospect) {
+      return {
+        name: prospect.name,
+        assignedAgentId: prospect.assignedAgentId,
+        assignedCsrId: prospect.assignedCsrId,
+      };
+    }
+  }
+  return { name: "Client" };
+}
+
+function quoteSessionAssignedStaff(session: Pick<QuotingSession, "createdById" | "customerId" | "prospectId">): string | undefined {
+  const creator = db.list("users").find((u) => u.id === session.createdById);
+  if (creator && isStaffRole(creator.role)) return creator.id;
+  const contact = quoteSessionContact(session);
+  return contact.assignedAgentId ?? contact.assignedCsrId;
+}
+
+function quoteMilestoneKey(sessionId: string, milestone: string): string {
+  return `quote-session:${sessionId}:${milestone}`;
+}
+
+function createQuoteMilestoneTask(
+  session: QuotingSession,
+  input: {
+    milestone: string;
+    title: string;
+    description: string;
+    severity?: TaskSeverity;
+    severityReason?: string;
+    createdById?: string;
+    auditAction?: string;
+  }
+): Task {
+  return createActionTaskOnce({
+    tenantId: session.tenantId,
+    activityKey: quoteMilestoneKey(session.id, input.milestone),
+    title: input.title,
+    description: input.description,
+    customerId: session.customerId,
+    prospectId: session.prospectId,
+    assetId: session.assetId,
+    quoteSessionId: session.id,
+    quoteRequestId: session.quoteRequestId,
+    topic: "other",
+    severity: input.severity ?? "warning",
+    severityReason: input.severityReason,
+    assignedToId: quoteSessionAssignedStaff(session),
+    createdById: input.createdById ?? "ai",
+    auditAction: input.auditAction ?? "task.created_from_quote_milestone",
+    auditMetadata: { quoteSessionId: session.id, quoteRequestId: session.quoteRequestId, milestone: input.milestone },
+  });
+}
+
+function createQuoteReadyNotification(
+  session: QuotingSession,
+  input: {
+    title: string;
+    summary: string;
+    severity?: TaskSeverity;
+    severityReason?: string;
+  }
+): AiNotification {
+  const existing = db
+    .list("aiNotifications")
+    .find(
+      (notification) =>
+        notification.tenantId === session.tenantId &&
+        notification.kind === "quote_ready" &&
+        notification.quoteSessionId === session.id &&
+        !notification.acknowledgedAt
+    );
+  if (existing) return existing;
+  const row: AiNotification = {
+    id: uid("ain"),
+    tenantId: session.tenantId,
+    kind: "quote_ready",
+    title: input.title,
+    summary: input.summary,
+    customerId: session.customerId,
+    prospectId: session.prospectId,
+    assetId: session.assetId,
+    quoteSessionId: session.id,
+    quoteRequestId: session.quoteRequestId,
+    topic: "other",
+    severity: input.severity ?? "warning",
+    severityReason: input.severityReason,
+    assignedToId: quoteSessionAssignedStaff(session),
+    createdAt: nowIso(),
+  };
+  db.insert("aiNotifications", row);
+  return row;
+}
+
+function resolveQuoteMilestoneTasks(
+  session: Pick<QuotingSession, "id" | "tenantId">,
+  milestones: string[],
+  actorId?: string
+) {
+  resolveActionTasks(
+    session.tenantId,
+    milestones.map((milestone) => quoteMilestoneKey(session.id, milestone)),
+    actorId ?? "ai",
+    "task.resolved_by_quote_milestone"
+  );
+}
+
+function isLegacyQuoteReadyActivity(task: Task): boolean {
+  return !!task.activityKey?.startsWith("quote-session:") && task.activityKey.endsWith(":quote_ready");
+}
+
+function actorName(userId?: string): string {
+  if (!userId) return "System";
+  if (userId === "ai") return "AI";
+  const user = db.list("users").find((u) => u.id === userId);
+  return user?.name ?? "Staff";
+}
+
+function carrierName(carrierId?: string): string {
+  if (!carrierId) return "Carrier";
+  return db.list("carriers").find((c) => c.id === carrierId)?.name ?? "Carrier";
+}
+
+function policyRef(policy?: Pick<Policy, "policyNumber" | "id"> | null): string {
+  if (!policy) return "policy";
+  return policy.policyNumber ? `Policy #${policy.policyNumber}` : `Policy #${policy.id.slice(-6).toUpperCase()}`;
+}
+
+function primaryOwnerForCustomer(customer?: CustomerProfile | null): string | undefined {
+  return customer?.assignedAgentId ?? customer?.assignedCsrId;
+}
+
+function customerForPolicy(policy?: Policy | null): CustomerProfile | undefined {
+  return policy ? db.list("customers").find((c) => c.id === policy.customerId) : undefined;
+}
+
+function ensureClaimActionTask(claim: Claim, actorId?: string): Task | null {
+  const key = `claim:${claim.id}:open`;
+  if (claim.status === "closed") {
+    resolveActionTasks(claim.tenantId, [key], actorId, "task.resolved_by_claim_close");
+    return null;
+  }
+  const customer = db.list("customers").find((c) => c.id === claim.customerId);
+  const policy = db.list("policies").find((p) => p.id === claim.policyId);
+  const carrier = db.list("carriers").find((c) => c.id === claim.carrierId);
+  return createActionTaskOnce({
+    tenantId: claim.tenantId,
+    activityKey: key,
+    title: `Open claim: ${customer?.name ?? "Client"}${policy ? ` - ${policyRef(policy)}` : ""}`,
+    description: `${customer?.name ?? "A client"} has an open claim with ${
+      carrier?.name ?? "the carrier"
+    }. Track status, keep documents current, and close the activity when the claim is closed.`,
+    customerId: claim.customerId,
+    policyId: claim.policyId,
+    claimId: claim.id,
+    topic: "claim_status",
+    severity: claim.status === "opened" ? "urgent" : "warning",
+    severityReason: "Open claim requires staff monitoring until closed.",
+    assignedToId: primaryOwnerForCustomer(customer),
+    createdById: actorId ?? "ai",
+    auditAction: "task.created_from_claim",
+    auditMetadata: { claimId: claim.id },
+  });
+}
+
+function logClaimRecordTimeline(
+  claim: Claim,
+  action: "opened" | "updated" | "closed" | "checked",
+  detail?: string,
+  actorId?: string
+) {
+  const customer = db.list("customers").find((c) => c.id === claim.customerId);
+  const policy = db.list("policies").find((p) => p.id === claim.policyId);
+  const carrier = db.list("carriers").find((c) => c.id === claim.carrierId);
+  const claimRef = claim.externalClaimNumber ? `claim #${claim.externalClaimNumber}` : "a claim";
+  const policyLabel = policyRef(policy);
+  const carrierLabel = carrier?.name ?? "Carrier";
+  const message =
+    action === "closed"
+      ? `${carrierLabel} closed ${claimRef} for ${policyLabel}. It is now included in previous loss runs.`
+      : action === "opened"
+      ? `${carrierLabel} reported ${claimRef} for ${policyLabel}. The claim record was added to this client.`
+      : action === "updated"
+      ? `${carrierLabel} updated ${claimRef} for ${policyLabel}${detail ? `: ${detail}` : "."}`
+      : `${carrierLabel} claim check completed for ${policyLabel}${detail ? `: ${detail}` : "."}`;
+
+  db.insert("statusEvents", {
+    id: uid("se"),
+    tenantId: claim.tenantId,
+    source: "system",
+    message,
+    visibility: "internal",
+    customerId: claim.customerId,
+    assetId: policy?.assetId,
+    policyId: claim.policyId,
+    claimId: claim.id,
+    createdAt: nowIso(),
+    createdById: actorId ?? "system",
+  });
+  if (customer && action === "closed") {
+    db.insert("notes", {
+      id: uid("note"),
+      tenantId: claim.tenantId,
+      authorId: actorId ?? "system",
+      customerId: customer.id,
+      policyId: claim.policyId,
+      body: `${carrierLabel} closed ${claimRef}. This closed claim is now part of the client's previous loss runs.`,
+      visibility: "internal",
+      createdAt: nowIso(),
+    });
+  }
+}
+
+function logPolicyMovedToPrevious(policy: Policy, actorId?: string) {
+  const customer = db.list("customers").find((c) => c.id === policy.customerId);
+  const carrier = db.list("carriers").find((c) => c.id === policy.carrierId);
+  const carrierLabel = carrier?.name ?? "Carrier";
+  const message = `${policyRef(policy)} with ${carrierLabel} was closed and moved to previous policies.`;
+  db.insert("statusEvents", {
+    id: uid("se"),
+    tenantId: policy.tenantId,
+    source: "system",
+    message,
+    visibility: "internal",
+    customerId: policy.customerId,
+    assetId: policy.assetId,
+    policyId: policy.id,
+    createdAt: nowIso(),
+    createdById: actorId ?? "system",
+  });
+  if (customer) {
+    db.insert("notes", {
+      id: uid("note"),
+      tenantId: policy.tenantId,
+      authorId: actorId ?? "system",
+      customerId: customer.id,
+      policyId: policy.id,
+      body: message,
+      visibility: "internal",
+      createdAt: nowIso(),
+    });
+  }
+}
+
+function ensureClaimInquiryTask(input: {
+  tenantId: string;
+  customerId: string;
+  assetId?: string;
+  body: string;
+  commId: string;
+  createdAt: string;
+}): Task {
+  const customer = db.list("customers").find((c) => c.id === input.customerId);
+  const asset = input.assetId ? db.list("assets").find((a) => a.id === input.assetId) : undefined;
+  return createActionTaskOnce({
+    tenantId: input.tenantId,
+    activityKey: `claim-inquiry:${input.commId}`,
+    title: `Claim inquiry: ${customer?.name ?? "Client"}`,
+    description: `${customer?.name ?? "A client"} submitted a claim inquiry${
+      asset ? ` for ${asset.label}` : ""
+    }. Review the message, contact the carrier if needed, and keep the client updated.`,
+    customerId: input.customerId,
+    assetId: input.assetId,
+    messageId: input.commId,
+    topic: "claim_filed",
+    severity: "urgent",
+    severityReason: "Customer submitted a claim-related request.",
+    assignedToId: primaryOwnerForCustomer(customer),
+    createdById: "ai",
+    createdAt: input.createdAt,
+    auditAction: "task.created_from_claim_inquiry",
+    auditMetadata: { communicationId: input.commId },
+  });
+}
+
+function ensureBillingIssueTask(policy: Policy, actorId?: string): Task | null {
+  const customer = customerForPolicy(policy);
+  const carrier = db.list("carriers").find((c) => c.id === policy.carrierId);
+  const status = billingStatusFor(policy);
+  const missing = billingHasMissingInfo(policy);
+  const pastDueKey = `billing:${policy.id}:past_due`;
+  const missingKey = `billing:${policy.id}:missing_info`;
+
+  if (status !== "past_due") {
+    resolveActionTasks(policy.tenantId, [pastDueKey], actorId, "task.resolved_by_billing_update");
+  }
+  if (!missing) {
+    resolveActionTasks(policy.tenantId, [missingKey], actorId, "task.resolved_by_billing_update");
+  }
+
+  if (status === "past_due") {
+    return createActionTaskOnce({
+      tenantId: policy.tenantId,
+      activityKey: pastDueKey,
+      title: `Billing past due: ${policyRef(policy)}`,
+      description: `${customer?.name ?? "Client"} has a past-due billing status on ${
+        policyRef(policy)
+      }${carrier ? ` with ${carrier.name}` : ""}. Verify carrier billing status and follow up with the client if needed.`,
+      customerId: policy.customerId,
+      policyId: policy.id,
+      assetId: policy.assetId,
+      topic: "payment_issue",
+      severity: "urgent",
+      severityReason: "Policy billing is past due.",
+      assignedToId: primaryOwnerForCustomer(customer),
+      createdById: actorId ?? "ai",
+      auditAction: "task.created_from_billing_issue",
+      auditMetadata: { policyId: policy.id, status },
+    });
+  }
+
+  if (missing) {
+    return createActionTaskOnce({
+      tenantId: policy.tenantId,
+      activityKey: missingKey,
+      title: `Billing info missing: ${policyRef(policy)}`,
+      description: `${policyRef(policy)} is missing billing tracking information. Record the payment method, plan, and next due date so accounting and client service stay accurate.`,
+      customerId: policy.customerId,
+      policyId: policy.id,
+      assetId: policy.assetId,
+      topic: "payment_issue",
+      severity: "warning",
+      severityReason: `Billing method is ${billingMethodLabel(policy.billingMethod)} and at least one billing tracking field is incomplete.`,
+      assignedToId: primaryOwnerForCustomer(customer),
+      createdById: actorId ?? "ai",
+      auditAction: "task.created_from_billing_issue",
+      auditMetadata: { policyId: policy.id, missingInfo: true },
+    });
+  }
+
+  return null;
+}
+
+function ensureNonRenewalTask(renewal: Renewal, actorId?: string): Task | null {
+  const key = `non-renewal:${renewal.id}`;
+  if (renewal.status !== "not_renewed") {
+    resolveActionTasks(renewal.tenantId, [key], actorId, "task.resolved_by_renewal_status");
+    return null;
+  }
+  const policy = db.list("policies").find((p) => p.id === renewal.policyId);
+  const customer = customerForPolicy(policy);
+  const carrier = policy ? db.list("carriers").find((c) => c.id === policy.carrierId) : undefined;
+  const effective = renewal.nonRenewalEffectiveDate ?? renewal.renewalDate;
+  return createActionTaskOnce({
+    tenantId: renewal.tenantId,
+    activityKey: key,
+    title: `Non-renewal: ${policyRef(policy)}`,
+    description: `${carrier?.name ?? "Carrier"} issued a non-renewal for ${customer?.name ?? "the client"}${
+      effective ? ` effective ${fmt.date(effective)}` : ""
+    }. Reason: ${renewal.nonRenewalReason ?? "No reason recorded yet."} Review replacement options and contact the client.`,
+    customerId: policy?.customerId,
+    policyId: policy?.id,
+    assetId: policy?.assetId,
+    renewalId: renewal.id,
+    topic: "renewal_approaching",
+    severity: "urgent",
+    severityReason: "Carrier non-renewal requires replacement-market action.",
+    assignedToId: renewal.agentId ?? primaryOwnerForCustomer(customer),
+    createdById: actorId ?? "ai",
+    auditAction: "task.created_from_non_renewal",
+    auditMetadata: { renewalId: renewal.id, policyId: renewal.policyId },
+  });
+}
+
+const RUNNER_TERMINAL_STATUSES: CarrierRunnerJobStatus[] = ["completed", "cancelled"];
+
+function sortInsuranceCategories(a: InsuranceCategory, b: InsuranceCategory): number {
+  const lineRank = (category: InsuranceCategory) =>
+    (category.lineOfBusiness ?? "personal") === "personal" ? 0 : 1;
+  const byLine = lineRank(a) - lineRank(b);
+  if (byLine !== 0) return byLine;
+  return a.sortOrder - b.sortOrder || a.label.localeCompare(b.label);
+}
+
+function activeCarrierIdsForTenant(tenantId: string): string[] {
+  return db
+    .list("carrierLinks")
+    .filter((link) => link.tenantId === tenantId && link.active)
+    .map((link) => link.carrierId);
+}
+
+function carrierRunnerEnabledForTenant(tenantId: string): boolean {
+  const agency = db.list("agencies").find((a) => a.id === tenantId);
+  if (!agency?.carrierRunnerEnabled) return false;
+  return agency.carrierRunnerStatus !== "not_configured" && agency.carrierRunnerStatus !== "paused";
+}
+
+function policyAllowedForCarrierRunner(policy: Policy): boolean {
+  if (policy.status === "closed") return false;
+  if (!carrierRunnerEnabledForTenant(policy.tenantId)) return false;
+  return activeCarrierIdsForTenant(policy.tenantId).includes(policy.carrierId);
+}
+
+function renewalForPolicy(policyId: string): Renewal | undefined {
+  return db
+    .list("renewals")
+    .filter((renewal) => renewal.policyId === policyId)
+    .sort((a, b) => (a.renewalDate < b.renewalDate ? 1 : -1))[0];
+}
+
+function carrierRunnerJobTitle(
+  trigger: CarrierRunnerJobTrigger,
+  policy?: Policy,
+  renewal?: Renewal
+): string {
+  const ref = policyRef(policy);
+  if (trigger === "policy_check") {
+    return `Carrier policy retrieval: ${ref}`;
+  }
+  if (trigger === "renewal_window") {
+    return `Carrier renewal check: ${ref}`;
+  }
+  if (trigger === "renewal_status_check") {
+    return `Carrier non-renewal check: ${ref}`;
+  }
+  if (trigger === "billing_check") {
+    return `Carrier billing check: ${ref}`;
+  }
+  if (trigger === "claim_check") {
+    return `Carrier claim check: ${ref}`;
+  }
+  if (trigger === "document_sync") {
+    return `Carrier document sync: ${ref}`;
+  }
+  if (trigger === "policy_placed") {
+    return `Carrier policy pickup: ${ref}`;
+  }
+  return `${carrierRunnerTriggerLabel(trigger)}: ${ref}${renewal?.renewalDate ? ` (${fmt.date(renewal.renewalDate)})` : ""}`;
+}
+
+function logCarrierRunnerTimeline(
+  job: CarrierRunnerJob,
+  action: string,
+  detail?: string,
+  actorId = "ai"
+) {
+  const message = detail ? `${action}: ${detail}` : action;
+  db.insert("statusEvents", {
+    id: uid("se"),
+    tenantId: job.tenantId,
+    source: "system",
+    message,
+    visibility: "internal",
+    customerId: job.customerId,
+    assetId: job.assetId,
+    policyId: job.policyId,
+    createdAt: nowIso(),
+    createdById: actorId,
+  });
+}
+
+function createCarrierRunnerJobOnce(input: {
+  tenantId: string;
+  trigger: CarrierRunnerJobTrigger;
+  reason: string;
+  scheduledFor?: string;
+  createdById?: string;
+  policy?: Policy;
+  renewal?: Renewal;
+  carrierId?: string;
+  customerId?: string;
+  assetId?: string;
+}): CarrierRunnerJob | null {
+  const policy = input.policy;
+  if (policy && !policyAllowedForCarrierRunner(policy)) return null;
+  const carrierId = input.carrierId ?? policy?.carrierId;
+  if (!carrierId) return null;
+  const existing = db.list("carrierRunnerJobs").find((job) => {
+    if (job.tenantId !== input.tenantId) return false;
+    if (job.trigger !== input.trigger) return false;
+    if (job.policyId !== policy?.id) return false;
+    if ((job.renewalId ?? "") !== (input.renewal?.id ?? "")) return false;
+    return !RUNNER_TERMINAL_STATUSES.includes(job.status);
+  });
+  if (existing) return existing;
+
+  const row: CarrierRunnerJob = {
+    id: uid("runner_job"),
+    tenantId: input.tenantId,
+    carrierId,
+    customerId: input.customerId ?? policy?.customerId,
+    assetId: input.assetId ?? policy?.assetId,
+    policyId: policy?.id,
+    renewalId: input.renewal?.id,
+    trigger: input.trigger,
+    status: "queued",
+    title: carrierRunnerJobTitle(input.trigger, policy, input.renewal),
+    reason: input.reason,
+    scheduledFor: input.scheduledFor ?? nowIso(),
+    createdAt: nowIso(),
+    createdById: input.createdById ?? "ai",
+    attempts: 0,
+  };
+  db.insert("carrierRunnerJobs", row);
+  logCarrierRunnerTimeline(row, "Carrier portal check queued", input.reason, input.createdById ?? "system");
+  return row;
+}
+
+function queueCarrierRunnerPolicyPlaced(policy: Policy, actorId?: string): CarrierRunnerJob | null {
+  return createCarrierRunnerJobOnce({
+    tenantId: policy.tenantId,
+    trigger: "policy_placed",
+    policy,
+    createdById: actorId ?? policy.agentId ?? "ai",
+    reason:
+      "Policy was put in place. The carrier portal should be checked for bound policy data, available documents, billing path, and upcoming renewal date, then any changes should be staged for review.",
+  });
+}
+
+function queueCarrierRunnerRenewalWindow(
+  policy: Policy,
+  renewal: Renewal | undefined,
+  actorId?: string
+): CarrierRunnerJob | null {
+  return createCarrierRunnerJobOnce({
+    tenantId: policy.tenantId,
+    trigger: "renewal_window",
+    policy,
+    renewal,
+    createdById: actorId ?? policy.agentId ?? "ai",
+    reason: `Policy renewal is within ${CARRIER_RUNNER_RENEWAL_LOOKAHEAD_DAYS} days. The carrier portal should be checked for renewal terms, documents, billing changes, and non-renewal notices if present.`,
+  });
+}
+
+function ensureCarrierRunnerRenewalJob(policy: Policy, now = nowIso()): CarrierRunnerJob | null {
+  const renewal = renewalForPolicy(policy.id);
+  if (!shouldQueueCarrierRunnerRenewalJob(policy, renewal, now)) return null;
+  return queueCarrierRunnerRenewalWindow(policy, renewal);
+}
+
+function createCarrierRunnerExceptionTask(job: CarrierRunnerJob, reason: string): Task {
+  const customer = job.customerId
+    ? db.list("customers").find((c) => c.id === job.customerId)
+    : undefined;
+  const agency = db.list("agencies").find((a) => a.id === job.tenantId);
+  return createActionTaskOnce({
+    tenantId: job.tenantId,
+    activityKey: `carrier-runner-exception:${job.id}`,
+    title: `Carrier portal needs attention: ${job.title}`,
+    description: reason,
+    customerId: job.customerId,
+    policyId: job.policyId,
+    assetId: job.assetId,
+    topic: "other",
+    severity: "warning",
+    severityReason: "Carrier portal update needs staff review before continuing.",
+    assignedToId: agency?.carrierRunnerAuthorizedUserIds?.[0] ?? primaryOwnerForCustomer(customer),
+    createdById: "ai",
+    auditAction: "task.created_from_carrier_runner_exception",
+    auditMetadata: { runnerJobId: job.id, trigger: job.trigger },
+  });
+}
+
+function applyCarrierRunnerNonRenewal(job: CarrierRunnerJob, summary: string, byUserId?: string) {
+  if (!job.policyId) return;
+  const policy = db.list("policies").find((p) => p.id === job.policyId);
+  if (!policy) return;
+  db.update("policies", policy.id, { renewalStatus: "not_renewed" });
+  const existingRenewal = job.renewalId
+    ? db.list("renewals").find((r) => r.id === job.renewalId)
+    : renewalForPolicy(policy.id);
+  const renewal =
+    existingRenewal ??
+    db.insert("renewals", {
+      id: uid("renewal"),
+      tenantId: policy.tenantId,
+      policyId: policy.id,
+      renewalDate: policy.renewalDate ?? nowIso(),
+      status: "not_renewed",
+      agentId: policy.agentId,
+      createdAt: nowIso(),
+    });
+  const updated = db.update("renewals", renewal.id, {
+    status: "not_renewed",
+    nonRenewalReason: summary || renewal.nonRenewalReason || "Carrier posted a non-renewal notice.",
+    nonRenewalNoticeDate: nowIso(),
+    nonRenewalEffectiveDate: renewal.nonRenewalEffectiveDate ?? policy.renewalDate,
+    nonRenewalCarrierReference: job.sourceReference ?? renewal.nonRenewalCarrierReference,
+  });
+  if (updated) ensureNonRenewalTask(updated, byUserId ?? "ai");
+}
+
+function carrierDownloadSubject(download: CarrierDownload): string {
+  if (download.documentPayload) {
+    return download.documentPayload.documentName || download.documentPayload.fileName;
+  }
+  switch (download.kind) {
+    case "policy_update":
+      return carrierDownloadLooksLikeRenewal(download) ? "renewal information" : "policy information";
+    case "edoc":
+      return "document";
+    case "billing_update":
+      return "billing information";
+    case "claim_update":
+      return "claim information";
+    case "commission_statement":
+      return "commission statement";
+  }
+}
+
+function carrierDownloadLooksLikeRenewal(download: CarrierDownload): boolean {
+  const text = [
+    download.summary,
+    download.documentPayload?.documentName,
+    download.documentPayload?.fileName,
+    download.sourceReference,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return /renewal|renewed|renew/i.test(text);
+}
+
+function carrierDownloadReceivedMessage(download: CarrierDownload): string {
+  const carrier = carrierName(download.carrierId);
+  const policy = download.policyId
+    ? policyRef(db.list("policies").find((p) => p.id === download.policyId))
+    : "this account";
+  const subject = carrierDownloadSubject(download);
+
+  if (carrierDownloadLooksLikeRenewal(download)) {
+    return `${carrier} posted updated renewal information for ${policy}: ${subject}. It is ready for review.`;
+  }
+  if (download.kind === "billing_update") {
+    return `${carrier} posted updated billing information for ${policy}: ${subject}. It is ready for review.`;
+  }
+  if (download.kind === "edoc") {
+    return `${carrier} posted a new document for ${policy}: ${subject}. It is ready for review.`;
+  }
+  if (download.kind === "claim_update") {
+    return `${carrier} posted a claim update for ${policy}: ${subject}. It is ready for review.`;
+  }
+  return `${carrier} posted updated carrier information for ${policy}: ${subject}. It is ready for review.`;
+}
+
+function carrierDownloadFiledMessage(download: CarrierDownload): string {
+  const carrier = carrierName(download.carrierId);
+  const policy = download.policyId
+    ? policyRef(db.list("policies").find((p) => p.id === download.policyId))
+    : "this account";
+  const subject = carrierDownloadSubject(download);
+
+  if (carrierDownloadLooksLikeRenewal(download)) {
+    return `${carrier} renewal update filed for ${policy}: ${subject}.`;
+  }
+  if (download.kind === "billing_update") {
+    return `${carrier} billing update filed for ${policy}: ${subject}.`;
+  }
+  if (download.kind === "edoc") {
+    return `${carrier} document filed for ${policy}: ${subject}.`;
+  }
+  if (download.kind === "claim_update") {
+    return `${carrier} claim update filed for ${policy}: ${subject}.`;
+  }
+  return `${carrier} update filed for ${policy}: ${subject}.`;
+}
+
+function logCarrierDownloadActivity(
+  download: CarrierDownload,
+  message: string,
+  actorId = "system",
+  documentId?: string
+) {
+  const createdAt = nowIso();
+  db.insert("statusEvents", {
+    id: uid("se"),
+    tenantId: download.tenantId,
+    source: "system",
+    message,
+    visibility: "internal",
+    customerId: download.customerId,
+    assetId: download.assetId,
+    policyId: download.policyId,
+    documentId,
+    createdAt,
+    createdById: actorId,
+  });
+  if (download.customerId || download.policyId) {
+    db.insert("notes", {
+      id: uid("note"),
+      tenantId: download.tenantId,
+      authorId: actorId,
+      customerId: download.customerId,
+      policyId: download.policyId,
+      body: message,
+      visibility: "internal",
+      createdAt,
+    });
+  }
+}
+
+function stageCarrierDownloadFromRunnerJob(
+  job: CarrierRunnerJob,
+  input: {
+    kind: CarrierDownloadKind;
+    summary: string;
+    changes?: CarrierDownloadChange[];
+    documentPayload?: CarrierDownloadDocumentPayload;
+    confidence?: number;
+    effectiveDate?: string;
+    sourceReference?: string;
+  }
+): CarrierDownload {
+  const row: CarrierDownload = {
+    id: uid("download"),
+    tenantId: job.tenantId,
+    carrierId: job.carrierId ?? "carrier_unknown",
+    kind: input.kind,
+    status: (input.changes?.length ?? 0) > 0 || input.documentPayload ? "matched" : "unreviewed",
+    source: "carrier_runner",
+    sourceReference: input.sourceReference ?? job.sourceReference,
+    receivedAt: nowIso(),
+    effectiveDate: input.effectiveDate,
+    customerId: job.customerId,
+    assetId: job.assetId,
+    policyId: job.policyId,
+    confidence: input.confidence ?? 0.92,
+    summary: input.summary,
+    changes: input.changes ?? [],
+    documentPayload: input.documentPayload,
+  };
+  db.insert("carrierDownloads", row);
+  logCarrierDownloadActivity(row, carrierDownloadReceivedMessage(row), "system");
+  return row;
+}
+
+function ensureDocumentReviewNotice(doc: Document, actorId?: string): AiNotification | null {
+  const key = `document-review:${doc.id}`;
+  if (doc.status !== "pending") {
+    resolveActionTasks(doc.tenantId, [key], actorId, "task.resolved_by_document_status");
+    db
+      .list("aiNotifications")
+      .filter(
+        (n) =>
+          n.tenantId === doc.tenantId &&
+          n.kind === "inbound_notice" &&
+          n.documentId === doc.id &&
+          !n.acknowledgedAt
+      )
+      .forEach((n) =>
+        db.update("aiNotifications", n.id, {
+          acknowledgedAt: nowIso(),
+          acknowledgedById: actorId,
+        })
+      );
+    return null;
+  }
+  if (!doc.customerId) return null;
+  const uploader = db.list("users").find((u) => u.id === doc.uploadedById);
+  if (uploader?.role !== "customer") return null;
+  const customer = db.list("customers").find((c) => c.id === doc.customerId);
+  resolveActionTasks(doc.tenantId, [key], actorId, "task.resolved_by_document_notice");
+  const existing = db
+    .list("aiNotifications")
+    .find(
+      (n) =>
+        n.tenantId === doc.tenantId &&
+        n.kind === "inbound_notice" &&
+        n.documentId === doc.id &&
+        !n.acknowledgedAt
+    );
+  if (existing) return existing;
+  const row: AiNotification = {
+    id: uid("ain"),
+    tenantId: doc.tenantId,
+    kind: "inbound_notice",
+    title: `Document uploaded: ${doc.fileName}`,
+    summary: `${customer?.name ?? "A client"} uploaded ${doc.fileName}.`,
+    customerId: doc.customerId,
+    assetId: doc.assetId,
+    policyId: doc.policyId,
+    documentId: doc.id,
+    topic: "document_upload",
+    severity: "info",
+    severityReason: "Document upload notification; no owned activity was opened.",
+    assignedToId: primaryOwnerForCustomer(customer),
+    createdAt: nowIso(),
+  };
+  db.insert("aiNotifications", row);
+  return row;
+}
+
+function bumpRenewalTaskForDraft(draft: Document, actorId?: string) {
+  if (!draft.renewalId) return;
+  const renewal = db.list("renewals").find((r) => r.id === draft.renewalId);
+  if (!renewal) return;
+  const task = db.list("tasks").find((t) => t.renewalId === renewal.id && !t.completedAt);
+  if (!task) return;
+  db.update("tasks", task.id, {
+    status: "open",
+    severity: "warning",
+    severityReason: "Renewal document draft is ready for staff review.",
+    aiSummary: `${draft.fileName} is ready for review before publishing to the renewal term.`,
+  });
+  logTaskAudit({
+    tenantId: task.tenantId,
+    actorId: actorId ?? "ai",
+    action: "task.updated_from_renewal_document_draft",
+    taskId: task.id,
+    metadata: { documentId: draft.id, renewalId: renewal.id },
+  });
+}
+
+function ensureCarrierBindingIssueTask(input: {
+  session: QuotingSession;
+  policy: Policy;
+  carrier: Carrier;
+  status: string;
+  reasons?: string[];
+  actorId?: string;
+}): Task | null {
+  if (input.status === "bound_on_carrier") {
+    resolveActionTasks(
+      input.policy.tenantId,
+      [`carrier-bind:${input.policy.id}`],
+      input.actorId,
+      "task.resolved_by_carrier_binding"
+    );
+    return null;
+  }
+  const customer = customerForPolicy(input.policy);
+  return createActionTaskOnce({
+    tenantId: input.policy.tenantId,
+    activityKey: `carrier-bind:${input.policy.id}`,
+    title: `Carrier bind needs review: ${policyRef(input.policy)}`,
+    description: `${input.carrier.name} policy implementation did not confirm as bound on the carrier side. ${
+      input.reasons?.length ? input.reasons.join("; ") : "Review the carrier portal and complete any remaining binding step."
+    }`,
+    customerId: input.policy.customerId,
+    policyId: input.policy.id,
+    assetId: input.policy.assetId,
+    topic: "policy_edit_request",
+    severity: input.status === "failed" ? "urgent" : "warning",
+    severityReason: "Carrier-side binding requires staff verification.",
+    assignedToId: primaryOwnerForCustomer(customer) ?? input.session.createdById,
+    createdById: input.actorId ?? "ai",
+    auditAction: "task.created_from_carrier_binding",
+    auditMetadata: { sessionId: input.session.id, carrierId: input.carrier.id, status: input.status },
+  });
+}
+
+function customerRelatedProspects(customer: CustomerProfile): Prospect[] {
+  const customerEmail = normalizeEmail(customer.email);
+  return db
+    .list("prospects")
+    .filter(
+      (p) =>
+        p.tenantId === customer.tenantId &&
+        (p.customerId === customer.id ||
+          (!!customerEmail &&
+            normalizeEmail(p.email) === customerEmail &&
+            p.name.trim().toLowerCase() === customer.name.trim().toLowerCase()))
+    );
+}
+
+function makeHistoryEvent(
+  id: string,
+  input: Omit<StatusEvent, "id">
+): StatusEvent {
+  return { id, ...input };
+}
+
+function contactOwnerSummary(row: CustomerProfile | Prospect): string {
+  const parts: string[] = [];
+  if (row.assignedAgentId) {
+    parts.push(`agent ${actorName(row.assignedAgentId)}`);
+  }
+  for (const id of row.additionalAgentIds ?? []) {
+    if (id !== row.assignedAgentId) parts.push(`co-owner ${actorName(id)}`);
+  }
+  if (row.assignedCsrId) parts.push(`CSR ${actorName(row.assignedCsrId)}`);
+  for (const id of row.additionalCsrIds ?? []) {
+    if (id !== row.assignedCsrId) parts.push(`CSR ${actorName(id)}`);
+  }
+  return parts.join(", ");
+}
+
+function logContactRoutingEvent(input: {
+  tenantId: string;
+  kind: "client" | "prospect";
+  contactId: string;
+  contactName: string;
+  before: CustomerProfile | Prospect;
+  after: CustomerProfile | Prospect;
+  byUserId?: string;
+}) {
+  const beforeKey = contactOwnerIds(input.before).join("|");
+  const afterKey = contactOwnerIds(input.after).join("|");
+  if (beforeKey === afterKey) return;
+  const ownerSummary = contactOwnerSummary(input.after);
+  db.insert("statusEvents", {
+    id: uid("se"),
+    tenantId: input.tenantId,
+    source: "agent",
+    message: `${actorName(input.byUserId)} ${
+      beforeKey ? "rerouted" : "assigned"
+    } ${input.contactName} to ${ownerSummary || "no staff owner"}.`,
+    visibility: "internal",
+    customerId: input.kind === "client" ? input.contactId : undefined,
+    prospectId: input.kind === "prospect" ? input.contactId : undefined,
+    createdAt: nowIso(),
+    createdById: input.byUserId,
+  });
+}
+
+function quoteStatusLabel(status: PolicyStatus): string {
+  return fmt.titleCase(String(status).replace(/_/g, " "));
+}
+
+function quoteSessionContactMatches(
+  session: QuotingSession,
+  customerId: string,
+  prospectIds: Set<string>
+): boolean {
+  return (
+    session.customerId === customerId ||
+    (!!session.prospectId && prospectIds.has(session.prospectId))
+  );
+}
+
+function comprehensiveClientHistory(customerId: string): StatusEvent[] {
+  const customer = db.list("customers").find((c) => c.id === customerId);
+  if (!customer) return [];
+  const prospects = customerRelatedProspects(customer);
+  const prospectIds = new Set(prospects.map((p) => p.id));
+  const policies = db.list("policies").filter((p) => p.customerId === customer.id);
+  const policyIds = new Set(policies.map((p) => p.id));
+  const assetIds = new Set(
+    db.list("assets").filter((a) => a.customerId === customer.id).map((a) => a.id)
+  );
+
+  const events: StatusEvent[] = [];
+  const push = (event: StatusEvent | undefined | null) => {
+    if (event) events.push(event);
+  };
+
+  db.list("statusEvents").forEach((event) => {
+    if (
+      event.customerId === customer.id ||
+      (!!event.prospectId && prospectIds.has(event.prospectId)) ||
+      (!!event.policyId && policyIds.has(event.policyId)) ||
+      (!!event.assetId && assetIds.has(event.assetId))
+    ) {
+      events.push(event);
+    }
+  });
+  const hasLoggedEvent = (fragment: string, session?: QuotingSession): boolean => {
+    const needle = fragment.toLowerCase();
+    return events.some(
+      (event) =>
+        event.message.toLowerCase().includes(needle) &&
+        (event.customerId === customer.id ||
+          (!!event.prospectId && prospectIds.has(event.prospectId)) ||
+          (!!session?.assetId && event.assetId === session.assetId))
+    );
+  };
+
+  if (prospects.length === 0) {
+    push(
+      makeHistoryEvent(`history:client-created:${customer.id}`, {
+        tenantId: customer.tenantId,
+        source: "system",
+        message: `Client profile created for ${customer.name}.`,
+        visibility: "internal",
+        customerId: customer.id,
+        createdAt: customer.createdAt,
+      })
+    );
+  }
+
+  prospects.forEach((prospect) => {
+    push(
+      makeHistoryEvent(`history:prospect-created:${prospect.id}`, {
+        tenantId: prospect.tenantId,
+        source: "system",
+        message: `Prospect profile created for ${prospect.name}. Status: ${fmt.titleCase(
+          prospect.status.replace(/_/g, " ")
+        )}.`,
+        visibility: "internal",
+        customerId: customer.id,
+        prospectId: prospect.id,
+        createdAt: prospect.createdAt,
+      })
+    );
+    const ownerSummary = contactOwnerSummary(prospect);
+    if (ownerSummary) {
+      push(
+        makeHistoryEvent(`history:prospect-routing:${prospect.id}`, {
+          tenantId: prospect.tenantId,
+          source: "agent",
+          message: `Prospect routing on file: ${ownerSummary}.`,
+          visibility: "internal",
+          customerId: customer.id,
+          prospectId: prospect.id,
+          createdAt: prospect.createdAt,
+          createdById: prospect.assignedAgentId,
+        })
+      );
+    }
+  });
+
+  const customerOwnerSummary = contactOwnerSummary(customer);
+  if (customerOwnerSummary) {
+    push(
+      makeHistoryEvent(`history:client-routing:${customer.id}`, {
+        tenantId: customer.tenantId,
+        source: "agent",
+        message: `Current client routing on file: ${customerOwnerSummary}.`,
+        visibility: "internal",
+        customerId: customer.id,
+        createdAt: customer.createdAt,
+        createdById: customer.assignedAgentId,
+      })
+    );
+  }
+
+  db.list("quoteRequests")
+    .filter((q) => q.customerId === customer.id)
+    .forEach((quote) => {
+      const carrier = quote.aiRecommendedCarrierId
+        ? carrierName(quote.aiRecommendedCarrierId)
+        : undefined;
+      const premium =
+        quote.aiPremiumEstimateMin && quote.aiPremiumEstimateMax
+          ? ` Estimated premium ${fmt.money(quote.aiPremiumEstimateMin)}-${fmt.money(
+              quote.aiPremiumEstimateMax
+            )}.`
+          : "";
+      const missing = quote.missingDocuments.length
+        ? ` Missing documents: ${quote.missingDocuments.join(", ")}.`
+        : "";
+      push(
+        makeHistoryEvent(`history:quote-request:${quote.id}`, {
+          tenantId: quote.tenantId,
+          source: "ai",
+          message: `Quote request opened for ${api.helpers.assetTypeLabel(
+            quote.assetType
+          )}. Status: ${quoteStatusLabel(quote.status)}.${
+            carrier ? ` AI recommended ${carrier}.` : ""
+          }${premium}${missing}`,
+          visibility: "internal",
+          customerId: customer.id,
+          createdAt: quote.createdAt,
+          createdById: quote.assignedAgentId ?? "ai",
+        })
+      );
+    });
+
+  db.list("quotingSessions")
+    .filter((session) => quoteSessionContactMatches(session, customer.id, prospectIds))
+    .forEach((session) => {
+      const assetLabel = api.helpers.assetTypeLabel(session.assetType);
+      if (!hasLoggedEvent("AI quoting workflow started", session)) {
+        push(
+          makeHistoryEvent(`history:quote-session-start:${session.id}`, {
+            tenantId: session.tenantId,
+            source: "ai",
+            message: `AI quoting workflow started for ${session.lineOfBusiness ?? "personal"} ${assetLabel}.`,
+            visibility: "internal",
+            customerId: customer.id,
+            prospectId: session.prospectId,
+            assetId: session.assetId,
+            createdAt: session.createdAt,
+            createdById: session.createdById,
+          })
+        );
+      }
+      if (session.questionnaireSentAt) {
+        if (!hasLoggedEvent("questionnaire sent", session)) {
+          push(
+            makeHistoryEvent(`history:quote-questionnaire:${session.id}`, {
+              tenantId: session.tenantId,
+              source: "agent",
+              message: `Quoting questionnaire sent to client with ${
+                session.questionnaireQuestions?.length ?? 0
+              } question${(session.questionnaireQuestions?.length ?? 0) === 1 ? "" : "s"}.`,
+              visibility: "internal",
+              customerId: customer.id,
+              prospectId: session.prospectId,
+              communicationId: session.questionnaireMessageId,
+              createdAt: session.questionnaireSentAt,
+              createdById: session.createdById,
+            })
+          );
+        }
+      }
+      if (session.replyReceivedAt) {
+        if (!hasLoggedEvent("submitted quoting questionnaire", session)) {
+          push(
+            makeHistoryEvent(`history:quote-reply:${session.id}`, {
+              tenantId: session.tenantId,
+              source: "customer",
+              message: `Client submitted quoting questionnaire responses; AI moved the workflow into carrier ranking.`,
+              visibility: "internal",
+              customerId: customer.id,
+              prospectId: session.prospectId,
+              createdAt: session.replyReceivedAt,
+            })
+          );
+        }
+      }
+      (session.commercialCarrierSubmissions ?? []).forEach((submission) => {
+        const linkedMessageId = commercialSubmissionMessageId(submission);
+        push(
+          makeHistoryEvent(`history:commercial-submission:${session.id}:${submission.carrierId}`, {
+            tenantId: session.tenantId,
+            source: "ai",
+            message: `Commercial application sent to ${carrierName(
+              submission.carrierId
+            )}. Current carrier response: ${fmt.titleCase(
+              submission.status.replace(/_/g, " ")
+            )}.${submission.missingFields?.length ? ` Missing fields: ${submission.missingFields.join(", ")}.` : ""}`,
+            visibility: "internal",
+            customerId: customer.id,
+            prospectId: session.prospectId,
+            assetId: session.assetId,
+            communicationId: linkedMessageId,
+            documentId: commercialSubmissionDocumentId(submission),
+            createdAt: submission.responseAt ?? submission.sentAt,
+            createdById: linkedMessageId ? session.createdById : "ai",
+          })
+        );
+      });
+      if (session.quotes.length > 0) {
+        const top = session.quotes[0];
+        if (!hasLoggedEvent("AI carrier ranking", session) && !hasLoggedEvent("AI ranked", session)) {
+          push(
+            makeHistoryEvent(`history:quote-ranking:${session.id}`, {
+              tenantId: session.tenantId,
+              source: "ai",
+              message: `AI carrier ranking generated ${session.quotes.length} option${
+                session.quotes.length === 1 ? "" : "s"
+              }. Top option: ${carrierName(top.carrierId)} at ${fmt.money(top.premium)} annual premium.`,
+              visibility: "internal",
+              customerId: customer.id,
+              prospectId: session.prospectId,
+              assetId: session.assetId,
+              createdAt: session.updatedAt,
+              createdById: "ai",
+            })
+          );
+        }
+      }
+    });
+
+  db.list("tasks")
+    .filter(
+      (task) =>
+        task.customerId === customer.id ||
+        (!!task.prospectId && prospectIds.has(task.prospectId)) ||
+        (!!task.policyId && policyIds.has(task.policyId)) ||
+        (!!task.assetId && assetIds.has(task.assetId))
+    )
+    .forEach((task) => {
+      push(
+        makeHistoryEvent(`history:task-created:${task.id}`, {
+          tenantId: task.tenantId,
+          source: task.createdById === "ai" ? "ai" : "agent",
+          message: `Activity created: ${task.title}${task.description ? ` - ${task.description}` : ""}`,
+          visibility: "internal",
+          customerId: customer.id,
+          prospectId: task.prospectId,
+          assetId: task.assetId,
+          policyId: task.policyId,
+          communicationId: task.messageId,
+          renewalId: task.renewalId,
+          createdAt: task.createdAt,
+          createdById: task.createdById,
+        })
+      );
+      if (task.startedAt) {
+        push(
+          makeHistoryEvent(`history:task-started:${task.id}`, {
+            tenantId: task.tenantId,
+            source: "agent",
+            message: `Activity started: ${task.title}.`,
+            visibility: "internal",
+            customerId: customer.id,
+            prospectId: task.prospectId,
+            assetId: task.assetId,
+            policyId: task.policyId,
+            createdAt: task.startedAt,
+            createdById: task.startedById,
+          })
+        );
+      }
+      if (task.completedAt) {
+        push(
+          makeHistoryEvent(`history:task-completed:${task.id}`, {
+            tenantId: task.tenantId,
+            source: "agent",
+            message: `Activity resolved: ${task.title}.${
+              task.resolutionNote ? " Resolution note attached." : ""
+            }`,
+            visibility: "internal",
+            customerId: customer.id,
+            prospectId: task.prospectId,
+            assetId: task.assetId,
+            policyId: task.policyId,
+            createdAt: task.completedAt,
+            createdById: task.completedById,
+          })
+        );
+      }
+    });
+
+  db.list("communications")
+    .filter(
+      (comm) =>
+        comm.customerId === customer.id ||
+        (!!comm.prospectId && prospectIds.has(comm.prospectId))
+    )
+    .forEach((comm) => {
+      const alreadyLogged = events.some((event) => event.communicationId === comm.id);
+      if (alreadyLogged) return;
+      const channel = comm.channel === "email" ? "Email" : fmt.titleCase(String(comm.channel));
+      push(
+        makeHistoryEvent(`history:communication:${comm.id}`, {
+          tenantId: comm.tenantId,
+          source: comm.direction === "inbound" ? "customer" : "agent",
+          message: `${channel} ${comm.direction === "inbound" ? "received" : "sent"}${
+            comm.subject ? `: ${comm.subject}` : ""
+          }.`,
+          visibility: comm.channel === "note" ? "internal" : "customer_visible",
+          customerId: customer.id,
+          prospectId: comm.prospectId,
+          communicationId: comm.id,
+          createdAt: comm.createdAt,
+          createdById: comm.createdById,
+        })
+      );
+    });
+
+  db.list("notes")
+    .filter(
+      (note) =>
+        note.customerId === customer.id ||
+        (!!note.prospectId && prospectIds.has(note.prospectId)) ||
+        (!!note.policyId && policyIds.has(note.policyId))
+    )
+    .forEach((note) => {
+      const duplicate = events.some(
+        (event) =>
+          event.createdAt === note.createdAt &&
+          event.message.includes(note.body.slice(0, 80))
+      );
+      if (duplicate) return;
+      push(
+        makeHistoryEvent(`history:note:${note.id}`, {
+          tenantId: note.tenantId,
+          source: note.authorId === "ai" ? "ai" : "agent",
+          message: `Remark by ${actorName(note.authorId)}: ${note.body}`,
+          visibility: note.visibility,
+          customerId: customer.id,
+          prospectId: note.prospectId,
+          policyId: note.policyId,
+          attachments: note.attachments,
+          createdAt: note.createdAt,
+          createdById: note.authorId,
+        })
+      );
+    });
+
+  const seen = new Map<string, StatusEvent>();
+  for (const event of events) {
+    const key = [
+      event.id,
+      event.message,
+      event.createdAt,
+      event.customerId ?? "",
+      event.prospectId ?? "",
+      event.communicationId ?? "",
+    ].join("|");
+    if (!seen.has(key)) seen.set(key, event);
+  }
+  return [...seen.values()].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
 }
 
 // Routing-driven Task spawned when a prospect gets routed to a
@@ -466,12 +2855,85 @@ function spawnRoutingTask(
 
 function attachmentManifestLine(
   attachments: MarketingAttachment[],
-  channel: "email" | "sms"
+  channel: "email"
 ): string {
   const applicable = attachments.filter((a) => a.channels.includes(channel));
   if (applicable.length === 0) return "";
-  if (channel === "sms") return "";
   return `Attached: ${applicable.map((a) => a.description ?? a.fileName).join(", ")}.`;
+}
+
+function defaultAutoMessageRules(enabled = true): MarketingAutoMessageRule[] {
+  return [
+    {
+      id: uid("mar"),
+      name: "New prospect intake outreach",
+      enabled,
+      trigger: "new_prospect",
+      messageType: "quote_intake",
+      channels: ["email"],
+      audience: "new_prospects",
+      timing: "immediate",
+      delayAmount: 0,
+      delayUnit: "minutes",
+      senderMode: "assigned_agent",
+      approvalMode: "auto_send",
+      quietHoursStart: "20:00",
+      quietHoursEnd: "08:00",
+      maxPerContactPer30Days: 3,
+      stopOnReply: true,
+      includeAttachments: true,
+      prompt:
+        "Concierge quote-intake outreach. Acknowledge the request, make the next step obvious, and invite a callback without sounding generic.",
+      updatedAt: nowIso(),
+    },
+  ];
+}
+
+function normalizeMarketingConfig(config: MarketingConfig & { agencyLogo?: unknown }): MarketingConfig {
+  const { agencyLogo: _legacyAgencyLogo, ...rest } = config;
+  const rules = Array.isArray(rest.autoMessageRules)
+    ? rest.autoMessageRules
+    : defaultAutoMessageRules(rest.autoSendOnNewProspect);
+  return {
+    ...rest,
+    attachments: (rest.attachments ?? []).map((attachment) => ({
+      ...attachment,
+      channels: ["email"],
+    })),
+    autoMessageRules: rules.map((rule) => ({
+      ...rule,
+      channels: ["email"],
+    })),
+  };
+}
+
+function autoMessageSchedule(rule: MarketingAutoMessageRule): string | undefined {
+  if (rule.timing === "immediate") return undefined;
+  const date = new Date();
+  if (rule.timing === "scheduled_time" && rule.sendTime) {
+    const [hour, minute] = rule.sendTime.split(":").map((part) => Number(part));
+    if (Number.isFinite(hour) && Number.isFinite(minute)) {
+      date.setHours(hour, minute, 0, 0);
+      if (date.getTime() <= Date.now()) date.setDate(date.getDate() + 1);
+      return date.toISOString();
+    }
+  }
+  const amount = Math.max(0, rule.delayAmount ?? 0);
+  const unit = rule.delayUnit ?? "days";
+  const ms =
+    unit === "minutes"
+      ? amount * 60_000
+      : unit === "hours"
+      ? amount * 3_600_000
+      : amount * 86_400_000;
+  if (ms <= 0) return undefined;
+  return new Date(Date.now() + ms).toISOString();
+}
+
+function autoMessageVerb(status: MarketingMessage["deliveryStatus"]): string {
+  if (status === "draft") return "drafted";
+  if (status === "queued") return "queued";
+  return "auto-sent";
 }
 
 function topicLabel(t: import("@/types").TaskTopic): string {
@@ -479,7 +2941,7 @@ function topicLabel(t: import("@/types").TaskTopic): string {
     policy_edit_request: "a policy edit request",
     coverage_change: "a coverage change",
     cancellation_request: "a cancellation request",
-    claim_status: "a claim status update",
+    claim_status: "a claim remark",
     claim_filed: "a claim filing",
     renewal_approaching: "an upcoming policy renewal",
     payment_issue: "a payment issue",
@@ -491,7 +2953,1768 @@ function topicLabel(t: import("@/types").TaskTopic): string {
   return map[t] ?? "their policy";
 }
 
+function fieldSlug(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 48);
+}
+
+function documentTemplateFieldsFor(
+  doc: Pick<
+    Document,
+    | "tenantId"
+    | "fileName"
+    | "type"
+    | "documentName"
+    | "visibility"
+    | "status"
+    | "customerId"
+    | "assetId"
+    | "policyId"
+    | "lineOfBusiness"
+    | "policyTermYear"
+  >,
+  extras?: {
+    originalFileName?: string;
+    sourceFiles?: string[];
+    renewalDate?: string;
+  }
+): TemplateFieldMap {
+  const agency = db.list("agencies").find((a) => a.id === doc.tenantId);
+  const customer = doc.customerId
+    ? db.list("customers").find((c) => c.id === doc.customerId)
+    : undefined;
+  const asset = doc.assetId ? db.list("assets").find((a) => a.id === doc.assetId) : undefined;
+  const policy = doc.policyId ? db.list("policies").find((p) => p.id === doc.policyId) : undefined;
+  const carrier = policy?.carrierId
+    ? db.list("carriers").find((c) => c.id === policy.carrierId)
+    : undefined;
+
+  return buildDocumentTemplateFields({
+    fileName: doc.fileName,
+    documentTypeLabel: documentTypeLabelForTemplate(String(doc.type), doc.documentName),
+    documentName: doc.documentName,
+    visibilityLabel: doc.visibility.replace(/_/g, " "),
+    statusLabel: doc.status,
+    agencyName: agency?.name,
+    customerName: customer?.name,
+    customerEmail: customer?.email,
+    customerPhone: customer?.phone,
+    assetLabel: asset?.label,
+    assetValue: asset?.estimatedValue ? fmt.money(asset.estimatedValue) : undefined,
+    policyNumber: policy?.policyNumber,
+    carrierName: carrier?.name,
+    premium: policy ? fmt.money(policy.finalPremium ?? policy.premiumEstimate ?? 0) : undefined,
+    effectiveDate: policy?.effectiveDate ? fmt.date(policy.effectiveDate) : undefined,
+    renewalDate: extras?.renewalDate
+      ? fmt.date(extras.renewalDate)
+      : policy?.renewalDate
+      ? fmt.date(policy.renewalDate)
+      : undefined,
+    termYear: doc.policyTermYear,
+    originalFileName: extras?.originalFileName,
+    lineOfBusiness: doc.lineOfBusiness,
+    sourceFiles: extras?.sourceFiles,
+  });
+}
+
+function linkedActiveCarriers(tenantId: string): Carrier[] {
+  const links = db
+    .list("carrierLinks")
+    .filter((l) => l.tenantId === tenantId && l.active);
+  const linkedCarrierIds = new Set(links.map((l) => l.carrierId));
+  return db
+    .list("carriers")
+    .filter((c) => linkedCarrierIds.has(c.id) && c.status === "active");
+}
+
+function carrierQuoteApiStatus(carrier: Carrier): CarrierQuote["apiStatus"] {
+  return getCarrierQuoteProviderReadiness(carrier).quoteApiStatus;
+}
+
+function personalLineAppetiteFor(carrier: Carrier, assetType: AssetType): CarrierAppetite | undefined {
+  return (carrier.appetites ?? []).find(
+    (a) => a.assetType === assetType && (a.line ?? "personal") === "personal"
+  );
+}
+
+function diagnosePersonalCarrierApiRow(
+  carrier: Carrier,
+  input: { assetType: AssetType; state?: string }
+): PersonalLinesCarrierApiDiagnosticRow {
+  const configuredStatus = carrier.quotingApi?.status ?? "not_configured";
+  const endpoint = carrier.quotingApi?.endpoint?.trim();
+  const providerReadiness = getCarrierQuoteProviderReadiness(carrier);
+  const supportsAssetType = !!personalLineAppetiteFor(carrier, input.assetType);
+  const writesState = !input.state || carrier.stateAvailability.includes(input.state);
+  const quoteApiStatus = providerReadiness.quoteApiStatus;
+  const blockingReasons: string[] = [];
+
+  blockingReasons.push(...providerReadiness.blockingReasons);
+  if (!supportsAssetType) blockingReasons.push(`no personal-lines appetite for ${input.assetType.replace(/_/g, " ")}`);
+  if (!writesState && input.state) blockingReasons.push(`not licensed in ${input.state}`);
+
+  return {
+    carrierId: carrier.id,
+    carrierName: carrier.name,
+    provider: providerReadiness.providerLabel,
+    endpoint: endpoint ?? providerReadiness.portalUrl,
+    configuredStatus,
+    quoteApiStatus,
+    supportsAssetType,
+    writesState,
+    liveReady:
+      providerReadiness.liveReady &&
+      supportsAssetType &&
+      writesState,
+    blockingReasons,
+  };
+}
+
+function addOnePolicyYear(iso: string): string {
+  const date = new Date(iso);
+  date.setFullYear(date.getFullYear() + 1);
+  return date.toISOString();
+}
+
+function assetTypeDisplayName(type: AssetType): string {
+  const map: Record<AssetType, string> = {
+    coastal_home: "Coastal Home",
+    luxury_vehicle: "Luxury Vehicle",
+    yacht: "Yacht",
+    jewelry: "Jewelry",
+    umbrella_liability: "Umbrella Liability",
+    full_portfolio: "Full Portfolio",
+    other: "Other",
+  };
+  return map[type];
+}
+
+type CommercialAcordTemplateSelection = NonNullable<QuotingSession["commercialAcordTemplates"]>[number];
+
+function selectedCommercialAcordTemplates(
+  tenantId: string,
+  selectedTemplateIds: string[],
+  publicFields: Record<string, unknown>,
+  publicFieldEvidence?: PublicDataEvidenceMap
+): CommercialAcordTemplateSelection[] {
+  const selected = new Set(selectedTemplateIds);
+  if (selected.size === 0) return [];
+  const documentReadyFieldCount = Object.values(publicFieldEvidence ?? {}).filter(
+    (item) => item.allowDocumentAutofill
+  ).length;
+  return db
+    .list("documents")
+    .filter((d) => selected.has(d.id) && d.tenantId === tenantId)
+    .map((d, index) => {
+      const templateLike = {
+        templateId: d.id,
+        fileName: d.fileName,
+        documentName: d.documentName,
+      };
+      const totalFields = Math.max(1, acordQuestionCountForTemplate(templateLike));
+      const registryAutoFilledCount = countAcordAutoFilledFields(templateLike, {
+        publicFields,
+        publicFieldEvidence,
+      });
+      const autoFilledFieldCount = Math.min(
+        totalFields,
+        Math.max(registryAutoFilledCount, Math.min(documentReadyFieldCount + index, totalFields))
+      );
+      return {
+        templateId: d.id,
+        fileName: d.fileName,
+        documentName: d.documentName,
+        formNumber: getAcordFormNumber(d),
+        type: String(d.type),
+        storagePath: d.storagePath,
+        downloadUrl: d.downloadUrl,
+        autoFilledFieldCount,
+        missingFieldCount: Math.max(0, totalFields - autoFilledFieldCount),
+      };
+    });
+}
+
+function acordMissingFieldQuestions(
+  templates: CommercialAcordTemplateSelection[],
+  context: {
+    contactName?: string;
+    agencyName?: string;
+    estimatedValue?: number;
+    state?: string;
+    publicFields: Record<string, unknown>;
+    publicFieldEvidence?: PublicDataEvidenceMap;
+    assetDetails?: Record<string, string>;
+    knownFieldsByTemplateId?: Record<string, TemplateFieldMap>;
+  }
+): QuotingQuestion[] {
+  return templates.flatMap((template) =>
+    buildAcordQuestionsForTemplate(template, {
+      contactName: context.contactName,
+      agencyName: context.agencyName,
+      estimatedValue: context.estimatedValue,
+      state: context.state,
+      publicFields: context.publicFields,
+      publicFieldEvidence: context.publicFieldEvidence,
+      assetDetails: context.assetDetails,
+      knownFields: context.knownFieldsByTemplateId?.[template.templateId],
+    })
+  );
+}
+
+function implementedPolicyNumber(carrier: Carrier, session: QuotingSession): string {
+  const carrierCode = carrier.name
+    .replace(/[^a-z0-9]/gi, "")
+    .slice(0, 4)
+    .toUpperCase()
+    .padEnd(4, "X");
+  const sessionCode = session.id.slice(-6).toUpperCase();
+  return `${carrierCode}-${sessionCode}`;
+}
+
+function appendUniqueQuestions(
+  existing: QuotingQuestion[],
+  additions: QuotingQuestion[]
+): QuotingQuestion[] {
+  const seen = new Set(existing.map((q) => q.id));
+  return [
+    ...existing,
+    ...additions.filter((q) => {
+      if (seen.has(q.id)) return false;
+      seen.add(q.id);
+      return true;
+    }),
+  ];
+}
+
+function visibleQuotingQuestions(session: QuotingSession): QuotingQuestion[] {
+  const questions = session.questionnaireQuestions ?? [];
+  if (session.lineOfBusiness !== "commercial") return questions;
+  if (session.commercialSecondRoundSentAt && !session.commercialSupplementalsCompletedAt) {
+    return questions.filter((q) => q.round === "second_round");
+  }
+  if (!session.commercialApplicationSentAt) {
+    return questions.filter((q) => !q.carrierId && q.round !== "second_round");
+  }
+  return questions.filter((q) => q.round === "second_round");
+}
+
+function isDocumentOnlyAcordSession(session: QuotingSession): boolean {
+  return (
+    session.lineOfBusiness === "commercial" &&
+    session.aiSummary === "ACORD documents initialized from the client Documents card."
+  );
+}
+
+function initialCommercialQuestionnaireQuestions(session: QuotingSession): QuotingQuestion[] {
+  const contact = contactForQuotingSession(session);
+  const agency = db.list("agencies").find((candidate) => candidate.id === session.tenantId);
+  const carriers = linkedActiveCarriers(session.tenantId);
+  const templates = session.commercialAcordTemplates ?? [];
+  const knownFieldsByTemplateId = knownAcordFieldsByTemplateId(
+    templates,
+    session,
+    session.questionnaireResponses ?? {},
+    "application"
+  );
+
+  return aiGenerateCommercialQuestionnaire({
+    contactName: contact?.name ?? "Commercial applicant",
+    carrierList: carriers,
+    knownPublicFields: session.publicFields,
+  })
+    .filter((q) => !q.carrierId)
+    .concat(
+      acordMissingFieldQuestions(templates, {
+        contactName: contact?.name ?? "Commercial applicant",
+        agencyName: agency?.name,
+        estimatedValue: session.estimatedValue,
+        state: session.state,
+        publicFields: session.publicFields,
+        publicFieldEvidence: session.publicFieldEvidence,
+        assetDetails: session.assetDetails,
+        knownFieldsByTemplateId,
+      })
+    );
+}
+
+function commercialSupplementalQuestionsForCarrier(carrier: Carrier): {
+  label: string;
+  kind: QuotingQuestion["kind"];
+  options?: string[];
+}[] {
+  const questions: {
+    label: string;
+    kind: QuotingQuestion["kind"];
+    options?: string[];
+  }[] = [
+    {
+      label: `${carrier.name}: confirm cyber liability coverage carried separately`,
+      kind: "select",
+      options: ["Yes", "No", "Pending quote"],
+    },
+    {
+      label: `${carrier.name}: confirm operations outside the US`,
+      kind: "select",
+      options: ["No", "Canada/Mexico only", "Worldwide"],
+    },
+  ];
+  if (carrier.preferredAssetTypes.includes("luxury_vehicle")) {
+    questions.push({
+      label: `${carrier.name}: fleet schedule - number of company-owned vehicles`,
+      kind: "number",
+    });
+  }
+  if (carrier.preferredAssetTypes.includes("coastal_home")) {
+    questions.push({
+      label: `${carrier.name}: commercial property schedule - locations and square footage`,
+      kind: "textarea",
+    });
+  }
+  questions.push({
+    label: `${carrier.name}: pending or threatened litigation details`,
+    kind: "textarea",
+  });
+  return questions.slice(0, 3);
+}
+
+function carrierHasCommercialAppetite(carrier: Carrier): boolean {
+  if ((carrier.appetites ?? []).some((appetite) => appetite.line === "commercial")) {
+    return true;
+  }
+  const text = [
+    carrier.name,
+    carrier.appetiteNotes,
+    carrier.tendencyNotes,
+    carrier.underwritingRules,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return /\b(commercial|business|bop|workers|general liability|professional liability|fleet|company|main[-\s]?street|small[-\s]?commercial|farm)\b/.test(
+    text
+  );
+}
+
+function carrierCommercialDocuments(tenantId: string, carrierId: string): Document[] {
+  return db
+    .list("documents")
+    .filter(
+      (document) =>
+        document.tenantId === tenantId &&
+        document.carrierId === carrierId &&
+        document.lineOfBusiness === "commercial"
+    );
+}
+
+function carrierUnderwriters(tenantId: string, carrierId: string): CarrierContact[] {
+  return db
+    .list("carrierContacts")
+    .filter(
+      (contact) =>
+        contact.tenantId === tenantId &&
+        contact.carrierId === carrierId &&
+        contact.position === "underwriter" &&
+        !!contact.email
+    )
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function commercialCarrierRecommendationsForSession(
+  session: QuotingSession,
+  responses: Record<string, string> = {}
+): CommercialCarrierRecommendation[] {
+  const carriers = linkedActiveCarriers(session.tenantId).filter((carrier) => {
+    return (
+      carrierHasCommercialAppetite(carrier) ||
+      carrierCommercialDocuments(session.tenantId, carrier.id).length > 0 ||
+      carrierUnderwriters(session.tenantId, carrier.id).length > 0
+    );
+  });
+  const ranked = aiRankCarrierQuotes({
+    carriers,
+    assetType: session.assetType,
+    estimatedValue: session.estimatedValue || 1_000_000,
+    state: session.state,
+    lineOfBusiness: "commercial",
+  }).quotes;
+  const responseCompleteness = Math.min(
+    0.08,
+    Object.values(responses).filter((value) => value.trim()).length * 0.01
+  );
+
+  const rows: CommercialCarrierRecommendation[] = [];
+  ranked.forEach((quote) => {
+    const carrier = carriers.find((candidate) => candidate.id === quote.carrierId);
+    if (!carrier) return;
+    const underwriterContacts = carrierUnderwriters(session.tenantId, carrier.id);
+    const commercialDocumentCount = carrierCommercialDocuments(session.tenantId, carrier.id).length;
+    const hasCommercialAppetite = carrierHasCommercialAppetite(carrier);
+    const connector = getCarrierQuoteProviderReadiness(carrier);
+    const automationAvailable =
+      connector.provider === "carrier_portal_automation" &&
+      connector.hasPortalUrl &&
+      connector.quoteApiStatus !== "no_api";
+    const score = Math.min(
+      1,
+      quote.score +
+        (hasCommercialAppetite ? 0.18 : 0) +
+        (automationAvailable ? 0.1 : underwriterContacts.length > 0 ? 0.08 : -0.06) +
+        (commercialDocumentCount > 0 ? 0.05 : 0) +
+        responseCompleteness
+    );
+    const underwriterPhrase =
+      underwriterContacts.length === 1
+        ? `1 underwriter on file (${underwriterContacts[0].name})`
+        : underwriterContacts.length > 1
+        ? `${underwriterContacts.length} underwriters on file`
+        : "no underwriter email on file";
+    const documentPhrase =
+      commercialDocumentCount > 0
+        ? `${commercialDocumentCount} commercial document${commercialDocumentCount === 1 ? "" : "s"} on file`
+        : "no commercial documents uploaded";
+    const connectorPhrase = automationAvailable
+      ? `${connector.providerLabel} can queue a secured background portal submission`
+      : underwriterContacts.length > 0
+      ? "underwriter email workflow is available"
+      : "no carrier submission connector on file";
+    rows.push({
+      carrierId: carrier.id,
+      carrierName: carrier.name,
+      rank: 0,
+      score,
+      fitReason: quote.fitReason,
+      hasCommercialAppetite,
+      commercialDocumentCount,
+      underwriterContacts,
+      connectorLabel: automationAvailable ? connector.providerLabel : undefined,
+      automationAvailable,
+      disabledReason:
+        underwriterContacts.length === 0 && !automationAvailable
+          ? "Add an underwriter email or configure carrier portal automation before sending."
+          : undefined,
+      aiRationale: [
+        hasCommercialAppetite
+          ? "AI recognized commercial appetite from the carrier profile."
+          : "AI found commercial readiness from agency documents or contacts.",
+        underwriterPhrase,
+        documentPhrase,
+        connectorPhrase,
+      ].join(" "),
+    });
+  });
+
+  return rows
+    .sort((a, b) => b.score - a.score || a.carrierName.localeCompare(b.carrierName))
+    .map((row, index) => ({ ...row, rank: index + 1 }));
+}
+
+function contactForQuotingSession(session: QuotingSession): CustomerProfile | Prospect | null {
+  if (session.customerId) {
+    return db.list("customers").find((customer) => customer.id === session.customerId) ?? null;
+  }
+  if (session.prospectId) {
+    return db.list("prospects").find((prospect) => prospect.id === session.prospectId) ?? null;
+  }
+  return null;
+}
+
+function completedAcordFileName(
+  template: CommercialAcordTemplateSelection,
+  contactName: string,
+  kind: "application" | "supplemental"
+): string {
+  const contactSlug = contactName
+    .replace(/[^a-z0-9]+/gi, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 42) || "Commercial-applicant";
+  const base = template.fileName.replace(/\.[^.]+$/, "");
+  const ext = template.fileName.match(/\.[^.]+$/)?.[0] ?? ".pdf";
+  return `${base}-${contactSlug}-${kind === "application" ? "completed" : "supplemental-completed"}${ext}`;
+}
+
+function clientAcordFillDossier(
+  session: QuotingSession,
+  responses: Record<string, string>,
+  templateDocument?: Document
+) {
+  const contact = contactForQuotingSession(session);
+  const agency = db.list("agencies").find((candidate) => candidate.id === session.tenantId);
+  const customerId = session.customerId ?? (contact && "customerId" in contact ? contact.customerId : undefined);
+  const prospectId = session.prospectId ?? (!customerId && contact ? contact.id : undefined);
+  const tenantAssets = tenantFilter(db.list("assets"), session.tenantId);
+  const assets = tenantAssets.filter(
+    (asset) =>
+      (!!customerId && asset.customerId === customerId) ||
+      (!!session.assetId && asset.id === session.assetId)
+  );
+  const assetIds = new Set(assets.map((asset) => asset.id));
+  if (session.assetId) assetIds.add(session.assetId);
+  const policies = tenantFilter(db.list("policies"), session.tenantId).filter(
+    (policy) =>
+      (!!customerId && policy.customerId === customerId) ||
+      (!!session.assetId && policy.assetId === session.assetId) ||
+      assetIds.has(policy.assetId)
+  );
+  const policyIds = new Set(policies.map((policy) => policy.id));
+  const claims = tenantFilter(db.list("claims"), session.tenantId).filter(
+    (claim) =>
+      (!!customerId && claim.customerId === customerId) ||
+      (!!claim.policyId && policyIds.has(claim.policyId))
+  );
+  const claimIds = new Set(claims.map((claim) => claim.id));
+  const documents = tenantFilter(db.list("documents"), session.tenantId).filter(
+    (document) =>
+      !String(document.type).startsWith("completed_acord") &&
+      ((!!customerId && document.customerId === customerId) ||
+        (!!session.assetId && document.assetId === session.assetId) ||
+        (!!document.assetId && assetIds.has(document.assetId)) ||
+        (!!document.policyId && policyIds.has(document.policyId)) ||
+        (!!document.claimId && claimIds.has(document.claimId)) ||
+        document.quoteRequestId === session.id)
+  );
+  const notes = tenantFilter(db.list("notes"), session.tenantId).filter(
+    (note) =>
+      (!!customerId && note.customerId === customerId) ||
+      (!!prospectId && note.prospectId === prospectId) ||
+      (!!note.policyId && policyIds.has(note.policyId))
+  );
+  const communications = tenantFilter(db.list("communications"), session.tenantId).filter(
+    (communication) =>
+      (!!customerId && communication.customerId === customerId) ||
+      (!!prospectId && communication.prospectId === prospectId)
+  );
+  const policyCarrierIds = new Set(policies.map((policy) => policy.carrierId));
+  const linkedCarriers = linkedActiveCarriers(session.tenantId);
+  const carrierPool = db.list("carriers").filter((carrier) => carrier.status === "active");
+  const carriers = [
+    ...linkedCarriers,
+    ...carrierPool.filter((carrier) => policyCarrierIds.has(carrier.id)),
+  ].filter(
+    (carrier, index, all) => all.findIndex((candidate) => candidate.id === carrier.id) === index
+  );
+
+  return {
+    agency,
+    contact,
+    assets,
+    policies,
+    carriers,
+    claims,
+    documents,
+    notes,
+    communications,
+    session,
+    questions: session.questionnaireQuestions ?? [],
+    responses: {
+      ...(session.questionnaireResponses ?? {}),
+      ...responses,
+    },
+    templateDocument,
+  };
+}
+
+function completedAcordTemplateFields(
+  template: CommercialAcordTemplateSelection,
+  session: QuotingSession,
+  responses: Record<string, string>,
+  kind: "application" | "supplemental"
+): {
+  fields: TemplateFieldMap;
+  mappings: NonNullable<CommunicationAttachment["fieldMappings"]>;
+  missingFieldLabels: string[];
+  contactName: string;
+  audit: {
+    sourceCount: number;
+    candidateCount: number;
+    fittedFieldCount: number;
+    overflowFieldCount: number;
+    sourcesUsed: string[];
+    sourceFieldCounts: Record<string, number>;
+  };
+} {
+  const contact = contactForQuotingSession(session);
+  const templateDocument = db.list("documents").find((document) => document.id === template.templateId);
+  const sourceArtifact = completedAcordSourceArtifact(template, templateDocument);
+  const contactName = contact?.name ?? "Commercial applicant";
+  const filled = fillAcordFromClientDossier({
+    template,
+    dossier: clientAcordFillDossier(session, responses, templateDocument),
+    layout: sourceArtifact.templateFieldLayout,
+    kind,
+  });
+  return {
+    fields: {
+      ...filled.fields,
+      "Source ACORD template ID": template.templateId,
+      "Source ACORD file": template.fileName,
+      "Source ACORD layout fields": String(sourceArtifact.templateFieldLayout?.length ?? 0),
+      "Completed packet type": kind === "application" ? "Carrier application" : "Carrier supplemental",
+      "Completed by": "Quotex AI fill workflow",
+      "Completed field count": String(filled.mappings.length),
+      "Missing field count": String(filled.missingFieldLabels.length),
+      "Missing fields": filled.missingFieldLabels.join("; "),
+      "AI dossier source count": String(filled.audit.sourceCount),
+      "AI candidate field count": String(filled.audit.candidateCount),
+      "AI fitted PDF field count": String(filled.audit.fittedFieldCount),
+      "AI overflow field count": String(filled.audit.overflowFieldCount),
+      "AI sources used": filled.audit.sourcesUsed.join(", "),
+      "AI source field counts": formatAcordSourceFieldCounts(filled.audit.sourceFieldCounts),
+      "ACORD PDF fill status":
+        filled.missingFieldLabels.length > 0
+          ? "Partially filled from the full client dossier and questionnaire data"
+          : "Filled from the full client dossier and questionnaire data",
+      "Last filled at": nowIso(),
+    },
+    mappings: filled.mappings,
+    missingFieldLabels: filled.missingFieldLabels,
+    contactName,
+    audit: filled.audit,
+  };
+}
+
+function formatAcordSourceFieldCounts(counts: Record<string, number>): string {
+  return Object.entries(counts)
+    .filter(([, count]) => count > 0)
+    .map(([source, count]) => `${source.replace(/_/g, " ")}: ${count}`)
+    .join("; ");
+}
+
+function completedAcordSourceArtifact(
+  template: CommercialAcordTemplateSelection,
+  templateDocument?: Document
+): Pick<Document, "storagePath" | "downloadUrl" | "templateFieldLayout" | "fillableDetection"> {
+  const detected = detectFillableDocumentFields({
+    fileName: templateDocument?.fileName ?? template.fileName,
+    fileType: templateDocument?.fileType ?? "application/pdf",
+    type: String(templateDocument?.type ?? template.type ?? "agency_template"),
+    documentName: templateDocument?.documentName ?? template.documentName,
+    baseFields: templateDocument?.templateFields,
+  });
+  return {
+    storagePath: templateDocument?.storagePath ?? template.storagePath ?? `/acord/${template.fileName}`,
+    downloadUrl: templateDocument?.downloadUrl ?? template.downloadUrl ?? `/acord/${template.fileName}`,
+    templateFieldLayout:
+      templateDocument?.templateFieldLayout && templateDocument.templateFieldLayout.length > 0
+        ? templateDocument.templateFieldLayout
+        : detected.templateFieldLayout,
+    fillableDetection: templateDocument?.fillableDetection ?? detected.detection,
+  };
+}
+
+function knownAcordFieldsForTemplate(
+  template: CommercialAcordTemplateSelection,
+  session: QuotingSession,
+  responses: Record<string, string> = {},
+  kind: "application" | "supplemental" = "application"
+): TemplateFieldMap {
+  const templateDocument = db.list("documents").find((document) => document.id === template.templateId);
+  const sourceArtifact = completedAcordSourceArtifact(template, templateDocument);
+  return fillAcordFromClientDossier({
+    template,
+    dossier: clientAcordFillDossier(session, responses, templateDocument),
+    layout: sourceArtifact.templateFieldLayout,
+    kind,
+  }).fields;
+}
+
+function knownAcordFieldsByTemplateId(
+  templates: CommercialAcordTemplateSelection[],
+  session: QuotingSession,
+  responses: Record<string, string> = {},
+  kind: "application" | "supplemental" = "application"
+): Record<string, TemplateFieldMap> {
+  return Object.fromEntries(
+    templates.map((template) => [
+      template.templateId,
+      knownAcordFieldsForTemplate(template, session, responses, kind),
+    ])
+  );
+}
+
+function upsertCompletedAcordDocument(
+  template: CommercialAcordTemplateSelection,
+  session: QuotingSession,
+  responses: Record<string, string>,
+  kind: "application" | "supplemental"
+): Document {
+  const templateDocument = db.list("documents").find((document) => document.id === template.templateId);
+  const sourceArtifact = completedAcordSourceArtifact(template, templateDocument);
+  const completed = completedAcordTemplateFields(template, session, responses, kind);
+  const existing = db
+    .list("documents")
+    .find(
+      (document) =>
+        document.tenantId === session.tenantId &&
+        document.quoteRequestId === session.id &&
+        document.type ===
+          (kind === "application"
+            ? "completed_acord_application"
+            : "completed_acord_supplemental") &&
+        document.templateFields?.["Source ACORD template ID"] === template.templateId
+    );
+  if (existing) {
+    const preserveGeneratedArtifact =
+      existing.downloadUrl?.startsWith("data:application/pdf") &&
+      sameCompletedAcordContent(existing.templateFields, completed.fields);
+    return (
+      api.documents.update(existing.id, {
+        templateFields: preserveGeneratedArtifact
+          ? { ...completed.fields, ...nativeAcordArtifactFields(existing.templateFields) }
+          : completed.fields,
+        templateFieldLayout: sourceArtifact.templateFieldLayout,
+        fillableDetection: sourceArtifact.fillableDetection,
+        storagePath: preserveGeneratedArtifact
+          ? existing.storagePath
+          : sourceArtifact.storagePath,
+        downloadUrl: preserveGeneratedArtifact
+          ? existing.downloadUrl
+          : sourceArtifact.downloadUrl,
+        documentName: `Completed ${acordDefinitionForTemplate(template).title}`,
+      }) ?? existing
+    );
+  }
+  return api.documents.create({
+    tenantId: session.tenantId,
+    uploadedById: session.createdById,
+    fileName: completedAcordFileName(template, completed.contactName, kind),
+    fileType: "application/pdf",
+    documentName: `Completed ${acordDefinitionForTemplate(template).title}`,
+    type: kind === "application" ? "completed_acord_application" : "completed_acord_supplemental",
+    visibility: "employee_only",
+    status: "approved",
+    customerId: session.customerId,
+    quoteRequestId: session.id,
+    lineOfBusiness: "commercial",
+    templateFields: completed.fields,
+    templateFieldLayout: sourceArtifact.templateFieldLayout,
+    fillableDetection: sourceArtifact.fillableDetection,
+    storagePath: sourceArtifact.storagePath,
+    downloadUrl: sourceArtifact.downloadUrl,
+  });
+}
+
+const GENERATED_ACORD_META_FIELDS = new Set([
+  "Last filled at",
+  "Native PDF artifact",
+  "Native PDF field count",
+  "Native PDF filled field count",
+  "Native PDF missing field count",
+]);
+
+function sameCompletedAcordContent(
+  previous: TemplateFieldMap | undefined,
+  next: TemplateFieldMap
+): boolean {
+  return stableCompletedAcordFields(previous).join("\n") === stableCompletedAcordFields(next).join("\n");
+}
+
+function stableCompletedAcordFields(fields: TemplateFieldMap | undefined): string[] {
+  return Object.entries(fields ?? {})
+    .filter(([key]) => !GENERATED_ACORD_META_FIELDS.has(key))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value}`);
+}
+
+function nativeAcordArtifactFields(fields: TemplateFieldMap | undefined): TemplateFieldMap {
+  return Object.fromEntries(
+    Object.entries(fields ?? {}).filter(([key]) => GENERATED_ACORD_META_FIELDS.has(key))
+  );
+}
+
+function refreshedCommercialAcordTemplates(
+  session: QuotingSession,
+  responses: Record<string, string> = {}
+): CommercialAcordTemplateSelection[] | undefined {
+  const templates = session.commercialAcordTemplates;
+  if (!templates || templates.length === 0) return templates;
+  return templates.map((template) => {
+    const completed = completedAcordTemplateFields(template, session, responses, "application");
+    return {
+      ...template,
+      autoFilledFieldCount: completed.mappings.length,
+      missingFieldCount: completed.missingFieldLabels.length,
+      sourceCount: completed.audit.sourceCount,
+      candidateCount: completed.audit.candidateCount,
+      fittedFieldCount: completed.audit.fittedFieldCount,
+      overflowFieldCount: completed.audit.overflowFieldCount,
+      sourcesUsed: completed.audit.sourcesUsed,
+      sourceFieldCounts: completed.audit.sourceFieldCounts,
+    };
+  });
+}
+
+function syncCommercialAcordPdfArtifacts(
+  session: QuotingSession,
+  responses: Record<string, string> = {},
+  kind: "application" | "supplemental" = "application"
+): CommercialAcordTemplateSelection[] | undefined {
+  if (session.lineOfBusiness !== "commercial") return session.commercialAcordTemplates;
+  const templates = session.commercialAcordTemplates;
+  if (!templates || templates.length === 0) return templates;
+  templates.forEach((template) => {
+    upsertCompletedAcordDocument(template, session, responses, kind);
+  });
+  return refreshedCommercialAcordTemplates(session, responses);
+}
+
+function commercialAcordCommunicationAttachments(
+  session: QuotingSession,
+  kind: "application" | "supplemental",
+  responses: Record<string, string> = {},
+  options: { persistCompletedDocuments?: boolean } = {}
+): CommunicationAttachment[] {
+  const templates = session.commercialAcordTemplates ?? [];
+  return templates.map((template) => {
+    const completed = completedAcordTemplateFields(template, session, responses, kind);
+    const persistedDocument = options.persistCompletedDocuments
+      ? upsertCompletedAcordDocument(template, session, responses, kind)
+      : null;
+    return {
+      id: `${kind}_${persistedDocument?.id ?? template.templateId}`,
+      documentId: persistedDocument?.id ?? template.templateId,
+      sourceDocumentId: template.templateId,
+      fileName:
+        persistedDocument?.fileName ??
+        completedAcordFileName(template, completed.contactName, kind),
+      fileType: "application/pdf",
+      storagePath: persistedDocument?.storagePath ?? template.storagePath,
+      dataUrl: persistedDocument?.downloadUrl?.startsWith("data:application/pdf")
+        ? persistedDocument.downloadUrl
+        : undefined,
+      description:
+        kind === "application"
+          ? `Completed ${template.documentName || template.fileName} with ${completed.mappings.length} mapped ACORD field value${completed.mappings.length === 1 ? "" : "s"}.`
+          : `Completed supplemental ${template.documentName || template.fileName} with ${completed.mappings.length} mapped ACORD field value${completed.mappings.length === 1 ? "" : "s"}.`,
+      filledFieldCount: completed.mappings.length,
+      filledFields: completed.fields,
+      fieldMappings: completed.mappings,
+    };
+  });
+}
+
+function commercialApplicationBody(
+  underwriterName: string,
+  kind: "application" | "supplemental"
+): string {
+  const firstName = underwriterName.trim().split(/\s+/)[0] || "there";
+  const packageLabel =
+    kind === "application" ? "completed ACORD application PDF(s)" : "completed ACORD supplemental PDF(s)";
+  return [
+    `Hi ${firstName},`,
+    ``,
+    `Please find attached the ${packageLabel}.`,
+    ``,
+    kind === "application"
+      ? `Please review the attached ACORD document(s) and let me know whether you can proceed or need any supplemental fields.`
+      : `Please review the attached ACORD supplemental document(s) and let me know whether anything else is needed.`,
+    ``,
+    `Thank you,`,
+  ]
+    .join("\n");
+}
+
+function commercialSubmissionMessageId(
+  submission: CommercialCarrierSubmission
+): string | undefined {
+  return submission.supplementalMessageIds?.[0] ?? submission.applicationMessageIds?.[0];
+}
+
+function commercialSubmissionDocumentId(
+  submission: CommercialCarrierSubmission
+): string | undefined {
+  return submission.applicationDocumentIds?.[0] ?? submission.supplementalDocumentIds?.[0];
+}
+
+function logCommercialCarrierEmailStatus(input: {
+  session: QuotingSession;
+  carrierName: string;
+  underwriter: CarrierContact;
+  message: Communication;
+  kind: "application" | "supplemental";
+  attachmentCount: number;
+  firstDocumentId?: string;
+}) {
+  const packageLabel =
+    input.kind === "application" ? "ACORD application packet" : "ACORD supplemental packet";
+  const attachmentLabel = `${input.attachmentCount} PDF attachment${
+    input.attachmentCount === 1 ? "" : "s"
+  }`;
+  db.insert("statusEvents", {
+    id: uid("se"),
+    tenantId: input.session.tenantId,
+    source: "agent",
+    message: `${packageLabel} emailed to ${input.underwriter.name} at ${input.carrierName} with ${attachmentLabel}.`,
+    visibility: "internal",
+    customerId: input.session.customerId,
+    prospectId: input.session.prospectId,
+    assetId: input.session.assetId,
+    communicationId: input.message.id,
+    documentId: input.firstDocumentId,
+    createdAt: input.message.createdAt,
+    createdById: input.session.createdById,
+  });
+}
+
+function attachCommercialUnderwriterMessages(
+  session: QuotingSession,
+  submissions: CommercialCarrierSubmission[],
+  responses: Record<string, string>,
+  kind: "application" | "supplemental",
+  targetCarrierIds?: Set<string>,
+  emailDrafts?: CommercialUnderwriterEmailDraft[]
+): CommercialCarrierSubmission[] {
+  const contact = contactForQuotingSession(session);
+  const contactName = contact?.name ?? "Commercial applicant";
+  const completedAttachments = commercialAcordCommunicationAttachments(
+    session,
+    kind,
+    responses,
+    { persistCompletedDocuments: true }
+  );
+
+  return submissions.map((submission) => {
+    if (targetCarrierIds && !targetCarrierIds.has(submission.carrierId)) {
+      return submission;
+    }
+    if (
+      submission.submissionMethod &&
+      submission.submissionMethod !== "underwriter_email"
+    ) {
+      return submission;
+    }
+    const carrier = db.list("carriers").find((candidate) => candidate.id === submission.carrierId);
+    const underwriters = carrierUnderwriters(session.tenantId, submission.carrierId);
+    const attachments = completedAttachments;
+    const messageIds = underwriters.map((underwriter) => {
+      const draft = emailDrafts?.find(
+        (candidate) =>
+          candidate.carrierId === submission.carrierId &&
+          candidate.underwriterContactId === underwriter.id &&
+          candidate.kind === kind
+      );
+      const message = api.communications.create({
+        tenantId: session.tenantId,
+        carrierContactId: underwriter.id,
+        channel: "email",
+        direction: "outbound",
+        subject:
+          draft?.subject ??
+          (kind === "application"
+            ? `Commercial application package - ${contactName}`
+            : `Commercial supplemental package - ${contactName}`),
+        body:
+          draft?.body ??
+          commercialApplicationBody(
+            underwriter.name,
+            kind
+          ),
+        attachments,
+        createdById: session.createdById,
+      });
+      logCommercialCarrierEmailStatus({
+        session,
+        carrierName: carrier?.name ?? "Carrier",
+        underwriter,
+        message,
+        kind,
+        attachmentCount: attachments.length,
+        firstDocumentId: attachments.find((attachment) => attachment.documentId)?.documentId,
+      });
+      return message.id;
+    });
+    return {
+      ...submission,
+      underwriterContactIds: Array.from(
+        new Set([...(submission.underwriterContactIds ?? []), ...underwriters.map((contact) => contact.id)])
+      ),
+      ...(kind === "application"
+        ? {
+            applicationDocumentIds: Array.from(
+              new Set([
+                ...(submission.applicationDocumentIds ?? []),
+                ...attachments.map((attachment) => attachment.documentId).filter(Boolean),
+              ] as string[])
+            ),
+            applicationMessageIds: Array.from(
+              new Set([...(submission.applicationMessageIds ?? []), ...messageIds])
+            ),
+          }
+        : {
+            supplementalDocumentIds: Array.from(
+              new Set([
+                ...(submission.supplementalDocumentIds ?? []),
+                ...attachments.map((attachment) => attachment.documentId).filter(Boolean),
+              ] as string[])
+            ),
+            supplementalMessageIds: Array.from(
+              new Set([...(submission.supplementalMessageIds ?? []), ...messageIds])
+            ),
+          }),
+    };
+  });
+}
+
+interface CommercialUnderwriterEmailDraft {
+  carrierId: string;
+  carrierName: string;
+  underwriterContactId: string;
+  underwriterName: string;
+  underwriterEmail: string;
+  kind: "application" | "supplemental";
+  subject: string;
+  body: string;
+  attachments: CommunicationAttachment[];
+}
+
+function buildCommercialUnderwriterEmailDrafts(
+  session: QuotingSession,
+  responses: Record<string, string>,
+  kind: "application" | "supplemental",
+  carrierIds: string[]
+): CommercialUnderwriterEmailDraft[] {
+  const contact =
+    session.customerId
+      ? db.list("customers").find((customer) => customer.id === session.customerId)
+      : session.prospectId
+      ? db.list("prospects").find((prospect) => prospect.id === session.prospectId)
+      : null;
+  const contactName = contact?.name ?? "Commercial applicant";
+  const attachments = commercialAcordCommunicationAttachments(session, kind, responses, {
+    persistCompletedDocuments: true,
+  });
+  return carrierIds.flatMap((carrierId) => {
+    const carrier = db.list("carriers").find((candidate) => candidate.id === carrierId);
+    return carrierUnderwriters(session.tenantId, carrierId).map((underwriter) => ({
+      carrierId,
+      carrierName: carrier?.name ?? "Carrier",
+      underwriterContactId: underwriter.id,
+      underwriterName: underwriter.name,
+      underwriterEmail: underwriter.email ?? "",
+      kind,
+      subject:
+        kind === "application"
+          ? `Commercial application package - ${contactName}`
+          : `Commercial supplemental package - ${contactName}`,
+      body: commercialApplicationBody(underwriter.name, kind),
+      attachments,
+    }));
+  });
+}
+
+function mergeCommercialSubmissionArtifacts(
+  session: QuotingSession,
+  submissions: CommercialCarrierSubmission[]
+): CommercialCarrierSubmission[] {
+  const previousByCarrier = new Map(
+    (session.commercialCarrierSubmissions ?? []).map((submission) => [
+      submission.carrierId,
+      submission,
+    ])
+  );
+  return submissions.map((submission) => {
+    const previous = previousByCarrier.get(submission.carrierId);
+    if (!previous) return submission;
+    return {
+      ...submission,
+      submissionMethod: previous.submissionMethod ?? submission.submissionMethod,
+      connectorLabel: previous.connectorLabel ?? submission.connectorLabel,
+      automationJobId: previous.automationJobId ?? submission.automationJobId,
+      automationTrace: previous.automationTrace ?? submission.automationTrace,
+      underwriterContactIds: Array.from(
+        new Set([
+          ...(previous.underwriterContactIds ?? []),
+          ...(submission.underwriterContactIds ?? []),
+        ])
+      ),
+      applicationDocumentIds: Array.from(
+        new Set([
+          ...(previous.applicationDocumentIds ?? []),
+          ...(submission.applicationDocumentIds ?? []),
+        ])
+      ),
+      applicationMessageIds: Array.from(
+        new Set([
+          ...(previous.applicationMessageIds ?? []),
+          ...(submission.applicationMessageIds ?? []),
+        ])
+      ),
+      supplementalMessageIds: Array.from(
+        new Set([
+          ...(previous.supplementalMessageIds ?? []),
+          ...(submission.supplementalMessageIds ?? []),
+        ])
+      ),
+      supplementalDocumentIds: Array.from(
+        new Set([
+          ...(previous.supplementalDocumentIds ?? []),
+          ...(submission.supplementalDocumentIds ?? []),
+        ])
+      ),
+    };
+  });
+}
+
+function analyzeCommercialCarrierPipeline(
+  session: QuotingSession,
+  responses: Record<string, string>,
+  stampedAt: string,
+  selectedCarrierIds?: string[],
+  requireUnderwriterEmailsForSelected = false
+): {
+  submissions: CommercialCarrierSubmission[];
+  secondRoundQuestions: QuotingQuestion[];
+  acceptedCarrierIds: string[];
+  submittedCarrierCount: number;
+} {
+  const carriers = linkedActiveCarriers(session.tenantId);
+  const ranked = aiRankCarrierQuotes({
+    carriers,
+    assetType: session.assetType,
+    estimatedValue: session.estimatedValue || 1_000_000,
+    state: session.state,
+    lineOfBusiness: "commercial",
+  }).quotes;
+  const selectedSet = selectedCarrierIds?.length
+    ? new Set(selectedCarrierIds)
+    : null;
+  const selectedCarrierSend = !!selectedSet && requireUnderwriterEmailsForSelected;
+  const rankedTargets = selectedSet
+    ? ranked.filter(
+        (quote) =>
+          selectedSet.has(quote.carrierId) &&
+          (!requireUnderwriterEmailsForSelected ||
+            carrierUnderwriters(session.tenantId, quote.carrierId).length > 0)
+      )
+    : ranked;
+  const worthy = rankedTargets
+    .filter((q, i) => i < 6 && q.score >= 0.35)
+    .slice(0, 5);
+  const targetQuotes = selectedSet
+    ? rankedTargets
+    : worthy.length > 0
+    ? worthy
+    : ranked.slice(0, 3);
+  const commercialDocs = db
+    .list("documents")
+    .filter(
+      (d) =>
+        d.tenantId === session.tenantId &&
+        d.lineOfBusiness === "commercial" &&
+        d.carrierId
+    );
+  const existingQuestions = session.questionnaireQuestions ?? [];
+  const secondRoundQuestions: QuotingQuestion[] = [];
+
+  const submissions = targetQuotes.map((q, index) => {
+    const carrier = carriers.find((c) => c.id === q.carrierId);
+    const carrierDocs = commercialDocs.filter((d) => d.carrierId === q.carrierId);
+    const connector = carrier ? getCarrierQuoteProviderReadiness(carrier) : null;
+    const underwriters = carrierUnderwriters(session.tenantId, q.carrierId);
+    const submissionMethod: CommercialCarrierSubmission["submissionMethod"] =
+      selectedCarrierSend
+        ? "underwriter_email"
+        : connector?.provider === "carrier_portal_automation" && connector.hasPortalUrl
+        ? "carrier_portal_automation"
+        : underwriters.length > 0
+        ? "underwriter_email"
+        : "demo";
+    const connectorLabel =
+      submissionMethod === "carrier_portal_automation"
+        ? connector?.providerLabel ?? "AI carrier portal runner"
+        : submissionMethod === "underwriter_email"
+        ? "Underwriter email workflow"
+        : "Demo carrier workflow";
+    const automationTrace =
+      submissionMethod === "carrier_portal_automation" && carrier
+        ? runCarrierPortalRunner({
+            carrier,
+            session: {
+              ...session,
+              questionnaireResponses: responses,
+            },
+            state: session.state,
+            baseQuote: q,
+          })
+        : undefined;
+    const automationJobId =
+      submissionMethod === "carrier_portal_automation" ? automationTrace?.jobId : undefined;
+    const secondRoundCarrierQuestions = existingQuestions.filter(
+      (question) => question.carrierId === q.carrierId && question.round === "second_round"
+    );
+    const generatedSupplementals = carrier
+      ? commercialSupplementalQuestionsForCarrier(carrier)
+      : [];
+    const unanswered = session.commercialSecondRoundSentAt
+      ? secondRoundCarrierQuestions
+          .filter((question) => !(responses[question.id] ?? "").trim())
+          .slice(0, 2)
+      : generatedSupplementals.slice(0, 2);
+    const missingLabels =
+      unanswered.length > 0
+        ? unanswered.map((question) => question.label)
+        : [
+            `${carrier?.name ?? "Carrier"}: final carrier-specific supplemental details`,
+          ];
+
+    if (
+      index <= 1 ||
+      carrierDocs.length > 0 ||
+      (session.commercialSecondRoundSentAt && unanswered.length === 0)
+    ) {
+      return {
+        carrierId: q.carrierId,
+        status:
+          (carrierDocs.length > 0 && index > 1) ||
+          (session.commercialSecondRoundSentAt && index > 1)
+            ? "supplemental_sent"
+            : "accepted",
+        sentAt: stampedAt,
+        responseAt: stampedAt,
+        acceptedAt: stampedAt,
+        score: q.score,
+        fitReason: q.fitReason,
+        supplementalDocumentIds: carrierDocs.map((d) => d.id),
+        submissionMethod,
+        connectorLabel,
+        automationJobId,
+        automationTrace,
+        aiRationale:
+          index <= 1
+            ? `AI appetite analysis ranked this carrier high enough to accept the application without more client data through ${connectorLabel}.`
+            : `AI found the carrier supplemental on file and auto-filled it before resubmitting through ${connectorLabel}.`,
+      } satisfies CommercialCarrierSubmission;
+    }
+
+    if (index <= 3) {
+      missingLabels.forEach((label) => {
+        secondRoundQuestions.push({
+          id: `second-${q.carrierId}-${fieldSlug(label)}`,
+          section: "Second-round carrier supplementals",
+          label: label.replace(`${carrier?.name ?? ""}: `, ""),
+          kind: /details|summary|operations|litigation|locations/i.test(label)
+            ? "textarea"
+            : /number|count|employees|vehicles|sq ft|revenue/i.test(label)
+            ? "number"
+            : "text",
+          required: true,
+          round: "second_round",
+          carrierId: q.carrierId,
+        });
+      });
+      return {
+        carrierId: q.carrierId,
+        status: "needs_client_info",
+        sentAt: stampedAt,
+        responseAt: stampedAt,
+        score: q.score,
+        fitReason: q.fitReason,
+        missingFields: missingLabels,
+        submissionMethod,
+        connectorLabel,
+        automationJobId,
+        automationTrace,
+        aiRationale:
+          `Carrier replied through ${connectorLabel} with a supplemental request. AI could not complete every field from the file, so it queued a second client questionnaire.`,
+      } satisfies CommercialCarrierSubmission;
+    }
+
+    return {
+      carrierId: q.carrierId,
+      status: "declined",
+      sentAt: stampedAt,
+      responseAt: stampedAt,
+      score: q.score,
+      fitReason: q.fitReason,
+      submissionMethod,
+      connectorLabel,
+      automationJobId,
+      automationTrace,
+      declinedReason:
+        "Carrier response did not accept the risk after appetite and application review.",
+      aiRationale:
+        "AI filtered this carrier out so the agent only sees markets willing to proceed.",
+    } satisfies CommercialCarrierSubmission;
+  });
+
+  const priorSubmissionsByCarrier = new Map(
+    (session.commercialCarrierSubmissions ?? []).map((submission) => [
+      submission.carrierId,
+      submission,
+    ])
+  );
+  const normalizedSubmissions =
+    session.commercialApplicationSentAt && session.commercialSecondRoundSentAt
+      ? submissions.map((submission) => {
+          const prior = priorSubmissionsByCarrier.get(submission.carrierId);
+          if (!prior) return submission;
+          if (prior.status === "needs_client_info") {
+            return {
+              ...submission,
+              status: "supplemental_sent",
+              responseAt: stampedAt,
+              acceptedAt: stampedAt,
+              missingFields: undefined,
+              declinedReason: undefined,
+              aiRationale:
+                "Carrier supplemental information was completed and returned for underwriting review.",
+            } satisfies CommercialCarrierSubmission;
+          }
+          if (prior.status === "accepted" || prior.status === "supplemental_sent") {
+            return {
+              ...submission,
+              status: prior.status,
+              responseAt: prior.responseAt ?? submission.responseAt ?? stampedAt,
+              acceptedAt: prior.acceptedAt ?? submission.acceptedAt ?? stampedAt,
+              missingFields: undefined,
+            } satisfies CommercialCarrierSubmission;
+          }
+          if (prior.status === "declined") {
+            return {
+              ...submission,
+              status: "declined",
+              declinedReason: prior.declinedReason ?? submission.declinedReason,
+              missingFields: undefined,
+            } satisfies CommercialCarrierSubmission;
+          }
+          return submission;
+        })
+      : submissions;
+
+  const acceptedCarrierIds = normalizedSubmissions
+    .filter((s) => s.status === "accepted" || s.status === "supplemental_sent")
+    .map((s) => s.carrierId);
+  return {
+    submissions: normalizedSubmissions,
+    secondRoundQuestions,
+    acceptedCarrierIds,
+    submittedCarrierCount: targetQuotes.length,
+  };
+}
+
+function markCommercialSubmissionsAwaitingResponse(
+  submissions: CommercialCarrierSubmission[]
+): CommercialCarrierSubmission[] {
+  return submissions.map((submission) => ({
+    ...submission,
+    status: "awaiting_response",
+    responseAt: undefined,
+    acceptedAt: undefined,
+    missingFields: undefined,
+    declinedReason: undefined,
+    aiRationale: `Application packet sent through ${
+      submission.connectorLabel ?? "carrier workflow"
+    }. Awaiting the carrier response before AI classifies this market.`,
+  }));
+}
+
+const CARRIER_DOWNLOAD_POLICY_FIELDS = new Set<keyof Policy>([
+  "policyNumber",
+  "premiumEstimate",
+  "finalPremium",
+  "effectiveDate",
+  "renewalDate",
+  "status",
+  "renewalStatus",
+  "paymentFrequency",
+  "billingMethod",
+  "billingPayer",
+  "billingPayerName",
+  "billingStatus",
+  "billingAccountNumber",
+  "billingReference",
+  "billingFinanceCompany",
+  "billingMortgagee",
+  "billingLastVerifiedAt",
+  "billingNotes",
+  "nextPaymentDueDate",
+  "nextPaymentAmount",
+]);
+
+function policyPatchFromCarrierDownload(changes: CarrierDownloadChange[]): Partial<Policy> {
+  return changes.reduce<Partial<Policy>>((patch, change) => {
+    const field = change.field as keyof Policy;
+    if (!CARRIER_DOWNLOAD_POLICY_FIELDS.has(field)) return patch;
+    return { ...patch, [field]: change.incomingValue };
+  }, {});
+}
+
+const AGENCY_PLAN_FIELDS = new Set<keyof Agency>([
+  "tier",
+  "allowedUsers",
+  "allowedProspectsPerMonth",
+  "allowedAiMessagesPerMonth",
+  "allowedCarriers",
+  "websiteAppAddOn",
+  "softwarePlanTermMonths",
+  "softwarePlanStartedAt",
+  "softwarePlanRenewsAt",
+]);
+
+const AGENCY_PRICE_FIELDS = new Set<keyof Agency>([
+  "monthlyPriceOverrideUsd",
+  "monthlyPriceOverrideReason",
+  "monthlyPriceOverrideUpdatedAt",
+]);
+
+const AGENCY_WEBSITE_FIELDS = new Set<keyof Agency>([
+  "website",
+  "websiteSlug",
+  "websiteEnabled",
+  "websiteHeadline",
+  "websiteIntro",
+  "portalBaseUrl",
+  "customerPortalUrl",
+  "quoteStartUrl",
+  "websiteAllowedDomains",
+  "websiteApiKeyEncrypted",
+  "websiteApiKeyPreview",
+  "websiteWebhookUrl",
+  "websiteWebhookSecretEncrypted",
+  "websiteWebhookSecretPreview",
+  "websiteAuthRedirects",
+  "websitePortalModules",
+  "websiteLastLeadAt",
+  "websiteLastSyncAt",
+  "websiteLastWebhookStatus",
+  "websiteLastWebhookMessage",
+  "websiteConnectionUpdatedAt",
+]);
+
+const AGENCY_CARRIER_RUNNER_FIELDS = new Set<keyof Agency>([
+  "carrierRunnerEnabled",
+  "carrierRunnerStatus",
+  "carrierRunnerMode",
+  "carrierRunnerAgencyCode",
+  "carrierRunnerProfileId",
+  "carrierRunnerReceiverCode",
+  "carrierRunnerCredentialVaultRef",
+  "carrierRunnerMfaMode",
+  "carrierRunnerAuthorizedUserIds",
+  "carrierRunnerLinesOfBusiness",
+  "carrierRunnerFeeds",
+  "carrierRunnerCarrierIds",
+  "carrierRunnerReviewRule",
+  "carrierRunnerSchedule",
+  "carrierRunnerWorkingPath",
+  "carrierRunnerArchivePath",
+  "carrierRunnerFailureAlertEmails",
+  "carrierRunnerContactEmail",
+  "carrierRunnerContactPhone",
+  "carrierRunnerNotes",
+  "carrierRunnerLastTestAt",
+  "carrierRunnerLastTestStatus",
+  "carrierRunnerLastTestMessage",
+  "carrierRunnerLastSyncAt",
+  "carrierRunnerUpdatedAt",
+]);
+
+const AGENCY_PROFILE_FIELDS = new Set<keyof Agency>([
+  "name",
+  "logoUrl",
+  "brandColor",
+  "contactEmail",
+  "phone",
+  "address",
+  "serviceAreas",
+  "active",
+]);
+
+function agencyActivityFieldLabel(field: string): string {
+  return field
+    .replace(/Usd$/, "")
+    .replace(/At$/, "")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/^carrierRunner/i, "carrier runner")
+    .replace(/^ivans/i, "legacy download")
+    .replace(/^ai/i, "AI")
+    .replace(/^website/i, "website")
+    .toLowerCase();
+}
+
+function cleanAgencyActivityMetadata(
+  metadata: Record<string, unknown> = {}
+): Record<string, string | number | boolean | null> {
+  return Object.fromEntries(
+    Object.entries(metadata)
+      .filter(([key]) => !/encrypted|secret|credential/i.test(key))
+      .map(([key, value]) => {
+        if (Array.isArray(value)) return [key, value.join(", ")];
+        if (typeof value === "string" || typeof value === "number" || typeof value === "boolean" || value === null) {
+          return [key, value];
+        }
+        if (value === undefined) return [key, null];
+        return [key, String(value)];
+      })
+  );
+}
+
+function createMasterAgencyActivity(
+  input: Omit<MasterAgencyActivity, "id" | "createdAt"> & { createdAt?: string }
+): MasterAgencyActivity {
+  const row: MasterAgencyActivity = {
+    ...input,
+    id: uid("master_activity"),
+    createdAt: input.createdAt ?? nowIso(),
+    metadata: cleanAgencyActivityMetadata(input.metadata),
+  };
+  db.insert("masterAgencyActivities", row);
+  return row;
+}
+
+function logAgencyActivity(
+  agency: Agency,
+  kind: MasterAgencyActivityKind,
+  title: string,
+  description: string,
+  metadata?: Record<string, unknown>,
+  source: MasterAgencyActivity["source"] = "master_portal",
+  actorName = "Master portal"
+): MasterAgencyActivity {
+  return createMasterAgencyActivity({
+    agencyId: agency.id,
+    agencyName: agency.name,
+    kind,
+    title,
+    description,
+    actorName,
+    source,
+    metadata: cleanAgencyActivityMetadata(metadata),
+  });
+}
+
+function classifyAgencyPatchActivity(
+  agency: Agency,
+  patch: Partial<Agency>
+): Omit<MasterAgencyActivity, "id" | "createdAt" | "agencyId" | "agencyName" | "actorName" | "source"> | null {
+  const fields = Object.keys(patch).filter((field) => {
+    if (/encrypted|secret|credential/i.test(field)) return false;
+    return true;
+  });
+  if (fields.length === 0) return null;
+  const fieldSet = new Set(fields as (keyof Agency)[]);
+  const metadata = cleanAgencyActivityMetadata({
+    fields: fields.map(agencyActivityFieldLabel).join(", "),
+    ...(typeof patch.monthlyPriceOverrideUsd === "number"
+      ? { monthlyPriceUsd: patch.monthlyPriceOverrideUsd }
+      : {}),
+    ...(typeof patch.allowedUsers === "number" ? { userSlots: patch.allowedUsers } : {}),
+    ...(patch.softwarePlanTermMonths ? { termMonths: patch.softwarePlanTermMonths } : {}),
+    ...(patch.softwarePlanRenewsAt ? { renewsAt: dateInputFromIso(patch.softwarePlanRenewsAt) } : {}),
+    ...(patch.carrierRunnerStatus ? { runnerStatus: patch.carrierRunnerStatus } : {}),
+    ...(patch.websiteLastWebhookStatus ? { websiteStatus: patch.websiteLastWebhookStatus } : {}),
+  });
+
+  if (fieldSet.has("active") && patch.active === false) {
+    return {
+      kind: "agency_deactivated",
+      title: "Agency deactivated",
+      description: `${agency.name} was marked inactive in the master portal.`,
+      metadata,
+    };
+  }
+
+  if (fields.some((field) => AGENCY_PRICE_FIELDS.has(field as keyof Agency))) {
+    const cleared = "monthlyPriceOverrideUsd" in patch && patch.monthlyPriceOverrideUsd === undefined;
+    return {
+      kind: "agency_price_updated",
+      title: cleared ? "Manual monthly price removed" : "Manual monthly price updated",
+      description: cleared
+        ? `${agency.name}'s manual monthly price override was cleared.`
+        : `${agency.name}'s monthly price was manually adjusted${typeof patch.monthlyPriceOverrideUsd === "number" ? ` to ${fmt.money(patch.monthlyPriceOverrideUsd)}` : ""}.`,
+      metadata,
+    };
+  }
+
+  if (fields.some((field) => AGENCY_PLAN_FIELDS.has(field as keyof Agency))) {
+    return {
+      kind: "agency_plan_updated",
+      title: "Agency plan updated",
+      description: `${agency.name}'s software plan, user slots, add-ons, or contract term changed.`,
+      metadata,
+    };
+  }
+
+  if (fields.some((field) => AGENCY_CARRIER_RUNNER_FIELDS.has(field as keyof Agency))) {
+    return {
+      kind: "agency_carrier_runner_updated",
+      title: "Carrier download runner updated",
+      description: `${agency.name}'s carrier portal runner, MFA handling, feeds, credentials reference, or test status changed.`,
+      metadata,
+    };
+  }
+
+  if (fields.some((field) => AGENCY_WEBSITE_FIELDS.has(field as keyof Agency))) {
+    return {
+      kind: "agency_website_connection_updated",
+      title: "Website connection updated",
+      description: `${agency.name}'s website, client portal, API key, webhook, or redirect settings changed.`,
+      metadata,
+    };
+  }
+
+  if (fields.some((field) => AGENCY_PROFILE_FIELDS.has(field as keyof Agency))) {
+    return {
+      kind: "agency_updated",
+      title: "Agency profile updated",
+      description: `${agency.name}'s profile, contact, logo, service area, or status settings changed.`,
+      metadata,
+    };
+  }
+
+  return {
+    kind: "agency_updated",
+    title: "Agency updated",
+    description: `${agency.name} was updated in the platform.`,
+    metadata,
+  };
+}
+
+function logAgencyPatchActivity(agency: Agency, patch: Partial<Agency>) {
+  const activity = classifyAgencyPatchActivity(agency, patch);
+  if (!activity) return;
+  logAgencyActivity(
+    agency,
+    activity.kind,
+    activity.title,
+    activity.description,
+    activity.metadata
+  );
+}
+
+const LEGACY_DEMO_REQUESTS_KEY = "quotex.demoRequests.v1";
+
+function stringField(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value.trim() : fallback;
+}
+
+function boolField(value: unknown, fallback = false): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function syncLegacyDemoRequests() {
+  if (typeof window === "undefined" || !window.localStorage) return;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(window.localStorage.getItem(LEGACY_DEMO_REQUESTS_KEY) ?? "[]");
+  } catch {
+    parsed = [];
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return;
+
+  const existingIds = new Set(db.list("demoLeads").map((lead) => lead.id));
+  for (const item of parsed) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const source = item as Record<string, unknown>;
+    const id = stringField(source.id) || uid("demo_lead_legacy");
+    if (existingIds.has(id)) continue;
+    const createdAt = stringField(source.createdAt) || nowIso();
+    const row: DemoLead = {
+      id,
+      firstName: stringField(source.firstName),
+      lastName: stringField(source.lastName),
+      businessEmail: stringField(source.businessEmail),
+      agencyName: stringField(source.agencyName),
+      role: stringField(source.role),
+      staffSize: stringField(source.staffSize),
+      phone: stringField(source.phone) || undefined,
+      interest: stringField(source.interest, "Full Quotex software demo"),
+      notes: stringField(source.notes) || undefined,
+      marketingOptIn: boolField(source.marketingOptIn, true),
+      source: "view_demo",
+      status: "new",
+      createdAt,
+      updatedAt: createdAt,
+    };
+    db.insert("demoLeads", row);
+    existingIds.add(id);
+  }
+}
+
 export const api = {
+  // ------------ Demo leads (master) ------------
+  demoLeads: {
+    list(): DemoLead[] {
+      syncLegacyDemoRequests();
+      return db.list("demoLeads").sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    },
+    get(id: string): DemoLead | undefined {
+      syncLegacyDemoRequests();
+      return db.list("demoLeads").find((lead) => lead.id === id);
+    },
+    create(
+      input: Omit<DemoLead, "id" | "createdAt" | "updatedAt" | "status"> & {
+        id?: string;
+        createdAt?: string;
+        updatedAt?: string;
+        status?: DemoLeadStatus;
+      }
+    ): DemoLead {
+      const createdAt = input.createdAt ?? nowIso();
+      const row: DemoLead = {
+        ...input,
+        id: input.id ?? uid("demo_lead"),
+        status: input.status ?? "new",
+        createdAt,
+        updatedAt: input.updatedAt ?? createdAt,
+      };
+      db.insert("demoLeads", row);
+      return row;
+    },
+    update(id: string, patch: Partial<DemoLead>): DemoLead | null {
+      return db.update("demoLeads", id, { ...patch, updatedAt: nowIso() });
+    },
+  },
+
+  // ------------ Software transaction sales (master) ------------
+  softwareSales: {
+    list(): SoftwareSale[] {
+      return db.list("softwareSales").sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    },
+    get(id: string): SoftwareSale | undefined {
+      return db.list("softwareSales").find((sale) => sale.id === id);
+    },
+    create(
+      input: Omit<SoftwareSale, "id" | "createdAt" | "updatedAt" | "status"> & {
+        status?: SoftwareSaleStatus;
+      }
+    ): SoftwareSale {
+      const row: SoftwareSale = {
+        ...input,
+        id: uid("sale"),
+        status: input.status ?? "checkout_pending",
+        createdAt: nowIso(),
+        updatedAt: nowIso(),
+      };
+      db.insert("softwareSales", row);
+      return row;
+    },
+    update(id: string, patch: Partial<SoftwareSale>): SoftwareSale | null {
+      return db.update("softwareSales", id, { ...patch, updatedAt: nowIso() });
+    },
+    setStatus(id: string, status: SoftwareSaleStatus): SoftwareSale | null {
+      return this.update(id, { status });
+    },
+  },
+
+  // ------------ Master agency activity log ------------
+  masterAgencyActivities: {
+    list(filters: { agencyId?: string; kind?: MasterAgencyActivityKind } = {}): MasterAgencyActivity[] {
+      return db
+        .list("masterAgencyActivities")
+        .filter((activity) => !filters.agencyId || activity.agencyId === filters.agencyId)
+        .filter((activity) => !filters.kind || activity.kind === filters.kind)
+        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    },
+    create(
+      input: Omit<MasterAgencyActivity, "id" | "createdAt"> & { createdAt?: string }
+    ): MasterAgencyActivity {
+      return createMasterAgencyActivity(input);
+    },
+  },
+
   // ------------ Agencies (master) ------------
   agencies: {
     list(): Agency[] {
@@ -500,32 +4723,319 @@ export const api = {
     get(id: string): Agency | undefined {
       return db.list("agencies").find((a) => a.id === id);
     },
-    create(input: Omit<Agency, "id" | "createdAt" | "active"> & { active?: boolean }): Agency {
-      const row: Agency = {
+    byCode(code: string): Agency | undefined {
+      const normalized = normalizeAgencyCode(code);
+      if (!normalized) return undefined;
+      return db.list("agencies").find((a) => agencyCodeMatches(a, normalized));
+    },
+    maskedCode(agency: Agency): string {
+      return maskedAgencyCode(agency.agencyCodePreview);
+    },
+    revealCodeForMaster(id: string): string | null {
+      const agency = db.list("agencies").find((a) => a.id === id);
+      if (!agency) return null;
+      return revealProtectedAgencyCode(agency);
+    },
+    sendAgencyCode(id: string): { agency: Agency; recipient: string; maskedCode: string; sentAt: string } | null {
+      const agency = db.list("agencies").find((a) => a.id === id);
+      if (!agency) return null;
+      logAgencyActivity(
+        agency,
+        "agency_code_sent",
+        "Agency code sent",
+        `Encrypted agency sign-in code was prepared for ${agency.contactEmail}.`,
+        { recipient: agency.contactEmail, codePreview: agency.agencyCodePreview }
+      );
+      return {
+        agency,
+        recipient: agency.contactEmail,
+        maskedCode: maskedAgencyCode(agency.agencyCodePreview),
+        sentAt: nowIso(),
+      };
+    },
+    create(
+      input: Omit<
+        Agency,
+        "id" | "createdAt" | "active" | "agencyCode" | "agencyCodeEncrypted" | "agencyCodePreview"
+      > & {
+        active?: boolean;
+      }
+    ): Agency {
+      const existingCodes = new Set(
+        db
+          .list("agencies")
+          .map((agency) => revealProtectedAgencyCode(agency) ?? "")
+          .filter(Boolean)
+      );
+      const agencyCode = generateAgencyCode(input.name, existingCodes);
+      const row: Agency = ensureWebsiteConnection({
         ...input,
+        ...protectAgencyCode(agencyCode),
         id: uid("agency"),
         active: input.active ?? true,
         createdAt: nowIso(),
-      };
+      });
       db.insert("agencies", row);
-      // Auto-provision staff accounts (count comes from the tier plan).
-      // Master admin can view and distribute the generated credentials from
-      // the Users page.
-      try {
-        api.users.bulkProvision({ tenantId: row.id, agencyName: row.name, tier: row.tier });
-      } catch {
-        /* non-fatal — credentials can still be regenerated by master */
-      }
+      upsertDemoAgencyMarketingMailbox(row);
+      logAgencyActivity(
+        row,
+        "agency_created",
+        "Agency created",
+        `${row.name} was added to the platform and issued an encrypted agency sign-in code.`,
+        {
+          codePreview: row.agencyCodePreview,
+          userSlots: row.allowedUsers,
+          termMonths: row.softwarePlanTermMonths ?? agencyPlanTermMonths(row),
+          websiteAppAddOn: row.websiteAppAddOn ?? "none",
+        }
+      );
       return row;
     },
     update(id: string, patch: Partial<Agency>) {
-      return db.update("agencies", id, patch);
+      const updated = db.update("agencies", id, patch);
+      if (updated) {
+        if (patch.contactEmail !== undefined || patch.name !== undefined) {
+          upsertDemoAgencyMarketingMailbox(updated);
+        }
+        logAgencyPatchActivity(updated, patch);
+      }
+      return updated;
+    },
+    sendRenewalContract(id: string): Agency | null {
+      const agency = db.list("agencies").find((a) => a.id === id);
+      if (!agency) return null;
+      const updated = db.update("agencies", id, {
+        softwarePlanRenewalContractPacketId: uid("agency_renewal_packet"),
+        softwarePlanRenewalContractSentAt: nowIso(),
+        softwarePlanRenewalContractRecipientEmail: agency.contactEmail,
+        softwarePlanRenewalContractSignedAt: undefined,
+        softwarePlanRenewalContractSignedByName: undefined,
+        softwarePlanRenewalContractSignedByEmail: undefined,
+      });
+      if (updated) {
+        logAgencyActivity(
+          updated,
+          "agency_renewal_contract_sent",
+          "Renewal contract sent",
+          `Software renewal contract was sent to ${updated.softwarePlanRenewalContractRecipientEmail ?? updated.contactEmail}.`,
+          {
+            recipient: updated.softwarePlanRenewalContractRecipientEmail ?? updated.contactEmail,
+            packetId: updated.softwarePlanRenewalContractPacketId ?? null,
+            renewsAt: dateInputFromIso(agencyPlanRenewalIso(updated)),
+          }
+        );
+      }
+      return updated;
+    },
+    completeRenewalContractSignature(id: string): Agency | null {
+      const agency = db.list("agencies").find((a) => a.id === id);
+      if (!agency) return null;
+      const currentRenewalInput = dateInputFromIso(agencyPlanRenewalIso(agency));
+      const todayInput = dateInputFromIso(nowIso());
+      const currentRenewalTime = new Date(`${currentRenewalInput}T12:00:00.000Z`).getTime();
+      const todayTime = new Date(`${todayInput}T12:00:00.000Z`).getTime();
+      const nextStartInput = currentRenewalTime > todayTime ? currentRenewalInput : todayInput;
+      const nextRenewalInput = addMonthsToDateInput(
+        nextStartInput,
+        agencyPlanTermMonths(agency)
+      );
+      const signedAt = nowIso();
+      const updated = db.update("agencies", id, {
+        softwarePlanStartedAt: isoFromDateInput(nextStartInput),
+        softwarePlanRenewsAt: isoFromDateInput(nextRenewalInput),
+        softwarePlanRenewalContractSignedAt: signedAt,
+        softwarePlanRenewalContractSignedByName: agency.name,
+        softwarePlanRenewalContractSignedByEmail:
+          agency.softwarePlanRenewalContractRecipientEmail ?? agency.contactEmail,
+        softwarePlanLastRenewedAt: signedAt,
+      });
+      if (updated) {
+        logAgencyActivity(
+          updated,
+          "agency_renewed",
+          "Agency renewed",
+          `${updated.name}'s signed renewal contract was registered and the term rolled forward.`,
+          {
+            signedBy: updated.softwarePlanRenewalContractSignedByEmail ?? updated.contactEmail,
+            startedAt: nextStartInput,
+            renewsAt: nextRenewalInput,
+            termMonths: agencyPlanTermMonths(updated),
+          }
+        );
+      }
+      return updated;
+    },
+    regenerateCode(id: string): { ok: true; agency: Agency } | { ok: false; reason: "missing" } {
+      const agency = db.list("agencies").find((a) => a.id === id);
+      if (!agency) return { ok: false, reason: "missing" };
+      const existingCodes = db
+        .list("agencies")
+        .filter((a) => a.id !== id)
+        .map((a) => revealProtectedAgencyCode(a) ?? "")
+        .filter(Boolean);
+      const nextCode = generateAgencyCode(agency.name, existingCodes);
+      const updated = db.update("agencies", id, protectAgencyCode(nextCode));
+      if (updated) {
+        logAgencyActivity(
+          updated,
+          "agency_code_changed",
+          "Agency code regenerated",
+          `${updated.name}'s encrypted agency sign-in code was regenerated.`,
+          { codePreview: updated.agencyCodePreview }
+        );
+      }
+      return updated ? { ok: true, agency: updated } : { ok: false, reason: "missing" };
+    },
+    revealWebsiteApiKeyForMaster(id: string): string | null {
+      const agency = db.list("agencies").find((a) => a.id === id);
+      return agency ? revealWebsiteApiKey(agency) : null;
+    },
+    revealWebsiteWebhookSecretForMaster(id: string): string | null {
+      const agency = db.list("agencies").find((a) => a.id === id);
+      return agency ? revealWebsiteWebhookSecret(agency) : null;
+    },
+    regenerateWebsiteApiKey(id: string): { ok: true; agency: Agency } | { ok: false; reason: "missing" } {
+      const agency = db.list("agencies").find((a) => a.id === id);
+      if (!agency) return { ok: false, reason: "missing" };
+      const updated = db.update("agencies", id, {
+        ...protectWebsiteApiKey(generateConnectionSecret("qtx_site")),
+        websiteConnectionUpdatedAt: nowIso(),
+      });
+      if (updated) {
+        logAgencyActivity(
+          updated,
+          "agency_website_connection_updated",
+          "Website API key regenerated",
+          `${updated.name}'s website API key was regenerated.`,
+          { apiKeyPreview: updated.websiteApiKeyPreview ?? null }
+        );
+      }
+      return updated ? { ok: true, agency: updated } : { ok: false, reason: "missing" };
+    },
+    regenerateWebsiteWebhookSecret(id: string): { ok: true; agency: Agency } | { ok: false; reason: "missing" } {
+      const agency = db.list("agencies").find((a) => a.id === id);
+      if (!agency) return { ok: false, reason: "missing" };
+      const updated = db.update("agencies", id, {
+        ...protectWebsiteWebhookSecret(generateConnectionSecret("qtx_hook")),
+        websiteConnectionUpdatedAt: nowIso(),
+      });
+      if (updated) {
+        logAgencyActivity(
+          updated,
+          "agency_website_connection_updated",
+          "Website webhook secret regenerated",
+          `${updated.name}'s website webhook secret was regenerated.`,
+          { webhookSecretPreview: updated.websiteWebhookSecretPreview ?? null }
+        );
+      }
+      return updated ? { ok: true, agency: updated } : { ok: false, reason: "missing" };
+    },
+    checkWebsiteConnection(id: string): { ok: true; agency: Agency } | { ok: false; reason: "missing" } {
+      const agency = db.list("agencies").find((a) => a.id === id);
+      if (!agency) return { ok: false, reason: "missing" };
+      const result = assessWebsiteConnection(agency);
+      const updated = db.update("agencies", id, {
+        websiteLastSyncAt: nowIso(),
+        websiteLastWebhookStatus: result.status,
+        websiteLastWebhookMessage: result.message,
+        websiteConnectionUpdatedAt: nowIso(),
+      });
+      if (updated) {
+        logAgencyActivity(
+          updated,
+          "agency_website_connection_updated",
+          "Website connection checked",
+          `${updated.name}'s website connection was checked: ${result.message}`,
+          { status: result.status }
+        );
+      }
+      return updated ? { ok: true, agency: updated } : { ok: false, reason: "missing" };
     },
     deactivate(id: string) {
-      return db.update("agencies", id, { active: false });
+      const updated = db.update("agencies", id, { active: false });
+      if (updated) {
+        logAgencyActivity(
+          updated,
+          "agency_deactivated",
+          "Agency deactivated",
+          `${updated.name} was marked inactive in the master portal.`
+        );
+      }
+      return updated;
     },
     setTier(id: string, tier: SubscriptionTier) {
-      return db.update("agencies", id, { tier });
+      const updated = db.update("agencies", id, { tier });
+      if (updated) {
+        logAgencyActivity(
+          updated,
+          "agency_plan_updated",
+          "Agency tier changed",
+          `${updated.name}'s tier was changed to ${tier}.`,
+          { tier }
+        );
+      }
+      return updated;
+    },
+    addUserSlots(id: string, count: number): Agency | null {
+      const agency = db.list("agencies").find((a) => a.id === id);
+      if (!agency) return null;
+      const safeCount = Math.max(0, Math.min(500, Math.floor(count)));
+      if (safeCount === 0) return agency;
+      const updated = db.update("agencies", id, {
+        allowedUsers: agency.allowedUsers + safeCount,
+      });
+      if (updated) {
+        logAgencyActivity(
+          updated,
+          "agency_plan_updated",
+          "User slots added",
+          `${safeCount} user slot${safeCount === 1 ? "" : "s"} added to ${updated.name}.`,
+          { addedSlots: safeCount, totalSlots: updated.allowedUsers }
+        );
+      }
+      return updated;
+    },
+    updateSubscriptionLimits(
+      id: string,
+      input: {
+        tier: SubscriptionTier;
+        allowedUsers: number;
+        allowedCarriers: number;
+        allowedAiMessagesPerMonth: number;
+        websiteAppAddOn?: Agency["websiteAppAddOn"];
+      }
+    ): Agency | null {
+      const agency = db.list("agencies").find((a) => a.id === id);
+      if (!agency) return null;
+      const tierLimits = TIER_LIMITS[input.tier];
+      const staffCount = db
+        .list("users")
+        .filter((u) => u.tenantId === id && (u.role === "agent" || u.role === "manager")).length;
+      const updated = db.update("agencies", id, {
+        tier: input.tier,
+        allowedUsers: Math.max(staffCount, Math.floor(input.allowedUsers) || 0),
+        allowedCarriers: Math.max(tierLimits.allowedCarriers, Math.floor(input.allowedCarriers) || 0),
+        allowedAiMessagesPerMonth: Math.max(
+          tierLimits.allowedAiMessagesPerMonth,
+          Math.floor(input.allowedAiMessagesPerMonth) || 0
+        ),
+        websiteAppAddOn: input.websiteAppAddOn ?? agency.websiteAppAddOn ?? "none",
+        allowedProspectsPerMonth: tierLimits.allowedProspectsPerMonth,
+      });
+      if (updated) {
+        logAgencyActivity(
+          updated,
+          "agency_plan_updated",
+          "Subscription limits updated",
+          `${updated.name}'s plan limits and add-ons were updated.`,
+          {
+            tier: updated.tier,
+            userSlots: updated.allowedUsers,
+            websiteAppAddOn: updated.websiteAppAddOn ?? "none",
+          }
+        );
+      }
+      return updated;
     },
     // Create a performance goal (company-wide or personal). Returns
     // the created goal so callers can reference its id.
@@ -533,6 +5043,10 @@ export const api = {
       id: string,
       input: {
         metric: import("@/types").PerformanceGoalMetric;
+        customMetricLabel?: string;
+        customMetricPrompt?: string;
+        customMetricHelper?: string;
+        customMetricFormula?: import("@/types").CustomPerformanceGoalFormula;
         target: number;
         period: import("@/types").PerformanceGoalPeriod;
         dueDate?: string;
@@ -545,6 +5059,10 @@ export const api = {
       const goal: import("@/types").PerformanceGoal = {
         id: uid("goal"),
         metric: input.metric,
+        customMetricLabel: input.customMetricLabel,
+        customMetricPrompt: input.customMetricPrompt,
+        customMetricHelper: input.customMetricHelper,
+        customMetricFormula: input.customMetricFormula,
         target: input.target,
         period: input.period,
         dueDate: input.dueDate,
@@ -564,6 +5082,10 @@ export const api = {
       goalId: string,
       patch: Partial<{
         target: number;
+        customMetricLabel?: string;
+        customMetricPrompt?: string;
+        customMetricHelper?: string;
+        customMetricFormula?: import("@/types").CustomPerformanceGoalFormula;
         period: import("@/types").PerformanceGoalPeriod;
         dueDate?: string;
         scope: import("@/types").PerformanceGoalScope;
@@ -622,6 +5144,10 @@ export const api = {
       const archived: import("@/types").ArchivedPerformanceGoal = {
         id: active.id,
         metric: active.metric,
+        customMetricLabel: active.customMetricLabel,
+        customMetricPrompt: active.customMetricPrompt,
+        customMetricHelper: active.customMetricHelper,
+        customMetricFormula: active.customMetricFormula,
         target: active.target,
         period: active.period,
         dueDate: active.dueDate,
@@ -640,6 +5166,165 @@ export const api = {
           ...(current.performanceGoalHistory ?? []),
         ],
       });
+    },
+    addPerformanceGoalRequest(
+      id: string,
+      input: {
+        requestedById: string;
+        metric: import("@/types").PerformanceGoalMetric;
+        customMetricLabel?: string;
+        customMetricPrompt?: string;
+        customMetricHelper?: string;
+        customMetricFormula?: import("@/types").CustomPerformanceGoalFormula;
+        target: number;
+        period: import("@/types").PerformanceGoalPeriod;
+        dueDate?: string;
+        scope: import("@/types").PerformanceGoalScope;
+        note?: string;
+      }
+    ): PerformanceGoalRequest | null {
+      const current = db.list("agencies").find((a) => a.id === id);
+      if (!current) return null;
+      const request: PerformanceGoalRequest = {
+        id: uid("goalreq"),
+        requestedById: input.requestedById,
+        metric: input.metric,
+        customMetricLabel: input.customMetricLabel,
+        customMetricPrompt: input.customMetricPrompt,
+        customMetricHelper: input.customMetricHelper,
+        customMetricFormula: input.customMetricFormula,
+        target: input.target,
+        period: input.period,
+        dueDate: input.dueDate,
+        scope: input.scope,
+        note: input.note,
+        status: "pending",
+        createdAt: nowIso(),
+      };
+      db.update("agencies", id, {
+        performanceGoalRequests: [
+          request,
+          ...(current.performanceGoalRequests ?? []),
+        ],
+      });
+      const requester = db.list("users").find((u) => u.id === input.requestedById);
+      const metricLabel =
+        input.metric === "custom"
+          ? input.customMetricLabel ?? "Custom metric"
+          : input.metric === "premiumWritten"
+            ? "Premium written"
+            : input.metric === "newCustomers"
+              ? "New clients"
+              : input.metric === "newProspects"
+                ? "New prospects"
+                : input.metric === "activitiesResolved"
+                  ? "Activities resolved"
+                  : "Policies bound";
+      const targetLabel =
+        input.metric === "premiumWritten"
+          ? fmt.money(input.target)
+          : input.target.toLocaleString();
+      db
+        .list("users")
+        .filter((u) => u.tenantId === id && u.role === "manager" && u.active)
+        .forEach((manager) => {
+          db.insert("aiNotifications", {
+            id: uid("ain"),
+            tenantId: id,
+            kind: "goal_request",
+            title: `Performance goal request - ${requester?.name ?? "Agent"}`,
+            summary: `${requester?.name ?? "An agent"} requested ${targetLabel} ${
+              input.scope === "company" ? "company-wide" : "personal"
+            } ${metricLabel.toLowerCase()} for this ${input.period}${
+              input.dueDate ? `, due ${fmt.date(input.dueDate)}` : ""
+            }.`,
+            assignedToId: manager.id,
+            severity: "info",
+            topic: "other",
+            goalRequestId: request.id,
+            createdAt: nowIso(),
+          });
+        });
+      return request;
+    },
+    approvePerformanceGoalRequest(
+      id: string,
+      requestId: string,
+      reviewerId: string
+    ): import("@/types").PerformanceGoal | null {
+      const current = db.list("agencies").find((a) => a.id === id);
+      if (!current) return null;
+      const request = (current.performanceGoalRequests ?? []).find(
+        (r) => r.id === requestId
+      );
+      if (!request || request.status !== "pending") return null;
+      const goal = this.addPerformanceGoal(id, {
+        metric: request.metric,
+        customMetricLabel: request.customMetricLabel,
+        customMetricPrompt: request.customMetricPrompt,
+        customMetricHelper: request.customMetricHelper,
+        customMetricFormula: request.customMetricFormula,
+        target: request.target,
+        period: request.period,
+        dueDate: request.dueDate,
+        scope: request.scope,
+        assigneeIds: request.scope === "personal" ? [request.requestedById] : undefined,
+      });
+      if (!goal) return null;
+      const latest = db.list("agencies").find((a) => a.id === id);
+      db.update("agencies", id, {
+        performanceGoalRequests: (latest?.performanceGoalRequests ?? []).map((r) =>
+          r.id === requestId
+            ? {
+                ...r,
+                status: "approved" as const,
+                reviewedAt: nowIso(),
+                reviewedById: reviewerId,
+                createdGoalId: goal.id,
+              }
+            : r
+        ),
+      });
+      db
+        .list("aiNotifications")
+        .filter((n) => n.tenantId === id && n.goalRequestId === requestId)
+        .forEach((n) =>
+          db.update("aiNotifications", n.id, {
+            acknowledgedAt: nowIso(),
+            acknowledgedById: reviewerId,
+          })
+        );
+      return goal;
+    },
+    rejectPerformanceGoalRequest(
+      id: string,
+      requestId: string,
+      reviewerId: string
+    ): Agency | null {
+      const current = db.list("agencies").find((a) => a.id === id);
+      if (!current) return null;
+      const updated = db.update("agencies", id, {
+        performanceGoalRequests: (current.performanceGoalRequests ?? []).map((r) =>
+          r.id === requestId
+            ? {
+                ...r,
+                status: "rejected" as const,
+                reviewedAt: nowIso(),
+                reviewedById: reviewerId,
+              }
+            : r
+        ),
+      });
+      db
+        .list("aiNotifications")
+        .filter((n) => n.tenantId === id && n.goalRequestId === requestId)
+        .forEach((n) =>
+          db.update("aiNotifications", n.id, {
+            acknowledgedAt: nowIso(),
+            acknowledgedById: reviewerId,
+          })
+        );
+      return updated;
     },
   },
 
@@ -672,13 +5357,50 @@ export const api = {
         createdAt: nowIso(),
       };
       db.insert("branches", row);
+      const agency = db.list("agencies").find((a) => a.id === row.agencyId);
+      if (agency) {
+        logAgencyActivity(
+          agency,
+          "agency_updated",
+          "Branch added",
+          `${row.name} was added as a branch/location for ${agency.name}.`,
+          { branchName: row.name, city: row.city ?? null, state: row.state ?? null }
+        );
+      }
       return row;
     },
     update(id: string, patch: Partial<import("@/types").Branch>) {
-      return db.update("branches", id, patch);
+      const updated = db.update("branches", id, patch);
+      if (updated) {
+        const agency = db.list("agencies").find((a) => a.id === updated.agencyId);
+        if (agency) {
+          logAgencyActivity(
+            agency,
+            "agency_updated",
+            "Branch updated",
+            `${updated.name}'s branch/location details were updated for ${agency.name}.`,
+            { branchName: updated.name, fields: Object.keys(patch).join(", ") }
+          );
+        }
+      }
+      return updated;
     },
     remove(id: string) {
-      return db.remove("branches", id);
+      const existing = db.list("branches").find((branch) => branch.id === id);
+      const removed = db.remove("branches", id);
+      if (removed && existing) {
+        const agency = db.list("agencies").find((a) => a.id === existing.agencyId);
+        if (agency) {
+          logAgencyActivity(
+            agency,
+            "agency_updated",
+            "Branch removed",
+            `${existing.name} was removed from ${agency.name}'s branch/location list.`,
+            { branchName: existing.name }
+          );
+        }
+      }
+      return removed;
     },
   },
 
@@ -691,28 +5413,234 @@ export const api = {
       return db.list("users").find((u) => u.id === id);
     },
     byEmail(email: string): User | undefined {
-      return db.list("users").find((u) => u.email.toLowerCase() === email.toLowerCase());
+      const e = email.toLowerCase();
+      return db
+        .list("users")
+        .find((u) => u.email.toLowerCase() === e || u.businessEmail?.toLowerCase() === e);
     },
     byUsername(username: string): User | undefined {
       const u = username.trim().toLowerCase();
       return db.list("users").find((row) => row.username?.toLowerCase() === u);
     },
     // Accepts either an email or a username — used by the staff sign-in form.
-    byIdentifier(identifier: string): User | undefined {
-      return this.byUsername(identifier) ?? this.byEmail(identifier);
+    byIdentifier(identifier: string, tenantId?: string | null): User | undefined {
+      const normalized = identifier.trim().toLowerCase();
+      const scoped = (u: User) => tenantId === undefined || u.tenantId === tenantId;
+      return db
+        .list("users")
+        .find(
+          (row) =>
+            scoped(row) &&
+            ((row.username?.toLowerCase() ?? "") === normalized ||
+              row.email.toLowerCase() === normalized ||
+              row.businessEmail?.toLowerCase() === normalized)
+        );
     },
     create(input: Omit<User, "id" | "createdAt" | "active"> & { active?: boolean }): User {
       const row: User = {
         ...input,
         id: uid("user"),
         active: input.active ?? true,
+        staffAccessStatus: input.active === false ? input.staffAccessStatus ?? "deleted" : input.staffAccessStatus ?? "active",
         createdAt: nowIso(),
       };
       db.insert("users", row);
+      upsertDemoStaffMailbox(row);
+      if (row.tenantId && isStaffRole(row.role)) {
+        const agency = db.list("agencies").find((a) => a.id === row.tenantId);
+        if (agency) {
+          logAgencyActivity(
+            agency,
+            "agency_user_updated",
+            "Staff user created",
+            `${row.name} was added as ${staffRoleLabel(row.role).toLowerCase()} for ${agency.name}.`,
+            { userName: row.name, role: staffRoleLabel(row.role), email: row.businessEmail ?? row.email }
+          );
+        }
+      }
       return row;
     },
     update(id: string, patch: Partial<User>) {
-      return db.update("users", id, patch);
+      const updated = db.update("users", id, patch);
+      if (
+        updated &&
+        (patch.businessEmail !== undefined ||
+          patch.email !== undefined ||
+          patch.mailProvider !== undefined ||
+          patch.name !== undefined ||
+          patch.active !== undefined ||
+          patch.staffAccessStatus !== undefined)
+      ) {
+        if (updated.active && updated.staffAccessStatus !== "banned" && updated.staffAccessStatus !== "deleted") {
+          upsertDemoStaffMailbox(updated, patch.staffAccessUpdatedById);
+        } else {
+          const existing = db
+            .list("connectedMailboxes")
+            .find((mailbox) => mailbox.ownerType === "staff" && mailbox.userId === updated.id);
+          if (existing) {
+            db.update("connectedMailboxes", existing.id, {
+              status: "disabled",
+              updatedAt: nowIso(),
+              updatedById: patch.staffAccessUpdatedById,
+            });
+          }
+        }
+      }
+      if (updated?.tenantId && isStaffRole(updated.role)) {
+        const agency = db.list("agencies").find((a) => a.id === updated.tenantId);
+        if (agency) {
+          logAgencyActivity(
+            agency,
+            "agency_user_updated",
+            "Staff user updated",
+            `${updated.name}'s staff profile or access details changed for ${agency.name}.`,
+            {
+              userName: updated.name,
+              role: staffRoleLabel(updated.role),
+              fields: Object.keys(patch).join(", "),
+            }
+          );
+        }
+      }
+      return updated;
+    },
+    setStaffAccessStatus(
+      id: string,
+      status: NonNullable<User["staffAccessStatus"]>,
+      actorId?: string
+    ):
+      | { ok: true; user: User }
+      | { ok: false; reason: "not_found" | "last_active_manager" | "seat_capacity" } {
+      const user = api.users.get(id);
+      if (!user) return { ok: false, reason: "not_found" };
+      const active = status === "active";
+      const tenantId = user.tenantId;
+      if (!active && user.role === "manager" && tenantId) {
+        const activeManagers = db
+          .list("users")
+          .filter(
+            (u) =>
+              u.tenantId === tenantId &&
+              u.role === "manager" &&
+              u.active &&
+              u.id !== user.id
+          );
+        if (activeManagers.length === 0) return { ok: false, reason: "last_active_manager" };
+      }
+      if (active && tenantId && isStaffRole(user.role)) {
+        const agency = api.agencies.get(tenantId);
+        const activeTenantStaffCount = db
+          .list("users")
+          .filter(
+            (u) =>
+              u.tenantId === tenantId &&
+              u.active &&
+              isStaffRole(u.role) &&
+              u.id !== user.id
+          ).length;
+        if (agency && activeTenantStaffCount >= agency.allowedUsers) {
+          return { ok: false, reason: "seat_capacity" };
+        }
+      }
+      const updated = db.update("users", id, {
+        active,
+        staffAccessStatus: status,
+        staffAccessUpdatedAt: nowIso(),
+        staffAccessUpdatedById: actorId,
+      });
+      if (updated) {
+        if (active) {
+          upsertDemoStaffMailbox(updated, actorId);
+        } else {
+          const existing = db
+            .list("connectedMailboxes")
+            .find((mailbox) => mailbox.ownerType === "staff" && mailbox.userId === updated.id);
+          if (existing) {
+            db.update("connectedMailboxes", existing.id, {
+              status: "disabled",
+              updatedAt: nowIso(),
+              updatedById: actorId,
+            });
+          }
+        }
+      }
+      if (updated?.tenantId && isStaffRole(updated.role)) {
+        const agency = db.list("agencies").find((a) => a.id === updated.tenantId);
+        if (agency) {
+          logAgencyActivity(
+            agency,
+            "agency_user_updated",
+            active ? "Staff user reactivated" : "Staff user access changed",
+            `${updated.name}'s access status is now ${status}.`,
+            {
+              userName: updated.name,
+              role: staffRoleLabel(updated.role),
+              status,
+            }
+          );
+        }
+      }
+      return updated ? { ok: true, user: updated } : { ok: false, reason: "not_found" };
+    },
+    registerStaff(input: {
+      agencyCode: string;
+      branchId?: string;
+      role: StaffRole;
+      firstName: string;
+      lastName: string;
+      phone: string;
+      businessEmail: string;
+      password: string;
+    }):
+      | { ok: true; user: User; agency: Agency }
+      | {
+          ok: false;
+          reason:
+            | "agency_not_found"
+            | "inactive_agency"
+            | "duplicate_email"
+            | "slot_limit"
+            | "weak_password"
+            | "missing_fields";
+        } {
+      const agency = api.agencies.byCode(input.agencyCode);
+      if (!agency) return { ok: false, reason: "agency_not_found" };
+      if (!agency.active) return { ok: false, reason: "inactive_agency" };
+      if (!isStaffRole(input.role)) return { ok: false, reason: "missing_fields" };
+      const branchId = input.branchId?.trim() || undefined;
+      if (
+        branchId &&
+        !db.list("branches").some((branch) => branch.id === branchId && branch.agencyId === agency.id)
+      ) {
+        return { ok: false, reason: "missing_fields" };
+      }
+      const firstName = input.firstName.trim();
+      const lastName = input.lastName.trim();
+      const phone = input.phone.trim();
+      const businessEmail = input.businessEmail.trim().toLowerCase();
+      if (!firstName || !lastName || !phone || !businessEmail) {
+        return { ok: false, reason: "missing_fields" };
+      }
+      if (input.password.length < 8) return { ok: false, reason: "weak_password" };
+      if (api.users.byEmail(businessEmail)) return { ok: false, reason: "duplicate_email" };
+      const staffCount = activeStaffCount(db.list("users"), agency.id);
+      if (staffCount >= agency.allowedUsers) return { ok: false, reason: "slot_limit" };
+      const user = api.users.create({
+        tenantId: agency.id,
+        role: input.role,
+        firstName,
+        lastName,
+        name: `${firstName} ${lastName}`,
+        email: businessEmail,
+        businessEmail,
+        mailProvider: inferMailProvider(businessEmail),
+        phone,
+        branchId,
+        generatedPassword: input.password,
+        passwordUpdatedAt: nowIso(),
+        profileCompleted: true,
+      });
+      return { ok: true, user, agency };
     },
     // Regenerate a single user's password. Returns the new value so master
     // can copy it; the previous value is replaced atomically.
@@ -758,16 +5686,29 @@ export const api = {
             passwordUpdatedAt: nowIso(),
             // Placeholder name until the staff member completes their
             // profile on first login.
-            name: `${role === "manager" ? "Manager" : "Agent"} #${seq} · ${agencyName}`,
+            name: `${staffRoleLabel(role)} #${seq} - ${agencyName}`,
             profileCompleted: false,
             active: true,
             createdAt: nowIso(),
           };
           db.insert("users", user);
+          upsertDemoStaffMailbox(user);
           made.push(user);
         }
       });
 
+      if (made.length > 0) {
+        const agency = db.list("agencies").find((a) => a.id === tenantId);
+        if (agency) {
+          logAgencyActivity(
+            agency,
+            "agency_user_updated",
+            "Staff placeholders provisioned",
+            `${made.length} staff placeholder account${made.length === 1 ? "" : "s"} were provisioned for ${agency.name}.`,
+            { count: made.length }
+          );
+        }
+      }
       return made;
     },
     // Provision an exact count of unassigned staff credentials at the
@@ -782,11 +5723,17 @@ export const api = {
       agencyName,
     }: {
       tenantId: string;
-      role: "agent" | "manager";
+      role: StaffRole;
       count: number;
       agencyName: string;
     }): User[] {
-      const safeCount = Math.max(1, Math.min(50, Math.floor(count)));
+      if (!isStaffRole(role)) return [];
+      const agency = db.list("agencies").find((a) => a.id === tenantId);
+      const currentStaffCount = activeStaffCount(db.list("users"), tenantId);
+      const availableSlots = agency ? Math.max(0, agency.allowedUsers - currentStaffCount) : 50;
+      const requestedCount = Math.max(1, Math.floor(count) || 1);
+      const safeCount = Math.max(0, Math.min(50, requestedCount, availableSlots));
+      if (safeCount === 0) return [];
       const existing = db.list("users").filter((u) => u.tenantId === tenantId && u.role === role);
       const startSeq = existing.length + 1;
       const slug = slugifyAgency(agencyName);
@@ -803,15 +5750,91 @@ export const api = {
           username,
           generatedPassword: password,
           passwordUpdatedAt: nowIso(),
-          name: `${role === "manager" ? "Manager" : "Agent"} #${seq} · ${agencyName}`,
+          name: `${staffRoleLabel(role)} #${seq} - ${agencyName}`,
           profileCompleted: false,
           active: true,
           createdAt: nowIso(),
         };
         db.insert("users", user);
+        upsertDemoStaffMailbox(user);
         made.push(user);
       }
+      if (made.length > 0 && agency) {
+        logAgencyActivity(
+          agency,
+          "agency_user_updated",
+          "Staff placeholders provisioned",
+          `${made.length} ${staffRoleLabel(role).toLowerCase()} placeholder account${made.length === 1 ? "" : "s"} were provisioned for ${agency.name}.`,
+          { count: made.length, role: staffRoleLabel(role) }
+        );
+      }
       return made;
+    },
+  },
+
+  // ------------ Connected mailboxes ------------
+  mailboxes: {
+    listByTenant(tenantId: string): ConnectedMailbox[] {
+      return tenantFilter(db.list("connectedMailboxes"), tenantId);
+    },
+    get(id: string): ConnectedMailbox | undefined {
+      return db.list("connectedMailboxes").find((mailbox) => mailbox.id === id);
+    },
+    staff(userId: string): ConnectedMailbox | undefined {
+      return db
+        .list("connectedMailboxes")
+        .find((mailbox) => mailbox.ownerType === "staff" && mailbox.userId === userId);
+    },
+    agencyMarketing(tenantId: string): ConnectedMailbox | undefined {
+      return db
+        .list("connectedMailboxes")
+        .find(
+          (mailbox) =>
+            mailbox.tenantId === tenantId &&
+            mailbox.ownerType === "agency_marketing" &&
+            mailbox.status !== "disabled"
+        );
+    },
+    resolveStaffSender(userId: string) {
+      return mailboxForUser(userId);
+    },
+    resolveAgencyMarketingSender(tenantId: string) {
+      return agencyMarketingSender(tenantId);
+    },
+    connectStaffDemo(userId: string, byUserId?: string): ConnectedMailbox | null {
+      const user = db.list("users").find((row) => row.id === userId);
+      return user ? upsertDemoStaffMailbox(user, byUserId) : null;
+    },
+    connectAgencyMarketingDemo(tenantId: string, byUserId?: string): ConnectedMailbox | null {
+      const agency = db.list("agencies").find((row) => row.id === tenantId);
+      return agency ? upsertDemoAgencyMarketingMailbox(agency, byUserId) : null;
+    },
+    setStatus(id: string, status: ConnectedMailboxStatus, byUserId?: string): ConnectedMailbox | null {
+      return db.update("connectedMailboxes", id, {
+        status,
+        updatedAt: nowIso(),
+        updatedById: byUserId,
+      });
+    },
+    productionRequirements(mailbox: ConnectedMailbox | undefined): string[] {
+      if (!mailbox) {
+        return ["Connect the mailbox through Google OAuth, Microsoft OAuth, or an approved IMAP/SMTP adapter."];
+      }
+      if (mailbox.authMode === "demo") {
+        return [
+          "Replace the demo connection with provider OAuth before production send/sync.",
+          "Store refresh tokens in the encrypted backend token vault.",
+          "Enable provider webhooks or scheduled sync for inbound and sent-mail mirroring.",
+        ];
+      }
+      const missing: string[] = [];
+      if (!mailbox.tokenVaultRef) missing.push("Add an encrypted token vault reference.");
+      if (!mailbox.scopes.includes("send")) missing.push("Grant send permission.");
+      if (!mailbox.scopes.includes("read") && !mailbox.scopes.includes("sync")) {
+        missing.push("Grant read or sync permission for mailbox mirroring.");
+      }
+      if (mailbox.status !== "connected") missing.push("Complete provider authorization.");
+      return missing;
     },
   },
 
@@ -837,13 +5860,26 @@ export const api = {
     ): CustomerProfile[] {
       const all = this.list(tenantId, opts);
       if (!viewer) return [];
-      if (viewer.role === "manager" || viewer.role === "master_admin") return all;
-      if (viewer.role === "agent") {
-        return all.filter(
-          (c) =>
-            c.assignedAgentId === viewer.id ||
-            (c.additionalAgentIds ?? []).includes(viewer.id)
-        );
+      if (viewer.role === "manager" || viewer.role === "master_admin")
+        return all;
+      if (viewer.role === "agent" || viewer.role === "csr") {
+        return all.filter((c) => contactIsOwnedBy(c, viewer.id));
+      }
+      return [];
+    },
+    // Alert-scoped list. Managers can still access the full tenant
+    // through listVisible(), but notification/badge surfaces should
+    // only light up for clients assigned to that staff member.
+    listOwned(
+      tenantId: string,
+      viewer: { id: string; role: Role } | undefined,
+      opts?: { includeArchived?: boolean }
+    ): CustomerProfile[] {
+      const all = this.list(tenantId, opts);
+      if (!viewer) return [];
+      if (viewer.role === "master_admin") return all;
+      if (viewer.role === "agent" || viewer.role === "manager" || viewer.role === "csr") {
+        return all.filter((c) => contactIsOwnedBy(c, viewer.id));
       }
       return [];
     },
@@ -855,14 +5891,15 @@ export const api = {
       viewer: { id: string; role: Role } | undefined
     ): boolean {
       if (!customer || !viewer) return false;
-      if (viewer.role === "manager" || viewer.role === "master_admin") return true;
-      if (viewer.role === "agent") {
-        return (
-          customer.assignedAgentId === viewer.id ||
-          (customer.additionalAgentIds ?? []).includes(viewer.id)
-        );
+      if (viewer.role === "manager" || viewer.role === "master_admin")
+        return true;
+      if (viewer.role === "agent" || viewer.role === "csr") {
+        return contactIsOwnedBy(customer, viewer.id);
       }
       return false;
+    },
+    fullHistory(customerId: string): StatusEvent[] {
+      return comprehensiveClientHistory(customerId);
     },
     listArchived(tenantId: string): CustomerProfile[] {
       return tenantFilter(db.list("customers"), tenantId).filter((c) => c.archived);
@@ -873,17 +5910,62 @@ export const api = {
     byUserId(userId: string): CustomerProfile | undefined {
       return db.list("customers").find((c) => c.userId === userId);
     },
-    create(input: Omit<CustomerProfile, "id" | "createdAt">): CustomerProfile {
+    create(
+      input: Omit<CustomerProfile, "id" | "createdAt"> & { skipAutoRoute?: boolean }
+    ): CustomerProfile {
+      const { skipAutoRoute, ...customerInput } = input;
+      const autoAgent = !customerInput.assignedAgentId && !skipAutoRoute
+        ? chooseAutoRouteAgent(customerInput.tenantId, contactLine(customerInput))
+        : undefined;
       const row: CustomerProfile = {
-        ...input,
+        ...customerInput,
+        assignedAgentId: customerInput.assignedAgentId ?? autoAgent?.id,
         id: uid("customer"),
         createdAt: nowIso(),
       };
       db.insert("customers", row);
+      if (autoAgent) {
+        spawnRoutingTask(row, autoAgent.id, "ai");
+        logContactRoutingEvent({
+          tenantId: row.tenantId,
+          kind: "client",
+          contactId: row.id,
+          contactName: row.name,
+          before: { ...row, assignedAgentId: undefined, additionalAgentIds: undefined, assignedCsrId: undefined },
+          after: row,
+          byUserId: "ai",
+        });
+      }
       return row;
     },
     update(id: string, patch: Partial<CustomerProfile>) {
-      return db.update("customers", id, patch);
+      const before = db.list("customers").find((c) => c.id === id);
+      if (!before) return undefined;
+      const shouldAutoRoute =
+        !before.assignedAgentId &&
+        !patch.assignedAgentId &&
+        !!patch.lineOfBusiness;
+      const autoAgent = shouldAutoRoute
+        ? chooseAutoRouteAgent(before.tenantId, contactLine(patch))
+        : undefined;
+      const nextPatch: Partial<CustomerProfile> = { ...patch };
+      if (patch.assignedAgentId || autoAgent) {
+        nextPatch.assignedAgentId = patch.assignedAgentId ?? autoAgent?.id;
+      }
+      const updated = db.update("customers", id, nextPatch);
+      if (updated && autoAgent) {
+        spawnRoutingTask(updated, autoAgent.id, "ai");
+        logContactRoutingEvent({
+          tenantId: updated.tenantId,
+          kind: "client",
+          contactId: updated.id,
+          contactName: updated.name,
+          before,
+          after: updated,
+          byUserId: "ai",
+        });
+      }
+      return updated;
     },
     // Routing transition for an existing client. Mirrors
     // prospects.assignAgent: when a client goes from unassigned →
@@ -897,6 +5979,17 @@ export const api = {
       if (updated && !before?.assignedAgentId && agentId) {
         spawnRoutingTask(updated, agentId, byUserId);
       }
+      if (before && updated) {
+        logContactRoutingEvent({
+          tenantId: updated.tenantId,
+          kind: "client",
+          contactId: updated.id,
+          contactName: updated.name,
+          before,
+          after: updated,
+          byUserId,
+        });
+      }
       return updated;
     },
     // Multi-agent variant. The first id in the list becomes the
@@ -904,22 +5997,52 @@ export const api = {
     // newly-routed-to agent gets a Task spawned on their queue.
     // Used by the manager Routing card when the manager checks
     // multiple agents in the assignment modal.
-    assignAgents(id: string, agentIds: string[], byUserId?: string) {
+    assignAgents(
+      id: string,
+      agentIds: string[],
+      byUserId?: string,
+      options?: { csrId?: string | null; csrIds?: string[] }
+    ) {
       if (agentIds.length === 0) return null;
       const before = db.list("customers").find((c) => c.id === id);
-      const previouslyAssigned = new Set([
-        before?.assignedAgentId,
-        ...(before?.additionalAgentIds ?? []),
-      ].filter((v): v is string => !!v));
-      const [primary, ...rest] = agentIds;
+      const selectedUsers = agentIds
+        .map((aid) => db.list("users").find((u) => u.id === aid && u.tenantId === before?.tenantId))
+        .filter((u): u is User => !!u && isRoutableStaffRole(u.role));
+      if (!before || selectedUsers.length === 0) return null;
+      const previouslyAssigned = new Set(contactOwnerIds(before));
+      const agentUsers = selectedUsers.filter((u) => u.role === "agent" || u.role === "manager");
+      if (agentUsers.length === 0) return null;
+      const [primary, ...rest] = agentUsers.map((u) => u.id);
+      const requestedCsrIds = options
+        ? options.csrIds ?? (options.csrId ? [options.csrId] : [])
+        : [before.assignedCsrId, ...(before.additionalCsrIds ?? [])].filter(Boolean);
+      const csrIds = Array.from(
+        new Set(
+          requestedCsrIds
+            .map((cid) => db.list("users").find((u) => u.id === cid && u.tenantId === before.tenantId && u.role === "csr")?.id)
+            .filter((cid): cid is string => !!cid)
+        )
+      );
+      const [csrId, ...additionalCsrIds] = csrIds;
       const updated = db.update("customers", id, {
-        assignedAgentId: primary,
+        assignedAgentId: primary ?? before.assignedAgentId,
         additionalAgentIds: rest.length > 0 ? rest : undefined,
+        assignedCsrId: csrId,
+        additionalCsrIds: additionalCsrIds.length > 0 ? additionalCsrIds : undefined,
       });
       if (updated) {
-        agentIds
-          .filter((aid) => !previouslyAssigned.has(aid))
+        [...agentUsers.map((u) => u.id), ...csrIds]
+          .filter((aid): aid is string => !!aid && !previouslyAssigned.has(aid))
           .forEach((aid) => spawnRoutingTask(updated, aid, byUserId));
+        logContactRoutingEvent({
+          tenantId: updated.tenantId,
+          kind: "client",
+          contactId: updated.id,
+          contactName: updated.name,
+          before,
+          after: updated,
+          byUserId,
+        });
       }
       return updated;
     },
@@ -960,6 +6083,15 @@ export const api = {
     listByTenant(tenantId: string): QuoteRequest[] {
       return tenantFilter(db.list("quoteRequests"), tenantId);
     },
+    listIncompleteWorkflows(tenantId: string): QuoteRequest[] {
+      return this.listByTenant(tenantId)
+        .filter((q) => q.status === "quote_started")
+        .sort((a, b) => {
+          const at = a.lastTouchedAt ?? a.createdAt;
+          const bt = b.lastTouchedAt ?? b.createdAt;
+          return at < bt ? 1 : -1;
+        });
+    },
     get(id: string): QuoteRequest | undefined {
       return db.list("quoteRequests").find((q) => q.id === id);
     },
@@ -971,12 +6103,228 @@ export const api = {
     update(id: string, patch: Partial<QuoteRequest>) {
       return db.update("quoteRequests", id, patch);
     },
+    findOpenIncomplete(input: {
+      tenantId: string;
+      customerId: string;
+      categoryId?: string;
+      assetType?: AssetType;
+    }): QuoteRequest | undefined {
+      return db
+        .list("quoteRequests")
+        .find(
+          (q) =>
+            q.tenantId === input.tenantId &&
+            q.customerId === input.customerId &&
+            q.status === "quote_started" &&
+            (input.categoryId
+              ? q.categoryId === input.categoryId
+              : input.assetType
+              ? q.assetType === input.assetType
+              : true)
+        );
+    },
+    recordIncompleteWorkflow(input: {
+      tenantId: string;
+      customerId: string;
+      assetType: AssetType;
+      lineOfBusiness?: "personal" | "commercial";
+      categoryId?: string;
+      categoryLabel?: string;
+      contactName: string;
+      contactEmail?: string;
+      contactPhone?: string;
+      assetIdentifier?: string;
+      parsedData?: Record<string, unknown>;
+      currentStep: string;
+      completionPercent: number;
+      assignedAgentId?: string;
+      createdById?: string;
+    }): QuoteRequest {
+      const touchedAt = nowIso();
+      const customer = db.list("customers").find((c) => c.id === input.customerId);
+      const contactName = input.contactName.trim() || customer?.name || "Customer";
+      const firstName = contactName.split(/\s+/)[0] || "there";
+      const categoryLabel = input.categoryLabel ?? quoteStatusLabel("quote_started");
+      const lineLabel =
+        input.lineOfBusiness === "commercial" ? "commercial" : "personal";
+      const assetLabel = api.helpers.assetTypeLabel(input.assetType);
+      const stoppedAt = input.currentStep.toLowerCase();
+      const title = `${contactName} stopped mid-quote: ${categoryLabel}`;
+      const description = `${contactName} started a ${categoryLabel} ${lineLabel}-lines quote but stopped at ${stoppedAt}. Follow up while the request is fresh.`;
+      const subject = `Finish your ${categoryLabel.toLowerCase()} quote`;
+      const body = [
+        `Hi ${firstName},`,
+        "",
+        `I saw you started your ${categoryLabel.toLowerCase()} quote and stopped around the ${stoppedAt} section. I can help you finish it from here if anything was unclear.`,
+        "",
+        input.assetIdentifier
+          ? `I have the ${assetLabel.toLowerCase()} reference you entered as: ${input.assetIdentifier}.`
+          : `Once you send the missing detail, I can move the quote forward with the right carrier options.`,
+        "",
+        `Reply here or reopen the quote whenever you're ready and we'll keep it moving.`,
+      ].join("\n");
+
+      const parsedData: Record<string, unknown> = {
+        ...(input.parsedData ?? {}),
+        lineOfBusiness: input.lineOfBusiness,
+        categoryId: input.categoryId,
+        categoryLabel,
+        contactName,
+        contactEmail: input.contactEmail,
+        contactPhone: input.contactPhone,
+        assetIdentifier: input.assetIdentifier,
+        currentStep: input.currentStep,
+        completionPercent: Math.max(0, Math.min(100, input.completionPercent)),
+      };
+      const open = this.findOpenIncomplete({
+        tenantId: input.tenantId,
+        customerId: input.customerId,
+        categoryId: input.categoryId,
+        assetType: input.assetType,
+      });
+
+      let taskId = open?.recoveryTaskId;
+      if (taskId) {
+        db.update("tasks", taskId, {
+          title,
+          description,
+          aiSummary: description,
+          aiReplySubject: subject,
+          aiReplyBody: body,
+          assignedToId: input.assignedAgentId,
+          severityReason: `Customer quote is ${Math.max(
+            0,
+            Math.min(100, input.completionPercent)
+          )}% complete and stopped at ${input.currentStep}.`,
+        });
+      } else {
+        const task: Task = {
+          id: uid("task"),
+          tenantId: input.tenantId,
+          title,
+          description,
+          customerId: input.customerId,
+          source: "ai_notification",
+          status: "open",
+          topic: "policy_edit_request",
+          severity: "warning",
+          severityReason: `Customer quote is ${Math.max(
+            0,
+            Math.min(100, input.completionPercent)
+          )}% complete and stopped at ${input.currentStep}.`,
+          aiSummary: description,
+          aiReplySubject: subject,
+          aiReplyBody: body,
+          assignedToId: input.assignedAgentId,
+          createdById: input.createdById ?? "ai",
+          expressQuoteFollowUp: true,
+          createdAt: touchedAt,
+        };
+        db.insert("tasks", task);
+        taskId = task.id;
+        logTaskAudit({
+          tenantId: input.tenantId,
+          actorId: input.createdById ?? "ai",
+          action: "task.created_from_incomplete_quote",
+          taskId,
+          metadata: {
+            customerId: input.customerId,
+            categoryId: input.categoryId,
+            currentStep: input.currentStep,
+          },
+        });
+      }
+
+      const patch: Partial<QuoteRequest> = {
+        tenantId: input.tenantId,
+        customerId: input.customerId,
+        assetType: input.assetType,
+        lineOfBusiness: input.lineOfBusiness,
+        categoryId: input.categoryId,
+        categoryLabel,
+        rawDescription: `Incomplete customer quote (${lineLabel} lines): ${categoryLabel}. Stopped at ${input.currentStep}.`,
+        parsedData,
+        missingDocuments: [],
+        status: "quote_started",
+        assignedAgentId: input.assignedAgentId,
+        currentStep: input.currentStep,
+        completionPercent: Math.max(0, Math.min(100, input.completionPercent)),
+        lastTouchedAt: touchedAt,
+        abandonedAt: touchedAt,
+        recoveryTaskId: taskId,
+        aiReplySubject: subject,
+        aiReplyBody: body,
+      };
+
+      if (open) {
+        const updated = db.update("quoteRequests", open.id, patch);
+        return updated ?? open;
+      }
+
+      const row: QuoteRequest = {
+        ...(patch as Omit<QuoteRequest, "id" | "createdAt">),
+        id: uid("quote"),
+        createdAt: touchedAt,
+      };
+      db.insert("quoteRequests", row);
+      db.insert("statusEvents", {
+        id: uid("se"),
+        tenantId: input.tenantId,
+        source: "system",
+        message: `${contactName} started a ${categoryLabel} quote and stopped at ${input.currentStep}.`,
+        visibility: "internal",
+        customerId: input.customerId,
+        createdAt: touchedAt,
+      });
+      return row;
+    },
+    submitCustomerQuote(input: Omit<QuoteRequest, "id" | "createdAt">): QuoteRequest {
+      const existing = this.findOpenIncomplete({
+        tenantId: input.tenantId,
+        customerId: input.customerId,
+        categoryId: input.categoryId,
+        assetType: input.assetType,
+      });
+      if (!existing) return this.create({ ...input, submittedAt: nowIso() });
+
+      if (existing.recoveryTaskId) {
+        db.update("tasks", existing.recoveryTaskId, {
+          status: "resolved",
+          completedAt: nowIso(),
+          completedById: "system",
+        });
+        logTaskAudit({
+          tenantId: input.tenantId,
+          actorId: "system",
+          action: "task.resolved_by_quote_submission",
+          taskId: existing.recoveryTaskId,
+          metadata: { quoteRequestId: existing.id },
+        });
+      }
+      const updated = db.update("quoteRequests", existing.id, {
+        ...input,
+        status: "submitted_to_agent",
+        currentStep: "submitted to agent",
+        completionPercent: 100,
+        lastTouchedAt: nowIso(),
+        submittedAt: nowIso(),
+      });
+      return updated ?? existing;
+    },
   },
 
   // ------------ Policies ------------
   policies: {
     listByCustomer(customerId: string): Policy[] {
       return db.list("policies").filter((p) => p.customerId === customerId);
+    },
+    listActiveByCustomer(customerId: string): Policy[] {
+      return this.listByCustomer(customerId).filter((p) => p.status !== "closed");
+    },
+    listPreviousByCustomer(customerId: string): Policy[] {
+      return this.listByCustomer(customerId)
+        .filter((p) => p.status === "closed")
+        .sort((a, b) => ((a.closedAt ?? a.createdAt) < (b.closedAt ?? b.createdAt) ? 1 : -1));
     },
     listByTenant(tenantId: string): Policy[] {
       return tenantFilter(db.list("policies"), tenantId);
@@ -1016,10 +6364,126 @@ export const api = {
           });
         }
       }
+      queueCarrierRunnerPolicyPlaced(row, input.agentId);
+      ensureCarrierRunnerRenewalJob(row);
       return row;
     },
     update(id: string, patch: Partial<Policy>) {
-      return db.update("policies", id, patch);
+      const updated = db.update("policies", id, patch);
+      if (updated) {
+        const billingTouched = Object.keys(patch).some((key) =>
+          CARRIER_DOWNLOAD_POLICY_FIELDS.has(key as keyof Policy) &&
+          String(key).toLowerCase().includes("billing")
+        ) || "paymentFrequency" in patch || "nextPaymentDueDate" in patch || "nextPaymentAmount" in patch;
+        if (billingTouched) ensureBillingIssueTask(updated, patch.agentId ?? updated.agentId ?? "ai");
+        if (patch.status === "bound" || patch.status === "renewed") {
+          queueCarrierRunnerPolicyPlaced(updated, patch.agentId ?? updated.agentId);
+        }
+        if ("renewalDate" in patch || "renewalStatus" in patch || patch.status === "renewal_upcoming") {
+          ensureCarrierRunnerRenewalJob(updated);
+        }
+      }
+      return updated;
+    },
+    close(id: string, actorId?: string): Policy | undefined {
+      const before = this.get(id);
+      if (!before) return undefined;
+      if (before.status === "closed") return before;
+      const updated = db.update("policies", id, {
+        status: "closed",
+        closedAt: nowIso(),
+        closedById: actorId ?? "system",
+      });
+      if (updated) logPolicyMovedToPrevious(updated, actorId ?? "system");
+      return updated ?? undefined;
+    },
+    retrieveFromCarrier(input: {
+      tenantId: string;
+      customerId: string;
+      createdById?: string;
+      policyIds?: string[];
+    }): { checked: number; updated: number; jobIds: string[]; summary: string } {
+      const allow = new Set(input.policyIds ?? []);
+      const targetPolicies = this.listActiveByCustomer(input.customerId).filter(
+        (policy) =>
+          policy.tenantId === input.tenantId &&
+          (allow.size === 0 || allow.has(policy.id)) &&
+          policyAllowedForCarrierRunner(policy)
+      );
+      let checked = 0;
+      let updated = 0;
+      const jobIds: string[] = [];
+      targetPolicies.forEach((policy) => {
+        const job = createCarrierRunnerJobOnce({
+          tenantId: input.tenantId,
+          trigger: "policy_check",
+          policy,
+          createdById: input.createdById ?? policy.agentId ?? "ai",
+          reason: `Retrieve current carrier policy record for ${policyRef(policy)} and apply any policy, billing, renewal, document, or claim updates found on the carrier portal.`,
+        });
+        if (!job) return;
+        checked += 1;
+        jobIds.push(job.id);
+        const started = db.update("carrierRunnerJobs", job.id, {
+          status: "running",
+          startedAt: job.startedAt ?? nowIso(),
+          startedById: input.createdById ?? "ai",
+          lastAttemptAt: nowIso(),
+          attempts: job.attempts + 1,
+        });
+        const refreshed = db.update("policies", policy.id, {
+          billingLastVerifiedAt: nowIso(),
+        });
+        if (refreshed) updated += 1;
+        const completed = db.update("carrierRunnerJobs", job.id, {
+          status: "completed",
+          completedAt: nowIso(),
+          completedById: input.createdById ?? "ai",
+          detectedOutcome: "no_change",
+          resultSummary: "Carrier policy record was retrieved and current policy data is in the system.",
+          errorMessage: undefined,
+        });
+        const finalJob = completed ?? started ?? job;
+        logCarrierRunnerTimeline(
+          finalJob,
+          "Carrier policy record retrieved",
+          "Current carrier policy data is in the system.",
+          input.createdById ?? "ai"
+        );
+        const carrierLabel = carrierName(policy.carrierId);
+        const message = `${carrierLabel} refreshed ${policyRef(policy)}. Current policy data is in the system.`;
+        db.insert("statusEvents", {
+          id: uid("se"),
+          tenantId: policy.tenantId,
+          source: "system",
+          message,
+          visibility: "internal",
+          customerId: policy.customerId,
+          assetId: policy.assetId,
+          policyId: policy.id,
+          createdAt: nowIso(),
+          createdById: input.createdById ?? "system",
+        });
+        db.insert("notes", {
+          id: uid("note"),
+          tenantId: policy.tenantId,
+          authorId: input.createdById ?? "system",
+          customerId: policy.customerId,
+          policyId: policy.id,
+          body: message,
+          visibility: "internal",
+          createdAt: nowIso(),
+        });
+      });
+      return {
+        checked,
+        updated,
+        jobIds,
+        summary:
+          checked === 0
+            ? "No active carrier-linked policies were available to retrieve."
+            : `Retrieved ${checked} polic${checked === 1 ? "y" : "ies"} from carrier portals.`,
+      };
     },
     setStatus(id: string, status: PolicyStatus) {
       return db.update("policies", id, { status });
@@ -1259,6 +6723,249 @@ export const api = {
     },
   },
 
+  // ------------ Staff accounting / timesheets ------------
+  accountingSettings: {
+    get(tenantId: string): AccountingSettings {
+      const existing = db.list("accountingSettings").find((settings) => settings.tenantId === tenantId);
+      if (existing) {
+        if (!Array.isArray(existing.timesheetRecipientIds)) {
+          const updated = db.update("accountingSettings", existing.id, {
+            timesheetRecipientIds: defaultTimesheetRecipientIds(tenantId),
+            updatedAt: nowIso(),
+          });
+          return updated ?? { ...existing, timesheetRecipientIds: defaultTimesheetRecipientIds(tenantId) };
+        }
+        return existing;
+      }
+      const row: AccountingSettings = {
+        id: uid("acct_settings"),
+        tenantId,
+        ...DEFAULT_TIMESHEET_SETTINGS,
+        timesheetRecipientIds: defaultTimesheetRecipientIds(tenantId),
+        updatedAt: nowIso(),
+      };
+      db.insert("accountingSettings", row);
+      return row;
+    },
+    update(
+      tenantId: string,
+      patch: Partial<
+        Pick<
+          AccountingSettings,
+          "timesheetFrequency" | "dueWeekday" | "dueDayOfMonth" | "reminderTime" | "timesheetRecipientIds"
+        >
+      >,
+      byUserId?: string
+    ): AccountingSettings {
+      const current = this.get(tenantId);
+      const updated = db.update("accountingSettings", current.id, {
+        ...patch,
+        timesheetRecipientIds: Array.isArray(patch.timesheetRecipientIds)
+          ? Array.from(new Set(patch.timesheetRecipientIds))
+          : current.timesheetRecipientIds,
+        updatedAt: nowIso(),
+        updatedById: byUserId,
+      });
+      const next = updated ?? current;
+      this.notifyTimesheetRecipients(tenantId, byUserId);
+      return next;
+    },
+    notifyTimesheetRecipients(tenantId: string, byUserId?: string): AiNotification[] {
+      const settings = this.get(tenantId);
+      const summary = timesheetNotificationSummary(settings);
+      const recipients = Array.from(new Set(settings.timesheetRecipientIds)).filter((id) => {
+        const user = db.list("users").find((u) => u.id === id);
+        return !!user && user.tenantId === tenantId && user.active;
+      });
+      return recipients.map((assignedToId) => {
+        const existing = db
+          .list("aiNotifications")
+          .find(
+            (notification) =>
+              notification.tenantId === tenantId &&
+              notification.kind === "timesheet_due" &&
+              notification.assignedToId === assignedToId &&
+              !notification.acknowledgedAt &&
+              notification.summary === summary
+          );
+        if (existing) return existing;
+        const row: AiNotification = {
+          id: uid("ain"),
+          tenantId,
+          kind: "timesheet_due",
+          title: "Timesheet due",
+          summary,
+          assignedToId,
+          severity: "info",
+          topic: "other",
+          createdAt: nowIso(),
+        };
+        db.insert("aiNotifications", row);
+        return row;
+      });
+    },
+    currentPeriod(tenantId: string) {
+      return currentTimesheetPeriod(this.get(tenantId));
+    },
+  },
+
+  timesheets: {
+    listByTenant(tenantId: string): Timesheet[] {
+      return tenantFilter(db.list("timesheets"), tenantId).sort((a, b) =>
+        (a.submittedAt ?? a.updatedAt) < (b.submittedAt ?? b.updatedAt) ? 1 : -1
+      );
+    },
+    listByUser(tenantId: string, userId: string): Timesheet[] {
+      return this.listByTenant(tenantId).filter((timesheet) => timesheet.userId === userId);
+    },
+    get(id: string): Timesheet | undefined {
+      return db.list("timesheets").find((timesheet) => timesheet.id === id);
+    },
+    ensureCurrent(tenantId: string, userId: string): Timesheet {
+      const settings = api.accountingSettings.get(tenantId);
+      const period = currentTimesheetPeriod(settings);
+      const existing = db
+        .list("timesheets")
+        .find(
+          (timesheet) =>
+            timesheet.tenantId === tenantId &&
+            timesheet.userId === userId &&
+            timesheet.periodStart === period.periodStart &&
+            timesheet.periodEnd === period.periodEnd
+        );
+      if (existing) return existing;
+      const now = nowIso();
+      const row: Timesheet = {
+        id: uid("timesheet"),
+        tenantId,
+        userId,
+        ...period,
+        status: "draft",
+        entries: [],
+        totalHours: 0,
+        createdAt: now,
+        updatedAt: now,
+      };
+      db.insert("timesheets", row);
+      return row;
+    },
+    saveDraft(
+      id: string,
+      input: {
+        entries: TimesheetEntry[];
+        notes?: string;
+      }
+    ): Timesheet | null {
+      const existing = this.get(id);
+      if (!existing || existing.status === "approved") return existing ?? null;
+      return db.update("timesheets", id, {
+        entries: input.entries,
+        notes: input.notes,
+        totalHours: totalTimesheetHours(input.entries),
+        status: existing.status === "submitted" ? "submitted" : "draft",
+        updatedAt: nowIso(),
+      });
+    },
+    submit(
+      id: string,
+      input: {
+        entries: TimesheetEntry[];
+        notes?: string;
+      }
+    ): Timesheet | null {
+      const existing = this.get(id);
+      if (!existing || existing.status === "approved") return existing ?? null;
+      const submittedAt = nowIso();
+      return db.update("timesheets", id, {
+        entries: input.entries,
+        notes: input.notes,
+        totalHours: totalTimesheetHours(input.entries),
+        status: "submitted",
+        submittedAt,
+        updatedAt: submittedAt,
+      });
+    },
+    review(id: string, status: Extract<TimesheetStatus, "approved" | "needs_revision">, reviewedById: string, managerNotes?: string) {
+      const reviewedAt = nowIso();
+      return db.update("timesheets", id, {
+        status,
+        reviewedAt,
+        reviewedById,
+        managerNotes,
+        updatedAt: reviewedAt,
+      });
+    },
+    needsSubmissionToday(tenantId: string, userId: string): boolean {
+      const settings = api.accountingSettings.get(tenantId);
+      const period = currentTimesheetPeriod(settings);
+      if (!isDueTodayOrPast(period.dueDate)) return false;
+      const sheet = db
+        .list("timesheets")
+        .find(
+          (timesheet) =>
+            timesheet.tenantId === tenantId &&
+            timesheet.userId === userId &&
+            timesheet.periodStart === period.periodStart &&
+            timesheet.periodEnd === period.periodEnd
+        );
+      return !sheet || sheet.status === "draft" || sheet.status === "needs_revision";
+    },
+    pendingManagerCount(tenantId: string): number {
+      return this.listByTenant(tenantId).filter((timesheet) => timesheet.status === "submitted").length;
+    },
+  },
+
+  // ------------ HR submissions ------------
+  hr: {
+    listByTenant(tenantId: string): HrSubmission[] {
+      return tenantFilter(db.list("hrSubmissions"), tenantId).sort((a, b) =>
+        a.submittedAt < b.submittedAt ? 1 : -1
+      );
+    },
+    listForUser(tenantId: string, userId: string): HrSubmission[] {
+      return this.listByTenant(tenantId).filter((submission) => submission.submittedById === userId);
+    },
+    get(id: string): HrSubmission | undefined {
+      return db.list("hrSubmissions").find((submission) => submission.id === id);
+    },
+    create(input: {
+      tenantId: string;
+      kind: HrSubmissionKind;
+      anonymous: boolean;
+      submittedById?: string;
+      coworkerName?: string;
+      subject: string;
+      message: string;
+    }): HrSubmission {
+      const submittedAt = nowIso();
+      const row: HrSubmission = {
+        id: uid("hr"),
+        tenantId: input.tenantId,
+        kind: input.kind,
+        anonymous: input.anonymous,
+        submittedById: input.anonymous ? undefined : input.submittedById,
+        coworkerName: input.kind === "complaint" ? input.coworkerName?.trim() : undefined,
+        subject: input.subject.trim(),
+        message: input.message.trim(),
+        status: "new",
+        submittedAt,
+      };
+      db.insert("hrSubmissions", row);
+      return row;
+    },
+    updateStatus(id: string, status: HrSubmissionStatus, reviewedById: string, managerNotes?: string) {
+      return db.update("hrSubmissions", id, {
+        status,
+        reviewedById,
+        reviewedAt: nowIso(),
+        managerNotes,
+      });
+    },
+    newCount(tenantId: string): number {
+      return this.listByTenant(tenantId).filter((submission) => submission.status === "new").length;
+    },
+  },
+
   // ------------ Prospects ------------
   prospects: {
     listByTenant(
@@ -1277,15 +6984,75 @@ export const api = {
         return true;
       });
     },
+    listVisible(
+      tenantId: string,
+      viewer: { id: string; role: Role } | undefined,
+      opts?: { includeArchived?: boolean; includeConverted?: boolean }
+    ): Prospect[] {
+      const all = this.listByTenant(tenantId, opts);
+      if (!viewer) return [];
+      if (viewer.role === "manager" || viewer.role === "master_admin")
+        return all;
+      if (viewer.role === "agent" || viewer.role === "csr") {
+        return all.filter((p) => contactIsOwnedBy(p, viewer.id));
+      }
+      return [];
+    },
+    listOwned(
+      tenantId: string,
+      viewer: { id: string; role: Role } | undefined,
+      opts?: { includeArchived?: boolean; includeConverted?: boolean }
+    ): Prospect[] {
+      const all = this.listByTenant(tenantId, opts);
+      if (!viewer) return [];
+      if (viewer.role === "master_admin") return all;
+      if (viewer.role === "agent" || viewer.role === "manager" || viewer.role === "csr") {
+        return all.filter((p) => contactIsOwnedBy(p, viewer.id));
+      }
+      return [];
+    },
+    canSee(
+      prospect: Prospect | undefined | null,
+      viewer: { id: string; role: Role } | undefined
+    ): boolean {
+      if (!prospect || !viewer) return false;
+      if (viewer.role === "manager" || viewer.role === "master_admin")
+        return true;
+      if (viewer.role === "agent" || viewer.role === "csr") {
+        return contactIsOwnedBy(prospect, viewer.id);
+      }
+      return false;
+    },
     listArchived(tenantId: string): Prospect[] {
       return tenantFilter(db.list("prospects"), tenantId).filter((p) => p.archived);
     },
     get(id: string): Prospect | undefined {
       return db.list("prospects").find((p) => p.id === id);
     },
-    create(input: Omit<Prospect, "id" | "createdAt">): Prospect {
-      const row: Prospect = { ...input, id: uid("prospect"), createdAt: nowIso() };
+    create(input: Omit<Prospect, "id" | "createdAt"> & { skipAutoRoute?: boolean }): Prospect {
+      const { skipAutoRoute, ...prospectInput } = input;
+      const autoAgent = !prospectInput.assignedAgentId && !skipAutoRoute
+        ? chooseAutoRouteAgent(prospectInput.tenantId, contactLine(prospectInput))
+        : undefined;
+      const row: Prospect = {
+        ...prospectInput,
+        assignedAgentId: prospectInput.assignedAgentId ?? autoAgent?.id,
+        id: uid("prospect"),
+        createdAt: nowIso(),
+      };
       db.insert("prospects", row);
+      if (autoAgent) {
+        spawnProspectRoutingTask(row, autoAgent.id, "ai");
+        logContactRoutingEvent({
+          tenantId: row.tenantId,
+          kind: "prospect",
+          contactId: row.id,
+          contactName: row.name,
+          before: { ...row, assignedAgentId: undefined, additionalAgentIds: undefined, assignedCsrId: undefined },
+          after: row,
+          byUserId: "ai",
+        });
+      }
       // Auto-send the intake email if the tenant's marketing
       // config says to. Manager turns this off (or changes the
       // style + attachments) under AI marketing → Marketing
@@ -1332,28 +7099,68 @@ export const api = {
       if (updated && !before?.assignedAgentId && agentId) {
         spawnProspectRoutingTask(updated, agentId, byUserId);
       }
+      if (before && updated) {
+        logContactRoutingEvent({
+          tenantId: updated.tenantId,
+          kind: "prospect",
+          contactId: updated.id,
+          contactName: updated.name,
+          before,
+          after: updated,
+          byUserId,
+        });
+      }
       return updated;
     },
     // Multi-agent variant. First id becomes the primary owner,
     // rest go into additionalAgentIds. Every newly-routed agent
     // gets a Task spawned on their queue.
-    assignAgents(id: string, agentIds: string[], byUserId?: string) {
+    assignAgents(
+      id: string,
+      agentIds: string[],
+      byUserId?: string,
+      options?: { csrId?: string | null; csrIds?: string[] }
+    ) {
       if (agentIds.length === 0) return null;
       const before = db.list("prospects").find((p) => p.id === id);
-      const previouslyAssigned = new Set(
-        [before?.assignedAgentId, ...(before?.additionalAgentIds ?? [])].filter(
-          (v): v is string => !!v
+      const selectedUsers = agentIds
+        .map((aid) => db.list("users").find((u) => u.id === aid && u.tenantId === before?.tenantId))
+        .filter((u): u is User => !!u && isRoutableStaffRole(u.role));
+      if (!before || selectedUsers.length === 0) return null;
+      const previouslyAssigned = new Set(contactOwnerIds(before));
+      const agentUsers = selectedUsers.filter((u) => u.role === "agent" || u.role === "manager");
+      if (agentUsers.length === 0) return null;
+      const [primary, ...rest] = agentUsers.map((u) => u.id);
+      const requestedCsrIds = options
+        ? options.csrIds ?? (options.csrId ? [options.csrId] : [])
+        : [before.assignedCsrId, ...(before.additionalCsrIds ?? [])].filter(Boolean);
+      const csrIds = Array.from(
+        new Set(
+          requestedCsrIds
+            .map((cid) => db.list("users").find((u) => u.id === cid && u.tenantId === before.tenantId && u.role === "csr")?.id)
+            .filter((cid): cid is string => !!cid)
         )
       );
-      const [primary, ...rest] = agentIds;
+      const [csrId, ...additionalCsrIds] = csrIds;
       const updated = db.update("prospects", id, {
-        assignedAgentId: primary,
+        assignedAgentId: primary ?? before.assignedAgentId,
         additionalAgentIds: rest.length > 0 ? rest : undefined,
+        assignedCsrId: csrId,
+        additionalCsrIds: additionalCsrIds.length > 0 ? additionalCsrIds : undefined,
       });
       if (updated) {
-        agentIds
-          .filter((aid) => !previouslyAssigned.has(aid))
+        [...agentUsers.map((u) => u.id), ...csrIds]
+          .filter((aid): aid is string => !!aid && !previouslyAssigned.has(aid))
           .forEach((aid) => spawnProspectRoutingTask(updated, aid, byUserId));
+        logContactRoutingEvent({
+          tenantId: updated.tenantId,
+          kind: "prospect",
+          contactId: updated.id,
+          contactName: updated.name,
+          before,
+          after: updated,
+          byUserId,
+        });
       }
       return updated;
     },
@@ -1431,9 +7238,14 @@ export const api = {
         marketingOptInEmail: true,
         marketingOptInSms: false,
         assignedAgentId: prospect.assignedAgentId,
+        assignedCsrId: prospect.assignedCsrId,
         additionalAgentIds:
           prospect.additionalAgentIds && prospect.additionalAgentIds.length > 0
             ? prospect.additionalAgentIds
+            : undefined,
+        additionalCsrIds:
+          prospect.additionalCsrIds && prospect.additionalCsrIds.length > 0
+            ? prospect.additionalCsrIds
             : undefined,
       });
       const updated = db.update("prospects", prospect.id, {
@@ -1569,8 +7381,19 @@ export const api = {
       const existing = db
         .list("carrierLinks")
         .find((l) => l.carrierId === carrierId && l.tenantId === tenantId);
+      const agency = db.list("agencies").find((a) => a.id === tenantId);
+      const carrier = db.list("carriers").find((c) => c.id === carrierId);
       if (existing) {
         db.update("carrierLinks", existing.id, { active: true });
+        if (agency && carrier && !existing.active) {
+          logAgencyActivity(
+            agency,
+            "agency_carrier_access_updated",
+            "Carrier enabled for agency",
+            `${carrier.name} was enabled for ${agency.name}.`,
+            { carrier: carrier.name }
+          );
+        }
         return { ...existing, active: true };
       }
       const row: CarrierAgencyLink = {
@@ -1581,20 +7404,325 @@ export const api = {
         createdAt: nowIso(),
       };
       db.insert("carrierLinks", row);
+      if (agency && carrier) {
+        logAgencyActivity(
+          agency,
+          "agency_carrier_access_updated",
+          "Carrier enabled for agency",
+          `${carrier.name} was enabled for ${agency.name}.`,
+          { carrier: carrier.name }
+        );
+      }
       return row;
     },
     unlinkFromAgency(carrierId: string, tenantId: string) {
       const existing = db
         .list("carrierLinks")
         .find((l) => l.carrierId === carrierId && l.tenantId === tenantId);
-      if (existing) db.update("carrierLinks", existing.id, { active: false });
+      if (existing) {
+        db.update("carrierLinks", existing.id, { active: false });
+        if (existing.active) {
+          const agency = db.list("agencies").find((a) => a.id === tenantId);
+          const carrier = db.list("carriers").find((c) => c.id === carrierId);
+          if (agency && carrier) {
+            logAgencyActivity(
+              agency,
+              "agency_carrier_access_updated",
+              "Carrier disabled for agency",
+              `${carrier.name} was disabled for ${agency.name}.`,
+              { carrier: carrier.name }
+            );
+          }
+        }
+      }
+    },
+  },
+
+  // ------------ Carrier portal AI runner jobs ------------
+  carrierRunnerJobs: {
+    listByTenant(tenantId: string): CarrierRunnerJob[] {
+      return tenantFilter(db.list("carrierRunnerJobs"), tenantId).sort((a, b) =>
+        a.createdAt < b.createdAt ? 1 : -1
+      );
+    },
+    listOpen(tenantId: string): CarrierRunnerJob[] {
+      return this.listByTenant(tenantId).filter(carrierRunnerJobIsOpen);
+    },
+    get(id: string): CarrierRunnerJob | undefined {
+      return db.list("carrierRunnerJobs").find((job) => job.id === id);
+    },
+    activeCarrierIds(tenantId: string): string[] {
+      return activeCarrierIdsForTenant(tenantId);
+    },
+    queueForPolicy(
+      policyId: string,
+      trigger: CarrierRunnerJobTrigger,
+      reason?: string,
+      createdById?: string
+    ): CarrierRunnerJob | null {
+      const policy = db.list("policies").find((p) => p.id === policyId);
+      if (!policy) return null;
+      const renewal = renewalForPolicy(policy.id);
+      return createCarrierRunnerJobOnce({
+        tenantId: policy.tenantId,
+        trigger,
+        policy,
+        renewal: trigger === "renewal_window" || trigger === "renewal_status_check" ? renewal : undefined,
+        reason:
+          reason ??
+          `${carrierRunnerTriggerLabel(trigger)} requested. Runner signs into the carrier portal with the approved agency credential vault, retrieves current policy, renewal, billing, claims, and document data, and stages any updates for review.`,
+        createdById,
+      });
+    },
+    queuePolicyPlaced(policyId: string, createdById?: string): CarrierRunnerJob | null {
+      const policy = db.list("policies").find((p) => p.id === policyId);
+      return policy ? queueCarrierRunnerPolicyPlaced(policy, createdById) : null;
+    },
+    sweepRenewals(tenantId: string, now = nowIso()): CarrierRunnerJob[] {
+      if (!carrierRunnerEnabledForTenant(tenantId)) return [];
+      const jobs: CarrierRunnerJob[] = [];
+      tenantFilter(db.list("policies"), tenantId).forEach((policy) => {
+        const job = ensureCarrierRunnerRenewalJob(policy, now);
+        if (job) jobs.push(job);
+      });
+      return jobs;
+    },
+    start(id: string, actorId?: string): CarrierRunnerJob | null {
+      const job = this.get(id);
+      if (!job || ["completed", "cancelled"].includes(job.status)) return job ?? null;
+      const updated = db.update("carrierRunnerJobs", id, {
+        status: "running",
+        startedAt: job.startedAt ?? nowIso(),
+        startedById: actorId ?? job.startedById ?? "ai",
+        lastAttemptAt: nowIso(),
+        attempts: job.attempts + 1,
+      });
+      if (updated) {
+        logCarrierRunnerTimeline(
+          updated,
+          "Carrier portal check started",
+          "Retrieving current carrier record data.",
+          actorId ?? "ai"
+        );
+      }
+      return updated;
+    },
+    markNeedsMfa(id: string, reason?: string): CarrierRunnerJob | null {
+      const job = this.get(id);
+      if (!job) return null;
+      const updated = db.update("carrierRunnerJobs", id, {
+        status: "needs_mfa",
+        requiresMfa: true,
+        mfaRequestedAt: nowIso(),
+        errorMessage: reason ?? "Carrier portal requested MFA before the runner could continue.",
+      });
+      if (updated) {
+        logCarrierRunnerTimeline(updated, "Carrier portal check paused for staff approval", updated.errorMessage);
+        createCarrierRunnerExceptionTask(updated, updated.errorMessage ?? "Carrier portal requested MFA.");
+      }
+      return updated;
+    },
+    approveMfa(id: string, byUserId: string): CarrierRunnerJob | null {
+      const job = this.get(id);
+      if (!job) return null;
+      const updated = db.update("carrierRunnerJobs", id, {
+        status: "queued",
+        requiresMfa: false,
+        mfaApprovedById: byUserId,
+        errorMessage: undefined,
+      });
+      if (updated) {
+        logCarrierRunnerTimeline(updated, "Carrier portal approval completed", "Carrier portal check was released to continue.", byUserId);
+      }
+      return updated;
+    },
+    complete(
+      id: string,
+      input: {
+        outcome?: CarrierRunnerJobOutcome;
+        summary?: string;
+        sourceReference?: string;
+        completedById?: string;
+        stageDownload?: {
+          kind: CarrierDownloadKind;
+          summary: string;
+          changes?: CarrierDownloadChange[];
+          documentPayload?: CarrierDownloadDocumentPayload;
+          confidence?: number;
+          effectiveDate?: string;
+        };
+      } = {}
+    ): CarrierRunnerJob | null {
+      const job = this.get(id);
+      if (!job || job.status === "cancelled") return job ?? null;
+      let carrierDownloadId: string | undefined;
+      if (input.stageDownload) {
+        const download = stageCarrierDownloadFromRunnerJob(job, {
+          ...input.stageDownload,
+          sourceReference: input.sourceReference,
+        });
+        carrierDownloadId = download.id;
+      }
+      const outcome = input.outcome ?? (carrierDownloadId ? "policy_update_staged" : "no_change");
+      const summary =
+        input.summary ??
+        (carrierDownloadId
+          ? "Carrier posted updates that were staged for staff review."
+          : "Carrier portal was checked and no changes were found.");
+      const updated = db.update("carrierRunnerJobs", id, {
+        status: carrierDownloadId ? "staged_for_review" : "completed",
+        completedAt: carrierDownloadId ? undefined : nowIso(),
+        completedById: input.completedById ?? "ai",
+        detectedOutcome: outcome,
+        resultSummary: summary,
+        sourceReference: input.sourceReference ?? job.sourceReference,
+        carrierDownloadId,
+        errorMessage: undefined,
+      });
+      if (updated) {
+        if (outcome === "non_renewal_detected") {
+          applyCarrierRunnerNonRenewal(updated, summary, input.completedById ?? "ai");
+        }
+        logCarrierRunnerTimeline(
+          updated,
+          carrierDownloadId ? "Carrier posted updates" : "Carrier portal check completed",
+          summary,
+          input.completedById ?? "ai"
+        );
+      }
+      return updated;
+    },
+    markStagedReviewed(id: string, byUserId: string): CarrierRunnerJob | null {
+      const job = this.get(id);
+      if (!job) return null;
+      const updated = db.update("carrierRunnerJobs", id, {
+        status: "completed",
+        completedAt: nowIso(),
+        completedById: byUserId,
+      });
+      if (updated) {
+        logCarrierRunnerTimeline(updated, "Carrier update review completed", "Staff completed review of the staged carrier update.", byUserId);
+      }
+      return updated;
+    },
+    fail(id: string, errorMessage: string, actorId?: string): CarrierRunnerJob | null {
+      const job = this.get(id);
+      if (!job) return null;
+      const updated = db.update("carrierRunnerJobs", id, {
+        status: "failed",
+        errorMessage,
+        lastAttemptAt: nowIso(),
+      });
+      if (updated) {
+        logCarrierRunnerTimeline(updated, "Carrier portal check failed", errorMessage, actorId ?? "ai");
+        createCarrierRunnerExceptionTask(updated, errorMessage);
+      }
+      return updated;
+    },
+    cancel(id: string, actorId?: string): CarrierRunnerJob | null {
+      const updated = db.update("carrierRunnerJobs", id, {
+        status: "cancelled",
+        completedAt: nowIso(),
+        completedById: actorId ?? "system",
+      });
+      if (updated) {
+        logCarrierRunnerTimeline(updated, "Carrier portal check cancelled", "Carrier portal check was cancelled before completion.", actorId ?? "system");
+      }
+      return updated;
+    },
+  },
+
+  // ------------ Carrier downloads / eDocs / policy sync ------------
+  carrierDownloads: {
+    listByTenant(tenantId: string): CarrierDownload[] {
+      return tenantFilter(db.list("carrierDownloads"), tenantId).sort((a, b) =>
+        a.receivedAt < b.receivedAt ? 1 : -1
+      );
+    },
+    listOpen(tenantId: string): CarrierDownload[] {
+      return this.listByTenant(tenantId).filter((download) =>
+        ["unreviewed", "matched", "needs_review"].includes(download.status)
+      );
+    },
+    get(id: string): CarrierDownload | undefined {
+      return db.list("carrierDownloads").find((download) => download.id === id);
+    },
+    approve(id: string, byUserId: string): CarrierDownload | null {
+      const download = this.get(id);
+      if (!download || download.status === "approved") return download ?? null;
+      const appliedAt = nowIso();
+      const policy = download.policyId ? db.list("policies").find((p) => p.id === download.policyId) : undefined;
+      const patch = policyPatchFromCarrierDownload(download.changes);
+      if (policy && Object.keys(patch).length > 0) {
+        db.update("policies", policy.id, patch);
+      }
+
+      let documentId: string | undefined;
+      if (download.documentPayload && download.policyId && download.customerId) {
+        const document = api.documents.create({
+          tenantId: download.tenantId,
+          uploadedById: byUserId,
+          fileName: download.documentPayload.fileName,
+          fileType: download.documentPayload.fileType,
+          documentName: download.documentPayload.documentName,
+          type: download.documentPayload.type,
+          visibility: download.documentPayload.visibility,
+          status: download.documentPayload.status ?? "approved",
+          customerId: download.customerId,
+          assetId: download.assetId,
+          policyId: download.policyId,
+        });
+        documentId = document.id;
+      }
+
+      const updated = db.update("carrierDownloads", id, {
+        status: "approved",
+        appliedAt,
+        appliedById: byUserId,
+      });
+      const runnerJob = db
+        .list("carrierRunnerJobs")
+        .find((job) => job.carrierDownloadId === download.id && job.status === "staged_for_review");
+      if (runnerJob) {
+        db.update("carrierRunnerJobs", runnerJob.id, {
+          status: "completed",
+          completedAt: appliedAt,
+          completedById: byUserId,
+        });
+      }
+      logCarrierDownloadActivity(download, carrierDownloadFiledMessage(download), byUserId, documentId);
+      return updated;
+    },
+    reject(id: string, byUserId: string, reason?: string): CarrierDownload | null {
+      const download = this.get(id);
+      if (!download || download.status === "rejected") return download ?? null;
+      const rejectedAt = nowIso();
+      const updated = db.update("carrierDownloads", id, {
+        status: "rejected",
+        rejectedAt,
+        rejectedById: byUserId,
+        rejectionReason: reason?.trim() || undefined,
+      });
+      db.insert("statusEvents", {
+        id: uid("se"),
+        tenantId: download.tenantId,
+        source: "system",
+        message: `Carrier update rejected: ${download.summary}`,
+        visibility: "internal",
+        customerId: download.customerId,
+        assetId: download.assetId,
+        policyId: download.policyId,
+        createdAt: rejectedAt,
+        createdById: byUserId,
+      });
+      return updated;
     },
   },
 
   // ------------ Carrier contacts (per-tenant address book) ------------
   // Per-agency contact list for carrier reps — underwriters,
   // adjusters, claims reps, marketing reps, account execs, etc.
-  // Managed from the manager portal's Carrier recommendations page
+  // Managed from the manager portal's Carrier library page
   // (each card opens a modal with the contact list + add form).
   // Each contact surfaces on the Messages page as its own thread.
   carrierContacts: {
@@ -1632,13 +7760,13 @@ export const api = {
   // ------------ Insurance categories (master) ------------
   categories: {
     list(): InsuranceCategory[] {
-      return db.list("categories").sort((a, b) => a.sortOrder - b.sortOrder);
+      return db.list("categories").sort(sortInsuranceCategories);
     },
     listActive(): InsuranceCategory[] {
       return db
         .list("categories")
         .filter((c) => c.active)
-        .sort((a, b) => a.sortOrder - b.sortOrder);
+        .sort(sortInsuranceCategories);
     },
     // Active categories the given tenant has linked. If the tenant
     // has no link rows at all (legacy data, or a brand-new agency
@@ -1653,7 +7781,7 @@ export const api = {
       return db
         .list("categories")
         .filter((c) => c.active && activeIds.has(c.id))
-        .sort((a, b) => a.sortOrder - b.sortOrder);
+        .sort(sortInsuranceCategories);
     },
     get(id: string): InsuranceCategory | undefined {
       return db.list("categories").find((c) => c.id === id);
@@ -1686,8 +7814,19 @@ export const api = {
       const existing = db
         .list("categoryLinks")
         .find((l) => l.categoryId === categoryId && l.tenantId === tenantId);
+      const agency = db.list("agencies").find((a) => a.id === tenantId);
+      const category = db.list("categories").find((c) => c.id === categoryId);
       if (existing) {
         db.update("categoryLinks", existing.id, { active: true });
+        if (agency && category && !existing.active) {
+          logAgencyActivity(
+            agency,
+            "agency_category_access_updated",
+            "Insurance category enabled",
+            `${category.label} was enabled for ${agency.name}.`,
+            { category: category.label }
+          );
+        }
         return { ...existing, active: true };
       }
       const row: CategoryAgencyLink = {
@@ -1698,13 +7837,37 @@ export const api = {
         createdAt: nowIso(),
       };
       db.insert("categoryLinks", row);
+      if (agency && category) {
+        logAgencyActivity(
+          agency,
+          "agency_category_access_updated",
+          "Insurance category enabled",
+          `${category.label} was enabled for ${agency.name}.`,
+          { category: category.label }
+        );
+      }
       return row;
     },
     unlinkFromAgency(categoryId: string, tenantId: string) {
       const existing = db
         .list("categoryLinks")
         .find((l) => l.categoryId === categoryId && l.tenantId === tenantId);
-      if (existing) db.update("categoryLinks", existing.id, { active: false });
+      if (existing) {
+        db.update("categoryLinks", existing.id, { active: false });
+        if (existing.active) {
+          const agency = db.list("agencies").find((a) => a.id === tenantId);
+          const category = db.list("categories").find((c) => c.id === categoryId);
+          if (agency && category) {
+            logAgencyActivity(
+              agency,
+              "agency_category_access_updated",
+              "Insurance category disabled",
+              `${category.label} was disabled for ${agency.name}.`,
+              { category: category.label }
+            );
+          }
+        }
+      }
     },
   },
 
@@ -1734,6 +7897,12 @@ export const api = {
       uploadedById: string;
       fileName: string;
       fileType: string;
+      documentName?: string;
+      templateFields?: TemplateFieldMap;
+      templateFieldLayout?: Document["templateFieldLayout"];
+      fillableDetection?: Document["fillableDetection"];
+      storagePath?: string;
+      downloadUrl?: string;
       // Either a built-in DocumentType or a tenant-defined custom slug.
       type: DocumentType | string;
       visibility: DocumentVisibility;
@@ -1746,17 +7915,26 @@ export const api = {
       agencyId?: string;
       quoteRequestId?: string;
       // Optional personal/commercial bucket. Used today by the
-      // Carrier recommendations page to split a carrier's documents
+      // Carrier library page to split a carrier's documents
       // into the right section.
       lineOfBusiness?: "personal" | "commercial";
+      required?: boolean;
+      customerEsignRequired?: boolean;
+      agentEsignRequired?: boolean;
     }): Document {
+      const uploadedAt = nowIso();
       const row: Document = {
         id: uid("doc"),
         ...input,
         status: input.status ?? "pending",
-        storagePath: `s3://placeholder/${input.tenantId}/${uid("file")}/${input.fileName}`,
-        uploadedAt: nowIso(),
+        storagePath: input.storagePath ?? `s3://placeholder/${input.tenantId}/${uid("file")}/${input.fileName}`,
+        downloadUrl: input.downloadUrl,
+        uploadedAt,
+        lastChangeAction: "uploaded",
+        lastChangeAt: uploadedAt,
       };
+      row.templateFields =
+        normalizeTemplateFields(input.templateFields) ?? documentTemplateFieldsFor(row);
       db.insert("documents", row);
 
       // Document uploads always get a timeline entry so the agent /
@@ -1765,7 +7943,7 @@ export const api = {
       // customer-visible event, employee-only files stay internal.
       const uploader = db.list("users").find((u) => u.id === input.uploadedById);
       const verb = uploader?.role === "customer" ? "uploaded" : "shared";
-      const docLabel = input.type.replace(/_/g, " ");
+      const docLabel = input.documentName?.trim() || api.helpers.documentTypeLabel(String(input.type));
       db.insert("statusEvents", {
         id: uid("se"),
         tenantId: input.tenantId,
@@ -1781,10 +7959,47 @@ export const api = {
         createdById: input.uploadedById,
       });
 
+      ensureDocumentReviewNotice(row, input.uploadedById);
+
       return row;
     },
     update(id: string, patch: Partial<Document>) {
-      return db.update("documents", id, patch);
+      const shouldStampChange =
+        !patch.lastChangeAction &&
+        !patch.lastChangeAt &&
+        Object.keys(patch).some(
+          (key) =>
+            ![
+              "needsRenewalUpdate",
+              "renewalForRenewalId",
+              "customerEsignSentAt",
+              "customerEsignSignedAt",
+              "esignCommunicationId",
+              "agentEsignAssignedToId",
+              "agentEsignSignedAt",
+              "agentEsignSignatureName",
+              "agentEsignSignatureFont",
+              "agentEsignSignatureSize",
+              "agentEsignTaskId",
+            ].includes(key)
+        );
+      const action =
+        "templateFields" in patch || "fileName" in patch || "documentName" in patch
+          ? "edited"
+          : "updated";
+      const updated = db.update("documents", id, {
+        ...patch,
+        ...(shouldStampChange
+          ? {
+              lastChangeAction: action,
+              lastChangeAt: nowIso(),
+            }
+          : {}),
+      });
+      if (updated && "status" in patch) {
+        ensureDocumentReviewNotice(updated);
+      }
+      return updated;
     },
     // Tenant-wide agency templates the manager uploaded under
     // /employee/documents → "Agency templates & forms". Returned
@@ -1792,7 +8007,17 @@ export const api = {
     listTemplates(tenantId: string): Document[] {
       return db
         .list("documents")
-        .filter((d) => d.tenantId === tenantId && !d.customerId && d.type === "agency_template")
+        .filter(
+          (d) =>
+            d.tenantId === tenantId &&
+            !d.customerId &&
+            !d.assetId &&
+            !d.policyId &&
+            !d.claimId &&
+            !d.carrierId &&
+            !d.quoteRequestId &&
+            (d.type === "agency_template" || d.agencyId === tenantId)
+        )
         .sort((a, b) => (a.uploadedAt < b.uploadedAt ? 1 : -1));
     },
     // Send/apply an agency template to a specific customer. Clones
@@ -1816,6 +8041,8 @@ export const api = {
         // Visibility on the customer's side. Defaults to
         // customer_visible since templates are meant to be sent.
         visibility?: DocumentVisibility;
+        fileName?: string;
+        templateFields?: TemplateFieldMap;
       }
     ): Document | null {
       const tpl = db.list("documents").find((d) => d.id === templateId);
@@ -1823,7 +8050,7 @@ export const api = {
       return this.create({
         tenantId: tpl.tenantId,
         uploadedById: input.uploadedById,
-        fileName: tpl.fileName,
+        fileName: input.fileName?.trim() || tpl.fileName,
         fileType: tpl.fileType,
         type: input.type ?? tpl.type,
         visibility: input.visibility ?? "customer_visible",
@@ -1831,7 +8058,156 @@ export const api = {
         customerId: input.customerId,
         assetId: input.assetId,
         policyId: input.policyId,
+        customerEsignRequired: tpl.customerEsignRequired,
+        agentEsignRequired: tpl.agentEsignRequired,
+        templateFields: input.templateFields,
       });
+    },
+    autofillAcordForCustomer(input: {
+      tenantId: string;
+      customerId: string;
+      uploadedById: string;
+      selectedAcordTemplateIds: string[];
+      assetId?: string;
+    }): {
+      session: QuotingSession;
+      documents: Document[];
+      templates: CommercialAcordTemplateSelection[];
+    } | null {
+      const customer = db
+        .list("customers")
+        .find((candidate) => candidate.id === input.customerId && candidate.tenantId === input.tenantId);
+      if (!customer || input.selectedAcordTemplateIds.length === 0) return null;
+
+      const customerAssets = db
+        .list("assets")
+        .filter((asset) => asset.customerId === customer.id && asset.tenantId === input.tenantId);
+      const primaryAsset =
+        customerAssets.find((asset) => asset.id === input.assetId) ?? customerAssets[0];
+      const assetDetails: Record<string, string> = primaryAsset
+        ? Object.fromEntries(
+            Object.entries(primaryAsset.details ?? {}).map(([key, value]) => [
+              key,
+              value == null ? "" : String(value),
+            ])
+          )
+        : {};
+      if (customer.mailingAddress && !assetDetails.address) assetDetails.address = customer.mailingAddress;
+
+      const existing = db
+        .list("quotingSessions")
+        .filter(
+          (session) =>
+            session.tenantId === input.tenantId &&
+            session.customerId === customer.id &&
+            session.lineOfBusiness === "commercial" &&
+            !isDocumentOnlyAcordSession(session)
+        )
+        .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))[0];
+      const templateIds = Array.from(
+        new Set([
+          ...(existing?.commercialAcordTemplates ?? []).map((template) => template.templateId),
+          ...input.selectedAcordTemplateIds,
+        ])
+      );
+      const templates = selectedCommercialAcordTemplates(
+        input.tenantId,
+        templateIds,
+        existing?.publicFields ?? {},
+        existing?.publicFieldEvidence
+      );
+      const now = nowIso();
+      const hasExistingCommercialSession = !!existing;
+      const session =
+        existing
+          ? db.update("quotingSessions", existing.id, {
+              assetId: existing.assetId ?? primaryAsset?.id,
+              assetType: existing.assetType ?? primaryAsset?.type ?? "other",
+              estimatedValue: existing.estimatedValue || primaryAsset?.estimatedValue || 0,
+              assetDetails: Object.keys(existing.assetDetails ?? {}).length
+                ? existing.assetDetails
+                : assetDetails,
+              commercialAcordTemplates: templates,
+              updatedAt: now,
+            }) ?? existing
+          : (() => {
+              const row: QuotingSession = {
+                id: `quote_session_docs_${customer.id}`,
+                tenantId: input.tenantId,
+                customerId: customer.id,
+                assetId: primaryAsset?.id,
+                assetType: primaryAsset?.type ?? "other",
+                estimatedValue: primaryAsset?.estimatedValue ?? 0,
+                assetDetails,
+                state:
+                  customer.mailingAddress
+                    ? extractStateFromString(customer.mailingAddress)
+                    : extractStateFromString(Object.values(assetDetails).join(" ")),
+                lineOfBusiness: "commercial",
+                commercialAcordTemplates: templates,
+                questionnaireQuestions: [],
+                questionnaireResponses: {},
+                createdById: input.uploadedById,
+                status: "gathering_info",
+                publicFields: {},
+                missingFields: [],
+                quotes: [],
+                aiSummary: "ACORD documents initialized from the client Documents card.",
+                createdAt: now,
+                updatedAt: now,
+              };
+              return row;
+            })();
+
+      const syncedTemplates = syncCommercialAcordPdfArtifacts(
+        session,
+        session.questionnaireResponses ?? {},
+        "application"
+      );
+      const activeSession =
+        syncedTemplates && syncedTemplates.length > 0
+          ? hasExistingCommercialSession
+            ? db.update("quotingSessions", session.id, {
+                commercialAcordTemplates: syncedTemplates,
+                updatedAt: nowIso(),
+              }) ?? session
+            : {
+                ...session,
+                commercialAcordTemplates: syncedTemplates,
+                updatedAt: nowIso(),
+              }
+          : session;
+      const selectedTemplateIds = new Set(input.selectedAcordTemplateIds);
+      const documents = db
+        .list("documents")
+        .filter(
+          (document) =>
+            document.tenantId === input.tenantId &&
+            document.customerId === customer.id &&
+            document.quoteRequestId === activeSession.id &&
+            document.type === "completed_acord_application" &&
+            selectedTemplateIds.has(document.templateFields?.["Source ACORD template ID"] ?? "")
+        );
+
+      logQuotingWorkflowProgress(activeSession, {
+        message: `AI autofilled ${documents.length} ACORD document${
+          documents.length === 1 ? "" : "s"
+        } from the client Documents card.`,
+        detail: documents.length
+          ? `Completed PDF${documents.length === 1 ? "" : "s"} saved to this client's Documents card: ${documents
+              .map((document) => document.fileName)
+              .join(", ")}.`
+          : "No completed ACORD documents were created because no selected template could be resolved.",
+        createdAt: nowIso(),
+        createdById: input.uploadedById,
+        source: "ai",
+      });
+
+      return {
+        session: activeSession,
+        documents,
+        templates: activeSession.commercialAcordTemplates ?? templates,
+      };
     },
     // Renew a policy's core documents from its current information.
     // Regenerates a fresh, dated set (declarations page, insurance ID
@@ -1886,8 +8262,8 @@ export const api = {
     // insurance, policy document, endorsement document) and flags
     // each as needing an update for the new term. The Documents card
     // surfaces an "Update for Renewal" button per flagged row, and
-    // the renewal activity's resolve gate stays locked until every
-    // flagged doc has a published successor for this renewal.
+    // the renewal diagnostic stays pending until every flagged doc
+    // has a published successor for this renewal.
     flagForRenewal(renewalId: string, actorId?: string): Document[] {
       const renewal = db.list("renewals").find((r) => r.id === renewalId);
       if (!renewal) return [];
@@ -1900,7 +8276,7 @@ export const api = {
         "policy_document",
         "endorsement_document",
       ];
-      const candidates = db
+      const renewalCandidates = db
         .list("documents")
         .filter(
           (d) =>
@@ -1912,6 +8288,42 @@ export const api = {
             // Idempotent — skip docs already flagged for this renewal.
             !(d.needsRenewalUpdate && d.renewalForRenewalId === renewalId)
         );
+      const policyCurrentTermYear = (() => {
+        const sourceDate = policy.effectiveDate ?? policy.renewalDate;
+        if (!sourceDate) return undefined;
+        const year = new Date(sourceDate).getUTCFullYear();
+        if (!Number.isFinite(year)) return undefined;
+        return policy.effectiveDate ? year : year - 1;
+      })();
+      const termYearOf = (doc: Document) => doc.policyTermYear ?? policyCurrentTermYear ?? 0;
+      const hasPublishedSuccessor = (doc: Document) =>
+        renewalCandidates.some(
+          (candidate) =>
+            candidate.id !== doc.id &&
+            candidate.type === doc.type &&
+            !!candidate.publishedAt &&
+            candidate.status !== "rejected" &&
+            (candidate.supersedesId === doc.id || termYearOf(candidate) > termYearOf(doc))
+        );
+      const latestByType = new Map<string, Document>();
+      renewalCandidates
+        .filter(
+          (d) =>
+            d.status === "approved" &&
+            !hasPublishedSuccessor(d) &&
+            !(d.needsRenewalUpdate && d.renewalForRenewalId === renewalId)
+        )
+        .sort((a, b) => {
+          const ay = termYearOf(a);
+          const by = termYearOf(b);
+          if (ay !== by) return by - ay;
+          return (a.publishedAt ?? a.uploadedAt) < (b.publishedAt ?? b.uploadedAt) ? 1 : -1;
+        })
+        .forEach((doc) => {
+          const key = String(doc.type);
+          if (!latestByType.has(key)) latestByType.set(key, doc);
+        });
+      const candidates = Array.from(latestByType.values());
       const flagged: Document[] = [];
       candidates.forEach((d) => {
         const updated = db.update("documents", d.id, {
@@ -1979,6 +8391,18 @@ export const api = {
         customerId: orig.customerId,
         assetId: orig.assetId,
         policyId: orig.policyId,
+        templateFields: documentTemplateFieldsFor(
+          {
+            ...orig,
+            fileName,
+            status: "pending",
+            policyTermYear: termYear,
+          },
+          {
+            originalFileName: orig.fileName,
+            renewalDate: renewal.renewalDate,
+          }
+        ),
       });
       // Tag the renewal/version metadata.
       const tagged = db.update("documents", draft.id, {
@@ -1986,7 +8410,28 @@ export const api = {
         supersedesId: orig.id,
         policyTermYear: termYear,
       });
-      return tagged ?? draft;
+      const out = tagged ?? draft;
+      bumpRenewalTaskForDraft(out, uploadedById);
+      const policy = out.policyId
+        ? db.list("policies").find((p) => p.id === out.policyId)
+        : undefined;
+      db.insert("statusEvents", {
+        id: uid("se"),
+        tenantId: out.tenantId,
+        source: "agent",
+        message: `${api.helpers.documentTypeLabel(String(out.type))} update staged for renewal review: ${
+          out.fileName
+        }${policy?.policyNumber ? ` (Policy #${policy.policyNumber})` : ""}.`,
+        visibility: "internal",
+        customerId: out.customerId,
+        assetId: out.assetId,
+        policyId: out.policyId,
+        documentId: out.id,
+        renewalId,
+        createdAt: nowIso(),
+        createdById: uploadedById,
+      });
+      return out;
     },
     // Publish a renewal draft: marks it approved, stamps publishedAt,
     // clears the original's needs-update flag, applies any edits the
@@ -1995,15 +8440,21 @@ export const api = {
     publishRenewalUpdate(
       draftDocId: string,
       uploadedById: string,
-      edits?: { fileName?: string }
+      edits?: { fileName?: string; templateFields?: TemplateFieldMap }
     ): Document | null {
       const draft = db.list("documents").find((d) => d.id === draftDocId);
       if (!draft || !draft.supersedesId || !draft.renewalId) return null;
+      const publishedAt = nowIso();
       const patch: Partial<Document> = {
         status: "approved",
-        publishedAt: nowIso(),
+        publishedAt,
+        lastChangeAction: "renewed",
+        lastChangeAt: publishedAt,
       };
       if (edits?.fileName && edits.fileName.trim()) patch.fileName = edits.fileName.trim();
+      if (edits?.templateFields) {
+        patch.templateFields = normalizeTemplateFields(edits.templateFields);
+      }
       const updated = db.update("documents", draft.id, patch);
       // Clear the flag on the original so the renewal activity's
       // checklist closes that step.
@@ -2058,6 +8509,8 @@ export const api = {
       policyId?: string;
       type?: DocumentType | string;
       uploadedById: string;
+      outputFileName?: string;
+      templateFields?: TemplateFieldMap;
     }): Document | null {
       const tpl = db.list("documents").find((d) => d.id === input.templateId);
       if (!tpl) return null;
@@ -2072,7 +8525,12 @@ export const api = {
         .replace(/^-|-$/g, "");
       const base = tpl.fileName.replace(/\.[^.]+$/, "");
       const ext = tpl.fileName.match(/\.[^.]+$/)?.[0] ?? ".pdf";
-      const outputName = `${base}-${customerSlug}-${stamp}-AI-filled${ext}`;
+      const outputName =
+        input.outputFileName?.trim() || `${base}-${customerSlug}-${stamp}-AI-filled${ext}`;
+      const usedExistingDocs = (input.sourceDocumentIds ?? [])
+        .map((id) => db.list("documents").find((d) => d.id === id)?.fileName)
+        .filter((n): n is string => !!n);
+      const usedFiles = (input.sourceFiles ?? []).map((f) => f.fileName);
 
       const out = this.create({
         tenantId: tpl.tenantId,
@@ -2085,12 +8543,23 @@ export const api = {
         customerId: input.customerId,
         assetId: input.assetId,
         policyId: input.policyId,
+        templateFields:
+          normalizeTemplateFields(input.templateFields) ??
+          documentTemplateFieldsFor(
+            {
+              ...tpl,
+              tenantId: tpl.tenantId,
+              fileName: outputName,
+              type: input.type ?? tpl.type,
+              visibility: "customer_visible",
+              status: "approved",
+              customerId: input.customerId,
+              assetId: input.assetId,
+              policyId: input.policyId,
+            },
+            { sourceFiles: [...usedExistingDocs, ...usedFiles] }
+          ),
       });
-
-      const usedExistingDocs = (input.sourceDocumentIds ?? [])
-        .map((id) => db.list("documents").find((d) => d.id === id)?.fileName)
-        .filter((n): n is string => !!n);
-      const usedFiles = (input.sourceFiles ?? []).map((f) => f.fileName);
       const inputsLabel =
         [...usedExistingDocs, ...usedFiles].join(", ") || "no source files attached";
 
@@ -2130,7 +8599,55 @@ export const api = {
       if (!customer) return [];
       const assets = db.list("assets").filter((a) => a.customerId === customerId);
       const policies = db.list("policies").filter((p) => p.customerId === customerId);
-      const docs = db.list("documents").filter((d) => d.customerId === customerId);
+      const allDocs = db.list("documents").filter((d) => d.customerId === customerId);
+      const policyCurrentTermYear = (policy?: Policy) => {
+        const sourceDate = policy?.effectiveDate ?? policy?.renewalDate;
+        if (!sourceDate) return undefined;
+        const year = new Date(sourceDate).getUTCFullYear();
+        if (!Number.isFinite(year)) return undefined;
+        return policy?.effectiveDate ? year : year - 1;
+      };
+      const policyForDoc = (doc: Document) =>
+        doc.policyId
+          ? policies.find((policy) => policy.id === doc.policyId)
+          : doc.assetId
+          ? policies.find((policy) => policy.assetId === doc.assetId)
+          : undefined;
+      const sourceTermYear = (doc: Document) => doc.policyTermYear ?? policyCurrentTermYear(policyForDoc(doc));
+      const latestTermYearForPolicy = (policyId?: string) => {
+        if (!policyId) return undefined;
+        const policy = policies.find((row) => row.id === policyId);
+        return allDocs.reduce<number | undefined>((latest, doc) => {
+          const policy = policyForDoc(doc);
+          if (policy?.id !== policyId) return latest;
+          const year = sourceTermYear(doc);
+          if (!year) return latest;
+          return latest == null ? year : Math.max(latest, year);
+        }, policyCurrentTermYear(policy));
+      };
+      const hasPublishedSuccessor = (doc: Document) =>
+        allDocs.some((candidate) => {
+          if (candidate.id === doc.id || candidate.type !== doc.type) return false;
+          const docPolicy = policyForDoc(doc);
+          const candidatePolicy = policyForDoc(candidate);
+          if (docPolicy?.id !== candidatePolicy?.id) return false;
+          const candidateYear = sourceTermYear(candidate);
+          const docYear = sourceTermYear(doc);
+          return (
+            !!candidate.publishedAt &&
+            candidate.status !== "rejected" &&
+            (candidate.supersedesId === doc.id ||
+              (!!candidateYear && !!docYear && candidateYear > docYear))
+          );
+        });
+      const docs = allDocs.filter((doc) => {
+        const policy = policyForDoc(doc);
+        if (!policy) return !hasPublishedSuccessor(doc);
+        if (hasPublishedSuccessor(doc)) return false;
+        const year = sourceTermYear(doc);
+        const latestYear = latestTermYearForPolicy(policy.id);
+        return !year || !latestYear || year >= latestYear;
+      });
 
       // Doc types we expect to see attached for each asset type. The
       // "reason" string is shown in the AI-suggestions section so
@@ -2298,7 +8815,7 @@ export const api = {
       return tenantFilter(db.list("campaigns"), tenantId);
     },
     listMessages(tenantId: string): MarketingMessage[] {
-      return tenantFilter(db.list("messages"), tenantId);
+      return tenantFilter(db.list("messages"), tenantId).map(normalizeMarketingMessageForDisplay);
     },
     // ------------ Per-tenant marketing configuration ------------
     // Single-row "settings" the manager controls under
@@ -2308,7 +8825,7 @@ export const api = {
     // policy-edit acknowledgments, doc-request drafts, etc.).
     getConfig(tenantId: string): MarketingConfig {
       const existing = db.list("marketingConfigs").find((c) => c.tenantId === tenantId);
-      if (existing) return existing;
+      if (existing) return normalizeMarketingConfig(existing);
       const agency = db.list("agencies").find((a) => a.id === tenantId);
       const defaultConfig: MarketingConfig = {
         id: uid("mcfg"),
@@ -2318,6 +8835,7 @@ export const api = {
         signOff: `Best,\n${agency?.name ?? "Your Insurance Concierge"}`,
         autoSendOnNewProspect: true,
         followUpCadenceDays: 3,
+        autoMessageRules: defaultAutoMessageRules(true),
         attachments: [],
         updatedAt: nowIso(),
       };
@@ -2326,12 +8844,15 @@ export const api = {
     },
     updateConfig(tenantId: string, patch: Partial<MarketingConfig>, byUserId?: string): MarketingConfig {
       const current = this.getConfig(tenantId);
+      const { agencyLogo: _legacyAgencyLogo, ...safePatch } = patch as Partial<MarketingConfig> & {
+        agencyLogo?: unknown;
+      };
       const updated = db.update("marketingConfigs", current.id, {
-        ...patch,
+        ...safePatch,
         updatedAt: nowIso(),
         updatedById: byUserId,
       });
-      return updated ?? current;
+      return updated ? normalizeMarketingConfig(updated) : current;
     },
     addAttachment(
       tenantId: string,
@@ -2367,30 +8888,39 @@ export const api = {
     autoSendProspectOutreach(input: {
       tenantId: string;
       prospectId: string;
-      // Kept for back-compat with callers; promotional AI auto-outreach
-      // always goes out via SMS now and never lands in email.
-      channel?: "email" | "sms";
+      channel?: "email";
       actorId?: string;
     }): MarketingMessage | null {
       const prospect = db.list("prospects").find((p) => p.id === input.prospectId);
       if (!prospect) return null;
       const cfg = this.getConfig(input.tenantId);
+      const sender = agencyMarketingSender(input.tenantId);
+      if (!cfg.autoSendOnNewProspect) return null;
+      const rule = cfg.autoMessageRules.find(
+        (item) => item.enabled && item.trigger === "new_prospect"
+      );
+      if (!rule) return null;
       const firstName = prospect.name.split(/\s+/)[0];
       const assetWord = prospect.assetType.replace(/_/g, " ");
-      // Promotional auto-outreach is SMS-only by policy — it never
-      // lands in the prospect's email.
-      const channel = "sms" as const;
-      const attachmentLine = attachmentManifestLine(cfg.attachments, channel);
+      // The advanced automation rule decides timing,
+      // approval mode, attachment use, and draft behavior.
+      const channel = "email" as const;
+      const attachmentLine = rule.includeAttachments
+        ? attachmentManifestLine(cfg.attachments, channel)
+        : "";
+      const scheduledFor = autoMessageSchedule(rule);
+      const deliveryStatus: MarketingMessage["deliveryStatus"] =
+        rule.approvalMode === "draft_for_review" ? "draft" : scheduledFor ? "queued" : "sent";
 
-      const subject: string | undefined = undefined;
+      const subject = `${firstName}, next step on your ${assetWord} quote`;
       let body = `${cfg.senderName}: Hi ${firstName} — ${
         cfg.messageStyle === "concise"
           ? "ready to wrap up your quote?"
           : "still happy to walk you through next steps on your " + assetWord + " coverage."
       } Reply YES for a callback. Reply STOP to opt out.`;
-      if (attachmentLine && cfg.attachments.some((a) => a.channels.includes("sms"))) {
+      if (attachmentLine && cfg.attachments.some((a) => a.channels.includes(channel))) {
         body += `\n(${cfg.attachments
-          .filter((a) => a.channels.includes("sms"))
+          .filter((a) => a.channels.includes(channel))
           .map((a) => a.description ?? a.fileName)
           .join(", ")})`;
       }
@@ -2403,16 +8933,22 @@ export const api = {
         channel,
         subject,
         content: body,
-        deliveryStatus: "sent",
-        sentAt: nowIso(),
+        deliveryStatus,
+        sentAt: deliveryStatus === "sent" ? nowIso() : undefined,
+        nextScheduledAt: deliveryStatus === "queued" ? scheduledFor : undefined,
+        fromName: sender.fromName,
+        fromEmail: sender.fromEmail,
+        mailboxProvider: sender.provider,
+        mailboxConnectionId: sender.connectionId,
         createdAt: nowIso(),
       };
       db.insert("messages", msg);
+      if (deliveryStatus === "sent") markMailboxSent(sender.connectionId);
       db.insert("statusEvents", {
         id: uid("se"),
         tenantId: input.tenantId,
         source: "ai",
-        message: `AI auto-sent SMS to ${prospect.name} (${cfg.messageStyle} style${
+        message: `AI ${autoMessageVerb(deliveryStatus)} email to ${prospect.name} via "${rule.name}" (${cfg.messageStyle} style${
           cfg.attachments.length ? `, ${cfg.attachments.length} attachment${cfg.attachments.length === 1 ? "" : "s"}` : ""
         }).`,
         visibility: "internal",
@@ -2425,25 +8961,30 @@ export const api = {
     },
     // Compose a fresh AI marketing campaign from a brief.
     //
-    // Records a MarketingCampaign row + one tenant-scoped status event
-    // documenting the launch (channels, recipient count, attachment
-    // manifest, scheduling). It deliberately does NOT write per-
-    // recipient message rows: promotional blasts are fire-and-forget
-    // and must not clutter each contact's Messages thread or be
-    // logged as individual communications. (Transactional AI messages
-    // about a quote / policy / document still go through
-    // communications.create on email.)
+    // Records a MarketingCampaign row, one tenant-scoped status event,
+    // and one recipient-level MarketingMessage row for each targeted
+    // client/prospect. Those rows are audit receipts for "campaigns
+    // received" cards and campaign exports; they are not client-thread
+    // conversations.
     //
-    // A campaign can target email + SMS at once, and any combination
-    // of "all clients", "all prospects", and hand-picked recipients.
+    // A campaign can target any combination of "all clients",
+    // "all prospects", and hand-picked recipients.
     //
     // Manager-controlled — caller is responsible for gating in
     // the UI; this entry point doesn't enforce a role check.
     composeAiCampaign(input: {
       tenantId: string;
       name: string;
-      channels: ("email" | "sms")[];
+      channels: "email"[];
       brief: string;
+      emailSubject?: string;
+      emailBody?: string;
+      heroImageUrl?: string;
+      heroImageAlt?: string;
+      pamphlet?: MarketingCampaignPamphletPayload;
+      pamphletTheme?: string;
+      ctaLabel?: string;
+      appOrigin?: string;
       includeAllClients?: boolean;
       includeAllProspects?: boolean;
       selectedCustomerIds?: string[];
@@ -2459,9 +9000,10 @@ export const api = {
       const tenant = db.list("agencies").find((a) => a.id === input.tenantId);
       const agencyName = tenant?.name ?? "your concierge agency";
       const cfg = this.getConfig(input.tenantId);
+      const sender = agencyMarketingSender(input.tenantId);
       const recurrence = input.recurrence ?? "none";
       const now = Date.now();
-      const channels = input.channels.length ? input.channels : ["sms" as const];
+      const channels = ["email" as const];
       const sendAt =
         input.scheduledFor && Date.parse(input.scheduledFor) > now
           ? input.scheduledFor
@@ -2469,9 +9011,8 @@ export const api = {
       const isScheduled = !!sendAt;
       const isRecurring = recurrence !== "none";
 
-      // Resolve the audience union (dedup by id) just to count
-      // recipients for the launch record — no per-recipient rows are
-      // written.
+      // Resolve the audience union (dedup by id) for the launch record
+      // and the per-recipient campaign receipt rows.
       const customerIds = new Set<string>();
       const prospectIds = new Set<string>();
       if (input.includeAllClients) {
@@ -2500,6 +9041,16 @@ export const api = {
           includeAllProspects: !!input.includeAllProspects,
           customerIds: Array.from(customerIds),
           prospectIds: Array.from(prospectIds),
+          brief: input.brief,
+          emailSubject: input.emailSubject,
+          emailBody: input.emailBody,
+          heroImageUrl: input.heroImageUrl,
+          heroImageAlt: input.heroImageAlt,
+          pamphlet: input.pamphlet,
+          pamphletTheme: input.pamphletTheme,
+          smartContactLinks: true,
+          attachments: input.attachments ?? [],
+          messageStyle: cfg.messageStyle,
         },
         status: isScheduled ? "scheduled" : "active",
         scheduledFor: sendAt,
@@ -2507,9 +9058,87 @@ export const api = {
         nextRunAt: sendAt ?? (isRecurring ? nowIso() : undefined),
       });
 
+      const deliveryStatus: MarketingMessage["deliveryStatus"] = isScheduled
+        ? "queued"
+        : "sent";
+      const messageCreatedAt = nowIso();
+      const messageBody = input.emailBody?.trim() || input.brief.trim() || input.name;
+      const subject = input.emailSubject?.trim() || input.name.trim() || "Agency update";
+      const ctaLabel = input.ctaLabel?.trim() || MARKETING_SMART_CTA_LABEL;
+      const messageContentFor = (
+        recipient: { customerId?: string; prospectId?: string },
+        contact?: { name?: string; email?: string } | null
+      ) => {
+        const href = marketingSmartContactUrl({
+          origin: input.appOrigin,
+          tenantId: input.tenantId,
+          customerId: recipient.customerId,
+          prospectId: recipient.prospectId,
+        });
+        const personalizedBody = personalizeMarketingMergeFields(messageBody, contact);
+        if (input.pamphlet) {
+          return buildMarketingPamphletMessage({
+            emailBody: personalizedBody,
+            pamphlet: input.pamphlet,
+            heroImageUrl: input.heroImageUrl,
+            heroImageAlt: input.heroImageAlt || input.name,
+            href,
+            ctaLabel,
+            recipientName: contact?.name,
+            pamphletTheme: input.pamphletTheme,
+          });
+        }
+        return appendMarketingContactCta(
+          prependMarketingHeroImage(personalizedBody, input.heroImageUrl, input.heroImageAlt || input.name),
+          href,
+          ctaLabel
+        );
+      };
+      Array.from(customerIds).forEach((customerId) => {
+        const customer = db.list("customers").find((row) => row.id === customerId);
+        db.insert("messages", {
+          id: uid("msg"),
+          tenantId: input.tenantId,
+          campaignId: campaign.id,
+          customerId,
+          channel: "email",
+          subject: personalizeMarketingMergeFields(subject, customer),
+          content: messageContentFor({ customerId }, customer),
+          deliveryStatus,
+          sentAt: deliveryStatus === "sent" ? messageCreatedAt : undefined,
+          nextScheduledAt: deliveryStatus === "queued" ? sendAt : undefined,
+          fromName: sender.fromName,
+          fromEmail: sender.fromEmail,
+          mailboxProvider: sender.provider,
+          mailboxConnectionId: sender.connectionId,
+          createdAt: messageCreatedAt,
+        } satisfies MarketingMessage);
+      });
+      Array.from(prospectIds).forEach((prospectId) => {
+        const prospect = db.list("prospects").find((row) => row.id === prospectId);
+        db.insert("messages", {
+          id: uid("msg"),
+          tenantId: input.tenantId,
+          campaignId: campaign.id,
+          prospectId,
+          channel: "email",
+          subject: personalizeMarketingMergeFields(subject, prospect),
+          content: messageContentFor({ prospectId }, prospect),
+          deliveryStatus,
+          sentAt: deliveryStatus === "sent" ? messageCreatedAt : undefined,
+          nextScheduledAt: deliveryStatus === "queued" ? sendAt : undefined,
+          fromName: sender.fromName,
+          fromEmail: sender.fromEmail,
+          mailboxProvider: sender.provider,
+          mailboxConnectionId: sender.connectionId,
+          createdAt: messageCreatedAt,
+        } satisfies MarketingMessage);
+      });
+      if (deliveryStatus === "sent") markMailboxSent(sender.connectionId);
+
       // Audit trail — one tenant-scoped status event with the
       // campaign id, channels, recipient count, attachment manifest,
-      // and scheduling metadata. Individual sends are not recorded.
+      // scheduling metadata, and recipient receipt count.
       const scheduleNote = isScheduled ? ` Scheduled for ${sendAt}.` : "";
       const recurrenceNote = isRecurring ? ` Recurring ${recurrence}.` : "";
       const verb = isScheduled ? "scheduled" : "launched";
@@ -2526,7 +9155,7 @@ export const api = {
                 input.attachments.length === 1 ? "" : "s"
               }`
             : ""
-        }). Promotional sends are not individually logged. Agency: ${agencyName}.${scheduleNote}${recurrenceNote}`,
+        }). Recipient campaign receipts were recorded. Agency: ${agencyName}.${scheduleNote}${recurrenceNote}`,
         visibility: "internal",
         marketingCampaignId: campaign.id,
         createdAt: nowIso(),
@@ -2549,9 +9178,17 @@ export const api = {
     resumeCampaign(id: string) {
       return db.update("campaigns", id, { status: "active" });
     },
+    deleteCampaign(id: string) {
+      return db.remove("campaigns", id);
+    },
     queueMessage(input: Omit<MarketingMessage, "id" | "createdAt" | "deliveryStatus">): MarketingMessage {
+      const sender = agencyMarketingSender(input.tenantId);
       const row: MarketingMessage = {
         ...input,
+        fromName: input.fromName ?? sender.fromName,
+        fromEmail: input.fromEmail ?? sender.fromEmail,
+        mailboxProvider: input.mailboxProvider ?? sender.provider,
+        mailboxConnectionId: input.mailboxConnectionId ?? sender.connectionId,
         id: uid("msg"),
         deliveryStatus: "queued",
         createdAt: nowIso(),
@@ -2614,7 +9251,7 @@ export const api = {
       rows.forEach((m) => db.remove("messages", m.id));
       return rows.length;
     },
-    // Auto-drafts an email + SMS asking the customer for the
+    // Auto-drafts an email asking the customer for the
     // documents the AI flagged as missing on a quote. Status is
     // "draft" so the agent or manager must review + approve before
     // anything is sent. Emits an internal status event so the
@@ -2625,11 +9262,12 @@ export const api = {
       customerId: string;
       assetType?: string;
       missingDocuments: string[];
-    }): { email: MarketingMessage; sms: MarketingMessage } | null {
+    }): { email: MarketingMessage } | null {
       const docs = input.missingDocuments.filter((d) => d && d.trim());
       if (docs.length === 0) return null;
       const customer = db.list("customers").find((c) => c.id === input.customerId);
       const tenant = db.list("agencies").find((a) => a.id === input.tenantId);
+      const sender = agencyMarketingSender(input.tenantId);
       const firstName = (customer?.name ?? "there").split(/\s+/)[0];
       const agencyName = tenant?.name ?? "your agency";
       const docList = docs.map((d) => `  • ${d}`).join("\n");
@@ -2664,20 +9302,13 @@ export const api = {
         subject,
         content: emailBody,
         deliveryStatus: "draft",
-        createdAt: nowIso(),
-      };
-      const sms: MarketingMessage = {
-        id: uid("msg"),
-        tenantId: input.tenantId,
-        campaignId: "campaign_doc_requests",
-        customerId: input.customerId,
-        channel: "sms",
-        content: smsBody,
-        deliveryStatus: "draft",
+        fromName: sender.fromName,
+        fromEmail: sender.fromEmail,
+        mailboxProvider: sender.provider,
+        mailboxConnectionId: sender.connectionId,
         createdAt: nowIso(),
       };
       db.insert("messages", email);
-      db.insert("messages", sms);
 
       // Timeline crumb so the agent/manager sees the AI staged
       // outreach next to the quote submission. Internal so the
@@ -2695,7 +9326,7 @@ export const api = {
         marketingCampaignId: "campaign_doc_requests",
       });
 
-      return { email, sms };
+      return { email };
     },
   },
 
@@ -2755,7 +9386,7 @@ export const api = {
     create(input: {
       tenantId: string;
       createdById: string;
-      channel: "email" | "sms";
+      channel: "email";
       subject?: string;
       body: string;
       attachments?: CustomMessageAttachment[];
@@ -2789,14 +9420,15 @@ export const api = {
           : "sent";
 
       // Custom messages are sent verbatim, so the sender's personal
-      // email signature is woven into the body on save (channel=email
-      // only). SMS sends are unchanged.
+      // email signature is woven into the body on save.
       const bodyWithSignature = applySenderEmailSignature(
         input.channel,
         "outbound",
         input.body,
         input.createdById
       );
+      const senderMailbox = mailboxForUser(input.createdById);
+      const senderUser = db.list("users").find((user) => user.id === input.createdById);
 
       const row: CustomMessage = {
         id: uid("cmsg"),
@@ -2805,6 +9437,10 @@ export const api = {
         channel: input.channel,
         subject: input.subject,
         body: bodyWithSignature,
+        fromName: senderUser?.name,
+        fromEmail: senderMailbox.account,
+        mailboxProvider: senderMailbox.provider,
+        mailboxConnectionId: senderMailbox.connectionId,
         attachments: input.attachments ?? [],
         audience: input.audience,
         filter: input.filter,
@@ -2819,6 +9455,7 @@ export const api = {
         createdAt: nowIso(),
       };
       db.insert("customMessages", row);
+      if (status === "sent") markMailboxSent(senderMailbox.connectionId);
       return row;
     },
     cancel(id: string) {
@@ -2837,6 +9474,7 @@ export const api = {
     sendNow(id: string) {
       const msg = db.list("customMessages").find((m) => m.id === id);
       if (!msg) return null;
+      markMailboxSent(msg.mailboxConnectionId);
       return db.update("customMessages", id, {
         status: "sent",
         sentCount: msg.recipientCount,
@@ -2865,8 +9503,11 @@ export const api = {
       // AI inspects the renewal and flags the policy's term-bound
       // documents (dec page, ID card, proof of insurance, etc.) so
       // each gets an "Update for Renewal" button on the Documents card
-      // and the renewal activity stays locked until they're republished.
+      // and the renewal diagnostic remains pending until they're republished.
       api.documents.flagForRenewal(row.id, row.agentId);
+      ensureNonRenewalTask(row, row.agentId);
+      const policy = db.list("policies").find((p) => p.id === row.policyId);
+      if (policy) ensureCarrierRunnerRenewalJob(policy);
       return row;
     },
     // Create the Activity Center card for a single renewal — assigned
@@ -2934,20 +9575,33 @@ export const api = {
           // directly into the DB.
           api.documents.flagForRenewal(r.id);
         });
+      api.carrierRunnerJobs.sweepRenewals(tenantId);
       return made;
     },
     update(id: string, patch: Partial<Renewal>) {
-      return db.update("renewals", id, patch);
+      const updated = db.update("renewals", id, patch);
+      if (
+        updated &&
+        ("status" in patch ||
+          "nonRenewalReason" in patch ||
+          "nonRenewalEffectiveDate" in patch ||
+          "replacementStrategy" in patch)
+      ) {
+        ensureNonRenewalTask(updated, updated.agentId);
+        const policy = db.list("policies").find((p) => p.id === updated.policyId);
+        if (policy) ensureCarrierRunnerRenewalJob(policy);
+      }
+      return updated;
     },
     // Move an "upcoming" renewal off the alert path. Two terminal
     // states the agent reaches for from the UI:
     //   markRenewed → policy renewed for another term
     //   markNotDue  → false alarm / agent already handled it
     markRenewed(id: string) {
-      return db.update("renewals", id, { status: "renewed" });
+      return this.update(id, { status: "renewed" });
     },
     markNotDue(id: string) {
-      return db.update("renewals", id, { status: "not_due" });
+      return this.update(id, { status: "not_due" });
     },
     // Record that a renewal reminder went out. The actual delivery
     // (SendGrid / Twilio) is out of scope here — this just persists
@@ -2959,7 +9613,7 @@ export const api = {
       sentById,
     }: {
       renewalId: string;
-      channel: "email" | "sms";
+      channel: "email";
       sentById: string;
     }): { reminderSent: boolean; reason?: string } {
       const renewal = db.list("renewals").find((r) => r.id === renewalId);
@@ -2990,7 +9644,59 @@ export const api = {
         id: uid("se"),
         tenantId: policy.tenantId,
         source: "agent",
-        message: `Renewal reminder sent via ${channel.toUpperCase()} for policy ${policy.policyNumber ?? policy.id} (renews ${renewalDateStr}).`,
+        message: `Renewal reminder email sent for policy ${policy.policyNumber ?? policy.id} (renews ${renewalDateStr}).`,
+        visibility: "customer_visible",
+        customerId: policy.customerId,
+        policyId: policy.id,
+        renewalId: renewal.id,
+        createdAt: nowIso(),
+        createdById: sentById,
+      });
+      return { reminderSent: true };
+    },
+    sendNonRenewalSummary({
+      renewalId,
+      channel,
+      sentById,
+    }: {
+      renewalId: string;
+      channel: "email";
+      sentById: string;
+    }): { reminderSent: boolean; reason?: string } {
+      const renewal = db.list("renewals").find((r) => r.id === renewalId);
+      if (!renewal) return { reminderSent: false, reason: "renewal_not_found" };
+      const policy = db.list("policies").find((p) => p.id === renewal.policyId);
+      if (!policy) return { reminderSent: false, reason: "policy_not_found" };
+      const carrier = db.list("carriers").find((c) => c.id === policy.carrierId);
+      const expirationStr = renewal.nonRenewalEffectiveDate || renewal.renewalDate
+        ? new Date(renewal.nonRenewalEffectiveDate ?? renewal.renewalDate).toLocaleDateString("en-US")
+        : "the non-renewal date";
+      const reason = renewal.nonRenewalReason ?? "The carrier issued a non-renewal notice.";
+      const strategy = renewal.replacementStrategy
+        ? `\n\nReplacement plan: ${renewal.replacementStrategy}`
+        : "";
+      const subject = `Non-renewal notice summary — policy ${policy.policyNumber ?? policy.id}`;
+      const body = `We are documenting the carrier non-renewal for policy ${
+        policy.policyNumber ?? policy.id
+      } with ${carrier?.name ?? "the current carrier"}. The non-renewal is effective ${expirationStr}.\n\nReason: ${reason}${strategy}\n\nYour agency team will help review replacement options before the effective date.`;
+      db.insert("communications", {
+        id: uid("comm"),
+        tenantId: policy.tenantId,
+        customerId: policy.customerId,
+        channel,
+        direction: "outbound",
+        subject,
+        body,
+        createdById: sentById,
+        createdAt: nowIso(),
+      });
+      db.insert("statusEvents", {
+        id: uid("se"),
+        tenantId: policy.tenantId,
+        source: "agent",
+        message: `Non-renewal summary email sent for policy ${
+          policy.policyNumber ?? policy.id
+        } (effective ${expirationStr}).`,
         visibility: "customer_visible",
         customerId: policy.customerId,
         policyId: policy.id,
@@ -3016,15 +9722,175 @@ export const api = {
     create(input: Omit<Claim, "id" | "openedAt">): Claim {
       const row: Claim = { ...input, id: uid("claim"), openedAt: nowIso() };
       db.insert("claims", row);
+      syncPolicyClaimStatus(row);
+      ensureClaimActionTask(row);
+      logClaimRecordTimeline(row, row.status === "closed" ? "closed" : "opened", undefined, "system");
       return row;
     },
     update(id: string, patch: Partial<Claim>) {
-      return db.update("claims", id, patch);
+      const before = db.list("claims").find((c) => c.id === id);
+      const updated = db.update("claims", id, patch);
+      if (updated && patch.status) syncPolicyClaimStatus(updated);
+      if (updated && ("status" in patch || "closedAt" in patch)) ensureClaimActionTask(updated);
+      if (updated && before) {
+        const becameClosed =
+          updated.status === "closed" &&
+          (before.status !== "closed" || (!before.closedAt && Boolean(updated.closedAt)));
+        if (becameClosed) {
+          logClaimRecordTimeline(updated, "closed", undefined, patch.closedAt ? "system" : undefined);
+        } else if (
+          before.status !== updated.status ||
+          before.externalClaimNumber !== updated.externalClaimNumber ||
+          before.lossDescription !== updated.lossDescription ||
+          before.lossAmountUsd !== updated.lossAmountUsd
+        ) {
+          logClaimRecordTimeline(updated, "updated", "claim details refreshed", "system");
+        }
+      }
+      return updated;
     },
     // Convenience: close a claim. Stamps closedAt and flips status
     // so the Clients sidebar badge stops counting this client.
-    close(id: string) {
-      return db.update("claims", id, { status: "closed", closedAt: nowIso() });
+    close(id: string, actorId?: string) {
+      const before = db.list("claims").find((c) => c.id === id);
+      if (before?.status === "closed") return before;
+      const updated = db.update("claims", id, { status: "closed", closedAt: nowIso() });
+      if (updated) syncPolicyClaimStatus(updated);
+      if (updated) ensureClaimActionTask(updated);
+      if (updated) logClaimRecordTimeline(updated, "closed", undefined, actorId ?? "system");
+      return updated;
+    },
+    checkForCarrierClaims(input: {
+      tenantId: string;
+      customerId: string;
+      createdById?: string;
+    }): {
+      checked: number;
+      created: number;
+      updated: number;
+      jobIds: string[];
+      summary: string;
+    } {
+      const customer = db.list("customers").find((c) => c.id === input.customerId);
+      if (!customer || customer.tenantId !== input.tenantId) {
+        return { checked: 0, created: 0, updated: 0, jobIds: [], summary: "Client record could not be found." };
+      }
+      const policies = tenantFilter(db.list("policies"), input.tenantId).filter(
+        (policy) => policy.customerId === customer.id
+      );
+      if (policies.length === 0) {
+        return {
+          checked: 0,
+          created: 0,
+          updated: 0,
+          jobIds: [],
+          summary: "No policies are on file, so there were no carrier claim portals to check.",
+        };
+      }
+
+      const checkedAt = nowIso();
+      const jobIds: string[] = [];
+      policies.forEach((policy) => {
+        const job = createCarrierRunnerJobOnce({
+          tenantId: input.tenantId,
+          trigger: "claim_check",
+          policy,
+          createdById: input.createdById ?? "system",
+          reason: `Check ${carrierName(policy.carrierId)} for current claim activity tied to ${policyRef(policy)} and import any new or changed claim records.`,
+        });
+        if (!job) return;
+        jobIds.push(job.id);
+        db.update("carrierRunnerJobs", job.id, {
+          status: "running",
+          startedAt: job.startedAt ?? checkedAt,
+          startedById: input.createdById ?? "system",
+          lastAttemptAt: checkedAt,
+          attempts: job.attempts + 1,
+        });
+      });
+
+      let created = 0;
+      let updated = 0;
+      const existingClaims = db.list("claims").filter((claim) => claim.customerId === customer.id);
+      const activeClaims = existingClaims.filter((claim) => claim.status !== "closed");
+
+      if (activeClaims.length > 0) {
+        activeClaims.forEach((claim, index) => {
+          const policy = db.list("policies").find((p) => p.id === claim.policyId);
+          const carrier = db.list("carriers").find((c) => c.id === claim.carrierId);
+          const patch: Partial<Claim> = {
+            status: claim.status === "opened" ? "in_review" : claim.status,
+            carrierClaimsUrl: claim.carrierClaimsUrl ?? carrier?.claimsUrl,
+            externalClaimNumber:
+              claim.externalClaimNumber ??
+              `CR-${(policy?.policyNumber ?? claim.policyId).replace(/[^a-z0-9]+/gi, "").slice(-8)}-${index + 1}`,
+          };
+          const next = db.update("claims", claim.id, patch);
+          if (next) {
+            updated += 1;
+            syncPolicyClaimStatus(next);
+            ensureClaimActionTask(next, input.createdById);
+            logClaimRecordTimeline(next, "updated", "carrier status confirmed", input.createdById ?? "system");
+          }
+        });
+      } else if (existingClaims.length === 0) {
+        const policy =
+          policies.find((row) => row.carrierId === "carrier_chubb") ??
+          policies.find((row) => row.carrierId === "carrier_pure") ??
+          policies[0];
+        const carrier = db.list("carriers").find((c) => c.id === policy.carrierId);
+        const asset = db.list("assets").find((row) => row.id === policy.assetId);
+        const claim = db.insert("claims", {
+          id: uid("claim"),
+          tenantId: input.tenantId,
+          customerId: customer.id,
+          policyId: policy.id,
+          carrierId: policy.carrierId,
+          carrierClaimsUrl: carrier?.claimsUrl,
+          externalClaimNumber: `CR-${(policy.policyNumber ?? policy.id).replace(/[^a-z0-9]+/gi, "").slice(-8)}-1`,
+          lossDescription: `Carrier-reported claim activity discovered for ${asset?.label ?? "insured asset"}.`,
+          status: "in_review",
+          openedAt: checkedAt,
+        });
+        created += 1;
+        syncPolicyClaimStatus(claim);
+        ensureClaimActionTask(claim, input.createdById);
+        logClaimRecordTimeline(claim, "opened", undefined, input.createdById ?? "system");
+      }
+
+      const resultSummary =
+        created > 0
+          ? `${created} carrier-reported claim was added to ${customer.name}.`
+          : updated > 0
+          ? `${updated} open claim${updated === 1 ? "" : "s"} refreshed from carrier information.`
+          : `Carrier claim portals were checked for ${customer.name}; no new claim activity was found.`;
+
+      jobIds.forEach((jobId) => {
+        const job = db.list("carrierRunnerJobs").find((row) => row.id === jobId);
+        if (!job) return;
+        db.update("carrierRunnerJobs", job.id, {
+          status: "completed",
+          completedAt: checkedAt,
+          completedById: input.createdById ?? "system",
+          detectedOutcome: created > 0 || updated > 0 ? "claim_update_staged" : "no_change",
+          resultSummary,
+          errorMessage: undefined,
+        });
+        logCarrierRunnerTimeline(job, "Carrier claim check completed", resultSummary, input.createdById ?? "system");
+      });
+
+      db.update("agencies", input.tenantId, {
+        carrierRunnerLastSyncAt: checkedAt,
+        carrierRunnerUpdatedAt: checkedAt,
+      });
+
+      return {
+        checked: policies.length,
+        created,
+        updated,
+        jobIds,
+        summary: resultSummary,
+      };
     },
     // Fires when a customer clicks a carrier claim link out of the
     // portal. Two side effects so the agent + manager have full
@@ -3052,6 +9918,7 @@ export const api = {
       claimsUrl: string;
       assetId?: string;
       policyId?: string;
+      claimId?: string;
     }): { statusEventId: string; draftEmailId: string } | null {
       const customer = db.list("customers").find((c) => c.id === input.customerId);
       if (!customer) return null;
@@ -3087,6 +9954,7 @@ export const api = {
         customerId: customer.id,
         assetId: input.assetId,
         policyId: input.policyId,
+        claimId: input.claimId,
         createdAt: nowIso(),
       });
 
@@ -3142,6 +10010,7 @@ export const api = {
       const assetLabel = asset?.label ?? "an unspecified asset";
       const subject = `Claim inquiry — ${assetLabel}`;
       const commId = uid("comm");
+      const createdAt = nowIso();
       db.insert("communications", {
         id: commId,
         tenantId: input.tenantId,
@@ -3150,7 +10019,7 @@ export const api = {
         direction: "inbound",
         subject,
         body: input.body,
-        createdAt: nowIso(),
+        createdAt,
       });
       const statusEventId = uid("se");
       db.insert("statusEvents", {
@@ -3161,7 +10030,19 @@ export const api = {
         visibility: "customer_visible",
         customerId: input.customerId,
         assetId: input.assetId,
-        createdAt: nowIso(),
+        createdAt,
+      });
+      const task = ensureClaimInquiryTask({
+        tenantId: input.tenantId,
+        customerId: input.customerId,
+        assetId: input.assetId,
+        body: input.body,
+        commId,
+        createdAt,
+      });
+      db.update("communications", commId, {
+        aiActivityScannedAt: createdAt,
+        aiActivityTaskId: task.id,
       });
       return { commId, statusEventId };
     },
@@ -3196,6 +10077,7 @@ export const api = {
           visibility: input.visibility,
           customerId: input.customerId,
           prospectId: input.prospectId,
+          attachments: row.attachments,
           createdAt: nowIso(),
           createdById: input.authorId,
         });
@@ -3252,9 +10134,15 @@ export const api = {
     // Mark every unread inbound message in a contact's thread as read
     // (resolved). Used by the ⋯ thread settings "Mark as read".
     markContactRead(
-      contact: { customerId?: string; prospectId?: string; carrierContactId?: string },
+      contact: {
+        customerId?: string;
+        prospectId?: string;
+        carrierContactId?: string;
+        externalRecipientEmail?: string;
+      },
       byUserId: string
     ): number {
+      const externalEmail = normalizeEmail(contact.externalRecipientEmail);
       const rows = db
         .list("communications")
         .filter(
@@ -3263,7 +10151,8 @@ export const api = {
             !c.resolvedAt &&
             ((contact.customerId && c.customerId === contact.customerId) ||
               (contact.prospectId && c.prospectId === contact.prospectId) ||
-              (contact.carrierContactId && c.carrierContactId === contact.carrierContactId))
+              (contact.carrierContactId && c.carrierContactId === contact.carrierContactId) ||
+              (externalEmail && normalizeEmail(c.externalRecipientEmail) === externalEmail))
         );
       rows.forEach((c) =>
         db.update("communications", c.id, { resolvedAt: nowIso(), resolvedById: byUserId })
@@ -3276,14 +10165,17 @@ export const api = {
       customerId?: string;
       prospectId?: string;
       carrierContactId?: string;
+      externalRecipientEmail?: string;
     }): number {
+      const externalEmail = normalizeEmail(contact.externalRecipientEmail);
       const rows = db
         .list("communications")
         .filter(
           (c) =>
             (contact.customerId && c.customerId === contact.customerId) ||
             (contact.prospectId && c.prospectId === contact.prospectId) ||
-            (contact.carrierContactId && c.carrierContactId === contact.carrierContactId)
+            (contact.carrierContactId && c.carrierContactId === contact.carrierContactId) ||
+            (externalEmail && normalizeEmail(c.externalRecipientEmail) === externalEmail)
         );
       rows.forEach((c) => db.remove("communications", c.id));
       return rows.length;
@@ -3298,7 +10190,7 @@ export const api = {
     sweepInboundForActivities(
       tenantId: string,
       actorId?: string
-    ): { communicationId: string; task: Task }[] {
+    ): { communicationId: string; task?: Task; notification?: AiNotification }[] {
       const inbound = db
         .list("communications")
         .filter(
@@ -3308,7 +10200,7 @@ export const api = {
             c.createdById !== "ai" &&
             !c.aiActivityScannedAt
         );
-      const created: { communicationId: string; task: Task }[] = [];
+      const created: { communicationId: string; task?: Task; notification?: AiNotification }[] = [];
       for (const c of inbound) {
         const customer = c.customerId
           ? db.list("customers").find((x) => x.id === c.customerId)
@@ -3332,8 +10224,8 @@ export const api = {
           contactKind,
         });
         const patch: Partial<Communication> = { aiActivityScannedAt: nowIso() };
-        if (triage.warrants) {
-          const assignedToId = customer?.assignedAgentId ?? prospect?.assignedAgentId;
+        const assignedToId = customer?.assignedAgentId ?? prospect?.assignedAgentId;
+        if (triage.disposition === "activity") {
           // Carrier messages (and any unowned contact) route to a
           // manager via the Routing card.
           const awaiting = !assignedToId;
@@ -3365,6 +10257,34 @@ export const api = {
           });
           patch.aiActivityTaskId = taskRow.id;
           created.push({ communicationId: c.id, task: taskRow });
+        } else if (triage.disposition === "notification") {
+          const managerId = db
+            .list("users")
+            .find((u) => u.tenantId === tenantId && isRoutingManagerRole(u.role) && u.active)?.id;
+          const preview = c.body.trim().replace(/\s+/g, " ");
+          const row: AiNotification = {
+            id: uid("ain"),
+            tenantId,
+            kind: "inbound_notice",
+            title: `Notification: ${triage.title}`,
+            summary:
+              preview.length > 120
+                ? `${preview.slice(0, 117)}...`
+                : preview || `Inbound ${topicLabel(triage.topic)} update received.`,
+            customerId: c.customerId,
+            prospectId: c.prospectId,
+            communicationId: c.id,
+            topic: triage.topic,
+            severity: triage.severity,
+            severityReason: "Informational inbound message; no owned activity was opened.",
+            originalMessageContent: c.body,
+            originalMessageId: c.id,
+            assignedToId: assignedToId ?? managerId,
+            createdAt: nowIso(),
+          };
+          db.insert("aiNotifications", row);
+          patch.aiActivityNotificationId = row.id;
+          created.push({ communicationId: c.id, notification: row });
         }
         db.update("communications", c.id, patch);
       }
@@ -3380,15 +10300,29 @@ export const api = {
         input.channel,
         input.direction,
         input.body,
-        input.createdById
+        input.createdById,
+        input.mailboxOrigin
       );
+      const senderMailbox =
+        input.channel === "email" && input.direction === "outbound"
+          ? mailboxForUser(input.createdById)
+          : {};
       const row: Communication = {
         ...input,
         body: finalBody,
+        mailboxOrigin:
+          input.mailboxOrigin ??
+          (input.channel === "email" && input.direction === "outbound" ? "app" : undefined),
+        mailboxAccount: input.mailboxAccount ?? senderMailbox.account,
+        mailboxProvider: input.mailboxProvider ?? senderMailbox.provider,
+        mailboxConnectionId: input.mailboxConnectionId ?? senderMailbox.connectionId,
         id: uid("comm"),
         createdAt: nowIso(),
       };
       db.insert("communications", row);
+      if (row.channel === "email" && row.direction === "outbound") {
+        markMailboxSent(row.mailboxConnectionId);
+      }
 
       // Every email / SMS / call to or from a customer gets a
       // timeline row so the client status report shows the full
@@ -3396,30 +10330,108 @@ export const api = {
       // as source=customer, outbound from staff as source=agent.
       // Customer-visible visibility keeps the customer's own
       // portal timeline honest about messages we sent them.
-      if (input.customerId || input.prospectId) {
-        const channelLabel =
-          input.channel === "email" ? "Email"
-          : input.channel === "sms" ? "SMS"
-          : input.channel === "call" ? "Call"
-          : input.channel === "note" ? "Note"
-          : String(input.channel);
-        const dirVerb =
-          input.direction === "outbound" ? "sent" : "received";
-        const subject = input.subject ? `: ${input.subject}` : "";
-        db.insert("statusEvents", {
-          id: uid("se"),
-          tenantId: input.tenantId,
-          source: input.direction === "inbound" ? "customer" : "agent",
-          message: `${channelLabel} ${dirVerb}${subject}.`,
-          visibility: input.channel === "note" ? "internal" : "customer_visible",
-          customerId: input.customerId,
-          prospectId: input.prospectId,
-          communicationId: row.id,
-          createdAt: nowIso(),
-          createdById: input.createdById,
-        });
+      communicationStatusEvent(row);
+
+      return row;
+    },
+  },
+
+  // ------------ Mailbox mirror ------------
+  mailbox: {
+    // Production provider sync (Gmail watch / Microsoft Graph webhook /
+    // IMAP adapter) lands here after OAuth. It normalizes provider
+    // messages into Communication rows so the Messages page mirrors
+    // the staff member's real mailbox: inbound replies appear here,
+    // and emails sent directly in Gmail / Outlook appear as outbound
+    // "You" messages in the same contact thread.
+    mirrorExternalEmail(input: {
+      tenantId: string;
+      mailboxUserId: string;
+      mailboxAccount?: string;
+      provider?: MailProvider;
+      externalMessageId: string;
+      externalThreadId?: string;
+      externalUrl?: string;
+      from: string;
+      to: string[];
+      cc?: string[];
+      subject?: string;
+      body: string;
+      sentAt?: string;
+      direction?: "inbound" | "outbound";
+    }): Communication | null {
+      const userMailbox = mailboxForUser(input.mailboxUserId);
+      const mailboxAccount = input.mailboxAccount ?? userMailbox.account;
+      if (!mailboxAccount) return null;
+      const mailboxAddress = normalizeEmail(mailboxAccount);
+      const provider =
+        input.provider ?? userMailbox.provider ?? inferMailProvider(mailboxAccount);
+      const from = normalizeEmail(input.from);
+      const recipients = [...input.to, ...(input.cc ?? [])]
+        .map(normalizeEmail)
+        .filter(Boolean);
+      const direction =
+        input.direction ?? (from === mailboxAddress ? "outbound" : "inbound");
+      const contactEmail =
+        direction === "outbound"
+          ? recipients.find((email) => email !== mailboxAddress)
+          : from;
+      if (!contactEmail) return null;
+      const contact = resolveEmailContact(input.tenantId, contactEmail);
+      if (!contact) return null;
+
+      const existing = db
+        .list("communications")
+        .find(
+          (c) =>
+            c.tenantId === input.tenantId &&
+            c.externalMessageId === input.externalMessageId &&
+            normalizeEmail(c.mailboxAccount) === mailboxAddress
+        );
+      if (existing) {
+        return db.update("communications", existing.id, {
+          subject: input.subject ?? existing.subject,
+          body: input.body,
+          externalThreadId: input.externalThreadId ?? existing.externalThreadId,
+          externalUrl: input.externalUrl ?? existing.externalUrl,
+        }) ?? existing;
       }
 
+      const subjectKey = (input.subject ?? "message")
+        .trim()
+        .toLowerCase()
+        .replace(/^re:\s*/i, "")
+        .replace(/\s+/g, "-")
+        .slice(0, 64);
+      const row: Communication = {
+        id: uid("comm"),
+        tenantId: input.tenantId,
+        ...contact,
+        channel: "email",
+        direction,
+        subject: input.subject,
+        threadId: input.externalThreadId
+          ? `provider:${provider}:${input.externalThreadId}`
+          : `provider:${provider}:${contactEmail}:${subjectKey}`,
+        body: input.body,
+        createdById: direction === "outbound" ? input.mailboxUserId : undefined,
+        mailboxOrigin: "provider_sync",
+        mailboxAccount,
+        mailboxProvider: provider,
+        mailboxConnectionId: userMailbox.connectionId,
+        externalMessageId: input.externalMessageId,
+        externalThreadId: input.externalThreadId,
+        externalUrl: input.externalUrl,
+        createdAt: input.sentAt ?? nowIso(),
+      };
+      db.insert("communications", row);
+      if (userMailbox.connectionId) {
+        db.update("connectedMailboxes", userMailbox.connectionId, {
+          lastSyncAt: nowIso(),
+          updatedAt: nowIso(),
+        });
+      }
+      communicationStatusEvent(row);
       return row;
     },
   },
@@ -3442,6 +10454,14 @@ export const api = {
     ): { notification: AiNotification; task: Task; sentMessageId: string | null } | null {
       const notif = db.list("aiNotifications").find((n) => n.id === id);
       if (!notif || notif.acknowledgedAt) return null;
+      if (
+        notif.kind === "goal_request" ||
+        notif.kind === "timesheet_due" ||
+        notif.kind === "inbound_notice" ||
+        notif.kind === "quote_ready"
+      ) {
+        return null;
+      }
       // The AI auto-reply already went out on requestEdit submission
       // (no approval gate). Acknowledge here just creates the
       // follow-up Task — it doesn't trigger another send. The
@@ -3524,6 +10544,131 @@ export const api = {
     },
   },
 
+  // ------------ Contact routing requests ------------
+  routing: {
+    findOpenContactRouteRequest(
+      kind: "client" | "prospect",
+      targetId: string
+    ): Task | undefined {
+      return db.list("tasks").find((t) => {
+        if (t.completedAt || !t.awaitingManagerAssignment) return false;
+        if (t.routeRequestKind !== kind) return false;
+        return kind === "client" ? t.customerId === targetId : t.prospectId === targetId;
+      });
+    },
+    requestContactRoute(input: {
+      tenantId: string;
+      kind: "client" | "prospect";
+      targetId: string;
+      mode: "route" | "reroute";
+      actorId: string;
+      requestedAgentIds: string[];
+    }): Task {
+      const existing = this.findOpenContactRouteRequest(input.kind, input.targetId);
+      if (existing) return existing;
+      const requestedAgentIds = Array.from(
+        new Set(input.requestedAgentIds.filter(Boolean))
+      );
+      if (requestedAgentIds.length === 0) {
+        throw new Error("Select who this should be routed to before submitting the request.");
+      }
+
+      const contact =
+        input.kind === "client"
+          ? db.list("customers").find((c) => c.id === input.targetId)
+          : db.list("prospects").find((p) => p.id === input.targetId);
+      if (!contact || contact.tenantId !== input.tenantId) {
+        throw new Error(`${input.kind === "client" ? "Client" : "Prospect"} not found.`);
+      }
+
+      const requester = db.list("users").find((u) => u.id === input.actorId);
+      const requestedAgents = requestedAgentIds
+        .map((id) => db.list("users").find((u) => u.id === id && u.tenantId === input.tenantId))
+        .filter((u): u is User => !!u && isRoutableStaffRole(u.role));
+      if (requestedAgents.length === 0) {
+        throw new Error("Select a valid agency member before submitting the route request.");
+      }
+      const routeWord = input.mode === "route" ? "Route" : "Reroute";
+      const contactLabel = input.kind === "client" ? "client" : "prospect";
+      const requestedNames = requestedAgents.map((u) => u.name).join(", ");
+      const requestedAt = nowIso();
+      const row: Task = {
+        id: uid("task"),
+        tenantId: input.tenantId,
+        title: `${routeWord} ${contactLabel} requested: ${contact.name}`,
+        description: `${requester?.name ?? "A staff member"} requested that a manager ${input.mode} ${contact.name} to ${requestedNames}. Review and confirm the owner from the Routing card to complete the request.`,
+        customerId: input.kind === "client" ? contact.id : undefined,
+        prospectId: input.kind === "prospect" ? contact.id : undefined,
+        source: "manual",
+        status: "open",
+        severity: "warning",
+        topic: "other",
+        awaitingManagerAssignment: true,
+        routeRequestKind: input.kind,
+        routeRequestMode: input.mode,
+        routeRequestToAgentIds: requestedAgents.map((u) => u.id),
+        routeRequestedAt: requestedAt,
+        routeRequestedById: input.actorId,
+        createdById: input.actorId,
+        createdAt: requestedAt,
+      };
+      db.insert("tasks", row);
+      logTaskAudit({
+        tenantId: input.tenantId,
+        actorId: input.actorId,
+        action: "contact.route_requested",
+        taskId: row.id,
+        metadata: {
+          kind: input.kind,
+          targetId: input.targetId,
+          mode: input.mode,
+          requestedAgentIds: requestedAgents.map((u) => u.id),
+        },
+      });
+      return row;
+    },
+    completeContactRouteRequest(
+      taskId: string,
+      agentIds: string[],
+      actorId?: string,
+      options?: { csrId?: string | null; csrIds?: string[] }
+    ): Task | null {
+      const row = db.list("tasks").find((t) => t.id === taskId);
+      const ids = Array.from(new Set(agentIds.filter(Boolean)));
+      if (!row || ids.length === 0 || !row.routeRequestKind) return null;
+
+      if (row.routeRequestKind === "client") {
+        if (!row.customerId) return null;
+        api.customers.assignAgents(row.customerId, ids, actorId, options);
+      } else {
+        if (!row.prospectId) return null;
+        api.prospects.assignAgents(row.prospectId, ids, actorId, options);
+      }
+
+      const [primary, ...additional] = ids;
+      const updated = db.update("tasks", taskId, {
+        assignedToId: primary,
+        additionalAssignedToIds: additional.length > 0 ? additional : undefined,
+        awaitingManagerAssignment: false,
+        status: "resolved",
+        completedAt: nowIso(),
+        completedById: actorId,
+      });
+      logTaskAudit({
+        tenantId: row.tenantId,
+        actorId,
+        action: "contact.route_request_completed",
+        taskId,
+        metadata: {
+          kind: row.routeRequestKind,
+          mode: row.routeRequestMode,
+          toAgentIds: ids,
+        },
+      });
+      return updated;
+    },
+  },
+
   // ------------ Tasks (Activity Center entries) ------------
   // Each Task represents one row in the Activity Center surface
   // (sidebar #2). Acknowledging an AiNotification spawns one of
@@ -3533,13 +10678,25 @@ export const api = {
   // reconstruct the full trail from /master/data or the client
   // profile timeline.
   tasks: {
+    get(id: string): Task | undefined {
+      return db.list("tasks").find((t) => t.id === id);
+    },
     listByTenant(tenantId: string): Task[] {
       // Sort order: manual priorityRank desc (pinned=1 → 0 → -1 sent
       // to bottom), then newest first.
-      return tenantFilter(db.list("tasks"), tenantId).sort((a, b) => {
+      return tenantFilter(db.list("tasks"), tenantId)
+        .filter((task) => !isLegacyQuoteReadyActivity(task))
+        .sort((a, b) => {
         const pa = a.priorityRank ?? 0;
         const pb = b.priorityRank ?? 0;
         if (pa !== pb) return pb - pa;
+        const qa = a.queuePosition;
+        const qb = b.queuePosition;
+        if (qa != null || qb != null) {
+          const va = qa ?? Number.MAX_SAFE_INTEGER;
+          const vb = qb ?? Number.MAX_SAFE_INTEGER;
+          if (va !== vb) return va - vb;
+        }
         return a.createdAt < b.createdAt ? 1 : -1;
       });
     },
@@ -3575,25 +10732,22 @@ export const api = {
       if (t.status === "in_progress") return "in_progress";
       return "open";
     },
-    // AI resolution checklist. Returns the steps the system
-    // expects to see complete before "Mark resolved" is unlocked,
-    // along with each step's done/pending state. Used by the
-    // Activity Center to gate the resolve button and to render
-    // the disclaimer modal that explains why it's locked.
+    // AI resolution checklist diagnostics. Kept for historical audit
+    // and tests that explain what the system has observed, but the UI
+    // no longer blocks staff from marking an activity resolved.
     // True when any outbound message has gone out to this activity's
     // contact — either via the Messages page, the inline thread on
     // the detail page, or the agent reply flow. Sending a message
-    // counts as an active touchpoint and lifts the resolve-gate
-    // checklist below.
+    // counts as an active touchpoint for the diagnostic checklist below.
     hasOutboundTouchpoint(t: Task): boolean {
       const replied = this.history(t.id).some((h) => h.action === "task.replied");
       if (replied) return true;
       // Fallback: an outbound Communication a *person* sent to the
       // contact during / after the task was opened. AI-authored
       // messages (createdById "ai" — e.g. the express-quote auto
-      // confirmation SMS) deliberately do NOT count: the gate exists
-      // so an agent personally responds before resolving. An
-      // automated acknowledgment isn't a substitute for that.
+      // confirmation SMS) deliberately do NOT count as a human
+      // touchpoint. An automated acknowledgment isn't a substitute for
+      // staff follow-up when reviewing diagnostics.
       const since = new Date(t.createdAt).getTime();
       const contactComms = db.list("communications").filter((c) => {
         if (c.direction !== "outbound") return false;
@@ -3606,24 +10760,40 @@ export const api = {
         (c) => new Date(c.createdAt).getTime() >= since
       );
     },
-    // True when the agent has used the "Send questionnaire" action on
-    // this activity.
+    // True when this activity has recorded its questionnaire send
+    // action, whether manual or autopilot.
     hasSentQuestionnaire(t: Task): boolean {
       return this.history(t.id).some((h) => h.action === "task.questionnaire_sent");
     },
-    // True once the "Send documents requiring e-sign" action has run
+    // Documents still waiting for this customer to receive an
+    // e-signature request. Autopilot sends these deterministically.
     // ON THIS activity. A new activity is a new activity — the
     // customer having received e-sign docs on a previous activity
     // does NOT pre-satisfy it. (No-contact activities have nothing to
     // send, so they're auto-clear.)
+    pendingEsignDocs(t: Task): Document[] {
+      if (!t.customerId) return [];
+      return db
+        .list("documents")
+        .filter(
+          (d) =>
+            d.customerId === t.customerId &&
+            !!d.customerEsignRequired &&
+            !d.customerEsignSentAt &&
+            !d.customerEsignSignedAt
+        );
+    },
     hasSentEsignDocs(t: Task): boolean {
       if (!t.customerId) return true;
-      return this.history(t.id).some((h) => h.action === "task.esign_docs_sent");
+      return (
+        this.pendingEsignDocs(t).length === 0 ||
+        this.history(t.id).some((h) => h.action === "task.esign_docs_sent")
+      );
     },
-    // AI change-verification gate. Reads what the activity is ABOUT
+    // AI change-verification diagnostic. Reads what the activity is ABOUT
     // (topic + title + description) and confirms the corresponding
     // real-world change has actually landed on the account since the
-    // activity opened — e.g. an "add a vehicle" activity stays locked
+    // activity opened — e.g. an "add a vehicle" activity stays pending
     // until a new asset shows up. Returns `required:false` for
     // activities with no machine-verifiable change (general questions,
     // callbacks) so those resolve exactly as before.
@@ -3711,15 +10881,15 @@ export const api = {
           !!t.startedAt || this.statusOf(t) === "in_progress" || !!t.completedAt,
       });
 
-      // Customer activities require the agent to actually reach out:
-      // send the questionnaire AND send the missing-documents request
-      // before the activity can be resolved.
+      // Customer activities require customer-facing automation to run:
+      // AI sends the questionnaire and deterministic e-sign packets go
+      // out automatically before the activity can be resolved.
       if (t.customerId) {
         // Step 2 — questionnaire sent
         steps.push({
           label: "Questionnaire sent to the customer",
           detail:
-            "Use 'Send questionnaire' on the activity to email the intake questions. This step clears once it's sent.",
+            "AI sends the intake questions automatically when the activity starts. This step clears once the send is audited.",
           done: this.hasSentQuestionnaire(t),
         });
 
@@ -3740,16 +10910,16 @@ export const api = {
             pendingEsign > 0
               ? `${pendingEsign} document${
                   pendingEsign === 1 ? "" : "s"
-                } need the customer's e-signature. Use 'Send documents requiring e-sign' — this step clears once they go out. Signed copies file themselves automatically.`
+                } need the customer's e-signature. The activity autopilot emails them automatically; signed copies file themselves automatically.`
               : "No documents are waiting on the customer's e-signature.",
           done: this.hasSentEsignDocs(t),
         });
       }
 
-      // Final gate — the AI must recognize that the concrete change
-      // the activity asked for actually happened on the account before
-      // resolve unlocks (e.g. a vehicle was added). Skipped for
-      // activities with no verifiable change.
+      // Final diagnostic — the AI records whether the concrete change
+      // the activity asked for actually happened on the account (e.g.
+      // a vehicle was added). Skipped for activities with no verifiable
+      // change.
       const res = this.resolutionCheck(t);
       if (res.required) {
         steps.push({
@@ -3759,18 +10929,48 @@ export const api = {
         });
       }
 
-      // Renewal-document update step. When the AI inspected this
+      // Renewal-document update diagnostic. When the AI inspected this
       // renewal and flagged term-bound documents for an update, the
-      // activity stays locked until each flagged doc has a published
-      // successor for the same renewal.
+      // checklist remains pending until each flagged doc has a
+      // published successor for the same renewal.
       if (t.renewalId) {
-        const flagged = db
-          .list("documents")
-          .filter(
-            (d) =>
-              d.renewalForRenewalId === t.renewalId &&
-              d.needsRenewalUpdate
+        const allDocs = db.list("documents");
+        const renewal = db.list("renewals").find((r) => r.id === t.renewalId);
+        const policy = renewal
+          ? db.list("policies").find((p) => p.id === renewal.policyId)
+          : undefined;
+        const policyCurrentTermYear = (() => {
+          const sourceDate = policy?.effectiveDate ?? policy?.renewalDate;
+          if (!sourceDate) return undefined;
+          const year = new Date(sourceDate).getUTCFullYear();
+          if (!Number.isFinite(year)) return undefined;
+          return policy?.effectiveDate ? year : year - 1;
+        })();
+        const termYearOf = (doc: Document) => doc.policyTermYear ?? policyCurrentTermYear ?? 0;
+        const hasPublishedSuccessor = (doc: Document) =>
+          allDocs.some(
+            (candidate) =>
+              candidate.policyId === doc.policyId &&
+              candidate.id !== doc.id &&
+              candidate.type === doc.type &&
+              !!candidate.publishedAt &&
+              candidate.status !== "rejected" &&
+              (candidate.supersedesId === doc.id || termYearOf(candidate) > termYearOf(doc))
           );
+        const latestSameTypeYear = (doc: Document) =>
+          allDocs
+            .filter((candidate) => candidate.policyId === doc.policyId && candidate.type === doc.type)
+            .reduce<number | null>((latest, candidate) => {
+              const year = termYearOf(candidate);
+              return latest == null ? year : Math.max(latest, year);
+            }, null);
+        const flagged = allDocs.filter((d) => {
+          if (d.renewalForRenewalId !== t.renewalId || !d.needsRenewalUpdate) return false;
+          if (hasPublishedSuccessor(d)) return false;
+          const sourceYear = termYearOf(d);
+          const latestYear = latestSameTypeYear(d);
+          return !latestYear || sourceYear >= latestYear;
+        });
         if (flagged.length > 0) {
           steps.push({
             label: "Renewal documents updated",
@@ -3784,13 +10984,18 @@ export const api = {
 
       return steps;
     },
-    // "Send questionnaire" action. Emails the customer the activity's
+    // Questionnaire send action. Emails the customer the activity's
     // pre-drafted questionnaire (or a generic one) and records the
-    // questionnaire-sent audit so the resolve gate clears. Does NOT
-    // auto-resolve — the missing-docs request is still required.
-    sendQuestionnaire(id: string, userId?: string): Task | null {
+    // questionnaire-sent audit so the diagnostic checklist records
+    // the touchpoint. Does NOT auto-resolve.
+    sendQuestionnaire(
+      id: string,
+      userId?: string,
+      options: { automated?: boolean } = {}
+    ): Task | null {
       const t = db.list("tasks").find((x) => x.id === id);
       if (!t || !t.customerId) return null;
+      if (this.hasSentQuestionnaire(t)) return t;
       const subject = t.aiReplySubject ?? "A few questions to finalize your coverage";
       const body =
         t.aiReplyBody ??
@@ -3809,29 +11014,32 @@ export const api = {
         actorId: userId,
         action: "task.questionnaire_sent",
         taskId: id,
+        metadata: { automated: !!options.automated },
       });
       return db.list("tasks").find((x) => x.id === id) ?? null;
     },
-    // "Send documents requiring e-sign" action. Emails the customer
+    // E-signature send action. Emails the customer
     // the documents that still need their signature (marks them sent),
-    // then records the audit so the resolve gate clears. Once the
+    // then records the audit for the diagnostic checklist. Once the
     // customer signs in their portal the executed copy files itself
     // automatically (see esign.markCustomerSigned).
-    sendEsignDocuments(id: string, userId?: string): Task | null {
+    sendEsignDocuments(
+      id: string,
+      userId?: string,
+      options: { automated?: boolean } = {}
+    ): Task | null {
       const t = db.list("tasks").find((x) => x.id === id);
       if (!t || !t.customerId) return null;
       const customer = db.list("customers").find((c) => c.id === t.customerId);
       // Docs that need the customer's e-signature and haven't been
       // emailed yet.
-      const pending = db
-        .list("documents")
-        .filter(
-          (d) =>
-            d.customerId === t.customerId &&
-            !!d.customerEsignRequired &&
-            !d.customerEsignSentAt &&
-            !d.customerEsignSignedAt
-        );
+      const pending = this.pendingEsignDocs(t);
+      if (
+        pending.length === 0 &&
+        this.history(t.id).some((h) => h.action === "task.esign_docs_sent")
+      ) {
+        return t;
+      }
       if (pending.length > 0 && customer) {
         const firstName = customer.name.split(/\s+/)[0];
         const lines = pending.map((d) => `  • ${d.fileName}`).join("\n");
@@ -3870,8 +11078,25 @@ export const api = {
         actorId: userId,
         action: "task.esign_docs_sent",
         taskId: id,
+        metadata: { automated: !!options.automated, documentCount: pending.length },
       });
       return db.list("tasks").find((x) => x.id === id) ?? null;
+    },
+    // Activity autopilot. When an agent starts work, AI prepares and
+    // sends the standard questionnaire while deterministic e-sign
+    // packets go out automatically if any are waiting. Idempotent:
+    // reloads and repeated starts do not duplicate messages.
+    ensureAutopilot(id: string, userId?: string): Task | null {
+      const t = db.list("tasks").find((x) => x.id === id);
+      if (!t || !t.customerId) return t ?? null;
+      if (!this.hasSentQuestionnaire(t)) {
+        this.sendQuestionnaire(id, userId, { automated: true });
+      }
+      const fresh = db.list("tasks").find((x) => x.id === id) ?? t;
+      if (this.pendingEsignDocs(fresh).length > 0) {
+        this.sendEsignDocuments(id, userId, { automated: true });
+      }
+      return db.list("tasks").find((x) => x.id === id) ?? fresh;
     },
     canResolve(t: Task): { allowed: boolean; missingSteps: number } {
       // Manager override short-circuits the checklist.
@@ -4020,23 +11245,17 @@ export const api = {
       viewer: { id: string; role: Role },
       contact: { customerId?: string; prospectId?: string }
     ): boolean {
-      if (viewer.role === "manager" || viewer.role === "master_admin") return true;
-      if (viewer.role !== "agent") return false;
+      if (isRoutingManagerRole(viewer.role) || viewer.role === "master_admin") return true;
+      if (viewer.role !== "agent" && viewer.role !== "csr") return false;
       if (contact.customerId) {
         const c = db.list("customers").find((x) => x.id === contact.customerId);
         if (!c) return false;
-        return (
-          c.assignedAgentId === viewer.id ||
-          (c.additionalAgentIds ?? []).includes(viewer.id)
-        );
+        return contactIsOwnedBy(c, viewer.id);
       }
       if (contact.prospectId) {
         const p = db.list("prospects").find((x) => x.id === contact.prospectId);
         if (!p) return false;
-        return (
-          p.assignedAgentId === viewer.id ||
-          (p.additionalAgentIds ?? []).includes(viewer.id)
-        );
+        return contactIsOwnedBy(p, viewer.id);
       }
       return true;
     },
@@ -4061,7 +11280,7 @@ export const api = {
         const actor = db.list("users").find((u) => u.id === input.createdById);
         if (
           actor &&
-          actor.role === "agent" &&
+          (actor.role === "agent" || actor.role === "csr") &&
           !this.canCreateActivityFor(
             { id: actor.id, role: actor.role },
             { customerId: input.customerId, prospectId: input.prospectId }
@@ -4121,7 +11340,7 @@ export const api = {
         action: "task.in_progress",
         taskId: id,
       });
-      // On the first start, auto-text the customer that an agent has
+      // On the first start, email the customer that an agent has
       // picked up their request — the same kind of acknowledgment the
       // AI used to send when the activity was created.
       if (firstStart && row.customerId) {
@@ -4131,29 +11350,56 @@ export const api = {
           api.communications.create({
             tenantId: row.tenantId,
             customerId: row.customerId,
-            channel: "sms",
+            channel: "email",
             direction: "outbound",
-            body: `Hi ${firstName}, one of our agents has started working on your request. We'll follow up shortly with next steps.`,
+            subject: "Your agency team is working on your request",
+            body: `Hi ${firstName},\n\nOne of our agents has started working on your request. We'll follow up shortly with next steps.`,
             createdById: userId,
           });
         }
+        this.ensureAutopilot(id, userId);
       }
-      return updated;
+      return db.list("tasks").find((x) => x.id === id) ?? updated;
     },
-    markComplete(id: string, userId?: string): Task | null {
+    markComplete(
+      id: string,
+      userId?: string,
+      options: { resolutionNote?: string } = {}
+    ): Task | null {
       const row = db.list("tasks").find((t) => t.id === id);
       if (!row || row.completedAt) return null;
+      const completedAt = nowIso();
+      const trimmedNote = options.resolutionNote?.trim();
+      let resolutionNoteId: string | undefined;
+      if (trimmedNote && (row.customerId || row.prospectId)) {
+        const note = api.notes.create({
+          tenantId: row.tenantId,
+          authorId: userId ?? "system",
+          customerId: row.customerId,
+          prospectId: row.prospectId,
+          policyId: row.policyId,
+          visibility: "internal",
+          body: `Activity closed out with agent note attached: ${row.title}\n\n${trimmedNote}`,
+        });
+        resolutionNoteId = note.id;
+      }
       const updated = db.update("tasks", id, {
-        completedAt: nowIso(),
+        completedAt,
         completedById: userId,
         status: "resolved",
         snoozedUntil: undefined,
+        resolutionNote: trimmedNote || undefined,
+        resolutionNoteId,
+        resolutionNoteAt: trimmedNote ? completedAt : undefined,
       });
       logTaskAudit({
         tenantId: row.tenantId,
         actorId: userId,
         action: "task.resolved",
         taskId: id,
+        metadata: trimmedNote
+          ? { resolutionNoteId, resolutionNote: trimmedNote }
+          : undefined,
       });
       return updated;
     },
@@ -4187,13 +11433,29 @@ export const api = {
       });
       return updated;
     },
-    assign(id: string, agentId: string | undefined, byUserId?: string): Task | null {
+    assign(
+      id: string,
+      agentIdOrIds: string | string[] | undefined,
+      byUserId?: string
+    ): Task | null {
       const row = db.list("tasks").find((t) => t.id === id);
       if (!row) return null;
+      const ids = Array.from(
+        new Set(
+          (Array.isArray(agentIdOrIds)
+            ? agentIdOrIds
+            : agentIdOrIds
+            ? [agentIdOrIds]
+            : []
+          ).filter(Boolean)
+        )
+      );
+      const [primary, ...additional] = ids;
       // Reassigning clears any pending reassignment request and the
       // "awaiting manager assignment" flag (the manager just made the call).
       const updated = db.update("tasks", id, {
-        assignedToId: agentId,
+        assignedToId: primary,
+        additionalAssignedToIds: additional.length > 0 ? additional : undefined,
         awaitingManagerAssignment: false,
         reassignRequestedAt: undefined,
         reassignRequestedById: undefined,
@@ -4205,7 +11467,7 @@ export const api = {
         actorId: byUserId,
         action: "task.reassigned",
         taskId: id,
-        metadata: { toAgentId: agentId ?? null },
+        metadata: { toAgentId: primary ?? null, toAgentIds: ids },
       });
       return updated;
     },
@@ -4248,6 +11510,8 @@ export const api = {
     createExpressQuoteFollowUp(input: {
       tenantId: string;
       customerId: string;
+      quoteRequestId?: string;
+      quoteSessionId?: string;
       title: string;
       description?: string;
       aiSummary?: string;
@@ -4264,6 +11528,8 @@ export const api = {
         tenantId: input.tenantId,
         title: input.title,
         description: input.description,
+        quoteRequestId: input.quoteRequestId,
+        quoteSessionId: input.quoteSessionId,
         customerId: input.customerId,
         source: "ai_notification",
         severity: input.severity ?? "warning",
@@ -4335,13 +11601,71 @@ export const api = {
       }
       return updated;
     },
+    setDueAt(id: string, dueAt: string | undefined, actorId?: string): Task | null {
+      const updated = db.update("tasks", id, {
+        dueAt,
+        dueAtChangedAt: nowIso(),
+        dueAtChangedById: actorId,
+      });
+      if (updated) {
+        logTaskAudit({
+          tenantId: updated.tenantId,
+          actorId,
+          action: dueAt ? "task.due_date_set" : "task.due_date_cleared",
+          taskId: id,
+          metadata: { dueAt },
+        });
+      }
+      return updated;
+    },
+    reorderQueue(orderedIds: string[], movedTaskId: string, actorId?: string): Task[] {
+      const uniqueIds = Array.from(new Set(orderedIds));
+      const allTasks = db.list("tasks");
+      const rows = uniqueIds
+        .map((id) => allTasks.find((t) => t.id === id))
+        .filter((t): t is Task => !!t);
+      const moved = rows.find((t) => t.id === movedTaskId);
+      if (!moved || rows.length < 2) return rows;
+      if (rows.some((t) => t.tenantId !== moved.tenantId)) return rows;
+      const stamp = nowIso();
+      const updated = rows
+        .map((task, index) =>
+          db.update("tasks", task.id, {
+            queuePosition: index + 1,
+            queueChangedAt: stamp,
+            queueChangedById: actorId,
+            priorityRank: 0,
+            priorityChangedAt: stamp,
+            priorityChangedById: actorId,
+          })
+        )
+        .filter((t): t is Task => !!t);
+      logTaskAudit({
+        tenantId: moved.tenantId,
+        actorId,
+        action: "task.reordered_queue",
+        taskId: movedTaskId,
+        metadata: { orderedIds: uniqueIds },
+      });
+      return updated;
+    },
     // Pin to top of the Activity Center list. Sort: pinned tasks
     // first (priorityRank=1), then default (0), then deprioritized
     // (-1). Within a tier we fall back to the severity-based sort.
     moveToFront(id: string, actorId?: string): Task | null {
+      const row = db.list("tasks").find((t) => t.id === id);
+      if (!row) return null;
+      const minPosition = db
+        .list("tasks")
+        .filter((t) => t.tenantId === row.tenantId && t.queuePosition != null)
+        .reduce((min, t) => Math.min(min, t.queuePosition ?? min), 0);
+      const stamp = nowIso();
       const updated = db.update("tasks", id, {
         priorityRank: 1,
-        priorityChangedAt: nowIso(),
+        queuePosition: minPosition - 1,
+        queueChangedAt: stamp,
+        queueChangedById: actorId,
+        priorityChangedAt: stamp,
         priorityChangedById: actorId,
       });
       if (updated) {
@@ -4355,9 +11679,19 @@ export const api = {
       return updated;
     },
     moveToBack(id: string, actorId?: string): Task | null {
+      const row = db.list("tasks").find((t) => t.id === id);
+      if (!row) return null;
+      const maxPosition = db
+        .list("tasks")
+        .filter((t) => t.tenantId === row.tenantId && t.queuePosition != null)
+        .reduce((max, t) => Math.max(max, t.queuePosition ?? max), 0);
+      const stamp = nowIso();
       const updated = db.update("tasks", id, {
         priorityRank: -1,
-        priorityChangedAt: nowIso(),
+        queuePosition: maxPosition + 1,
+        queueChangedAt: stamp,
+        queueChangedById: actorId,
+        priorityChangedAt: stamp,
         priorityChangedById: actorId,
       });
       if (updated) {
@@ -4371,9 +11705,13 @@ export const api = {
       return updated;
     },
     clearPriority(id: string, actorId?: string): Task | null {
+      const stamp = nowIso();
       const updated = db.update("tasks", id, {
         priorityRank: 0,
-        priorityChangedAt: nowIso(),
+        queuePosition: undefined,
+        queueChangedAt: stamp,
+        queueChangedById: actorId,
+        priorityChangedAt: stamp,
         priorityChangedById: actorId,
       });
       if (updated) {
@@ -4405,9 +11743,11 @@ export const api = {
       // is fine — the title is used as a custom label even when
       // the reminder is task-anchored.
       taskId?: string;
+      calendarEventId?: string;
       title?: string;
       note?: string;
       importance?: TaskSeverity;
+      scope?: Reminder["scope"];
       // Optional recurrence. When set, dismiss() auto-schedules the
       // next occurrence (capped by endsAt).
       recurrence?: import("@/types").ReminderRecurrence;
@@ -4417,7 +11757,9 @@ export const api = {
         id: uid("rem"),
         tenantId: input.tenantId,
         userId: input.userId,
+        scope: input.scope ?? "personal",
         taskId: input.taskId,
+        calendarEventId: input.calendarEventId,
         title: input.title,
         remindAt: input.remindAt,
         note: input.note,
@@ -4453,6 +11795,7 @@ export const api = {
           title: input.title,
           note: input.note,
           importance: input.importance,
+          scope: "company",
           recurrence: input.recurrence,
         })
       );
@@ -4485,6 +11828,12 @@ export const api = {
         .filter((r) => r.taskId === taskId && r.userId === userId && !r.dismissedAt)
         .sort((a, b) => (a.remindAt < b.remindAt ? -1 : 1));
     },
+    listForCalendarEvent(calendarEventId: string, userId: string): Reminder[] {
+      return db
+        .list("reminders")
+        .filter((r) => r.calendarEventId === calendarEventId && r.userId === userId && !r.dismissedAt)
+        .sort((a, b) => (a.remindAt < b.remindAt ? -1 : 1));
+    },
     // Soft dismiss — keeps the audit trail but drops from the
     // dashboard list. If the reminder carries a recurrence config,
     // dismissing also schedules the next occurrence on the same
@@ -4499,10 +11848,12 @@ export const api = {
         tenantId: updated.tenantId,
         userId: updated.userId,
         taskId: updated.taskId,
+        calendarEventId: updated.calendarEventId,
         remindAt: next,
         title: updated.title,
         note: updated.note,
         importance: updated.importance,
+        scope: updated.scope,
         recurrence: updated.recurrence,
         recurrenceSourceId: updated.recurrenceSourceId ?? updated.id,
       });
@@ -4514,6 +11865,100 @@ export const api = {
     },
     remove(id: string) {
       return db.remove("reminders", id);
+    },
+  },
+
+  // ------------ Personal calendar events ------------
+  calendarEvents: {
+    listForUser(tenantId: string, userId: string): CalendarEvent[] {
+      return db
+        .list("calendarEvents")
+        .filter(
+          (event) =>
+            event.tenantId === tenantId &&
+            (event.userId === userId ||
+              event.attendeeStatuses?.some(
+                (attendee) => attendee.userId === userId && attendee.status === "accepted"
+              ))
+        )
+        .sort((a, b) => (a.startsAt < b.startsAt ? -1 : 1));
+    },
+    listPendingRequestsForUser(tenantId: string, userId: string): CalendarEvent[] {
+      return db
+        .list("calendarEvents")
+        .filter(
+          (event) =>
+            event.tenantId === tenantId &&
+            event.kind === "meeting" &&
+            event.attendeeStatuses?.some(
+              (attendee) => attendee.userId === userId && attendee.status === "pending"
+            )
+        )
+        .sort((a, b) => (a.startsAt < b.startsAt ? -1 : 1));
+    },
+    pendingRequestCount(tenantId: string, userId: string): number {
+      return this.listPendingRequestsForUser(tenantId, userId).length;
+    },
+    get(id: string): CalendarEvent | undefined {
+      return db.list("calendarEvents").find((event) => event.id === id);
+    },
+    create(input: Omit<CalendarEvent, "id" | "createdAt" | "updatedAt">): CalendarEvent {
+      const now = nowIso();
+      const row: CalendarEvent = {
+        ...input,
+        id: uid("cal"),
+        createdAt: now,
+        updatedAt: now,
+      };
+      db.insert("calendarEvents", row);
+      return row;
+    },
+    requestMeeting(input: Omit<CalendarEvent, "id" | "createdAt" | "updatedAt" | "kind" | "attendeeStatuses"> & {
+      attendeeIds: string[];
+    }): CalendarEvent {
+      const attendeeIds = Array.from(new Set(input.attendeeIds)).filter((id) => id !== input.userId);
+      return this.create({
+        tenantId: input.tenantId,
+        userId: input.userId,
+        kind: "meeting",
+        organizerId: input.organizerId ?? input.userId,
+        attendeeStatuses: attendeeIds.map((userId) => ({
+          userId,
+          status: "pending",
+        })),
+        title: input.title,
+        description: input.description,
+        startsAt: input.startsAt,
+        endsAt: input.endsAt,
+        importance: input.importance,
+        location: input.location,
+      });
+    },
+    respondToMeeting(id: string, userId: string, status: "accepted" | "declined"): CalendarEvent | null {
+      const event = this.get(id);
+      if (!event || event.kind !== "meeting") return null;
+      const attendeeStatuses = event.attendeeStatuses ?? [];
+      if (!attendeeStatuses.some((attendee) => attendee.userId === userId)) return null;
+      return db.update("calendarEvents", id, {
+        attendeeStatuses: attendeeStatuses.map((attendee) =>
+          attendee.userId === userId
+            ? { ...attendee, status, respondedAt: nowIso() }
+            : attendee
+        ),
+        updatedAt: nowIso(),
+      });
+    },
+    acceptMeeting(id: string, userId: string): CalendarEvent | null {
+      return this.respondToMeeting(id, userId, "accepted");
+    },
+    declineMeeting(id: string, userId: string): CalendarEvent | null {
+      return this.respondToMeeting(id, userId, "declined");
+    },
+    update(id: string, patch: Partial<Omit<CalendarEvent, "id" | "tenantId" | "userId" | "createdAt">>): CalendarEvent | null {
+      return db.update("calendarEvents", id, { ...patch, updatedAt: nowIso() });
+    },
+    remove(id: string) {
+      return db.remove("calendarEvents", id);
     },
   },
 
@@ -4675,19 +12120,229 @@ export const api = {
   // Each phase mutates the QuotingSession row and reflects in the UI.
   quoting: {
     get(id: string): QuotingSession | undefined {
-      return db.list("quotingSessions").find((s) => s.id === id);
+      const session = db.list("quotingSessions").find((s) => s.id === id);
+      return session ? ensureCompletePersonalCategoryQuestionnaire(session) : undefined;
+    },
+    listByTenant(tenantId: string): QuotingSession[] {
+      return tenantFilter(db.list("quotingSessions"), tenantId)
+        .map(ensureCompletePersonalCategoryQuestionnaire)
+        .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
     },
     getForProspect(prospectId: string): QuotingSession | undefined {
-      return db
+      const session = db
         .list("quotingSessions")
         .filter((s) => s.prospectId === prospectId)
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
+      return session ? ensureCompletePersonalCategoryQuestionnaire(session) : undefined;
     },
     getForCustomer(customerId: string): QuotingSession | undefined {
-      return db
+      const session = db
         .list("quotingSessions")
-        .filter((s) => s.customerId === customerId)
+        .filter((s) => s.customerId === customerId && !isDocumentOnlyAcordSession(s))
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
+      return session ? ensureCompletePersonalCategoryQuestionnaire(session) : undefined;
+    },
+    diagnosePersonalLinesCarrierApis(input: {
+      tenantId: string;
+      assetType: AssetType;
+      state?: string;
+    }): PersonalLinesCarrierApiDiagnostic {
+      const rows = linkedActiveCarriers(input.tenantId).map((carrier) =>
+        diagnosePersonalCarrierApiRow(carrier, input)
+      );
+      return {
+        tenantId: input.tenantId,
+        assetType: input.assetType,
+        state: input.state,
+        linkedActiveCarrierCount: rows.length,
+        liveReadyCount: rows.filter((row) => row.liveReady).length,
+        simulatedCount: rows.filter((row) => row.quoteApiStatus === "simulated").length,
+        missingApiCount: rows.filter((row) => row.quoteApiStatus === "no_api").length,
+        errorCount: rows.filter((row) => row.configuredStatus === "error").length,
+        blockedCount: rows.filter((row) => row.blockingReasons.length > 0).length,
+        rows,
+      };
+    },
+    upsertCustomerIntakeSession(input: {
+      tenantId: string;
+      customerId: string;
+      quoteRequestId: string;
+      assetType: AssetType;
+      lineOfBusiness?: QuotingLineOfBusiness;
+      categoryId?: string;
+      categoryLabel?: string;
+      contactName: string;
+      address?: string;
+      estimatedValue?: number;
+      assetDetails?: Record<string, string>;
+      publicFieldEvidence?: PublicDataEvidenceMap;
+      questionnaireAnswers?: Record<string, string>;
+      assignedAgentId?: string;
+      createdById: string;
+      status?: PolicyStatus;
+    }): QuotingSession {
+      const now = nowIso();
+      const category = input.categoryId ? api.categories.get(input.categoryId) : undefined;
+      const questions = category ? categoryQuotingQuestions(category) : [];
+      const categoryQuestionIds = new Set(questions.map((question) => question.id));
+      const answers = input.questionnaireAnswers ?? {};
+      const nextResponses = Object.fromEntries(
+        questions
+          .map((question) => {
+            const sourceKey = question.acordFieldKey ?? question.id.replace(`category-${input.categoryId}-`, "");
+            const value = String(answers[sourceKey] ?? "").trim();
+            return value ? [question.id, value] : null;
+          })
+          .filter((entry): entry is [string, string] => !!entry)
+      );
+      const nextMeta = Object.fromEntries(
+        Object.keys(nextResponses).map((questionId) => [
+          questionId,
+          {
+            updatedAt: now,
+            updatedById: input.customerId,
+            updatedByName: input.contactName || "Customer",
+            updatedByRole: "customer" as const,
+          },
+        ])
+      );
+      const existing = db
+        .list("quotingSessions")
+        .find(
+          (session) =>
+            session.quoteRequestId === input.quoteRequestId ||
+            (session.customerId === input.customerId &&
+              session.categoryId === input.categoryId &&
+              session.status !== "complete")
+        );
+      const preservedResponses = Object.fromEntries(
+        Object.entries(existing?.questionnaireResponses ?? {}).filter(
+          ([questionId]) => !categoryQuestionIds.has(questionId)
+        )
+      );
+      const preservedMeta = Object.fromEntries(
+        Object.entries(existing?.questionnaireResponseMeta ?? {}).filter(
+          ([questionId]) => !categoryQuestionIds.has(questionId)
+        )
+      );
+      const questionnaireResponses = { ...preservedResponses, ...nextResponses };
+      const questionnaireResponseMeta = { ...preservedMeta, ...nextMeta };
+      const missingFields = questions
+        .filter((question) => question.required && !questionnaireResponses[question.id])
+        .map((question) => question.label);
+      const publicFields: Record<string, unknown> = {
+        ...(existing?.publicFields ?? {}),
+        ...(input.assetDetails ?? {}),
+        contactName: input.contactName,
+        categoryId: input.categoryId,
+        categoryLabel: input.categoryLabel,
+        lineOfBusiness: input.lineOfBusiness,
+        assetIdentifier: input.address,
+        address: input.address,
+      };
+      const publicFieldEvidence: PublicDataEvidenceMap = {
+        ...(existing?.publicFieldEvidence ?? {}),
+        ...(input.publicFieldEvidence ?? {}),
+      };
+      Object.entries(input.assetDetails ?? {}).forEach(([fieldKey, value]) => {
+        if (!value || publicFieldEvidence[fieldKey]) return;
+        publicFieldEvidence[fieldKey] = {
+          fieldKey,
+          sourceKind: "client_intake",
+          sourceLabel: "Client quote intake",
+          confidence: 0.88,
+          verified: true,
+          allowDocumentAutofill: true,
+          collectedAt: now,
+          notes: "Submitted through the customer quote flow.",
+        };
+      });
+      const patch: Partial<QuotingSession> = {
+        quoteRequestId: input.quoteRequestId,
+        categoryId: input.categoryId,
+        categoryLabel: input.categoryLabel,
+        customerId: input.customerId,
+        assetType: input.assetType,
+        estimatedValue: input.estimatedValue ?? existing?.estimatedValue ?? 0,
+        assetDetails: input.assetDetails ?? existing?.assetDetails,
+        lineOfBusiness: input.lineOfBusiness,
+        publicFields,
+        publicFieldEvidence,
+        missingFields,
+        questionnaireQuestions: questions,
+        questionnaireResponses,
+        questionnaireResponseMeta,
+        status: "gathering_info",
+        updatedAt: now,
+      };
+
+      let session: QuotingSession;
+      if (existing) {
+        session = db.update("quotingSessions", existing.id, patch) ?? existing;
+      } else {
+        session = {
+          id: uid("quote_session"),
+          tenantId: input.tenantId,
+          quoteRequestId: input.quoteRequestId,
+          categoryId: input.categoryId,
+          categoryLabel: input.categoryLabel,
+          customerId: input.customerId,
+          assetType: input.assetType,
+          estimatedValue: input.estimatedValue ?? 0,
+          assetDetails: input.assetDetails,
+          lineOfBusiness: input.lineOfBusiness,
+          createdById: input.createdById,
+          status: "gathering_info",
+          publicFields,
+          publicFieldEvidence,
+          missingFields,
+          questionnaireQuestions: questions,
+          questionnaireResponses,
+          questionnaireResponseMeta,
+          quotes: [],
+          aiSummary: `${input.contactName} started a ${input.categoryLabel ?? assetTypeDisplayName(input.assetType)} quote from the client portal.`,
+          createdAt: now,
+          updatedAt: now,
+        };
+        db.insert("quotingSessions", session);
+        const body = [
+          `Customer started quote flow: ${input.categoryLabel ?? assetTypeDisplayName(input.assetType)}.`,
+          input.status === "submitted_to_agent" ? "Status: submitted to agent." : "Status: started in client portal.",
+          input.address ? `Search key: ${input.address}.` : "",
+          `${questions.length} tailored intake question${questions.length === 1 ? "" : "s"} loaded into the agent quoting workspace.`,
+        ]
+          .filter(Boolean)
+          .join(" ");
+        db.insert("notes", {
+          id: uid("note"),
+          tenantId: input.tenantId,
+          authorId: "ai",
+          customerId: input.customerId,
+          body,
+          visibility: "internal",
+          createdAt: now,
+        });
+        db.insert("statusEvents", {
+          id: uid("se"),
+          tenantId: input.tenantId,
+          source: "ai",
+          message: `Note by QuoteX AI: ${body}`,
+          visibility: "internal",
+          customerId: input.customerId,
+          createdAt: now,
+          createdById: "ai",
+        });
+      }
+
+      db.update("quoteRequests", input.quoteRequestId, { quoteSessionId: session.id });
+      const quoteRequest = db.list("quoteRequests").find((quote) => quote.id === input.quoteRequestId);
+      if (quoteRequest?.recoveryTaskId) {
+        db.update("tasks", quoteRequest.recoveryTaskId, {
+          quoteRequestId: input.quoteRequestId,
+          quoteSessionId: session.id,
+        });
+      }
+      return session;
     },
     // Phase 1: AI pulls public records + identifies missing fields.
     async startSession(input: {
@@ -4700,77 +12355,242 @@ export const api = {
       contactName: string;
       address?: string;
       estimatedValue?: number;
+      assetDetails?: Record<string, string>;
+      categoryId?: string;
+      categoryLabel?: string;
+      lineOfBusiness?: QuotingLineOfBusiness;
+      selectedAcordTemplateIds?: string[];
     }): Promise<QuotingSession> {
       const {
         aiPreparePublicFields,
         aiInferLineOfBusiness,
-        aiGenerateCommercialQuestionnaire,
-        aiGeneratePersonalQuestionnaire,
       } = await import("./ai");
       const prep = await aiPreparePublicFields({
         assetType: input.assetType,
         prospectName: input.contactName,
         address: input.address,
         estimatedValue: input.estimatedValue,
+        assetDetails: input.assetDetails,
         rngSeed: `${input.prospectId ?? input.customerId ?? ""}-${input.assetType}-${input.assetId ?? ""}`,
       });
-      const lineOfBusiness = aiInferLineOfBusiness({
-        contactName: input.contactName,
-        assetType: input.assetType,
-        estimatedValue: input.estimatedValue,
-      });
-      const state = input.address ? extractStateFromString(input.address) : undefined;
-      // Both lines of business get a structured portal questionnaire.
-      // Commercial mixes base intake + per-carrier supplementals;
-      // personal turns the AI-identified missingFields into form
-      // questions one-to-one.
-      let questionnaireQuestions: QuotingQuestion[] | undefined;
-      if (lineOfBusiness === "commercial") {
-        const links = db
-          .list("carrierLinks")
-          .filter((l) => l.tenantId === input.tenantId && l.active);
-        const linkedCarrierIds = new Set(links.map((l) => l.carrierId));
-        const carriers = db
-          .list("carriers")
-          .filter((c) => linkedCarrierIds.has(c.id) && c.status === "active");
-        questionnaireQuestions = aiGenerateCommercialQuestionnaire({
+      const lineOfBusiness =
+        input.lineOfBusiness ??
+        aiInferLineOfBusiness({
           contactName: input.contactName,
-          carrierList: carriers,
-          knownPublicFields: prep.publicFields,
-        });
-      } else if (prep.missingFields.length > 0) {
-        questionnaireQuestions = aiGeneratePersonalQuestionnaire({
           assetType: input.assetType,
+          estimatedValue: input.estimatedValue,
+        });
+      const state = input.address
+        ? extractStateFromString(input.address)
+        : input.assetDetails
+        ? extractStateFromString(Object.values(input.assetDetails).join(" "))
+        : undefined;
+      const sessionId = uid("quote_session");
+      const createdAt = nowIso();
+      // Personal sessions generate client questions immediately.
+      // Commercial sessions first initialize the ACORD packet and
+      // wait for the next workflow step, so the questionnaire can be
+      // generated from the latest AI fill audit / remaining blanks.
+      let questionnaireQuestions: QuotingQuestion[] | undefined;
+      let questionnaireResponses: Record<string, string> | undefined;
+      let questionnaireResponseMeta: Record<string, QuestionnaireResponseMeta> | undefined;
+      let missingFields = prep.missingFields;
+      const category = input.categoryId ? api.categories.get(input.categoryId) : undefined;
+      const commercialAcordTemplates =
+        lineOfBusiness === "commercial"
+          ? selectedCommercialAcordTemplates(
+              input.tenantId,
+              input.selectedAcordTemplateIds ?? [],
+              prep.publicFields,
+              prep.publicFieldEvidence
+            )
+          : undefined;
+      if (lineOfBusiness === "commercial") {
+        questionnaireQuestions = [];
+      } else {
+        questionnaireQuestions = completePersonalQuestionnaireQuestions({
+          assetType: input.assetType,
+          category,
+          publicFields: prep.publicFields,
           missingFields: prep.missingFields,
         });
+        const seededQuestionnaire = seedKnownQuestionnaireResponses({
+          questions: questionnaireQuestions,
+          address: input.address,
+          estimatedValue: input.estimatedValue,
+          assetDetails: input.assetDetails,
+          publicFields: prep.publicFields,
+          updatedAt: createdAt,
+        });
+        questionnaireResponses = seededQuestionnaire.questionnaireResponses;
+        questionnaireResponseMeta = seededQuestionnaire.questionnaireResponseMeta;
+        missingFields = seededQuestionnaire.missingFields;
       }
       const needsClient = (questionnaireQuestions?.length ?? 0) > 0;
       const row: QuotingSession = {
-        id: uid("quote_session"),
+        id: sessionId,
         tenantId: input.tenantId,
+        categoryId: input.categoryId,
+        categoryLabel: input.categoryLabel,
         prospectId: input.prospectId,
         customerId: input.customerId,
         assetId: input.assetId,
         assetType: input.assetType,
         estimatedValue: input.estimatedValue ?? 0,
+        assetDetails: input.assetDetails,
         state,
         lineOfBusiness,
+        commercialAcordTemplates,
         createdById: input.createdById,
-        status: needsClient ? "gathering_info" : "quoting",
+        status: lineOfBusiness === "commercial" || needsClient ? "gathering_info" : "quoting",
         publicFields: prep.publicFields,
-        missingFields: prep.missingFields,
+        publicFieldEvidence: prep.publicFieldEvidence,
+        missingFields,
         questionnaireQuestions,
+        questionnaireResponses,
+        questionnaireResponseMeta,
         quotes: [],
         aiSummary: prep.summary,
-        createdAt: nowIso(),
-        updatedAt: nowIso(),
+        createdAt,
+        updatedAt: createdAt,
       };
       db.insert("quotingSessions", row);
+      const syncedAcordTemplates = syncCommercialAcordPdfArtifacts(row, {}, "application");
+      const activeRow = syncedAcordTemplates
+        ? db.update("quotingSessions", row.id, {
+            commercialAcordTemplates: syncedAcordTemplates,
+          }) ?? row
+        : row;
+      logQuotingWorkflowProgress(activeRow, {
+        message: `AI quoting workflow started for ${activeRow.lineOfBusiness === "commercial" ? "commercial" : "personal"} ${assetTypeDisplayName(activeRow.assetType)}.`,
+        detail: [
+          `Public-record enrichment completed with ${Object.keys(activeRow.publicFields).length} field${
+            Object.keys(activeRow.publicFields).length === 1 ? "" : "s"
+          } prepared.`,
+          activeRow.missingFields.length > 0
+            ? `Missing fields queued for questionnaire: ${activeRow.missingFields.join(", ")}.`
+            : "No missing client fields were found; carrier ranking can begin immediately.",
+          syncedAcordTemplates && syncedAcordTemplates.length > 0
+            ? `${syncedAcordTemplates.length} selected ACORD PDF${
+                syncedAcordTemplates.length === 1 ? "" : "s"
+              } initialized as filled application document${
+                syncedAcordTemplates.length === 1 ? "" : "s"
+              } from currently available data.`
+            : "",
+        ].filter(Boolean).join(" "),
+        createdAt: activeRow.createdAt,
+        createdById: input.createdById,
+      });
       // No missing fields + not commercial → run quotes immediately.
-      if (row.status === "quoting") {
-        return this.runQuotes(row.id);
+      if (activeRow.status === "quoting") {
+        return this.runQuotes(activeRow.id);
       }
-      return row;
+      return activeRow;
+    },
+    prepareCommercialQuestionnaire(sessionId: string): QuotingSession | null {
+      const session = this.get(sessionId);
+      if (!session || session.lineOfBusiness !== "commercial") return session ?? null;
+      if (session.commercialQuestionnairePreparedAt) return session;
+
+      const preparedAt = nowIso();
+      const syncedAcordTemplates = syncCommercialAcordPdfArtifacts(
+        session,
+        session.questionnaireResponses ?? {},
+        "application"
+      );
+      const sessionWithCurrentAcords: QuotingSession = {
+        ...session,
+        commercialAcordTemplates: syncedAcordTemplates ?? session.commercialAcordTemplates,
+      };
+      const questionnaireQuestions = initialCommercialQuestionnaireQuestions(
+        sessionWithCurrentAcords
+      );
+      const updated = db.update("quotingSessions", sessionId, {
+        commercialAcordTemplates: sessionWithCurrentAcords.commercialAcordTemplates,
+        questionnaireQuestions,
+        commercialQuestionnairePreparedAt: preparedAt,
+        status: "gathering_info",
+        updatedAt: preparedAt,
+      });
+      if (updated) {
+        const templates = updated.commercialAcordTemplates ?? [];
+        const missingCount = templates.reduce(
+          (sum, template) => sum + (template.missingFieldCount ?? 0),
+          0
+        );
+        logQuotingWorkflowProgress(updated, {
+          message: "AI generated the commercial questionnaire from the ACORD fill audit.",
+          detail: `${questionnaireQuestions.length} question${
+            questionnaireQuestions.length === 1 ? "" : "s"
+          } prepared from ${missingCount} remaining ACORD field${
+            missingCount === 1 ? "" : "s"
+          } and commercial intake requirements.`,
+          createdAt: preparedAt,
+          createdById: session.createdById,
+        });
+      }
+      return updated;
+    },
+    updateQuestionnaireQuestions(
+      sessionId: string,
+      questions: QuotingQuestion[],
+      actor?: QuestionnaireResponseActor
+    ): QuotingSession | null {
+      const session = this.get(sessionId);
+      if (!session) return null;
+
+      const updatedAt = nowIso();
+      const normalizedQuestions = questions
+        .map((question) => ({
+          ...question,
+          id: question.id || uid("qq"),
+          section: question.section.trim() || "General",
+          label: question.label.trim(),
+          options:
+            question.kind === "select"
+              ? (question.options ?? []).map((option) => option.trim()).filter(Boolean)
+              : undefined,
+          required: !!question.required,
+        }))
+        .filter((question) => question.label.length > 0);
+      const nextQuestionIds = new Set(normalizedQuestions.map((question) => question.id));
+      const questionnaireResponses = Object.fromEntries(
+        Object.entries(session.questionnaireResponses ?? {}).filter(([questionId]) =>
+          nextQuestionIds.has(questionId)
+        )
+      );
+      const questionnaireResponseMeta = Object.fromEntries(
+        Object.entries(session.questionnaireResponseMeta ?? {}).filter(([questionId]) =>
+          nextQuestionIds.has(questionId)
+        )
+      );
+      const missingFields = normalizedQuestions
+        .filter((question) => question.required && !(questionnaireResponses[question.id] ?? "").trim())
+        .map((question) => question.label);
+
+      const updated = db.update("quotingSessions", sessionId, {
+        questionnaireQuestions: normalizedQuestions,
+        questionnaireResponses,
+        questionnaireResponseMeta,
+        missingFields,
+        updatedAt,
+      });
+
+      if (updated) {
+        const actorLabel = actor?.name?.trim() || "Agent";
+        const visibleCount = visibleQuotingQuestions(updated).length;
+        logQuotingWorkflowProgress(updated, {
+          message: `${actorLabel} updated the quoting questionnaire.`,
+          detail: `${visibleCount} active question${
+            visibleCount === 1 ? "" : "s"
+          } are now in the client questionnaire; removed-question answers were cleared from the quote file.`,
+          createdAt: updatedAt,
+          createdById: actor?.id ?? updated.createdById,
+          source: actor?.role === "customer" ? "customer" : "agent",
+        });
+      }
+
+      return updated;
     },
     // Portal-link delivery used by both personal + commercial
     // sessions. Builds an outbound Communication pointing the
@@ -4779,7 +12599,11 @@ export const api = {
     // the customer portal — the client signs in to their account
     // before they see the form.
     sendPortalLink(sessionId: string, portalUrl: string): QuotingSession | null {
-      const session = this.get(sessionId);
+      const current = this.get(sessionId);
+      const session =
+        current?.lineOfBusiness === "commercial" && visibleQuotingQuestions(current).length === 0
+          ? this.prepareCommercialQuestionnaire(sessionId) ?? current
+          : current;
       if (!session) return null;
       const tenant = db.list("agencies").find((a) => a.id === session.tenantId);
       const agencyName = tenant?.name ?? "your agency";
@@ -4790,12 +12614,20 @@ export const api = {
         ? db.list("prospects").find((p) => p.id === session.prospectId)
         : null;
       const firstName = (contact?.name ?? "Friend").split(/\s+/)[0];
-      const sectionCount = new Set(
-        (session.questionnaireQuestions ?? []).map((q) => q.section)
-      ).size;
-      const questionCount = (session.questionnaireQuestions ?? []).length;
-      const subject = `Action needed: complete your quoting questionnaire`;
-      const body = [
+      const visibleQuestions = visibleQuotingQuestions(session);
+      const sectionCount = new Set(visibleQuestions.map((q) => q.section)).size;
+      const questionCount = visibleQuestions.length;
+      const isSupplementalPortalLink =
+        session.lineOfBusiness === "commercial" &&
+        !!session.commercialSecondRoundSentAt &&
+        !session.commercialSupplementalsCompletedAt;
+      const subject =
+        isSupplementalPortalLink
+          ? `Action needed: complete supplemental carrier questions`
+          : session.lineOfBusiness === "commercial"
+          ? `Action needed: complete your commercial quoting questionnaire`
+          : `Action needed: complete your quoting questionnaire`;
+      const originalBody = [
         `Hi ${firstName},`,
         ``,
         `To run firm quotes for you, we need a few additional details. I've put together a short questionnaire (${questionCount} questions across ${sectionCount} sections — pre-filled with what we already have on file).`,
@@ -4808,6 +12640,20 @@ export const api = {
         creator?.name ? `Best,\n${creator.name}` : `Best,\n${agencyName}`,
       ].join("\n");
 
+      const supplementalBody = [
+        `Hi ${firstName},`,
+        ``,
+        `A few carriers reviewed the commercial application and asked for supplemental form details that are not already on file. I put those follow-up questions into one short supplemental questionnaire (${questionCount} questions across ${sectionCount} sections).`,
+        ``,
+        `Sign in to your portal and complete the supplemental questions here:`,
+        portalUrl,
+        ``,
+        `Once you submit, Quotex completes the requested carrier supplementals, sends the information back to those markets, and updates the accepted-carrier ranking for your agent.`,
+        ``,
+        creator?.name ? `Best,\n${creator.name}` : `Best,\n${agencyName}`,
+      ].join("\n");
+      const body = isSupplementalPortalLink ? supplementalBody : originalBody;
+
       const comm = api.communications.create({
         tenantId: session.tenantId,
         customerId: session.customerId,
@@ -4818,67 +12664,528 @@ export const api = {
         body,
         createdById: session.createdById,
       });
-      return db.update("quotingSessions", sessionId, {
+      const sentAt = nowIso();
+      const updated = db.update("quotingSessions", sessionId, {
         questionnaireMessageId: comm.id,
         questionnaireDraft: `Subject: ${subject}\n\n${body}`,
-        questionnaireSentAt: nowIso(),
+        questionnaireSentAt: sentAt,
         status: "awaiting_reply",
-        updatedAt: nowIso(),
+        updatedAt: sentAt,
       });
+      if (updated) {
+        logQuotingWorkflowProgress(updated, {
+          message: isSupplementalPortalLink
+            ? `AI supplemental questionnaire sent to ${contact?.name ?? "client/prospect"} through the portal.`
+            : `AI quoting questionnaire sent to ${contact?.name ?? "client/prospect"} through the portal.`,
+          detail: isSupplementalPortalLink
+            ? `${questionCount} supplemental carrier question${
+                questionCount === 1 ? "" : "s"
+              } across ${sectionCount} section${sectionCount === 1 ? "" : "s"} are awaiting reply.`
+            : `${questionCount} question${questionCount === 1 ? "" : "s"} across ${sectionCount} section${
+                sectionCount === 1 ? "" : "s"
+              } are awaiting reply.`,
+          createdAt: sentAt,
+          createdById: session.createdById,
+          communicationId: comm.id,
+          source: "agent",
+        });
+      }
+      return updated;
     },
-    // Commercial flow: client submits structured answers from the
-    // portal questionnaire. Stamps the responses, marks reply
-    // received, runs the quotes, and writes an AI notification for
-    // the agent assigned to this session.
-    submitQuestionnaireResponses(
+    saveQuestionnaireResponses(
       sessionId: string,
-      responses: Record<string, string>
+      responses: Record<string, string>,
+      actor?: QuestionnaireResponseActor
     ): QuotingSession | null {
       const session = this.get(sessionId);
       if (!session) return null;
       const updatedAt = nowIso();
+      const mergedResponses = {
+        ...(session.questionnaireResponses ?? {}),
+        ...responses,
+      };
+      const updated = db.update("quotingSessions", sessionId, {
+        questionnaireResponses: {
+          ...mergedResponses,
+        },
+        questionnaireResponseMeta: mergeQuestionnaireResponseMeta(
+          session,
+          responses,
+          actor,
+          updatedAt
+        ),
+        updatedAt,
+      });
+      let finalUpdated = updated;
+      if (updated?.lineOfBusiness === "commercial") {
+        const syncedAcordTemplates = syncCommercialAcordPdfArtifacts(
+          updated,
+          {},
+          updated.commercialApplicationSentAt && updated.commercialSecondRoundSentAt
+            ? "supplemental"
+            : "application"
+        );
+        if (syncedAcordTemplates) {
+          finalUpdated = db.update("quotingSessions", sessionId, {
+            commercialAcordTemplates: syncedAcordTemplates,
+            updatedAt,
+          }) ?? updated;
+        }
+      }
+      if (finalUpdated && Object.keys(responses).length > 0) {
+        const actorLabel = actor?.name?.trim() || "Agent";
+        const source: StatusEventSource =
+          actor?.role === "customer" ? "customer" : actor?.role === "ai" ? "ai" : "agent";
+        const templates = finalUpdated.commercialAcordTemplates ?? [];
+        const autoFilledCount = templates.reduce(
+          (sum, template) => sum + (template.autoFilledFieldCount ?? 0),
+          0
+        );
+        const missingCount = templates.reduce(
+          (sum, template) => sum + (template.missingFieldCount ?? 0),
+          0
+        );
+        logQuotingWorkflowProgress(finalUpdated, {
+          message: `${actorLabel} saved ${Object.keys(responses).length} quoting questionnaire answer${
+            Object.keys(responses).length === 1 ? "" : "s"
+          }; ACORD packet refreshed.`,
+          detail:
+            templates.length > 0
+              ? `${templates.length} ACORD document${templates.length === 1 ? "" : "s"} updated. ${autoFilledCount} field${
+                  autoFilledCount === 1 ? "" : "s"
+                } currently filled; ${missingCount} field${missingCount === 1 ? "" : "s"} still need review.`
+              : "The saved draft is now available for the quoting workflow.",
+          createdAt: updatedAt,
+          createdById: actor?.id ?? finalUpdated.createdById,
+          source,
+        });
+      }
+      return finalUpdated;
+    },
+    recommendCommercialCarriers(
+      sessionId: string,
+      responses?: Record<string, string>
+    ): CommercialCarrierRecommendation[] {
+      const session = this.get(sessionId);
+      if (!session) return [];
+      return commercialCarrierRecommendationsForSession(session, responses);
+    },
+    previewCommercialCarrierEmails(
+      sessionId: string,
+      responses: Record<string, string>,
+      kind: "application" | "supplemental",
+      carrierIds?: string[]
+    ): CommercialUnderwriterEmailDraft[] {
+      const session = this.get(sessionId);
+      if (!session) return [];
+      const syncedAcordTemplates = syncCommercialAcordPdfArtifacts(session, responses, kind);
+      const sessionForPreview =
+        syncedAcordTemplates && syncedAcordTemplates.length > 0
+          ? db.update("quotingSessions", sessionId, {
+              commercialAcordTemplates: syncedAcordTemplates,
+              updatedAt: nowIso(),
+            }) ?? session
+          : session;
+      const targets =
+        carrierIds ??
+        (kind === "supplemental"
+          ? (sessionForPreview.commercialCarrierSubmissions ?? [])
+              .filter((submission) => submission.status === "needs_client_info")
+              .map((submission) => submission.carrierId)
+          : []);
+      return buildCommercialUnderwriterEmailDrafts(sessionForPreview, responses, kind, targets);
+    },
+    readCommercialCarrierResponses(sessionId: string): QuotingSession | null {
+      const session = this.get(sessionId);
+      if (!session || session.lineOfBusiness !== "commercial") return session ?? null;
+      const pendingSubmissions = (session.commercialCarrierSubmissions ?? []).filter(
+        (submission) =>
+          submission.status === "awaiting_response" ||
+          submission.status === "application_sent"
+      );
+      if (pendingSubmissions.length === 0) return session;
+
+      const updatedAt = nowIso();
+      const responses = session.questionnaireResponses ?? {};
+      const selectedCarrierIds = pendingSubmissions.map((submission) => submission.carrierId);
+      const pipeline = analyzeCommercialCarrierPipeline(
+        session,
+        responses,
+        updatedAt,
+        selectedCarrierIds
+      );
+      const carrierSubmissions = mergeCommercialSubmissionArtifacts(
+        session,
+        pipeline.submissions
+      );
+      const commercialContact = session.prospectId
+        ? db.list("prospects").find((p) => p.id === session.prospectId)
+        : session.customerId
+        ? db.list("customers").find((c) => c.id === session.customerId)
+        : null;
+
+      if (pipeline.secondRoundQuestions.length > 0) {
+        const portalUrl = `/customer/questionnaire/${sessionId}`;
+        const subject = "Additional details needed for carrier supplementals";
+        const body = [
+          `Hi ${(commercialContact?.name ?? "there").split(/\s+/)[0]},`,
+          ``,
+          `A few carriers reviewed the commercial application and asked for supplemental details that are not already on file.`,
+          ``,
+          `Please complete the short second-round questionnaire here:`,
+          portalUrl,
+          ``,
+          `Once those answers come in, the AI will auto-complete the supplementals, send them back to the remaining carriers, and show your agent only the accepted carrier options.`,
+        ].join("\n");
+        const comm = api.communications.create({
+          tenantId: session.tenantId,
+          customerId: session.customerId,
+          prospectId: session.prospectId,
+          channel: "email",
+          direction: "outbound",
+          subject,
+          body,
+          createdById: session.createdById,
+        });
+        logQuotingWorkflowProgress(session, {
+          message: `AI read carrier responses and queued a second-round supplemental questionnaire.`,
+          detail: `${pipeline.acceptedCarrierIds.length} carrier${
+            pipeline.acceptedCarrierIds.length === 1 ? "" : "s"
+          } accepted or can proceed now; ${pipeline.secondRoundQuestions.length} supplemental field${
+            pipeline.secondRoundQuestions.length === 1 ? "" : "s"
+          } still need client input.`,
+          createdAt: updatedAt,
+          createdById: session.createdById,
+          communicationId: comm.id,
+        });
+        db.update("quotingSessions", sessionId, {
+          questionnaireQuestions: appendUniqueQuestions(
+            session.questionnaireQuestions ?? [],
+            pipeline.secondRoundQuestions
+          ),
+          questionnaireMessageId: comm.id,
+          questionnaireDraft: `Subject: ${subject}\n\n${body}`,
+          questionnaireSentAt: updatedAt,
+          commercialCarrierSubmissions: carrierSubmissions,
+          commercialSecondRoundSentAt: updatedAt,
+          missingFields: pipeline.secondRoundQuestions.map((q) => q.label),
+          aiSummary: `AI read carrier responses. ${pipeline.acceptedCarrierIds.length} market${
+            pipeline.acceptedCarrierIds.length === 1 ? "" : "s"
+          } can rank now; ${pipeline.secondRoundQuestions.length} supplemental field${
+            pipeline.secondRoundQuestions.length === 1 ? "" : "s"
+          } still need the client.`,
+          status: "awaiting_reply",
+          updatedAt,
+        });
+        return this.runQuotes(sessionId, {
+          status: "awaiting_reply",
+          aiSummary: `AI ranked ${pipeline.acceptedCarrierIds.length} accepted market${
+            pipeline.acceptedCarrierIds.length === 1 ? "" : "s"
+          } while supplemental answers remain pending.`,
+        });
+      }
+
+      db.update("quotingSessions", sessionId, {
+        commercialCarrierSubmissions: carrierSubmissions,
+        status: "quoting",
+        missingFields: [],
+        aiSummary: `AI read carrier responses and filtered the carrier list down to ${pipeline.acceptedCarrierIds.length} accepted market${
+          pipeline.acceptedCarrierIds.length === 1 ? "" : "s"
+        }.`,
+        updatedAt,
+      });
+      logQuotingWorkflowProgress(session, {
+        message: `AI read commercial carrier responses and ranked accepted markets.`,
+        detail: `${pipeline.acceptedCarrierIds.length} accepted market${
+          pipeline.acceptedCarrierIds.length === 1 ? "" : "s"
+        } moved into ranking.`,
+        createdAt: updatedAt,
+      });
+      return this.runQuotes(sessionId);
+    },
+    // Commercial flow: client submits structured answers from the
+    // portal questionnaire. Stamps the responses, marks reply
+    // received and runs the quotes. runQuotes() creates the Activity
+    // Center milestone when the ranking is ready for agent review.
+    submitQuestionnaireResponses(
+      sessionId: string,
+      responses: Record<string, string>,
+      actor?: QuestionnaireResponseActor,
+      options?: {
+        selectedCommercialCarrierIds?: string[];
+        commercialCarrierEmailDrafts?: CommercialUnderwriterEmailDraft[];
+      }
+    ): QuotingSession | null {
+      const session = this.get(sessionId);
+      if (!session) return null;
+      const updatedAt = nowIso();
+      const mergedResponses = {
+        ...(session.questionnaireResponses ?? {}),
+        ...responses,
+      };
+      const responseMeta = mergeQuestionnaireResponseMeta(
+        session,
+        responses,
+        actor,
+        updatedAt
+      );
+      if (session.lineOfBusiness === "commercial") {
+        const sessionWithResponses: QuotingSession = {
+          ...session,
+          questionnaireResponses: mergedResponses,
+          questionnaireResponseMeta: responseMeta,
+          updatedAt,
+        };
+        const syncedAcordTemplates = syncCommercialAcordPdfArtifacts(
+          sessionWithResponses,
+          {},
+          session.commercialApplicationSentAt ? "supplemental" : "application"
+        );
+        const commercialContact = session.prospectId
+          ? db.list("prospects").find((p) => p.id === session.prospectId)
+          : session.customerId
+          ? db.list("customers").find((c) => c.id === session.customerId)
+          : null;
+        const explicitSelectedCommercialCarrierIds = options?.selectedCommercialCarrierIds;
+        const selectedCommercialCarrierIds =
+          explicitSelectedCommercialCarrierIds ??
+          (session.commercialApplicationSentAt
+            ? (session.commercialCarrierSubmissions ?? []).map(
+                (submission) => submission.carrierId
+              )
+            : undefined);
+        const pipeline = analyzeCommercialCarrierPipeline(
+          {
+            ...sessionWithResponses,
+            commercialAcordTemplates:
+              syncedAcordTemplates ?? sessionWithResponses.commercialAcordTemplates,
+          },
+          mergedResponses,
+          updatedAt,
+          selectedCommercialCarrierIds,
+          !!explicitSelectedCommercialCarrierIds
+        );
+        if (!session.commercialApplicationSentAt) {
+          const awaitingSubmissions = markCommercialSubmissionsAwaitingResponse(
+            pipeline.submissions
+          );
+          const carrierSubmissions = attachCommercialUnderwriterMessages(
+            session,
+            awaitingSubmissions,
+            mergedResponses,
+            "application",
+            undefined,
+            options?.commercialCarrierEmailDrafts
+          );
+          const underwriterEmailCount = carrierSubmissions.reduce(
+            (sum, submission) => sum + (submission.applicationMessageIds?.length ?? 0),
+            0
+          );
+          const portalAutomationCount = carrierSubmissions.filter(
+            (submission) => submission.submissionMethod === "carrier_portal_automation"
+          ).length;
+          const firstCarrierMessageSubmission = carrierSubmissions.find((submission) =>
+            commercialSubmissionMessageId(submission)
+          );
+          logQuotingWorkflowProgress(session, {
+            message: `Commercial application packet sent to ${pipeline.submittedCarrierCount} carrier${
+              pipeline.submittedCarrierCount === 1 ? "" : "s"
+            }; awaiting carrier responses.`,
+            detail: `${portalAutomationCount} portal automation job${
+              portalAutomationCount === 1 ? "" : "s"
+            } queued. ${underwriterEmailCount} underwriter email${
+              underwriterEmailCount === 1 ? "" : "s"
+            } created. Carrier statuses will update after responses are read.`,
+            createdAt: updatedAt,
+            createdById: session.createdById,
+            communicationId: firstCarrierMessageSubmission
+              ? commercialSubmissionMessageId(firstCarrierMessageSubmission)
+              : undefined,
+            documentId: firstCarrierMessageSubmission
+              ? commercialSubmissionDocumentId(firstCarrierMessageSubmission)
+              : undefined,
+          });
+          return db.update("quotingSessions", sessionId, {
+            questionnaireResponses: mergedResponses,
+            questionnaireResponseMeta: responseMeta,
+            commercialAcordTemplates:
+              syncedAcordTemplates ?? session.commercialAcordTemplates,
+            commercialCarrierSubmissions: carrierSubmissions,
+            commercialApplicationSentAt: updatedAt,
+            missingFields: [],
+            aiSummary: `AI sent the completed ACORD application packet to ${pipeline.submittedCarrierCount} appetite-matched carrier${
+              pipeline.submittedCarrierCount === 1 ? "" : "s"
+            }. Carrier responses are pending.`,
+            status: "quoting",
+            updatedAt,
+          });
+        }
+        const carrierSubmissions = mergeCommercialSubmissionArtifacts(
+          session,
+          pipeline.submissions
+        );
+        if (pipeline.secondRoundQuestions.length > 0) {
+          const portalUrl = `/customer/questionnaire/${sessionId}`;
+          const subject = "Additional details needed for carrier supplementals";
+          const body = [
+            `Hi ${(commercialContact?.name ?? "there").split(/\s+/)[0]},`,
+            ``,
+            `Our AI submitted your commercial application to the carriers whose appetite matched the risk. A few of those carriers asked for supplemental details that are not already on file.`,
+            ``,
+            `Please complete the short second-round questionnaire here:`,
+            portalUrl,
+            ``,
+            `Once those answers come in, the AI will auto-complete the supplementals, send them back to the remaining carriers, and show your agent only the accepted carrier options.`,
+          ].join("\n");
+          const comm = api.communications.create({
+            tenantId: session.tenantId,
+            customerId: session.customerId,
+            prospectId: session.prospectId,
+            channel: "email",
+            direction: "outbound",
+            subject,
+            body,
+            createdById: session.createdById,
+          });
+          const underwriterEmailCount = carrierSubmissions.reduce(
+            (sum, submission) => sum + (submission.applicationMessageIds?.length ?? 0),
+            0
+          );
+          const portalAutomationCount = carrierSubmissions.filter(
+            (submission) => submission.submissionMethod === "carrier_portal_automation"
+          ).length;
+          const firstCarrierMessageSubmission = carrierSubmissions.find((submission) =>
+            commercialSubmissionMessageId(submission)
+          );
+          logQuotingWorkflowProgress(session, {
+            message: `AI submitted the commercial application to ${pipeline.submittedCarrierCount} appetite-matched carrier${
+              pipeline.submittedCarrierCount === 1 ? "" : "s"
+            } and sent a second-round supplemental questionnaire to the client.`,
+            detail: `${portalAutomationCount} portal automation job${
+              portalAutomationCount === 1 ? "" : "s"
+            } queued. ${underwriterEmailCount} underwriter email${
+              underwriterEmailCount === 1 ? "" : "s"
+            } created. ${pipeline.acceptedCarrierIds.length} accepted market${
+              pipeline.acceptedCarrierIds.length === 1 ? "" : "s"
+            } can rank now; ${pipeline.secondRoundQuestions.length} supplemental field${
+              pipeline.secondRoundQuestions.length === 1 ? "" : "s"
+            } still need client input.`,
+            createdAt: updatedAt,
+            createdById: session.createdById,
+            communicationId: firstCarrierMessageSubmission
+              ? commercialSubmissionMessageId(firstCarrierMessageSubmission)
+              : comm.id,
+            documentId: firstCarrierMessageSubmission
+              ? commercialSubmissionDocumentId(firstCarrierMessageSubmission)
+              : undefined,
+          });
+          db.update("quotingSessions", sessionId, {
+            questionnaireResponses: mergedResponses,
+            questionnaireResponseMeta: responseMeta,
+            commercialAcordTemplates:
+              syncedAcordTemplates ?? session.commercialAcordTemplates,
+            questionnaireQuestions: appendUniqueQuestions(
+              session.questionnaireQuestions ?? [],
+              pipeline.secondRoundQuestions
+            ),
+            questionnaireMessageId: comm.id,
+            questionnaireDraft: `Subject: ${subject}\n\n${body}`,
+            questionnaireSentAt: updatedAt,
+            commercialCarrierSubmissions: carrierSubmissions,
+            commercialApplicationSentAt:
+              session.commercialApplicationSentAt ?? updatedAt,
+            commercialSecondRoundSentAt: updatedAt,
+            missingFields: pipeline.secondRoundQuestions.map((q) => q.label),
+            aiSummary: `AI sent the application to ${pipeline.submittedCarrierCount} appetite-matched carriers. ${pipeline.secondRoundQuestions.length} supplemental field${
+              pipeline.secondRoundQuestions.length === 1 ? "" : "s"
+            } still need the client.`,
+            status: "awaiting_reply",
+            updatedAt,
+          });
+          const acceptedCount = pipeline.acceptedCarrierIds.length;
+          const pendingCount = pipeline.submissions.filter(
+            (submission) => submission.status === "needs_client_info"
+          ).length;
+          return this.runQuotes(sessionId, {
+            status: "awaiting_reply",
+            aiSummary: `AI is already ranking ${acceptedCount} accepted market${
+              acceptedCount === 1 ? "" : "s"
+            }. ${pendingCount} carrier${
+              pendingCount === 1 ? "" : "s"
+            } will join the ranking once the second-round supplemental details are completed.`,
+          });
+        }
+        const supplementalCarrierIds = new Set(
+          (session.commercialCarrierSubmissions ?? [])
+            .filter((submission) => submission.status === "needs_client_info")
+            .map((submission) => submission.carrierId)
+        );
+        const completedCarrierSubmissions = session.commercialApplicationSentAt
+          ? attachCommercialUnderwriterMessages(
+              { ...session, commercialCarrierSubmissions: carrierSubmissions },
+              carrierSubmissions,
+              mergedResponses,
+              "supplemental",
+              supplementalCarrierIds,
+              options?.commercialCarrierEmailDrafts
+            )
+          : carrierSubmissions;
+        db.update("quotingSessions", sessionId, {
+          questionnaireResponses: mergedResponses,
+          questionnaireResponseMeta: responseMeta,
+          commercialAcordTemplates:
+            syncedAcordTemplates ?? session.commercialAcordTemplates,
+          replyReceivedAt: updatedAt,
+          status: "quoting",
+          commercialCarrierSubmissions: completedCarrierSubmissions,
+          commercialApplicationSentAt:
+            session.commercialApplicationSentAt ?? updatedAt,
+          commercialSupplementalsCompletedAt: updatedAt,
+          missingFields: [],
+          aiSummary: `AI submitted the commercial application to ${pipeline.submittedCarrierCount} appetite-matched carriers and filtered responses down to ${pipeline.acceptedCarrierIds.length} accepted market${
+            pipeline.acceptedCarrierIds.length === 1 ? "" : "s"
+          }.`,
+          updatedAt,
+        });
+        const firstCompletedCarrierMessageSubmission = completedCarrierSubmissions.find((submission) =>
+          commercialSubmissionMessageId(submission)
+        );
+        logQuotingWorkflowProgress(session, {
+          message: `${commercialContact?.name ?? "Client"} completed commercial quoting intake; AI filtered carrier responses and ranked accepted markets.`,
+          detail: `${pipeline.submittedCarrierCount} carrier application${
+            pipeline.submittedCarrierCount === 1 ? "" : "s"
+          } submitted; ${pipeline.acceptedCarrierIds.length} accepted market${
+            pipeline.acceptedCarrierIds.length === 1 ? "" : "s"
+          } moved into ranking.`,
+          createdAt: updatedAt,
+          communicationId: firstCompletedCarrierMessageSubmission
+            ? commercialSubmissionMessageId(firstCompletedCarrierMessageSubmission)
+            : undefined,
+          documentId: firstCompletedCarrierMessageSubmission
+            ? commercialSubmissionDocumentId(firstCompletedCarrierMessageSubmission)
+            : undefined,
+        });
+        return this.runQuotes(sessionId);
+      }
       db.update("quotingSessions", sessionId, {
         questionnaireResponses: { ...(session.questionnaireResponses ?? {}), ...responses },
+        questionnaireResponseMeta: responseMeta,
         replyReceivedAt: updatedAt,
         status: "quoting",
         updatedAt,
       });
-      // Notify the agent who owns the session — a new Activity
-      // Center task lands in their queue so they can flip the AI
-      // ranking on with one click.
       const contact = session.prospectId
         ? db.list("prospects").find((p) => p.id === session.prospectId)
         : session.customerId
         ? db.list("customers").find((c) => c.id === session.customerId)
         : null;
-      const taskId = uid("task");
-      const taskRow: Task = {
-        id: taskId,
-        tenantId: session.tenantId,
-        title: `${contact?.name ?? "Client"} submitted quoting questionnaire`,
-        description: `The commercial-quoting questionnaire is complete. Open the prospect / client record to review answers and run the carrier ranking.`,
-        customerId: session.customerId,
-        prospectId: session.prospectId,
-        source: "ai_notification",
-        severity: "warning",
-        severityReason: "Questionnaire just submitted — ready to run quotes.",
-        status: "open",
-        assignedToId: session.createdById,
-        createdById: "ai",
-        createdAt: updatedAt,
-      };
-      db.insert("tasks", taskRow);
-      db.insert("statusEvents", {
-        id: uid("se"),
-        tenantId: session.tenantId,
-        source: "customer",
+      logQuotingWorkflowProgress(session, {
         message: `${contact?.name ?? "Client"} submitted ${Object.keys(responses).length} questionnaire response${
           Object.keys(responses).length === 1 ? "" : "s"
         }; AI ranking ready to run.`,
-        visibility: "internal",
-        customerId: session.customerId,
-        prospectId: session.prospectId,
+        detail: "The workflow moved from client questionnaire collection into carrier ranking.",
         createdAt: updatedAt,
+        createdById: actor?.id ?? "ai",
       });
       // Auto-run the carrier ranking now that the client side is done.
       return this.runQuotes(sessionId);
@@ -4903,10 +13210,21 @@ export const api = {
         agentName: creator?.name,
         missingFields: session.missingFields,
       });
-      return db.update("quotingSessions", sessionId, {
+      const draftedAt = nowIso();
+      const updated = db.update("quotingSessions", sessionId, {
         questionnaireDraft: `Subject: ${subj}\n\n${body}`,
-        updatedAt: nowIso(),
+        updatedAt: draftedAt,
       });
+      if (updated) {
+        logQuotingWorkflowProgress(updated, {
+          message: "AI drafted the quoting questionnaire for staff review.",
+          detail: `${session.missingFields.length} missing field${
+            session.missingFields.length === 1 ? "" : "s"
+          } were converted into client questions.`,
+          createdAt: draftedAt,
+        });
+      }
+      return updated;
     },
     // Phase 2 send step: writes the questionnaire as an outbound
     // Communication and flips the session to awaiting_reply.
@@ -4926,28 +13244,47 @@ export const api = {
         body,
         createdById: session.createdById,
       });
-      return db.update("quotingSessions", sessionId, {
+      const sentAt = nowIso();
+      const updated = db.update("quotingSessions", sessionId, {
         questionnaireMessageId: comm.id,
-        questionnaireSentAt: nowIso(),
+        questionnaireSentAt: sentAt,
         status: "awaiting_reply",
-        updatedAt: nowIso(),
+        updatedAt: sentAt,
       });
+      if (updated) {
+        logQuotingWorkflowProgress(updated, {
+          message: "AI quoting questionnaire sent; workflow is awaiting client reply.",
+          detail: `Outbound message ${comm.id} is attached to this quoting session.`,
+          createdAt: sentAt,
+          createdById: session.createdById,
+        });
+      }
+      return updated;
     },
     // Phase 3: agent marks the reply received → AI runs the quotes.
     markReplyReceivedAndQuote(sessionId: string): QuotingSession | null {
       const session = this.get(sessionId);
       if (!session) return null;
+      const receivedAt = nowIso();
       db.update("quotingSessions", sessionId, {
-        replyReceivedAt: nowIso(),
+        replyReceivedAt: receivedAt,
         status: "quoting",
-        updatedAt: nowIso(),
+        updatedAt: receivedAt,
+      });
+      logQuotingWorkflowProgress(session, {
+        message: "Client reply received; AI carrier ranking started.",
+        detail: "The workflow moved from awaiting reply to quoting.",
+        createdAt: receivedAt,
       });
       return this.runQuotes(sessionId);
     },
     // Phase 4: call each carrier's quoting-API (simulated) and
-    // rank the responses. Writes the quotes array + summary +
-    // flips status to "complete".
-    runQuotes(sessionId: string): QuotingSession {
+    // rank the responses. Commercial second-round workflows can
+    // preserve "awaiting_reply" while exposing accepted markets.
+    runQuotes(
+      sessionId: string,
+      options?: { status?: QuotingSessionStatus; aiSummary?: string }
+    ): QuotingSession {
       const session = this.get(sessionId);
       if (!session) throw new Error("Quoting session not found.");
       // Pull state late so the customer's mailing address / public-
@@ -4968,24 +13305,482 @@ export const api = {
         .list("carrierLinks")
         .filter((l) => l.tenantId === session.tenantId && l.active);
       const linkedCarrierIds = new Set(links.map((l) => l.carrierId));
-      const eligibleCarriers = db
+      let eligibleCarriers = db
         .list("carriers")
         .filter((c) => linkedCarrierIds.has(c.id));
-      const { quotes, summary } = aiRankCarrierQuotes({
+      if (session.lineOfBusiness === "commercial") {
+        const submissions = session.commercialCarrierSubmissions ?? [];
+        const acceptedIds = new Set(
+          submissions
+            .filter((s) => s.status === "accepted" || s.status === "supplemental_sent")
+            .map((s) => s.carrierId)
+        );
+        if (submissions.length > 0) {
+          eligibleCarriers = eligibleCarriers.filter((c) => acceptedIds.has(c.id));
+        }
+      }
+      const { quotes, summary } = runCarrierQuoteProviders({
         carriers: eligibleCarriers,
-        assetType: session.assetType,
-        estimatedValue: session.estimatedValue || 1_000_000,
+        session: { ...session, state },
         state,
       });
-      return db.update("quotingSessions", sessionId, {
+      const rankedAt = nowIso();
+      const updated = db.update("quotingSessions", sessionId, {
         quotes,
-        aiSummary: summary,
-        status: "complete",
-        updatedAt: nowIso(),
+        aiSummary: options?.aiSummary ?? summary,
+        status: options?.status ?? "complete",
+        updatedAt: rankedAt,
       })!;
+      logQuotingWorkflowProgress(updated, {
+        message:
+          updated.status === "awaiting_reply"
+            ? `AI ranked ${quotes.length} accepted market${quotes.length === 1 ? "" : "s"} while supplemental answers remain pending.`
+            : `AI carrier ranking completed with ${quotes.length} quote option${quotes.length === 1 ? "" : "s"}.`,
+        detail: options?.aiSummary ?? summary,
+        createdAt: rankedAt,
+      });
+      const contact = quoteSessionContact(updated);
+      if (updated.status === "awaiting_reply") {
+        createQuoteMilestoneTask(updated, {
+          milestone: "supplemental_pending",
+          title: `${contact.name} supplemental questionnaire pending`,
+          description: `${contact.name}'s accepted markets are partially ranked, but at least one carrier requested supplemental details before it can be included in the final quote review.`,
+          severity: "warning",
+          severityReason: "Carrier response required a second-round supplemental questionnaire.",
+        });
+      } else if (updated.status === "complete") {
+        resolveQuoteMilestoneTasks(updated, ["supplemental_pending", "quote_ready"]);
+        createQuoteReadyNotification(updated, {
+          title:
+            quotes.length > 0
+              ? `${contact.name} quote options ready`
+              : `${contact.name} quote review needed`,
+          summary:
+            quotes.length > 0
+              ? `AI completed carrier ranking with ${quotes.length} quote option${
+                  quotes.length === 1 ? "" : "s"
+                }. Review the ranked options when ready.`
+              : "AI completed the carrier run but no quote options returned. Review carrier eligibility and decide the next step.",
+          severity: quotes.length > 0 ? "warning" : "urgent",
+          severityReason:
+            quotes.length > 0
+              ? "Carrier ranking is complete and ready for agent review."
+              : "Carrier ranking completed without a market result.",
+        });
+      }
+      return updated;
+    },
+    implementPolicy(input: {
+      sessionId: string;
+      carrierId: string;
+      implementedById: string;
+    }): {
+      session: QuotingSession;
+      policy: Policy;
+      carrierPortalUrl?: string;
+      carrierReference: string;
+      mode: "live_api" | "demo_adapter";
+      bindingTrace?: import("@/types").CarrierPolicyBindingTrace;
+    } {
+      const session = this.get(input.sessionId);
+      if (!session) throw new Error("Quoting session not found.");
+      const quote = session.quotes.find((q) => q.carrierId === input.carrierId);
+      if (!quote) throw new Error("Carrier quote not found on this session.");
+      if (quote.implementation?.policyId) {
+        const existing = db.list("policies").find((p) => p.id === quote.implementation?.policyId);
+        if (existing) {
+          return {
+            session,
+            policy: existing,
+            carrierPortalUrl: quote.implementation.carrierPortalUrl,
+            carrierReference: quote.implementation.carrierReference,
+            mode: quote.implementation.mode,
+            bindingTrace: quote.implementation.bindingTrace,
+          };
+        }
+      }
+
+      const carrier = db.list("carriers").find((c) => c.id === input.carrierId);
+      if (!carrier) throw new Error("Carrier not found.");
+
+      const prospect = session.prospectId
+        ? db.list("prospects").find((p) => p.id === session.prospectId)
+        : undefined;
+      const customerId = session.customerId ?? prospect?.customerId;
+      if (!customerId) {
+        throw new Error("Convert this prospect to a client before implementing a carrier policy.");
+      }
+      const customer = db.list("customers").find((c) => c.id === customerId);
+      if (!customer) throw new Error("Customer record not found.");
+
+      let asset = session.assetId ? db.list("assets").find((a) => a.id === session.assetId) : undefined;
+      if (!asset) {
+        asset = api.assets.create({
+          tenantId: session.tenantId,
+          customerId,
+          type: session.assetType,
+          label:
+            String(session.assetDetails?.assetName ?? "").trim() ||
+            String(session.assetDetails?.address ?? "").trim() ||
+            String(session.publicFields["Property address"] ?? "").trim() ||
+            assetTypeDisplayName(session.assetType),
+          estimatedValue: session.estimatedValue || 0,
+          details: {
+            ...(session.assetDetails ?? {}),
+            publicFields: session.publicFields,
+            createdFromQuotingSessionId: session.id,
+          },
+          status: "insured",
+        });
+      } else if (asset.status !== "insured") {
+        db.update("assets", asset.id, { status: "insured" });
+      }
+
+      const now = nowIso();
+      const existingPolicy = db
+        .list("policies")
+        .find(
+          (p) =>
+            p.customerId === customerId &&
+            p.assetId === asset!.id &&
+            p.carrierId === carrier.id &&
+            p.status === "bound"
+        );
+      const policyNumber = existingPolicy?.policyNumber ?? implementedPolicyNumber(carrier, session);
+      const carrierPortalUrl = quote.providerTrace?.liveReady
+        ? carrier.agentPortalUrl
+        : carrier.agentPortalUrl;
+      const providerExecution = quote.providerTrace?.executionId;
+      const carrierReference =
+        providerExecution ?? `${policyNumber}-${now.slice(0, 10).replace(/-/g, "")}`;
+      const policyPatch: Partial<Policy> = {
+        tenantId: session.tenantId,
+        customerId,
+        assetId: asset.id,
+        carrierId: carrier.id,
+        policyNumber,
+        premiumEstimate: quote.premium,
+        finalPremium: quote.premium,
+        effectiveDate: now,
+        renewalDate: addOnePolicyYear(now),
+        status: "bound",
+        renewalStatus: "not_due",
+        agentId: input.implementedById,
+        department: session.lineOfBusiness === "commercial" ? "commercial" : "personal",
+        paymentFrequency: "annual",
+        billingMethod: "direct_bill",
+        billingPayer: "client",
+        billingStatus: "current",
+        billingReference: carrierReference,
+        billingLastVerifiedAt: now,
+      };
+      let policy = existingPolicy
+        ? db.update("policies", existingPolicy.id, policyPatch)!
+        : api.policies.create(policyPatch as Omit<Policy, "id" | "createdAt">);
+      const bindingTrace = prepareCarrierPolicyBinding({
+        carrier,
+        session,
+        quote,
+        policy,
+        implementedById: input.implementedById,
+      });
+      const mode: "live_api" | "demo_adapter" =
+        bindingTrace.status === "bound_on_carrier" ? "live_api" : "demo_adapter";
+      policy = db.update("policies", policy.id, {
+        carrierBindingStatus: bindingTrace.status,
+        carrierBindingReference: bindingTrace.carrierReference,
+        carrierBindingMode: mode,
+        carrierBindingTrace: bindingTrace,
+        billingReference: bindingTrace.carrierReference,
+        billingNotes:
+          bindingTrace.status === "bound_on_carrier"
+            ? `Registered on carrier side through ${bindingTrace.providerLabel}.`
+            : `Quotex policy record created. Carrier-side registration requires ${bindingTrace.providerLabel}; ${bindingTrace.blockingReasons.join("; ") || "live binding confirmation pending"}.`,
+      })!;
+      ensureCarrierBindingIssueTask({
+        session,
+        policy,
+        carrier,
+        status: bindingTrace.status,
+        reasons: bindingTrace.blockingReasons,
+        actorId: input.implementedById,
+      });
+
+      const nextQuotes = session.quotes.map((q) =>
+        q.carrierId === input.carrierId
+          ? {
+              ...q,
+              implementation: {
+                status: "implemented" as const,
+                policyId: policy.id,
+                carrierReference: bindingTrace.carrierReference,
+                carrierPortalUrl,
+                implementedAt: now,
+                implementedById: input.implementedById,
+                mode,
+                bindingTrace,
+              },
+            }
+          : q
+      );
+      const updatedSession = db.update("quotingSessions", session.id, {
+        quotes: nextQuotes,
+        updatedAt: now,
+      })!;
+
+      logQuotingWorkflowProgress(
+        { ...session, customerId, assetId: asset.id },
+        {
+          message: `${carrier.name} quote implemented as Policy #${policyNumber} (${mode === "live_api" ? "carrier registered" : "carrier binding pending/manual"}). Carrier reference ${bindingTrace.carrierReference}.`,
+          detail: `Policy ${policy.id} and billing record fields were created from quoting session ${session.id}.`,
+          createdAt: now,
+          createdById: input.implementedById,
+          policyId: policy.id,
+          assetId: asset.id,
+        }
+      );
+
+      return {
+        session: updatedSession,
+        policy,
+        carrierPortalUrl,
+        carrierReference: bindingTrace.carrierReference,
+        mode,
+        bindingTrace,
+      };
+    },
+    async implementPolicyWithCarrierBind(input: {
+      sessionId: string;
+      carrierId: string;
+      implementedById: string;
+    }): Promise<{
+      session: QuotingSession;
+      policy: Policy;
+      carrierPortalUrl?: string;
+      carrierReference: string;
+      mode: "live_api" | "demo_adapter";
+      bindingTrace?: import("@/types").CarrierPolicyBindingTrace;
+    }> {
+      const initial = this.implementPolicy(input);
+      const session = this.get(input.sessionId) ?? initial.session;
+      const quote = session.quotes.find((q) => q.carrierId === input.carrierId);
+      const carrier = db.list("carriers").find((c) => c.id === input.carrierId);
+      if (!quote || !carrier) return initial;
+      const bindingTrace = await runCarrierPolicyBinding({
+        carrier,
+        session,
+        quote,
+        policy: initial.policy,
+        implementedById: input.implementedById,
+      });
+      const mode: "live_api" | "demo_adapter" =
+        bindingTrace.status === "bound_on_carrier" ? "live_api" : "demo_adapter";
+      const policy =
+        db.update("policies", initial.policy.id, {
+          carrierBindingStatus: bindingTrace.status,
+          carrierBindingReference: bindingTrace.carrierReference,
+          carrierBindingMode: mode,
+          carrierBindingTrace: bindingTrace,
+          billingReference: bindingTrace.carrierReference,
+          billingNotes:
+            bindingTrace.status === "bound_on_carrier"
+              ? `Registered on carrier side through ${bindingTrace.providerLabel}.`
+            : `Quotex policy record created. Carrier-side registration requires ${bindingTrace.providerLabel}; ${bindingTrace.blockingReasons.join("; ") || "live binding confirmation pending"}.`,
+        }) ?? initial.policy;
+      ensureCarrierBindingIssueTask({
+        session,
+        policy,
+        carrier,
+        status: bindingTrace.status,
+        reasons: bindingTrace.blockingReasons,
+        actorId: input.implementedById,
+      });
+      const nextSession =
+        db.update("quotingSessions", session.id, {
+          quotes: session.quotes.map((q) =>
+            q.carrierId === input.carrierId && q.implementation
+              ? {
+                  ...q,
+                  implementation: {
+                    ...q.implementation,
+                    mode,
+                    carrierReference: bindingTrace.carrierReference,
+                    bindingTrace,
+                  },
+                }
+              : q
+          ),
+          updatedAt: nowIso(),
+        }) ?? session;
+
+      if (bindingTrace.status === "bound_on_carrier") {
+        logQuotingWorkflowProgress(
+          { ...session, customerId: policy.customerId, assetId: policy.assetId },
+          {
+            message: `${carrier.name} confirmed carrier-side registration for Policy #${policy.policyNumber ?? policy.id}. Carrier reference ${bindingTrace.carrierReference}.`,
+            detail: `${bindingTrace.providerLabel} returned a bound-on-carrier confirmation for quoting session ${session.id}.`,
+            createdById: input.implementedById,
+            policyId: policy.id,
+            assetId: policy.assetId,
+          }
+        );
+      }
+
+      return {
+        session: nextSession,
+        policy,
+        carrierPortalUrl: initial.carrierPortalUrl,
+        carrierReference: bindingTrace.carrierReference,
+        mode,
+        bindingTrace,
+      };
+    },
+    stepBack(sessionId: string): QuotingSession | null {
+      const session = this.get(sessionId);
+      if (!session) return null;
+      const updatedAt = nowIso();
+      const common = {
+        updatedAt,
+      };
+
+      if (session.lineOfBusiness === "commercial") {
+        if (session.commercialSecondRoundSentAt || session.commercialSupplementalsCompletedAt) {
+          const nextQuestions = (session.questionnaireQuestions ?? []).filter(
+            (question) => question.round !== "second_round"
+          );
+          const updated = db.update("quotingSessions", sessionId, {
+            ...common,
+            questionnaireQuestions: nextQuestions,
+            questionnaireMessageId: undefined,
+            questionnaireDraft: undefined,
+            questionnaireSentAt: undefined,
+            replyReceivedAt: undefined,
+            commercialSecondRoundSentAt: undefined,
+            commercialSupplementalsCompletedAt: undefined,
+            missingFields: [],
+            quotes: [],
+            status: "quoting",
+            aiSummary: "AI moved back to carrier response review before sending supplementals.",
+          });
+          if (updated) {
+            logQuotingWorkflowProgress(updated, {
+              message: "Commercial quote workflow moved back one step.",
+              detail:
+                "The supplemental send step was reopened so staff can review carrier follow-up handling again.",
+              createdAt: updatedAt,
+              createdById: session.createdById,
+              source: "agent",
+            });
+          }
+          return updated;
+        }
+
+        if (
+          session.commercialApplicationSentAt ||
+          (session.commercialCarrierSubmissions ?? []).length > 0
+        ) {
+          const updated = db.update("quotingSessions", sessionId, {
+            ...common,
+            commercialApplicationSentAt: undefined,
+            commercialCarrierSubmissions: [],
+            questionnaireMessageId: undefined,
+            questionnaireDraft: undefined,
+            questionnaireSentAt: undefined,
+            replyReceivedAt: undefined,
+            quotes: [],
+            status: "gathering_info",
+            aiSummary: "AI moved back to application review before carrier submission.",
+          });
+          if (updated) {
+            logQuotingWorkflowProgress(updated, {
+              message: "Commercial quote workflow moved back one step.",
+              detail:
+                "The carrier send step was reopened so staff can review the ACORD packet and questionnaire answers again.",
+              createdAt: updatedAt,
+              createdById: session.createdById,
+              source: "agent",
+            });
+          }
+          return updated;
+        }
+
+        if (
+          session.commercialQuestionnairePreparedAt ||
+          (session.questionnaireQuestions ?? []).length > 0
+        ) {
+          const updated = db.update("quotingSessions", sessionId, {
+            ...common,
+            commercialQuestionnairePreparedAt: undefined,
+            questionnaireQuestions: [],
+            questionnaireMessageId: undefined,
+            questionnaireDraft: undefined,
+            questionnaireSentAt: undefined,
+            replyReceivedAt: undefined,
+            missingFields: [],
+            quotes: [],
+            status: "gathering_info",
+            aiSummary:
+              "AI moved back to the ACORD mapping review before generating the questionnaire.",
+          });
+          if (updated) {
+            logQuotingWorkflowProgress(updated, {
+              message: "Commercial quote workflow moved back one step.",
+              detail:
+                "The commercial questionnaire step was reopened so the AI can regenerate it from the latest ACORD fill audit.",
+              createdAt: updatedAt,
+              createdById: session.createdById,
+              source: "agent",
+            });
+          }
+          return updated;
+        }
+
+        logQuotingWorkflowProgress(session, {
+          message: "Commercial quote workflow moved back to setup.",
+          detail:
+            "The initial AI mapping session was closed so staff can adjust policy type or ACORD document selection.",
+          createdAt: updatedAt,
+          createdById: session.createdById,
+          source: "agent",
+        });
+        db.remove("quotingSessions", sessionId);
+        return null;
+      }
+
+      if (session.status === "complete" || session.quotes.length > 0) {
+        const updated = db.update("quotingSessions", sessionId, {
+          ...common,
+          quotes: [],
+          status: session.questionnaireSentAt ? "awaiting_reply" : "gathering_info",
+          aiSummary: "AI moved back before quote ranking.",
+        });
+        return updated;
+      }
+
+      if (session.status === "awaiting_reply" || session.questionnaireSentAt) {
+        return db.update("quotingSessions", sessionId, {
+          ...common,
+          questionnaireMessageId: undefined,
+          questionnaireDraft: undefined,
+          questionnaireSentAt: undefined,
+          replyReceivedAt: undefined,
+          status: "gathering_info",
+          aiSummary: "AI moved back before sending the questionnaire.",
+        });
+      }
+
+      return session;
     },
     // Discard the session and let the agent start over.
     reset(sessionId: string) {
+      const session = this.get(sessionId);
+      if (session) {
+        logQuotingWorkflowProgress(session, {
+          message: "AI quoting workflow was reset by staff.",
+          detail: "The prior quoting session was discarded so the agent can restart with updated line, asset, or intake details.",
+          createdById: session.createdById,
+        });
+      }
       db.remove("quotingSessions", sessionId);
     },
   },
@@ -5129,16 +13924,11 @@ export const api = {
     },
   },
 
-  // ------------ E-signature auto-send ------------
-  // Two-sided workflow:
-  //   • customerEsignRequired → AI auto-sends an outbound Communication
-  //     with a secure-link blurb so the client e-signs from their portal.
-  //   • agentEsignRequired → AI spawns an Activity Center task assigned
-  //     to the agent on the hook so the doc appears in their queue.
-  // Both sides are idempotent — re-runs skip docs already sent / tasked.
-  // The dashboard fires both helpers on mount, plus a sweep that
-  // synthesizes renewal packets for any upcoming renewal that doesn't
-  // already have a requiresEsign doc on file.
+  // ------------ E-signature requirements ------------
+  // Documents can be tagged as requiring a customer signature, an
+  // agent signature, or both. Tagging is metadata only: it does not
+  // email the customer or create Activity Center work. Explicit
+  // send/request helpers below handle those dispatch steps.
   esign: {
     // Customer-side packets that have been emailed but not signed yet.
     listAwaitingCustomerSignature(tenantId: string): Document[] {
@@ -5166,8 +13956,10 @@ export const api = {
         )
         .sort((a, b) => (a.uploadedAt < b.uploadedAt ? 1 : -1));
     },
-    // Flip the customer / agent esig requirement on a doc. Used by
-    // the manager Documents page row controls.
+    // Flip the customer / agent e-sign requirement on a doc. Used by
+    // the manager Documents page row controls. Turning a side off
+    // clears dispatch/signing metadata for that side so the flag can
+    // be re-enabled cleanly later.
     setRequirements(
       documentId: string,
       patch: {
@@ -5176,7 +13968,18 @@ export const api = {
         agentEsignAssignedToId?: string;
       }
     ): Document | null {
-      return db.update("documents", documentId, patch);
+      const normalized: Partial<Document> = { ...patch };
+      if (patch.customerEsignRequired === false) {
+        normalized.customerEsignSentAt = undefined;
+        normalized.customerEsignSignedAt = undefined;
+        normalized.esignCommunicationId = undefined;
+      }
+      if (patch.agentEsignRequired === false) {
+        normalized.agentEsignSignedAt = undefined;
+        normalized.agentEsignTaskId = undefined;
+        normalized.agentEsignAssignedToId = undefined;
+      }
+      return db.update("documents", documentId, normalized);
     },
     // Make sure every upcoming renewal has at least one customer-
     // facing e-sign doc on file (renewal packet). Real wiring would
@@ -5352,8 +14155,9 @@ export const api = {
       });
       return { created };
     },
-    // Top-level driver fired from the dashboard. Seeds renewal
-    // packets, then runs both auto-senders in series.
+    // Explicit maintenance driver. Seeds renewal packets, then runs
+    // both dispatch helpers in series. The app does not call this
+    // merely because a manager tagged a document as requiring e-sign.
     runAll(
       tenantId: string,
       actorId?: string,
@@ -5428,9 +14232,30 @@ export const api = {
     markAgentSigned(documentId: string, actorId?: string) {
       const doc = db.list("documents").find((d) => d.id === documentId);
       if (!doc) return null;
+      const actor = actorId ? db.list("users").find((u) => u.id === actorId) : null;
+      const signature = actor?.electronicSignature;
       const updated = db.update("documents", documentId, {
         agentEsignSignedAt: nowIso(),
+        agentEsignSignatureName: signature?.name,
+        agentEsignSignatureFont: signature?.fontFamily,
+        agentEsignSignatureSize: signature?.fontSize,
       });
+      if (updated && actor) {
+        db.insert("statusEvents", {
+          id: uid("se"),
+          tenantId: doc.tenantId,
+          source: "agent",
+          message: `${actor.name} e-signed ${doc.fileName}; saved electronic signature was applied to the document record.`,
+          visibility: "internal",
+          customerId: doc.customerId,
+          assetId: doc.assetId,
+          policyId: doc.policyId,
+          claimId: doc.claimId,
+          documentId: doc.id,
+          createdAt: updated.agentEsignSignedAt ?? nowIso(),
+          createdById: actor.id,
+        });
+      }
       if (doc.agentEsignTaskId) {
         db.update("tasks", doc.agentEsignTaskId, {
           status: "resolved",
@@ -5439,6 +14264,30 @@ export const api = {
         });
       }
       return updated;
+    },
+    applySavedAgentSignature(documentId: string, actorId: string): Document | null {
+      const actor = db.list("users").find((u) => u.id === actorId);
+      if (!actor?.electronicSignature?.name?.trim()) return null;
+      return this.markAgentSigned(documentId, actorId);
+    },
+    applySavedAgentSignatureToPending(
+      tenantId: string,
+      actorId: string
+    ): Document[] {
+      const actor = db.list("users").find((u) => u.id === actorId);
+      if (!actor?.electronicSignature?.name?.trim()) return [];
+      const pending = db
+        .list("documents")
+        .filter(
+          (d) =>
+            d.tenantId === tenantId &&
+            !!d.agentEsignRequired &&
+            !d.agentEsignSignedAt &&
+            (!d.agentEsignAssignedToId || d.agentEsignAssignedToId === actorId)
+        );
+      return pending
+        .map((d) => this.markAgentSigned(d.id, actorId))
+        .filter((d): d is Document => !!d);
     },
   },
 
@@ -5502,6 +14351,9 @@ export const api = {
         other: "Other",
       };
       return map[type] ?? type.replace(/_/g, " ");
+    },
+    documentDisplayName(doc: { type: string; documentName?: string }): string {
+      return doc.documentName?.trim() || api.helpers.documentTypeLabel(doc.type);
     },
     // Cadence shown on the policy summary card. Frequency is
     // optional on Policy so the helper returns "—" when unset.

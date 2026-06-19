@@ -96,6 +96,25 @@ describe("Button", () => {
     expect(el.getAttribute("href")).toBe("https://example.com");
   });
 
+  it("opens external href buttons in a protected new tab", () => {
+    act(() => {
+      root.render(<Button href="https://carrier.example.com/login">Carrier</Button>);
+    });
+    const el = container.firstElementChild as HTMLAnchorElement;
+    expect(el.getAttribute("target")).toBe("_blank");
+    const rel = el.getAttribute("rel") ?? "";
+    expect(rel).toContain("noopener");
+    expect(rel).toContain("noreferrer");
+  });
+
+  it("does not force same-origin href buttons into a new tab", () => {
+    act(() => {
+      root.render(<Button href="/employee/policies">Policies</Button>);
+    });
+    const el = container.firstElementChild as HTMLAnchorElement;
+    expect(el.getAttribute("target")).toBeNull();
+  });
+
   it("Assets-card and Policies-card View buttons resolve to the same class string", () => {
     // The exact inconsistency the standardization fixes. Both call
     // sites used to render slightly-different sizing — now they

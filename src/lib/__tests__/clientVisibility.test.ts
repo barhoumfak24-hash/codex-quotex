@@ -102,6 +102,55 @@ describe("api.customers.listVisible — access control", () => {
     expect(api.customers.canSee(cB, { id: manager.id, role: "manager" })).toBe(true);
   });
 
+  it("a CSR has agent-level visibility while still keeping the CSR label", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const csr = api.users.list(agency.id).find((u) => u.role === "csr")!;
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+
+    const primaryUser = api.users.create({
+      role: "customer",
+      tenantId: agency.id,
+      email: "csr-primary@example.com",
+      name: "CSR Primary Client",
+    });
+    const primaryClient = api.customers.create({
+      tenantId: agency.id,
+      userId: primaryUser.id,
+      name: "CSR Primary Client",
+      email: "csr-primary@example.com",
+      marketingOptInEmail: false,
+      marketingOptInSms: false,
+      assignedAgentId: csr.id,
+    });
+
+    const serviceUser = api.users.create({
+      role: "customer",
+      tenantId: agency.id,
+      email: "csr-service@example.com",
+      name: "CSR Service Client",
+    });
+    const serviceClient = api.customers.create({
+      tenantId: agency.id,
+      userId: serviceUser.id,
+      name: "CSR Service Client",
+      email: "csr-service@example.com",
+      marketingOptInEmail: false,
+      marketingOptInSms: false,
+      assignedAgentId: agent.id,
+      assignedCsrId: csr.id,
+    });
+
+    const csrSees = api.customers.listVisible(agency.id, {
+      id: csr.id,
+      role: "csr",
+    });
+    expect(csrSees.some((c) => c.id === primaryClient.id)).toBe(true);
+    expect(csrSees.some((c) => c.id === serviceClient.id)).toBe(true);
+    expect(api.customers.canSee(primaryClient, { id: csr.id, role: "csr" })).toBe(true);
+    expect(api.customers.canSee(serviceClient, { id: csr.id, role: "csr" })).toBe(true);
+  });
+
   it("an unassigned client is invisible to every agent (but a manager still sees them)", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
@@ -123,5 +172,32 @@ describe("api.customers.listVisible — access control", () => {
     });
     expect(api.customers.canSee(orphan, { id: agent.id, role: "agent" })).toBe(false);
     expect(api.customers.canSee(orphan, { id: manager.id, role: "manager" })).toBe(true);
+  });
+
+  it("persists commercial client line and business name on the customer profile", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const newUser = api.users.create({
+      role: "customer",
+      tenantId: agency.id,
+      email: "commercial-client@example.com",
+      name: "Avery Stone",
+    });
+    const customer = api.customers.create({
+      tenantId: agency.id,
+      userId: newUser.id,
+      lineOfBusiness: "commercial",
+      businessName: "Stone Coastal Holdings LLC",
+      operationsDescription: "Marine construction management, coastal property maintenance, and consulting operations.",
+      name: "Avery Stone",
+      email: "commercial-client@example.com",
+      marketingOptInEmail: false,
+      marketingOptInSms: false,
+    });
+
+    expect(customer.lineOfBusiness).toBe("commercial");
+    expect(customer.businessName).toBe("Stone Coastal Holdings LLC");
+    expect(api.customers.get(customer.id)?.businessName).toBe("Stone Coastal Holdings LLC");
+    expect(api.customers.get(customer.id)?.operationsDescription).toContain("Marine construction");
   });
 });

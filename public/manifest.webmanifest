@@ -1,0 +1,19 @@
+{
+  "name": "Quotex Agency OS",
+  "short_name": "Quotex",
+  "description": "AI-assisted private-client insurance agency software and branded client websites.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f8f7f3",
+  "theme_color": "#0d0c09",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icons/quotex-mark.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

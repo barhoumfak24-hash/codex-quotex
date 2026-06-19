@@ -1,9 +1,10 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { Plus } from "lucide-react";
+import { Plus, Search } from "lucide-react";
+import { MasterBackButton } from "@/components/layout/MasterBackButton";
 import { Modal } from "@/components/ui/Modal";
 import { api } from "@/lib/api";
-import type { AssetType, InsuranceCategory } from "@/types";
+import type { AssetType, CategoryAgencyLink, InsuranceCategory, InsuranceLineOfBusiness } from "@/types";
 
 // =====================================================================
 // Insurance categories — master library.
@@ -24,12 +25,17 @@ const ASSET_TYPE_OPTIONS: { value: AssetType; label: string }[] = [
   { value: "other", label: "Other (uses generic intake)" },
 ];
 
-const ICON_OPTIONS = ["Home", "Briefcase", "Sailboat", "Gem", "Umbrella", "Layers", "HelpCircle", "ShieldCheck", "Sparkles"];
+const ICON_OPTIONS = ["Home", "Briefcase", "Building2", "Sailboat", "Gem", "Umbrella", "Layers", "HelpCircle", "ShieldCheck", "Sparkles", "Car", "Bike", "Package", "HeartPulse", "Users"];
+const LINE_OPTIONS: { value: InsuranceLineOfBusiness; label: string }[] = [
+  { value: "personal", label: "Personal lines" },
+  { value: "commercial", label: "Commercial lines" },
+];
 
 type FormValues = Omit<InsuranceCategory, "id" | "createdAt">;
 const EMPTY: FormValues = {
   label: "",
   description: "",
+  lineOfBusiness: "personal",
   assetType: "other",
   icon: "HelpCircle",
   active: true,
@@ -37,36 +43,36 @@ const EMPTY: FormValues = {
   questions: [],
 };
 
-export function CategoriesPage() {
-  const [, setRev] = useState(0);
-  const [open, setOpen] = useState(false);
-  const refresh = () => setRev((r) => r + 1);
-  const cats = api.categories.list();
-  const allLinks = api.categories.links();
-  const agencyCount = api.agencies.list().length;
+function categoryLine(category: InsuranceCategory): InsuranceLineOfBusiness {
+  return category.lineOfBusiness ?? "personal";
+}
 
+function CategorySection({
+  title,
+  subtitle,
+  categories,
+  allLinks,
+  agencyCount,
+}: {
+  title: string;
+  subtitle: string;
+  categories: InsuranceCategory[];
+  allLinks: CategoryAgencyLink[];
+  agencyCount: number;
+}) {
   return (
-    <div className="space-y-6">
-      <div className="flex items-end justify-between gap-4 flex-wrap">
+    <section className="space-y-3">
+      <div className="flex items-end justify-between gap-3">
         <div>
-          <h1 className="font-display text-3xl">Insurance categories</h1>
-          <p className="text-ink-500 text-sm mt-1">
-            Master list of asset categories customers can pick from in the quote flow. Click a card
-            to edit intake questions and toggle which agencies offer it.
-          </p>
+          <h2 className="font-display text-2xl">{title}</h2>
+          <p className="text-sm text-ink-500">{subtitle}</p>
         </div>
-        <button className="btn-gold" onClick={() => setOpen(true)}>
-          <Plus className="h-4 w-4" /> Add category
-        </button>
+        <span className="badge bg-ink-50 text-ink-700">
+          {categories.length} categor{categories.length === 1 ? "y" : "ies"}
+        </span>
       </div>
-
-      <div className="text-xs text-ink-500">
-        {cats.length} categor{cats.length === 1 ? "y" : "ies"} in the master library. Inactive ones
-        are hidden from customers even at agencies that have them linked.
-      </div>
-
       <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
-        {cats.map((c) => {
+        {categories.map((c) => {
           const qCount = c.questions?.length ?? 0;
           const activeLinkAgencies = new Set(
             allLinks.filter((l) => l.categoryId === c.id && l.active).map((l) => l.tenantId)
@@ -88,10 +94,14 @@ export function CategoriesPage() {
                 <div className="text-xs text-ink-500 mt-1 line-clamp-2">{c.description}</div>
               )}
               <div className="mt-3 flex flex-wrap gap-1">
-                <span className="badge bg-ink-50 text-ink-700">{c.assetType.replace(/_/g, " ")}</span>
+                <span className="badge bg-ink-50 text-ink-700">
+                  {c.assetType.replace(/_/g, " ")}
+                </span>
               </div>
               <div className="mt-3 flex items-center justify-between text-[11px] text-ink-500">
-                <span>{qCount} question{qCount === 1 ? "" : "s"}</span>
+                <span>
+                  {qCount} question{qCount === 1 ? "" : "s"}
+                </span>
                 <span className="font-mono">
                   {linkCount}/{agencyCount} agenc{agencyCount === 1 ? "y" : "ies"}
                 </span>
@@ -99,8 +109,89 @@ export function CategoriesPage() {
             </Link>
           );
         })}
+      </div>
+    </section>
+  );
+}
+
+export function CategoriesPage() {
+  const [, setRev] = useState(0);
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const refresh = () => setRev((r) => r + 1);
+  const cats = api.categories.list();
+  const allLinks = api.categories.links();
+  const agencyCount = api.agencies.list().length;
+  const normalizedQuery = query.trim().toLowerCase();
+  const filteredCats = normalizedQuery
+    ? cats.filter((c) =>
+        [
+          c.label,
+          c.description,
+          c.assetType.replace(/_/g, " "),
+          categoryLine(c) === "personal" ? "personal lines" : "commercial lines",
+        ]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
+          .includes(normalizedQuery)
+      )
+    : cats;
+  const personalCats = filteredCats.filter((c) => categoryLine(c) === "personal");
+  const commercialCats = filteredCats.filter((c) => categoryLine(c) === "commercial");
+
+  return (
+    <div className="space-y-6">
+      <MasterBackButton />
+      <div className="flex items-end justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="font-display text-3xl">Insurance categories</h1>
+          <p className="text-ink-500 text-sm mt-1">
+            Master list of asset categories customers can pick from in the quote flow. Click a card
+            to edit intake questions and toggle which agencies offer it.
+          </p>
+        </div>
+        <button className="btn-gold" onClick={() => setOpen(true)}>
+          <Plus className="h-4 w-4" /> Add category
+        </button>
+      </div>
+
+      <div className="text-xs text-ink-500">
+        {cats.length} categor{cats.length === 1 ? "y" : "ies"} in the master library. Inactive ones
+        are hidden from customers even at agencies that have them linked.
+      </div>
+
+      <div className="card !p-3">
+        <label className="sr-only" htmlFor="category-search">Search insurance categories</label>
+        <div className="flex items-center gap-2">
+          <Search className="h-4 w-4 text-ink-400 shrink-0" />
+          <input
+            id="category-search"
+            className="input border-0 shadow-none !p-0 focus:ring-0"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search personal or commercial categories..."
+          />
+        </div>
+      </div>
+
+      <div className="space-y-6">
+        <CategorySection
+          title="Personal lines"
+          subtitle="Homes, autos, boats, collections, personal liability, life-adjacent, and private-client risks."
+          categories={personalCats}
+          allLinks={allLinks}
+          agencyCount={agencyCount}
+        />
+        <CategorySection
+          title="Commercial lines"
+          subtitle="Business property, casualty, professional, management liability, specialty, bonds, marine, and industry-specific risks."
+          categories={commercialCats}
+          allLinks={allLinks}
+          agencyCount={agencyCount}
+        />
         {cats.length === 0 && (
-          <div className="sm:col-span-2 lg:col-span-3 text-sm text-ink-400 text-center py-10">
+          <div className="text-sm text-ink-400 text-center py-10">
             No categories — customers will see an empty quote flow.
           </div>
         )}
@@ -116,6 +207,7 @@ export function CategoriesPage() {
               ...EMPTY,
               label: String(data.get("label")),
               description: String(data.get("description")),
+              lineOfBusiness: String(data.get("lineOfBusiness")) as InsuranceLineOfBusiness,
               assetType: String(data.get("assetType")) as AssetType,
               icon: String(data.get("icon")),
               sortOrder: Number(data.get("sortOrder") || 100),
@@ -134,6 +226,14 @@ export function CategoriesPage() {
             <input className="input" name="description" />
           </div>
           <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="label">Line</label>
+              <select className="input" name="lineOfBusiness" defaultValue="personal">
+                {LINE_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </div>
             <div>
               <label className="label">Intake form</label>
               <select className="input" name="assetType" defaultValue="other">

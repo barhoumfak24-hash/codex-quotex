@@ -54,6 +54,40 @@ const GOOGLE_GEOCODE_NORTHVILLE = {
   ],
 };
 
+describe("aiEnrichAsset - server mode", () => {
+  it("uses the backend enrichment endpoint when server AI is enabled", async () => {
+    vi.resetModules();
+    vi.stubGlobal("fetch", vi.fn());
+    vi.stubEnv("VITE_AI_MODE", "server");
+    vi.stubEnv("VITE_API_BASE_URL", "http://localhost:4000/api");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        fields: { floodZone: "AE" },
+        evidence: {
+          floodZone: {
+            fieldKey: "floodZone",
+            sourceKind: "government_api",
+            sourceLabel: "FEMA National Flood Hazard Layer (NFHL)",
+            confidence: 0.96,
+            verified: true,
+            allowDocumentAutofill: true,
+            collectedAt: "2026-06-18T00:00:00.000Z",
+          },
+        },
+        sources: ["FEMA National Flood Hazard Layer (NFHL)"],
+        confidence: 0.96,
+      }),
+    });
+    const { aiEnrichAsset } = await import("../ai");
+    const out = await aiEnrichAsset("coastal_home", { address: "901 McDonald Drive, Northville, MI 48167" });
+    expect(out.fields.floodZone).toBe("AE");
+    expect(String((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][0])).toBe(
+      "http://localhost:4000/api/ai/enrich-asset"
+    );
+  });
+});
+
 beforeEach(() => {
   vi.resetModules();
   vi.stubGlobal("fetch", vi.fn());
@@ -61,6 +95,7 @@ beforeEach(() => {
   // unless a test explicitly opts into the Google geocoder. Vite
   // loads any project-local .env at test time, which would otherwise
   // leak the real key into these unit tests.
+  vi.stubEnv("VITE_AI_MODE", "");
   vi.stubEnv("VITE_GOOGLE_PLACES_API_KEY", "");
   vi.stubEnv("VITE_GOOGLE_MAPS_API_KEY", "");
 });
@@ -88,10 +123,14 @@ describe("aiEnrichAsset — coastal home", () => {
 
     // FEMA flood zone is the verified field.
     expect(out.fields.floodZone).toBe("AE");
+    expect(out.evidence?.floodZone?.sourceKind).toBe("government_api");
+    expect(out.evidence?.floodZone?.allowDocumentAutofill).toBe(true);
     // AI-estimated property characteristics are also populated so
     // the intake form auto-fills with sensible defaults. These are
     // deterministic for the same address.
     expect(out.fields).toHaveProperty("yearBuilt");
+    expect(out.evidence?.yearBuilt?.sourceKind).toBe("model_estimate");
+    expect(out.evidence?.yearBuilt?.allowDocumentAutofill).toBe(false);
     expect(out.fields).toHaveProperty("squareFootage");
     expect(out.fields).toHaveProperty("constructionType");
     expect(out.fields).toHaveProperty("roofMaterial");
@@ -429,6 +468,8 @@ describe("aiEnrichAsset — luxury vehicle", () => {
       make: "PORSCHE",
       model: "911",
     });
+    expect(out.evidence?.year?.sourceKind).toBe("government_api");
+    expect(out.evidence?.year?.allowDocumentAutofill).toBe(true);
     // Market value is ALWAYS unavailable — no free public API.
     expect(out.unavailableFields).toEqual(expect.arrayContaining(["estimatedValue"]));
     expect(out.sources?.[0]).toContain("NHTSA");

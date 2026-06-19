@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Bell, Bot, Building2, CalendarClock, Check, CheckSquare, ChevronDown, ChevronUp, FileSearch, MessageCircle, PartyPopper, Plus, RotateCcw, ShieldCheck, UserSearch, Users, X } from "lucide-react";
+import { Bell, Bot, CalendarClock, Check, CheckSquare, ChevronDown, ChevronUp, FileSearch, MessageCircle, PartyPopper, Plus, RotateCcw, ShieldCheck, Target, UserSearch, Users, X } from "lucide-react";
 import { Card, CardHeader, StatCard } from "@/components/ui/Card";
 import { ExpandableCard } from "@/components/ui/ExpandableCard";
 import { Modal } from "@/components/ui/Modal";
@@ -11,16 +11,15 @@ import {
   RenewalList,
 } from "@/components/analytics/MetricLists";
 import { Confetti } from "@/components/ui/Confetti";
-import { Timeline } from "@/components/ui/Timeline";
 import { Badge } from "@/components/ui/Badge";
-import { ProspectStatusBadge } from "@/components/ui/StatusBadge";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
+import { subscribeToDbChanges } from "@/lib/db";
 import { fmt } from "@/lib/format";
+import { isRoutingManagerRole } from "@/lib/roles";
 import { sweepGoalAchievements } from "@/lib/performanceGoals";
 import { NewReminderModal } from "@/components/tasks/NewReminderModal";
-import { NewCompanyReminderModal } from "@/components/tasks/NewCompanyReminderModal";
 import { PerformanceGoalsMiniCard } from "@/components/analytics/PerformanceGoalsMiniCard";
 import { ImportanceIcon } from "@/components/tasks/ImportancePicker";
 import type { Reminder } from "@/types";
@@ -31,44 +30,20 @@ export function EmployeeDashboard() {
   const [, setRev] = useState(0);
   const refresh = () => setRev((r) => r + 1);
   const [newReminderOpen, setNewReminderOpen] = useState(false);
-  const [newCompanyReminderOpen, setNewCompanyReminderOpen] = useState(false);
   // Which dashboard stat tile is expanded into a quick-view list.
   const [quickView, setQuickView] = useState<
-    null | "clients" | "policies" | "prospects" | "renewals"
+    null | "clients" | "policies" | "prospects" | "renewals" | "activities"
   >(null);
   const [showPastReminders, setShowPastReminders] = useState(false);
-  // AI sweep on dashboard mount: auto-send customer e-sign packets,
-  // create Activity Center tasks for any docs the agent owes a
-  // signature on, and synthesize renewal packets so upcoming
-  // renewals always have something queued. Idempotent — re-runs
-  // skip docs already sent / tasked.
-  const [esignBurst, setEsignBurst] = useState<{
-    customerCount: number;
-    customerNames: string[];
-    agentTaskCount: number;
-  } | null>(null);
+  const [selectedReminder, setSelectedReminder] = useState<Reminder | null>(null);
+  useEffect(() => subscribeToDbChanges(() => setRev((r) => r + 1)), []);
+  // Keep upcoming-renewal packets available, but do not send or
+  // assign e-signature work just because a document was tagged as
+  // requiring a signature. Sending stays behind explicit user actions.
   useEffect(() => {
     if (!agency || !user) return;
-    const portalUrl =
-      typeof window !== "undefined"
-        ? `${window.location.origin}/customer/documents`
-        : `/customer/documents`;
-    const { customerSent, agentTasks } = api.esign.runAll(
-      agency.id,
-      user.id,
-      portalUrl
-    );
-    const customerDocs = customerSent.reduce(
-      (sum, b) => sum + b.documents.length,
-      0
-    );
-    if (customerDocs > 0 || agentTasks.length > 0) {
-      setEsignBurst({
-        customerCount: customerDocs,
-        customerNames: customerSent.map((s) => s.customer.name),
-        agentTaskCount: agentTasks.length,
-      });
-    }
+    const seeded = api.esign.seedRenewalPackets(agency.id, user.id);
+    if (seeded.length > 0) refresh();
     // Intentionally only runs once per dashboard mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agency?.id, user?.id]);
@@ -78,13 +53,14 @@ export function EmployeeDashboard() {
   useEffect(() => {
     if (!agency || !user) return;
     const celebrated = sweepGoalAchievements(agency.id);
-    // AI triage of inbound messages → auto-create activities.
+    // AI triage of inbound messages opens activities only for owned work.
     const triaged = api.communications.sweepInboundForActivities(agency.id, user.id);
     if (celebrated.length > 0 || triaged.length > 0) refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agency?.id, user?.id]);
   const navigate = useNavigate();
   if (!agency || !user) return null;
+  const dashboardRouteState = { fromDashboard: true };
   const viewer = { id: user.id, role: user.role };
   const reminders = api.reminders.listForUser(agency.id, user.id);
   const pastReminders = api.reminders.listDismissedForUser(agency.id, user.id);
@@ -101,22 +77,60 @@ export function EmployeeDashboard() {
   // on the dashboard (stat tiles + recent activity).
   const customers = api.customers.listVisible(agency.id, viewer);
   const visibleIds = new Set(customers.map((c) => c.id));
+  const notificationCustomerIds = new Set(
+    api.customers.listOwned(agency.id, viewer).map((c) => c.id)
+  );
   const visiblePolicies = policies.filter((p) => visibleIds.has(p.customerId));
   const renewals = api.renewals.listByTenant(agency.id);
   const messages = api.marketing
     .listMessages(agency.id)
     .filter((m) => !m.customerId || visibleIds.has(m.customerId));
-  const recent = api.status
-    .listByTenant(agency.id)
-    .filter((e) => !e.customerId || visibleIds.has(e.customerId));
+  const hidesManagerAssignmentFollowUp = (t: import("@/types").Task) => {
+    const title = typeof t.title === "string" ? t.title : "";
+    return (
+      user.role === "manager" &&
+      (title.startsWith("New prospect assigned:") ||
+        title.startsWith("New client assigned:"))
+    );
+  };
+  const assignedToViewer = (r: {
+    assignedToId?: string;
+    additionalAssignedToIds?: string[];
+  }) =>
+    (r.assignedToId ?? "") === viewer.id ||
+    (r.additionalAssignedToIds ?? []).includes(viewer.id);
+  const isManager = isRoutingManagerRole(user.role);
+  const routingProspects = isManager
+    ? api.prospects.listByTenant(agency.id).filter((p) => !p.assignedAgentId)
+    : [];
+  const routingClients = isManager
+    ? api.customers.list(agency.id).filter((c) => !c.assignedAgentId)
+    : [];
+  const routingTasks = isManager
+    ? api.tasks.listOpen(agency.id).filter((t) => t.awaitingManagerAssignment)
+    : [];
+  const routingCount = routingProspects.length + routingClients.length + routingTasks.length;
+  const assignedActivityNotifications = api.aiNotifications
+    .listUnacked(agency.id)
+    .filter((n) => n.kind !== "goal_request" && n.kind !== "timesheet_due" && n.kind !== "inbound_notice" && n.kind !== "quote_ready")
+    .filter(assignedToViewer);
+  const assignedActivityTasks = api.tasks
+    .listOpen(agency.id)
+    .filter((t) => !hidesManagerAssignmentFollowUp(t))
+    .filter((t) => !t.awaitingManagerAssignment)
+    .filter(assignedToViewer);
   // Notifications are surfaced exclusively in the Activity Center.
   // The dashboard tile counts items assigned TO the viewer — managers
   // see their own queue here, not tenant-wide work.
   const activityCount =
-    [
-      ...api.aiNotifications.listUnacked(agency.id),
-      ...api.tasks.listOpen(agency.id),
-    ].filter((r) => (r.assignedToId ?? "") === viewer.id).length;
+    assignedActivityNotifications.length + assignedActivityTasks.length + routingCount;
+  const activityItems = {
+    notifications: assignedActivityNotifications,
+    tasks: assignedActivityTasks,
+    routingProspects,
+    routingClients,
+    routingTasks,
+  };
 
   const newProspects = prospects.filter((p) => p.status === "new" || p.status === "abandoned");
 
@@ -138,7 +152,6 @@ export function EmployeeDashboard() {
       return (g.assigneeIds ?? []).includes(user.id);
     });
   })();
-
   return (
     <div className="space-y-6">
       {goalAchievements.length > 0 && <Confetti />}
@@ -164,7 +177,8 @@ export function EmployeeDashboard() {
                   navigate(
                     `/employee/analytics?celebrate=${encodeURIComponent(
                       n.goalId ?? ""
-                    )}#performance-goals`
+                    )}#performance-goals`,
+                    { state: dashboardRouteState }
                   );
                 }}
               >
@@ -189,40 +203,6 @@ export function EmployeeDashboard() {
         <h1 className="font-display text-3xl">Agency dashboard</h1>
         <p className="text-ink-500 text-sm mt-1">{agency.name}</p>
       </div>
-
-      {esignBurst && (
-        <div className="rounded-md border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-900 flex items-start gap-3">
-          <Bot className="h-4 w-4 mt-0.5 shrink-0 text-violet-600" />
-          <div className="flex-1 space-y-1">
-            <div className="font-medium">AI e-sign sweep complete</div>
-            {esignBurst.customerCount > 0 && (
-              <div className="text-xs text-violet-800">
-                Sent {esignBurst.customerCount} packet
-                {esignBurst.customerCount === 1 ? "" : "s"} to clients:{" "}
-                {esignBurst.customerNames.join(", ")}.
-              </div>
-            )}
-            {esignBurst.agentTaskCount > 0 && (
-              <div className="text-xs text-violet-800">
-                Created {esignBurst.agentTaskCount} Activity Center task
-                {esignBurst.agentTaskCount === 1 ? "" : "s"} for documents waiting on
-                agent signature.
-              </div>
-            )}
-            <div className="text-[11px] text-violet-700">
-              Outbound emails are in each client's Communications thread; agent
-              tasks live in the Activity Center.
-            </div>
-          </div>
-          <button
-            type="button"
-            className="text-violet-600 hover:text-violet-900 text-xs"
-            onClick={() => setEsignBurst(null)}
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
 
       <div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-4">
         <StatCard
@@ -253,14 +233,13 @@ export function EmployeeDashboard() {
           hint="Quick view"
           onClick={() => setQuickView("renewals")}
         />
-        <Link to="/employee/tasks" className="block hover:opacity-90">
-          <StatCard
-            label="Activity Center"
-            value={activityCount}
-            icon={<CheckSquare className="h-5 w-5" />}
-            hint={activityCount > 0 ? "Open the Activity Center" : "All caught up"}
-          />
-        </Link>
+        <StatCard
+          label="Activity Center"
+          value={activityCount}
+          icon={<CheckSquare className="h-5 w-5" />}
+          hint={activityCount > 0 ? "Quick view" : "All caught up"}
+          onClick={() => setQuickView("activities")}
+        />
       </div>
 
       <StatQuickView
@@ -270,71 +249,20 @@ export function EmployeeDashboard() {
         policies={visiblePolicies}
         prospects={newProspects}
         renewals={renewals.filter((r) => r.status === "upcoming")}
+        activityItems={activityItems}
       />
 
-      <div className="grid lg:grid-cols-3 gap-6">
-        <Card>
-          <CardHeader
-            title="Prospect queue"
-            subtitle="New leads and abandoned quotes detected by AI."
-            action={<Link to="/employee/prospects" className="btn-outline text-xs inline-flex">View all</Link>}
-          />
-          <ul className="divide-y divide-ink-100">
-            {newProspects.slice(0, 6).map((p) => (
-              <li key={p.id} className="py-3 flex items-center justify-between gap-3">
-                <Link to={`/employee/prospects/${p.id}`} className="min-w-0 flex-1">
-                  <div className="text-sm font-semibold truncate">{p.name}</div>
-                  <div className="text-xs text-ink-500 mt-0.5 truncate">{p.aiSummary}</div>
-                </Link>
-                <div className="text-right">
-                  <ProspectStatusBadge status={p.status} />
-                  <div className="text-[11px] text-ink-400 mt-1">{fmt.relative(p.lastActivityAt)}</div>
-                </div>
-              </li>
-            ))}
-            {newProspects.length === 0 && (
-              <li className="py-6 text-sm text-ink-400 text-center">No open prospects.</li>
-            )}
-          </ul>
-        </Card>
-
-        <Card>
-          <CardHeader
-            title="Notifications"
-            subtitle="New activities assigned to you, inbound client messages, and AI alerts."
-            action={
-              <Link
-                to="/employee/tasks"
-                className="btn-outline text-xs inline-flex"
-              >
-                <Bell className="h-3 w-3" /> Activity Center
-              </Link>
-            }
-          />
-          <NotificationsList
-            tenantId={agency.id}
-            userId={user.id}
-            visibleCustomerIds={visibleIds}
-          />
-        </Card>
-
-        <Card>
+      <div className="grid gap-6 lg:grid-cols-3">
+        <Card className="h-full min-h-[17rem]">
           <CardHeader
             title="My reminders"
+            hideSubtitle
             subtitle="Private follow-ups — set against an Activity Center card or freeform. Soonest first."
             action={
-              <div className="flex items-center gap-1.5">
+              <div className="flex max-w-full flex-wrap items-center justify-end gap-1.5">
                 <button
                   type="button"
-                  className="btn-outline text-xs"
-                  onClick={() => setNewCompanyReminderOpen(true)}
-                  title="Send one reminder to a chosen group of teammates"
-                >
-                  <Building2 className="h-3.5 w-3.5" /> Company reminder
-                </button>
-                <button
-                  type="button"
-                  className="btn-gold text-xs"
+                  className="btn-gold text-xs !px-2.5 whitespace-nowrap"
                   onClick={() => setNewReminderOpen(true)}
                 >
                   <Plus className="h-3.5 w-3.5" /> New reminder
@@ -357,10 +285,7 @@ export function EmployeeDashboard() {
                 <ReminderRow
                   key={r.id}
                   reminder={r}
-                  onDismiss={() => {
-                    api.reminders.dismiss(r.id);
-                    refresh();
-                  }}
+                  onOpen={() => setSelectedReminder(r)}
                 />
               ))}
             </ul>
@@ -381,26 +306,59 @@ export function EmployeeDashboard() {
                 {showPastReminders ? "Hide" : "Show"} past reminders ({pastReminders.length})
               </button>
               {showPastReminders && (
-                <ul className="mt-2 divide-y divide-ink-100">
-                  {pastReminders.map((r) => (
-                    <PastReminderRow
-                      key={r.id}
-                      reminder={r}
-                      onRestore={() => {
-                        api.reminders.restore(r.id);
-                        refresh();
-                      }}
-                      onRemove={() => {
-                        api.reminders.remove(r.id);
-                        refresh();
-                      }}
-                    />
-                  ))}
-                </ul>
+                <div
+                  className={`mt-2 ${
+                    pastReminders.length > 5 ? "max-h-[18rem] dropdown-scroll-y" : ""
+                  }`}
+                >
+                  <ul className="divide-y divide-ink-100">
+                    {pastReminders.map((r) => (
+                      <PastReminderRow
+                        key={r.id}
+                        reminder={r}
+                        onRestore={() => {
+                          api.reminders.restore(r.id);
+                          refresh();
+                        }}
+                        onRemove={() => {
+                          api.reminders.remove(r.id);
+                          refresh();
+                        }}
+                      />
+                    ))}
+                  </ul>
+                </div>
               )}
             </div>
           )}
         </Card>
+
+        <Card className="h-full min-h-[17rem]">
+          <CardHeader
+            title="Notifications"
+            action={
+              <Link
+                to="/employee/tasks"
+                state={dashboardRouteState}
+                className="btn-outline text-xs inline-flex"
+              >
+                <Bell className="h-3 w-3" /> Activity Center
+              </Link>
+            }
+          />
+          <NotificationsList
+            tenantId={agency.id}
+            userId={user.id}
+            visibleCustomerIds={notificationCustomerIds}
+          />
+        </Card>
+
+        <ActivityCenterDashboardCard
+          className="h-full min-h-[17rem]"
+          activityItems={activityItems}
+          routingCount={routingCount}
+          isManager={isManager}
+        />
 
         <NewReminderModal
           open={newReminderOpen}
@@ -410,34 +368,30 @@ export function EmployeeDashboard() {
           onCreated={refresh}
         />
 
-        <NewCompanyReminderModal
-          open={newCompanyReminderOpen}
-          onClose={() => setNewCompanyReminderOpen(false)}
-          tenantId={agency.id}
-          createdById={user.id}
-          onCreated={refresh}
+        <ReminderDetailModal
+          reminder={selectedReminder}
+          onClose={() => setSelectedReminder(null)}
+          onDismiss={(id) => {
+            api.reminders.dismiss(id);
+            setSelectedReminder(null);
+            refresh();
+          }}
         />
 
-        <Card className="lg:col-span-2">
-          <CardHeader
-            title="Recent status updates"
-            action={
-              <Link to="/employee/status-updates" className="btn-outline text-xs inline-flex">
-                View all
-              </Link>
-            }
-          />
-          <Timeline events={recent.slice(0, 10)} />
-        </Card>
-
-        <PerformanceGoalsMiniCard agencyId={agency.id} isManager={user.role === "manager"} />
+        <PerformanceGoalsMiniCard
+          agencyId={agency.id}
+          isManager={user.role === "manager"}
+          className="lg:col-span-3"
+        />
 
         <ExpandableCard
+          className="h-full min-h-[14rem]"
           title="Internal messages"
           subtitle="Unread DMs and group threads from your teammates."
           action={
             <Link
               to="/employee/messages"
+              state={dashboardRouteState}
               className="btn-outline text-xs inline-flex"
             >
               <MessageCircle className="h-3 w-3" /> View
@@ -457,6 +411,7 @@ export function EmployeeDashboard() {
                   <li key={thread.id} className="py-2">
                     <Link
                       to={`/employee/messages?thread=${thread.id}`}
+                      state={dashboardRouteState}
                       className="block hover:text-gold-700"
                     >
                       <div className="flex items-center justify-between gap-2">
@@ -478,8 +433,8 @@ export function EmployeeDashboard() {
           )}
         </ExpandableCard>
 
-        <Card>
-          <CardHeader title="AI marketing activity" action={<Link className="btn-outline text-xs inline-flex" to="/employee/marketing">View</Link>} />
+        <Card className="h-full min-h-[14rem]">
+          <CardHeader title="AI marketing activity" action={<Link className="btn-outline text-xs inline-flex" to="/employee/marketing" state={dashboardRouteState}>View</Link>} />
           {messages.length === 0 ? (
             <div className="text-sm text-ink-400">No outreach yet.</div>
           ) : (
@@ -499,8 +454,8 @@ export function EmployeeDashboard() {
           )}
         </Card>
 
-        <Card>
-          <CardHeader title="Documents needing review" action={<Link to="/employee/documents" className="btn-outline text-xs inline-flex">View all</Link>} />
+        <Card className="h-full min-h-[14rem]">
+          <CardHeader title="Documents needing review" action={<Link to="/employee/documents" state={dashboardRouteState} className="btn-outline text-xs inline-flex">View all</Link>} />
           <DocsPending tenantId={agency.id} visibleIds={visibleIds} />
         </Card>
       </div>
@@ -518,13 +473,21 @@ function StatQuickView({
   policies,
   prospects,
   renewals,
+  activityItems,
 }: {
-  which: null | "clients" | "policies" | "prospects" | "renewals";
+  which: null | "clients" | "policies" | "prospects" | "renewals" | "activities";
   onClose: () => void;
   customers: import("@/types").CustomerProfile[];
   policies: import("@/types").Policy[];
   prospects: import("@/types").Prospect[];
   renewals: import("@/types").Renewal[];
+  activityItems: {
+    notifications: ReturnType<typeof api.aiNotifications.listUnacked>;
+    tasks: ReturnType<typeof api.tasks.listOpen>;
+    routingProspects: import("@/types").Prospect[];
+    routingClients: import("@/types").CustomerProfile[];
+    routingTasks: ReturnType<typeof api.tasks.listOpen>;
+  };
 }) {
   if (!which) return null;
 
@@ -535,10 +498,27 @@ function StatQuickView({
       ? "Bound policies"
       : which === "prospects"
       ? "Open prospects"
-      : "Renewals upcoming";
+      : which === "renewals"
+      ? "Renewals upcoming"
+      : "Activity Center";
+  const category = {
+    clients: { to: "/employee/clients", label: "Open clients" },
+    policies: { to: "/employee/policies", label: "Open policies" },
+    prospects: { to: "/employee/prospects", label: "Open prospects" },
+    renewals: { to: "/employee/renewals", label: "Open renewals" },
+    activities: { to: "/employee/tasks", label: "Open Activity Center" },
+  }[which];
 
   return (
     <Modal open onClose={onClose} title={title} size="lg">
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <p className="text-sm text-ink-500">
+          Quick snapshot from the dashboard. Open the full category for filters and actions.
+        </p>
+        <Link to={category.to} state={{ fromDashboard: true }} onClick={onClose} className="btn-gold text-xs shrink-0">
+          {category.label}
+        </Link>
+      </div>
       <div className="max-h-[65vh] overflow-y-auto">
         {which === "clients" && <ClientList customers={customers} />}
         {which === "policies" && (
@@ -546,59 +526,231 @@ function StatQuickView({
         )}
         {which === "prospects" && <ProspectList prospects={prospects} />}
         {which === "renewals" && <RenewalList renewals={renewals} />}
+        {which === "activities" && <ActivityQuickList {...activityItems} />}
       </div>
     </Modal>
   );
 }
 
+function ActivityQuickList({
+  notifications,
+  tasks,
+  routingProspects,
+  routingClients,
+  routingTasks,
+  maxRows,
+}: {
+  notifications: ReturnType<typeof api.aiNotifications.listUnacked>;
+  tasks: ReturnType<typeof api.tasks.listOpen>;
+  routingProspects: import("@/types").Prospect[];
+  routingClients: import("@/types").CustomerProfile[];
+  routingTasks: ReturnType<typeof api.tasks.listOpen>;
+  maxRows?: number;
+}) {
+  type ActivityRow = {
+    id: string;
+    at: string;
+    title: string;
+    detail: string;
+    href: string;
+    tone?: import("@/types").TaskSeverity;
+  };
+  const rows: ActivityRow[] = [
+    ...notifications.map((n) => ({
+      id: `notification:${n.id}`,
+      at: n.createdAt,
+      title: n.title,
+      detail: n.summary,
+      href: n.taskId ? `/employee/tasks?focus=${n.taskId}` : "/employee/tasks",
+      tone: n.severity,
+    })),
+    ...tasks.map((t) => ({
+      id: `task:${t.id}`,
+      at: t.createdAt,
+      title: t.title,
+      detail: t.aiSummary ?? t.description ?? fmt.titleCase(t.status ?? "open"),
+      href: `/employee/tasks?focus=${t.id}`,
+      tone: t.severity,
+    })),
+    ...routingTasks.map((t) => ({
+      id: `routing-task:${t.id}`,
+      at: t.routeRequestedAt ?? t.createdAt,
+      title:
+        t.routeRequestMode === "reroute"
+          ? `Reroute request: ${t.title.replace(/^Reroute .* requested:\s*/i, "")}`
+          : t.routeRequestKind
+          ? `Route request: ${t.title.replace(/^Route .* requested:\s*/i, "")}`
+          : t.title,
+      detail: t.description ?? "Manager routing confirmation needed.",
+      href: `/employee/tasks?focus=${t.id}`,
+      tone: (t.routeRequestMode === "reroute" ? "warning" : "info") as import("@/types").TaskSeverity,
+    })),
+    ...routingProspects.map((p) => ({
+      id: `routing-prospect:${p.id}`,
+      at: p.lastActivityAt ?? p.createdAt,
+      title: `Route prospect: ${p.name}`,
+      detail: `${fmt.titleCase(p.lineOfBusiness ?? "personal")} lines - ${fmt.titleCase(
+        String(p.assetType).replace(/_/g, " ")
+      )}`,
+      href: "/employee/tasks",
+      tone: "info" as const,
+    })),
+    ...routingClients.map((c) => ({
+      id: `routing-client:${c.id}`,
+      at: c.createdAt,
+      title: `Route client: ${c.businessName || c.name}`,
+      detail: c.businessName ? `${c.name} - ${fmt.titleCase(c.lineOfBusiness ?? "commercial")} lines` : `${fmt.titleCase(c.lineOfBusiness ?? "personal")} lines`,
+      href: "/employee/tasks",
+      tone: "info" as const,
+    })),
+  ].sort((a, b) => (a.at < b.at ? 1 : -1));
+
+  if (rows.length === 0) {
+    return <div className="text-sm text-ink-400 text-center py-6">All caught up.</div>;
+  }
+
+  return (
+    <ul className="divide-y divide-ink-100">
+      {rows.slice(0, maxRows).map((row) => (
+        <li key={row.id} className="py-2.5 flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <ImportanceIcon importance={row.tone ?? "info"} className="h-4 w-4 shrink-0" />
+              <div className="text-sm font-medium text-ink-900 truncate">{row.title}</div>
+            </div>
+            <div className="mt-1 text-xs text-ink-500 line-clamp-2">{row.detail}</div>
+            <div className="mt-1 text-[11px] text-ink-400">{fmt.relative(row.at)}</div>
+          </div>
+          <Link to={row.href} state={{ fromDashboard: true }} className="btn-outline text-[11px] shrink-0">
+            Open
+          </Link>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function ActivityCenterDashboardCard({
+  activityItems,
+  routingCount,
+  isManager,
+  className = "",
+}: {
+  activityItems: {
+    notifications: ReturnType<typeof api.aiNotifications.listUnacked>;
+    tasks: ReturnType<typeof api.tasks.listOpen>;
+    routingProspects: import("@/types").Prospect[];
+    routingClients: import("@/types").CustomerProfile[];
+    routingTasks: ReturnType<typeof api.tasks.listOpen>;
+  };
+  routingCount: number;
+  isManager: boolean;
+  className?: string;
+}) {
+  return (
+    <Card className={className}>
+      <CardHeader
+        title="Activity Center"
+        hideSubtitle
+        action={
+          <Link to="/employee/tasks" state={{ fromDashboard: true }} className="btn-outline text-xs inline-flex">
+            Open
+          </Link>
+        }
+      />
+      <ActivityQuickList {...activityItems} maxRows={5} />
+    </Card>
+  );
+}
+
 function ReminderRow({
   reminder,
-  onDismiss,
+  onOpen,
 }: {
   reminder: Reminder;
-  onDismiss: () => void;
+  onOpen: () => void;
 }) {
   const task = reminder.taskId
     ? api.tasks.listByTenant(reminder.tenantId).find((t) => t.id === reminder.taskId)
     : undefined;
-  const isGeneral = !reminder.taskId;
   const label = reminder.title ?? task?.title ?? "(activity removed)";
   return (
-    <li className="py-2.5 flex items-start gap-3">
-      <ImportanceIcon
-        importance={reminder.importance}
-        className="h-4 w-4 mt-0.5 shrink-0"
-      />
-      <div className="min-w-0 flex-1">
-        {isGeneral ? (
-          <div className="text-sm font-medium truncate">{label}</div>
-        ) : (
-          <Link
-            to={`/employee/tasks?focus=${reminder.taskId}`}
-            className="text-sm font-medium truncate block hover:text-gold-700"
-          >
-            {label}
-          </Link>
-        )}
-        <div className="flex items-center gap-1.5 mt-0.5">
-          <Badge tone={isGeneral ? "neutral" : "info"}>
-            {isGeneral ? "General" : "Activity"}
-          </Badge>
-        </div>
-        {reminder.note && (
-          <div className="text-xs text-ink-600 mt-0.5 italic">"{reminder.note}"</div>
-        )}
-        <div className="text-[11px] text-ink-500 mt-0.5">{fmt.dateTime(reminder.remindAt)}</div>
-      </div>
+    <li className="py-2">
       <button
         type="button"
-        className="btn-outline text-xs"
-        onClick={onDismiss}
-        title="Dismiss reminder"
+        className="flex w-full min-w-0 items-center gap-2 text-left text-sm font-medium text-ink-900 hover:text-gold-700"
+        onClick={onOpen}
+        title="Open reminder details"
       >
-        <Check className="h-3.5 w-3.5" /> Done
+        <span className="shrink-0 text-ink-400">-</span>
+        <span className="min-w-0 truncate">{label}</span>
       </button>
     </li>
+  );
+}
+
+function ReminderDetailModal({
+  reminder,
+  onClose,
+  onDismiss,
+}: {
+  reminder: Reminder | null;
+  onClose: () => void;
+  onDismiss: (id: string) => void;
+}) {
+  if (!reminder) return null;
+  const task = reminder.taskId
+    ? api.tasks.listByTenant(reminder.tenantId).find((t) => t.id === reminder.taskId)
+    : undefined;
+  const title = reminder.title ?? task?.title ?? "Reminder";
+  const typeLabel = reminder.scope === "company" ? "Company reminder" : task ? "Activity reminder" : "Personal reminder";
+  const explanation =
+    reminder.note ??
+    (task
+      ? "This reminder is attached to an Activity Center card."
+      : reminder.scope === "company"
+        ? "This company reminder was sent to selected teammates."
+        : "This is a personal follow-up reminder.");
+  return (
+    <Modal open onClose={onClose} title="Reminder" size="sm">
+      <div className="space-y-4">
+        <div>
+          <h3 className="text-lg font-semibold text-ink-900">{title}</h3>
+          <p className="mt-2 text-sm text-ink-600">{explanation}</p>
+        </div>
+        <div className="rounded-md border border-ink-100 bg-ink-50/60 px-3 py-2 text-sm text-ink-700 space-y-1">
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-ink-500">Type</span>
+            <span className="font-medium text-right">{typeLabel}</span>
+          </div>
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-ink-500">Reminder time</span>
+            <span className="font-medium text-right">{fmt.dateTime(reminder.remindAt)}</span>
+          </div>
+          {task && (
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-ink-500">Activity</span>
+              <Link
+                to={`/employee/tasks?focus=${reminder.taskId}`}
+                state={{ fromDashboard: true }}
+                className="font-medium text-gold-700 hover:text-gold-800 text-right"
+                onClick={onClose}
+              >
+                Open activity
+              </Link>
+            </div>
+          )}
+        </div>
+        <div className="flex items-center justify-end gap-2">
+          <button type="button" className="btn-outline" onClick={onClose}>
+            Close
+          </button>
+          <button type="button" className="btn-primary" onClick={() => onDismiss(reminder.id)}>
+            <Check className="h-4 w-4" /> Done
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -674,7 +826,7 @@ function NotificationsList({
     .listOpen(tenantId)
     .filter(
       (t) =>
-        t.assignedToId === userId &&
+        (t.assignedToId === userId || (t.additionalAssignedToIds ?? []).includes(userId)) &&
         new Date(t.createdAt).getTime() >= sevenDaysAgo &&
         !t.startedAt
     );
@@ -690,11 +842,25 @@ function NotificationsList({
     tenantId,
     userId
   );
+  const goalRequests = api.aiNotifications
+    .listUnacked(tenantId)
+    .filter((n) => n.kind === "goal_request" && (n.assignedToId ?? "") === userId);
+  const timesheetNotifications = api.aiNotifications
+    .listUnacked(tenantId)
+    .filter((n) => n.kind === "timesheet_due" && (n.assignedToId ?? "") === userId);
+  const inboundNotices = api.aiNotifications
+    .listUnacked(tenantId)
+    .filter((n) => n.kind === "inbound_notice" && (n.assignedToId ?? "") === userId)
+    .filter((n) => !n.customerId || visibleCustomerIds.has(n.customerId));
+  const quoteReadyNotifications = api.aiNotifications
+    .listUnacked(tenantId)
+    .filter((n) => n.kind === "quote_ready" && (n.assignedToId ?? "") === userId)
+    .filter((n) => !n.customerId || visibleCustomerIds.has(n.customerId));
 
   type NotificationRow = {
     key: string;
     at: string;
-    kind: "task" | "client_msg" | "internal_msg";
+    kind: "task" | "client_msg" | "internal_msg" | "goal_request" | "timesheet_due" | "inbound_notice" | "quote_ready";
     icon: typeof Bell;
     iconClass: string;
     title: string;
@@ -704,23 +870,25 @@ function NotificationsList({
     // the message so the dashboard recolors the icon yellow / amber
     // / red. Tasks + client messages leave this undefined.
     urgency?: import("@/types").TaskSeverity;
+    onOpen?: () => void;
   };
   // Look up staff once so each internal-message row can resolve a
   // sender name without re-querying for every row.
   const staff = api.users.list(tenantId);
   const rows: NotificationRow[] = [];
-  recentTasks.forEach((t) =>
+  recentTasks.forEach((t) => {
+    const incompleteQuote = /stopped mid-quote/i.test(t.title);
     rows.push({
       key: `task:${t.id}`,
       at: t.createdAt,
       kind: "task",
       icon: CheckSquare,
       iconClass: "text-gold-600",
-      title: "New activity assigned",
+      title: incompleteQuote ? "Incomplete customer quote" : "New activity assigned",
       detail: t.title,
       href: `/employee/tasks?focus=${t.id}`,
-    })
-  );
+    });
+  });
   pendingComms.forEach((c) => {
     const customer = c.customerId ? api.customers.get(c.customerId) : null;
     const name = customer?.name ?? "a contact";
@@ -752,6 +920,77 @@ function NotificationsList({
       urgency: latest.urgency,
     });
   });
+  goalRequests.forEach((n) =>
+    rows.push({
+      key: `goal-request:${n.id}`,
+      at: n.createdAt,
+      kind: "goal_request",
+      icon: Target,
+      iconClass: "text-gold-700",
+      title: n.title,
+      detail: n.summary,
+      href: `/employee/analytics?request=${encodeURIComponent(
+        n.goalRequestId ?? ""
+      )}#performance-goals`,
+      urgency: "info",
+      onOpen: () => api.aiNotifications.dismiss(n.id, userId),
+    })
+  );
+  timesheetNotifications.forEach((n) =>
+    rows.push({
+      key: `timesheet:${n.id}`,
+      at: n.createdAt,
+      kind: "timesheet_due",
+      icon: CalendarClock,
+      iconClass: "text-gold-700",
+      title: n.title,
+      detail: n.summary,
+      href: "/employee/accounting",
+      urgency: "info",
+      onOpen: () => api.aiNotifications.dismiss(n.id, userId),
+    })
+  );
+  inboundNotices.forEach((n) => {
+    const comm = n.communicationId
+      ? api.communications.listByTenant(tenantId).find((c) => c.id === n.communicationId)
+      : undefined;
+    rows.push({
+      key: `inbound-notice:${n.id}`,
+      at: n.createdAt,
+      kind: "inbound_notice",
+      icon: Bell,
+      iconClass: "text-blue-500",
+      title: n.title.replace(/^Notification:\s*/i, ""),
+      detail: n.summary,
+      href: n.customerId
+        ? `/employee/messages?contact=client:${n.customerId}`
+        : n.prospectId
+        ? `/employee/messages?contact=prospect:${n.prospectId}`
+        : comm?.carrierContactId
+        ? `/employee/messages?contact=carrier:${comm.carrierContactId}`
+        : "/employee/messages",
+      urgency: n.severity ?? "info",
+      onOpen: () => api.aiNotifications.dismiss(n.id, userId),
+    });
+  });
+  quoteReadyNotifications.forEach((n) =>
+    rows.push({
+      key: `quote-ready:${n.id}`,
+      at: n.createdAt,
+      kind: "quote_ready",
+      icon: Bot,
+      iconClass: "text-emerald-600",
+      title: n.title,
+      detail: n.summary,
+      href: n.customerId
+        ? `/employee/clients/${n.customerId}#ai-quoting-workspace`
+        : n.prospectId
+        ? `/employee/prospects/${n.prospectId}#ai-quoting-workspace`
+        : "/employee",
+      urgency: n.severity ?? "info",
+      onOpen: () => api.aiNotifications.dismiss(n.id, userId),
+    })
+  );
   rows.sort((a, b) => (a.at < b.at ? 1 : -1));
 
   if (rows.length === 0) {
@@ -783,6 +1022,8 @@ function NotificationsList({
           <li key={r.key} className="py-2">
             <Link
               to={r.href}
+              state={{ fromDashboard: true }}
+              onClick={r.onOpen}
               className="flex items-start gap-2 hover:text-gold-700"
             >
               {r.kind === "internal_msg" && r.urgency ? (

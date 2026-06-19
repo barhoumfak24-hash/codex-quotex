@@ -53,7 +53,7 @@ export function DemoProvider({ children }: { children: React.ReactNode }) {
               <h3 className="font-display text-lg">{opts.title ?? "This action is gated to the production build"}</h3>
               <p className="mt-2 text-sm text-ink-600 leading-relaxed">
                 {opts.body ??
-                  `${opts.feature ? `"${opts.feature}" ` : "This feature "}requires a live backend integration (auth, payments, document storage, carrier API, or AI provider) and is intentionally disabled in the demo. The UI, data shape, and call sites are wired — only the external service is stubbed.`}
+                  `${opts.feature ? `"${opts.feature}" ` : "This feature "}requires a live backend integration (auth, payments, document storage, carrier runner, or AI provider) and is intentionally disabled in the demo. The UI, data shape, and call sites are wired — only the external service is stubbed.`}
               </p>
               <div className="mt-5 flex justify-end">
                 <button type="button" onClick={() => setOpen(false)} className="btn-primary">

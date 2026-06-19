@@ -1,176 +1,89 @@
-import { Navigate, Route, Routes } from "react-router-dom";
-import { PublicLayout } from "./components/layout/PublicLayout";
-import { CustomerLayout } from "./components/layout/CustomerLayout";
-import { EmployeeLayout } from "./components/layout/EmployeeLayout";
-import { MasterLayout } from "./components/layout/MasterLayout";
-import { RequireRole } from "./components/layout/RequireRole";
-import { RequireProfile } from "./components/layout/RequireProfile";
+import { Suspense, lazy } from "react";
+import { ArrowLeft } from "lucide-react";
+import { getDemoExitHref } from "./lib/demoExit";
+import { useExternalLinkTargets } from "./lib/externalLinks";
+import type { AppSurface } from "./lib/appSurface";
 
-// Public
-import { HomePage } from "./pages/public/HomePage";
-import { ServicesPage } from "./pages/public/ServicesPage";
-import { PrivateClientPage } from "./pages/public/PrivateClientPage";
-import { AboutPage } from "./pages/public/AboutPage";
-import { ContactPage } from "./pages/public/ContactPage";
+declare const __APP_SURFACE__: string | undefined;
 
-// Auth
-import { CustomerLoginPage } from "./pages/auth/CustomerLoginPage";
-import { CustomerSignupPage } from "./pages/auth/CustomerSignupPage";
-import { EmployeeLoginPage } from "./pages/auth/EmployeeLoginPage";
-import { MasterLoginPage } from "./pages/auth/MasterLoginPage";
-import { QuoteStartGate } from "./pages/auth/QuoteStartGate";
+function normalizeSurface(raw: string): AppSurface {
+  const surface = raw.toLowerCase();
+  if (surface === "software" || surface === "website") return surface;
+  if (surface === "app" || surface === "agency-app" || surface === "agencyapp" || surface === "mobile-app") {
+    return "agencyApp";
+  }
+  if (surface === "checkout" || surface === "transaction" || surface === "transactions") return "checkout";
+  return "unified";
+}
 
-// Customer
-import { CustomerDashboard } from "./pages/customer/CustomerDashboard";
-import { CustomerPoliciesPage } from "./pages/customer/CustomerPoliciesPage";
-import { CustomerAssetsPage } from "./pages/customer/CustomerAssetsPage";
-import { CustomerAssetPage } from "./pages/customer/CustomerAssetPage";
-import { CustomerPolicyPage } from "./pages/customer/CustomerPolicyPage";
-import { CustomerDocumentsPage } from "./pages/customer/CustomerDocumentsPage";
-import { CustomerClaimsPage } from "./pages/customer/CustomerClaimsPage";
-import { CustomerSettingsPage } from "./pages/customer/CustomerSettingsPage";
-import { ClientQuestionnairePage } from "./pages/customer/ClientQuestionnairePage";
-import { QuoteFlowPage } from "./pages/customer/QuoteFlowPage";
+const rawSurface =
+  typeof __APP_SURFACE__ === "string" && __APP_SURFACE__.trim()
+    ? __APP_SURFACE__
+    : "unified";
+const surface = normalizeSurface(rawSurface);
+const SurfaceApp =
+  surface === "software"
+    ? lazy(() => import("./apps/SoftwareApp").then((m) => ({ default: m.SoftwareApp })))
+    : surface === "agencyApp"
+      ? lazy(() => import("./apps/AgencyMobileApp").then((m) => ({ default: m.AgencyMobileApp })))
+    : surface === "website"
+      ? lazy(() => import("./apps/AgencyWebsiteApp").then((m) => ({ default: m.AgencyWebsiteApp })))
+      : surface === "checkout"
+        ? lazy(() => import("./apps/CheckoutApp").then((m) => ({ default: m.CheckoutApp })))
+        : lazy(() => import("./apps/UnifiedApp").then((m) => ({ default: m.UnifiedApp })));
 
-// Employee
-import { EmployeeDashboard } from "./pages/employee/EmployeeDashboard";
-import { ProspectsPage } from "./pages/employee/ProspectsPage";
-import { ProspectDetailPage } from "./pages/employee/ProspectDetailPage";
-import { ClientsPage } from "./pages/employee/ClientsPage";
-import { ClientDetailPage } from "./pages/employee/ClientDetailPage";
-import { EmployeeAssetPage } from "./pages/employee/EmployeeAssetPage";
-import { EmployeePoliciesPage } from "./pages/employee/EmployeePoliciesPage";
-import { EmployeePolicyPage } from "./pages/employee/EmployeePolicyPage";
-import { RenewalsPage } from "./pages/employee/RenewalsPage";
-import { EmployeeStatusUpdatesPage } from "./pages/employee/EmployeeStatusUpdatesPage";
-import { EmployeeArchivePage } from "./pages/employee/EmployeeArchivePage";
-import { DocumentReviewPage } from "./pages/employee/DocumentReviewPage";
-import { MarketingActivityPage } from "./pages/employee/MarketingActivityPage";
-import { MessagesPage } from "./pages/employee/MessagesPage";
-import { TasksPage } from "./pages/employee/TasksPage";
-import { AnalyticsPage } from "./pages/employee/AnalyticsPage";
-import { CarrierRecommendationsPage } from "./pages/employee/CarrierRecommendationsPage";
-import { AgencySettingsPage } from "./pages/employee/AgencySettingsPage";
-import { EmployeeWelcomePage } from "./pages/employee/EmployeeWelcomePage";
+function LoadingSurface() {
+  return (
+    <div className="min-h-screen bg-ink-50 text-ink-900 flex items-center justify-center p-6">
+      <div className="flex items-center gap-4 rounded-lg border border-ink-100 bg-white px-5 py-4 shadow-soft">
+        <div className="flex h-11 w-11 items-center justify-center rounded-md bg-ink-900 font-display text-xl text-white">
+          Q
+        </div>
+        <div>
+          <p className="font-semibold">Loading Quotex</p>
+          <p className="text-sm text-ink-500">Opening the software workspace...</p>
+        </div>
+      </div>
+    </div>
+  );
+}
 
-// Master
-import { MasterDashboard } from "./pages/master/MasterDashboard";
-import { AgenciesPage } from "./pages/master/AgenciesPage";
-import { AgencyDetailPage } from "./pages/master/AgencyDetailPage";
-import { CarrierLibraryPage } from "./pages/master/CarrierLibraryPage";
-import { CarrierDetailPage } from "./pages/master/CarrierDetailPage";
-import { CategoryDetailPage } from "./pages/master/CategoryDetailPage";
-import { BillingPage } from "./pages/master/BillingPage";
-import { MasterUsersPage } from "./pages/master/MasterUsersPage";
-import { AiRulesPage } from "./pages/master/AiRulesPage";
-import { UsageAnalyticsPage } from "./pages/master/UsageAnalyticsPage";
-import { DataToolsPage } from "./pages/master/DataToolsPage";
-import { PlatformSettingsPage } from "./pages/master/PlatformSettingsPage";
-import { CategoriesPage } from "./pages/master/CategoriesPage";
-
-import { NotFoundPage } from "./pages/public/NotFoundPage";
+function DemoExitButton() {
+  return (
+    <a
+      href={getDemoExitHref()}
+      className="fixed left-5 top-5 z-[200] inline-flex items-center gap-2 rounded-full border border-gold-200 bg-gold-300 px-5 py-3 text-sm font-bold text-ink-950 shadow-[0_16px_40px_rgba(0,0,0,0.32)] transition hover:bg-gold-200"
+    >
+      <ArrowLeft className="h-4 w-4" />
+      Exit demo
+    </a>
+  );
+}
 
 export default function App() {
+  useExternalLinkTargets();
+
+  if (surface === "website") {
+    return (
+      <>
+        <DemoExitButton />
+        <div className="min-h-screen bg-[#090807] px-4 pb-5 pt-20 md:px-8 md:pb-8 md:pt-24">
+          <div className="mx-auto min-h-[calc(100vh-8rem)] max-w-[1500px] overflow-hidden rounded-[30px] border border-white/15 bg-white shadow-[0_28px_90px_rgba(0,0,0,0.48)]">
+            <Suspense fallback={<LoadingSurface />}>
+              <SurfaceApp />
+            </Suspense>
+          </div>
+        </div>
+      </>
+    );
+  }
+
   return (
-    <Routes>
-      {/* Public site */}
-      <Route element={<PublicLayout />}>
-        <Route path="/" element={<HomePage />} />
-        <Route path="/services" element={<ServicesPage />} />
-        <Route path="/private-client" element={<PrivateClientPage />} />
-        <Route path="/about" element={<AboutPage />} />
-        <Route path="/contact" element={<ContactPage />} />
-      </Route>
-
-      {/* Auth (no portal shell) */}
-      <Route path="/login" element={<CustomerLoginPage />} />
-      <Route path="/signup" element={<CustomerSignupPage />} />
-      <Route path="/employee/login" element={<EmployeeLoginPage />} />
-      <Route path="/master/login" element={<MasterLoginPage />} />
-      <Route path="/quote/start" element={<QuoteStartGate />} />
-
-      {/* Customer portal — role gated */}
-      <Route
-        element={
-          <RequireRole roles={["customer"]} redirectTo="/login">
-            <CustomerLayout />
-          </RequireRole>
-        }
-      >
-        <Route path="/customer" element={<CustomerDashboard />} />
-        <Route path="/customer/policies" element={<CustomerPoliciesPage />} />
-        <Route path="/customer/policies/:policyId" element={<CustomerPolicyPage />} />
-        <Route path="/customer/assets" element={<CustomerAssetsPage />} />
-        <Route path="/customer/assets/:assetId" element={<CustomerAssetPage />} />
-        <Route path="/customer/documents" element={<CustomerDocumentsPage />} />
-        <Route path="/customer/claims" element={<CustomerClaimsPage />} />
-        <Route path="/customer/settings" element={<CustomerSettingsPage />} />
-        <Route path="/customer/quote/new" element={<QuoteFlowPage />} />
-        <Route
-          path="/customer/questionnaire/:sessionId"
-          element={<ClientQuestionnairePage />}
-        />
-      </Route>
-
-      {/* Employee portal */}
-      <Route
-        element={
-          <RequireRole roles={["agent", "manager"]} redirectTo="/employee/login">
-            <RequireProfile completePath="/employee/welcome">
-              <EmployeeLayout />
-            </RequireProfile>
-          </RequireRole>
-        }
-      >
-        <Route path="/employee/welcome" element={<EmployeeWelcomePage />} />
-        <Route path="/employee" element={<EmployeeDashboard />} />
-        <Route path="/employee/prospects" element={<ProspectsPage />} />
-        <Route path="/employee/prospects/:prospectId" element={<ProspectDetailPage />} />
-        <Route path="/employee/clients" element={<ClientsPage />} />
-        <Route path="/employee/clients/:customerId" element={<ClientDetailPage />} />
-        <Route
-          path="/employee/clients/:customerId/assets/:assetId"
-          element={<EmployeeAssetPage />}
-        />
-        <Route path="/employee/policies" element={<EmployeePoliciesPage />} />
-        <Route path="/employee/policies/:policyId" element={<EmployeePolicyPage />} />
-        <Route path="/employee/renewals" element={<RenewalsPage />} />
-        <Route path="/employee/status-updates" element={<EmployeeStatusUpdatesPage />} />
-        <Route path="/employee/archive" element={<EmployeeArchivePage />} />
-        <Route path="/employee/documents" element={<DocumentReviewPage />} />
-        <Route path="/employee/marketing" element={<MarketingActivityPage />} />
-        <Route path="/employee/tasks" element={<TasksPage />} />
-        <Route path="/employee/messages" element={<MessagesPage />} />
-        <Route path="/employee/carriers" element={<CarrierRecommendationsPage />} />
-        <Route path="/employee/analytics" element={<AnalyticsPage />} />
-        <Route path="/employee/settings" element={<AgencySettingsPage />} />
-      </Route>
-
-      {/* Master portal */}
-      <Route
-        element={
-          <RequireRole roles={["master_admin"]} redirectTo="/master/login">
-            <MasterLayout />
-          </RequireRole>
-        }
-      >
-        <Route path="/master" element={<MasterDashboard />} />
-        <Route path="/master/agencies" element={<AgenciesPage />} />
-        <Route path="/master/agencies/:agencyId" element={<AgencyDetailPage />} />
-        <Route path="/master/carriers" element={<CarrierLibraryPage />} />
-        <Route path="/master/carriers/:carrierId" element={<CarrierDetailPage />} />
-        <Route path="/master/categories" element={<CategoriesPage />} />
-        <Route path="/master/categories/:categoryId" element={<CategoryDetailPage />} />
-        <Route path="/master/billing" element={<BillingPage />} />
-        <Route path="/master/users" element={<MasterUsersPage />} />
-        <Route path="/master/ai-rules" element={<AiRulesPage />} />
-        <Route path="/master/analytics" element={<UsageAnalyticsPage />} />
-        <Route path="/master/data" element={<DataToolsPage />} />
-        <Route path="/master/settings" element={<PlatformSettingsPage />} />
-      </Route>
-
-      <Route path="/404" element={<NotFoundPage />} />
-      <Route path="*" element={<Navigate to="/404" replace />} />
-    </Routes>
+    <>
+      {surface === "agencyApp" && <DemoExitButton />}
+      <Suspense fallback={<LoadingSurface />}>
+        <SurfaceApp />
+      </Suspense>
+    </>
   );
 }

@@ -4,10 +4,13 @@ import { Card, CardHeader, EmptyState } from "@/components/ui/Card";
 import { CarrierClaimLink } from "@/components/ui/CarrierClaimLink";
 import { api } from "@/lib/api";
 import { fmt } from "@/lib/format";
+import { toTelHref } from "@/lib/phone";
+import { useTenant } from "@/lib/tenant";
 import { useCustomer } from "@/lib/useCustomer";
 
 export function CustomerClaimsPage() {
   const customer = useCustomer();
+  const { agency } = useTenant();
   const [query, setQuery] = useState("");
   // Contact-agency form state.
   const [contactAssetId, setContactAssetId] = useState<string>("");
@@ -18,6 +21,14 @@ export function CustomerClaimsPage() {
   const assets = api.assets.listByCustomer(customer.id);
   const policies = api.policies.listByCustomer(customer.id);
   const claims = api.claims.listByCustomer(customer.id);
+  const assignedAgent = customer.assignedAgentId
+    ? api.users.get(customer.assignedAgentId)
+    : undefined;
+  const agentPhoneHref = toTelHref(assignedAgent?.phone);
+  const agencyPhoneHref = toTelHref(agency?.phone);
+  const callLabel = assignedAgent?.name
+    ? `Call ${assignedAgent.name.split(" ")[0]}`
+    : "Call my agent";
 
   // Every carrier the customer's agency is contracted with. Powers
   // the "all carriers we work with" pool below so customers can
@@ -90,6 +101,22 @@ export function CustomerClaimsPage() {
         <CardHeader
           title="Contact your agency about a claim"
           subtitle="Send your agent a message so they can help start, escalate, or coordinate a claim on your behalf. Tag the affected asset so they have full context."
+          action={
+            agentPhoneHref || agencyPhoneHref ? (
+              <div className="flex flex-wrap items-center gap-2">
+                {agentPhoneHref && (
+                  <a href={agentPhoneHref} className="btn-outline text-sm whitespace-nowrap">
+                    <Phone className="h-4 w-4" /> {callLabel}
+                  </a>
+                )}
+                {agencyPhoneHref && agencyPhoneHref !== agentPhoneHref && (
+                  <a href={agencyPhoneHref} className="btn-outline text-sm whitespace-nowrap">
+                    <Phone className="h-4 w-4" /> Call agency
+                  </a>
+                )}
+              </div>
+            ) : undefined
+          }
         />
         {contactBanner && (
           <div className="mb-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">

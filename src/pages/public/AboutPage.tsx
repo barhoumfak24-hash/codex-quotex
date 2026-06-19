@@ -1,7 +1,10 @@
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { ShieldCheck, Sparkles, Users } from "lucide-react";
+import { toSurfaceRoute } from "@/lib/appSurface";
 
 export function AboutPage() {
+  const { pathname } = useLocation();
+  const route = (path: string) => toSurfaceRoute(path, pathname);
   return (
     <section className="max-w-4xl mx-auto px-6 py-16">
       <h1 className="font-display text-4xl">About Quotex Insurance</h1>
@@ -37,8 +40,8 @@ export function AboutPage() {
         ))}
       </div>
       <div className="mt-10 flex flex-wrap gap-3">
-        <Link to="/quote/start" className="btn-gold">Get a Private Quote</Link>
-        <Link to="/contact" className="btn-outline">Talk to us</Link>
+        <Link to={route("/quote/start")} className="btn-gold">Get a Quote</Link>
+        <Link to={route("/contact")} className="btn-outline">Talk to us</Link>
       </div>
     </section>
   );

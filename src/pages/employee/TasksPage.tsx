@@ -11,6 +11,7 @@ import {
   Briefcase,
   Building2,
   Car,
+  CalendarDays,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -18,12 +19,11 @@ import {
   ExternalLink,
   FileText,
   Gem,
+  GripVertical,
   Hand,
   Home,
   Info,
   ListTodo,
-  Lock,
-  Mail,
   Package,
   Plus,
   RotateCcw,
@@ -32,10 +32,12 @@ import {
   User,
   UserCog,
   UserSearch,
+  Workflow,
   X,
 } from "lucide-react";
 import { Card, CardHeader, EmptyState } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
+import { CountBadge } from "@/components/ui/CountBadge";
 import { Modal } from "@/components/ui/Modal";
 import { PolicyStatusBadge } from "@/components/ui/StatusBadge";
 import { CustomMessageComposer } from "@/components/marketing/CustomMessageComposer";
@@ -43,13 +45,29 @@ import { SetReminderModal } from "@/components/tasks/SetReminderModal";
 import { ReassignModal } from "@/components/tasks/ReassignModal";
 import { RequestReassignModal } from "@/components/tasks/RequestReassignModal";
 import { CreateActivityModal } from "@/components/tasks/CreateActivityModal";
+import { EmployeeBackButton } from "@/components/layout/EmployeeBackButton";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { useDemoNotice } from "@/lib/demo";
 import { api } from "@/lib/api";
 import { fmt } from "@/lib/format";
+import {
+  isRoutingManagerRole,
+  routableStaff,
+  staffRoleLabel,
+} from "@/lib/roles";
 import { subscribeToDbChanges } from "@/lib/db";
-import type { AssetType, Task, TaskStatus } from "@/types";
+import { summarizeQuotingWorkflow } from "@/lib/quotingWorkflows";
+import type {
+  AssetType,
+  CustomerProfile,
+  Prospect,
+  QuoteRequest,
+  Task,
+  TaskStatus,
+  User as UserType,
+} from "@/types";
+import type { QuotingWorkflowSummary } from "@/lib/quotingWorkflows";
 
 // =====================================================================
 // Activity Center (sidebar #2).
@@ -81,6 +99,23 @@ const ASSET_ICON: Record<AssetType, React.ComponentType<{ className?: string }>>
 };
 
 type StatusFilter = "all" | TaskStatus;
+type DropEdge = "before" | "after";
+
+interface QuotingWorkflowRow {
+  id: string;
+  kind: "ai_session" | "incomplete_customer_quote";
+  summary: QuotingWorkflowSummary;
+  contactName: string;
+  contactKind: "Client" | "Prospect" | "Contact";
+  href: string;
+  ownerLabel: string;
+  assetLabel: string;
+  lineLabel: "Personal" | "Commercial";
+  updatedAt: string;
+  completedAt?: string;
+  task?: Task;
+  quote?: QuoteRequest;
+}
 
 export function TasksPage() {
   const { agency } = useTenant();
@@ -94,13 +129,14 @@ export function TasksPage() {
   const [carrierFilter, setCarrierFilter] = useState<string>("all");
   // Manager-only "whose queue am I viewing?" picker. Defaults to
   // "me" so a manager lands on their own work first; they can
-  // switch to a specific agent's view or "all" to see everything.
+  // switch to a specific agent's service queue or "all" for broad oversight.
   // For agents this is forced to "me" via the visibleIds gate.
   const [managerView, setManagerView] = useState<string>("me");
   // Composer state for the Reply-to-Customer flow.
   const [replyTask, setReplyTask] = useState<Task | null>(null);
   const [composeOpen, setComposeOpen] = useState(false);
   const [createActivityOpen, setCreateActivityOpen] = useState(false);
+  const [createQuoteFlowOpen, setCreateQuoteFlowOpen] = useState(false);
   // `?focus=<taskId>` deep-link from elsewhere in the app (e.g. the
   // Open-activities card on a client profile). The matching
   // ActivityCard opens expanded + scrolls itself into view on mount.
@@ -115,10 +151,13 @@ export function TasksPage() {
   // Switch the queue picker to the task's owner (or "all") so the
   // activity is actually visible and can scroll into view.
   useEffect(() => {
-    if (!focusedTaskId || !agency || !user || user.role !== "manager") return;
+    if (!focusedTaskId || !agency || !user || !isRoutingManagerRole(user.role)) return;
     const t = api.tasks.listByTenant(agency.id).find((x) => x.id === focusedTaskId);
     if (!t) return;
-    const owner = t.assignedToId ?? "";
+    const owner =
+      t.assignedToId && t.assignedToId !== user.id
+        ? t.assignedToId
+        : t.additionalAssignedToIds?.find((id) => id !== user.id) ?? t.assignedToId ?? "";
     setManagerView(owner && owner !== user.id ? owner : owner ? "me" : "all");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focusedTaskId, agency?.id, user?.id]);
@@ -131,7 +170,7 @@ export function TasksPage() {
     if (!agency || !user) return;
     api.aiNotifications.autoPromote(agency.id, user.id);
     api.renewals.ensureActivities(agency.id);
-    // AI triage of inbound messages → auto-create activities.
+    // AI triage of inbound messages opens activities only for owned work.
     api.communications.sweepInboundForActivities(agency.id, user.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agency?.id, user?.id]);
@@ -142,8 +181,8 @@ export function TasksPage() {
   const visibleIds = new Set(
     api.customers.listVisible(agency.id, viewer).map((c) => c.id)
   );
-  const isManager = user.role === "manager";
-  const agents = api.users.list(agency.id).filter((u) => u.role === "agent" || u.role === "manager");
+  const isManager = isRoutingManagerRole(user.role);
+  const agents = routableStaff(api.users.list(agency.id), agency.id);
   const carriers = api.carriers.list();
   // Resolve the manager's queue selection into a concrete agentId
   // (or null = "all agents"). Agents always view their own queue.
@@ -161,24 +200,80 @@ export function TasksPage() {
   // For managers, the queue picker scopes the visible work to a
   // specific agent (default themselves) or to everyone.
   // For agents, queueAgentId is always their own id.
-  // A row's effective owner. Explicit assignedToId wins; otherwise an
+  // A row's effective owners. Explicit task assignees win; otherwise an
   // activity tied to a client that already has an assigned agent
   // belongs to that agent (so the manager never sees assigned-clients'
   // work as unrouted in their own queue). Falls back to "" (unowned).
-  function effectiveOwner(row: { assignedToId?: string; customerId?: string }): string {
-    if (row.assignedToId) return row.assignedToId;
-    if (row.customerId) {
-      const c = api.customers.get(row.customerId);
-      if (c?.assignedAgentId) return c.assignedAgentId;
-    }
-    return "";
+  function isRoutingFollowUpTask(t: Task): boolean {
+    return (
+      t.title.startsWith("New prospect assigned:") ||
+      t.title.startsWith("New client assigned:")
+    );
   }
 
-  function inSelectedQueue<T extends { assignedToId?: string; customerId?: string }>(
+  function uniqueIds(ids: Array<string | undefined>): string[] {
+    return Array.from(new Set(ids.filter((id): id is string => !!id)));
+  }
+
+  function contactOwnerIds(row: { customerId?: string; prospectId?: string }): string[] {
+    if (row.customerId) {
+      const c = api.customers.get(row.customerId);
+      if (c) return uniqueIds([
+        c.assignedAgentId,
+        ...(c.additionalAgentIds ?? []),
+        c.assignedCsrId,
+      ]);
+    }
+    if (row.prospectId) {
+      const p = api.prospects.get(row.prospectId);
+      if (p) return uniqueIds([
+        p.assignedAgentId,
+        ...(p.additionalAgentIds ?? []),
+        p.assignedCsrId,
+      ]);
+    }
+    return [];
+  }
+
+  function effectiveOwnerIds(row: {
+    assignedToId?: string;
+    additionalAssignedToIds?: string[];
+    customerId?: string;
+    prospectId?: string;
+    title?: string;
+  }): string[] {
+    if (row.title && isRoutingFollowUpTask(row as Task)) {
+      const contactOwners = contactOwnerIds(row);
+      return contactOwners.length > 0
+        ? contactOwners
+        : uniqueIds([row.assignedToId, ...(row.additionalAssignedToIds ?? [])]);
+    }
+    const taskOwners = uniqueIds([row.assignedToId, ...(row.additionalAssignedToIds ?? [])]);
+    return taskOwners.length > 0 ? taskOwners : contactOwnerIds(row);
+  }
+
+  function inSelectedQueue<
+    T extends {
+      assignedToId?: string;
+      additionalAssignedToIds?: string[];
+      customerId?: string;
+      prospectId?: string;
+      title?: string;
+    }
+  >(
     rows: T[]
   ): T[] {
     if (queueAgentId == null) return rows;
-    return rows.filter((r) => effectiveOwner(r) === queueAgentId);
+    return rows.filter((r) => effectiveOwnerIds(r).includes(queueAgentId));
+  }
+
+  function visibleOnManagerBoard(t: Task): boolean {
+    if (!isManager || !isRoutingFollowUpTask(t)) return true;
+    // Assignment follow-ups belong to the assignee. They should not
+    // land in the manager's own queue; managers can still inspect them
+    // through "All" or a specific agent queue.
+    if (queueAgentId === viewer.id) return false;
+    return true;
   }
 
   // Active = open + in_progress + snoozed (we still surface
@@ -188,6 +283,7 @@ export function TasksPage() {
     api.tasks
       .listOpen(agency.id)
       .filter((t) => !t.customerId || visibleIds.has(t.customerId))
+      .filter(visibleOnManagerBoard)
       // Activities an agent punted to a manager live in the Routing
       // card (below), not the To-do board.
       .filter((t) => !t.awaitingManagerAssignment)
@@ -196,27 +292,143 @@ export function TasksPage() {
     api.tasks
       .listSnoozed(agency.id)
       .filter((t) => !t.customerId || visibleIds.has(t.customerId))
+      .filter(visibleOnManagerBoard)
   );
   const completedTasks = inSelectedQueue(
     api.tasks
       .listCompleted(agency.id)
       .filter((t) => !t.customerId || visibleIds.has(t.customerId))
+      .filter(visibleOnManagerBoard)
   );
 
   // Manager-only routing surface: prospects + clients in the
   // tenant with no assigned agent. The manager can assign each
   // one to a specific agent (or themselves) inline.
   const unroutedProspects = isManager
-    ? api.prospects.listByTenant(agency.id).filter((p) => !p.assignedAgentId)
+    ? api.prospects
+        .listByTenant(agency.id)
+        .filter((p) => !p.assignedAgentId)
     : [];
   const unroutedClients = isManager
-    ? api.customers.list(agency.id).filter((c) => !c.assignedAgentId)
+    ? api.customers
+        .list(agency.id)
+        .filter((c) => !c.assignedAgentId)
     : [];
   // Activities an agent handed to a manager to assign — surfaced
   // tenant-wide in the Routing card so any manager can pick them up.
   const awaitingActivities = isManager
     ? api.tasks.listOpen(agency.id).filter((t) => t.awaitingManagerAssignment)
     : [];
+
+  const aiWorkflowRows = api.quoting
+    .listByTenant(agency.id)
+    .map((session): QuotingWorkflowRow | null => {
+      const summary = summarizeQuotingWorkflow(session);
+      const customer = session.customerId ? api.customers.get(session.customerId) : undefined;
+      const prospect = session.prospectId ? api.prospects.get(session.prospectId) : undefined;
+      if (session.customerId && !api.customers.canSee(customer, viewer)) return null;
+      if (session.prospectId && !prospect) return null;
+      const ownerIds = effectiveOwnerIds({
+        assignedToId: session.createdById,
+        customerId: session.customerId,
+        prospectId: session.prospectId,
+      });
+      if (queueAgentId !== null && !ownerIds.includes(queueAgentId)) return null;
+      const ownerLabel =
+        ownerIds
+          .map((id) => api.users.get(id)?.name)
+          .filter((name): name is string => !!name)
+          .join(", ") || "Unassigned";
+      const asset = session.assetId ? api.assets.get(session.assetId) : undefined;
+      const contactName = customer?.name ?? prospect?.name ?? "Unknown contact";
+      const contactKind = customer ? "Client" : prospect ? "Prospect" : "Contact";
+      const href = customer
+        ? `/employee/clients/${customer.id}#ai-quoting-workspace`
+        : prospect
+        ? `/employee/prospects/${prospect.id}#ai-quoting-workspace`
+        : "/employee/tasks";
+      const implementedAt = session.quotes.find((quote) => quote.implementation?.implementedAt)?.implementation
+        ?.implementedAt;
+      return {
+        id: session.id,
+        kind: "ai_session",
+        summary,
+        contactName,
+        contactKind,
+        href,
+        ownerLabel,
+        assetLabel: asset?.label ?? api.helpers.assetTypeLabel(session.assetType),
+        lineLabel: session.lineOfBusiness === "commercial" ? "Commercial" : "Personal",
+        updatedAt: session.updatedAt,
+        completedAt: implementedAt,
+      };
+    })
+    .filter((row): row is QuotingWorkflowRow => !!row);
+
+  const activeAiWorkflowRows = aiWorkflowRows.filter((row) => !row.summary.isClosed);
+  const completedWorkflowRows = aiWorkflowRows
+    .filter((row) => row.summary.isClosed)
+    .sort((a, b) => {
+      const at = a.completedAt ?? a.updatedAt;
+      const bt = b.completedAt ?? b.updatedAt;
+      return at < bt ? 1 : -1;
+    });
+
+  const incompleteWorkflowRows = api.quotes
+    .listIncompleteWorkflows(agency.id)
+    .map((quote): QuotingWorkflowRow | null => {
+      const customer = api.customers.get(quote.customerId);
+      if (!api.customers.canSee(customer, viewer)) return null;
+      const ownerIds = effectiveOwnerIds({
+        assignedToId: quote.assignedAgentId ?? customer?.assignedAgentId,
+        customerId: quote.customerId,
+      });
+      if (queueAgentId !== null && !ownerIds.includes(queueAgentId)) return null;
+      const ownerLabel =
+        ownerIds
+          .map((id) => api.users.get(id)?.name)
+          .filter((name): name is string => !!name)
+          .join(", ") || "Unassigned";
+      const categoryLabel = quote.categoryLabel ?? api.helpers.assetTypeLabel(quote.assetType);
+      const stoppedAt = quote.currentStep ?? "quote intake";
+      return {
+        id: quote.id,
+        kind: "incomplete_customer_quote",
+        quote,
+        task: quote.recoveryTaskId ? api.tasks.get(quote.recoveryTaskId) : undefined,
+        summary: {
+          stage: "Needs follow-up",
+          tone: "warn",
+          detail: `${customer?.name ?? "Customer"} started a ${categoryLabel} quote and stopped at ${stoppedAt}.`,
+          blocker: "AI follow-up draft ready.",
+          progress: quote.completionPercent ?? 40,
+          acceptedCount: 0,
+          waitingCount: 1,
+          quoteCount: 0,
+          implemented: false,
+          isClosed: false,
+          sortPriority: 5,
+        },
+        contactName: customer?.name ?? "Unknown customer",
+        contactKind: "Client",
+        href: customer
+          ? `/employee/clients/${customer.id}#client-remarks`
+          : "/employee/tasks",
+        ownerLabel,
+        assetLabel: categoryLabel,
+        lineLabel: quote.lineOfBusiness === "commercial" ? "Commercial" : "Personal",
+        updatedAt: quote.lastTouchedAt ?? quote.createdAt,
+      };
+    })
+    .filter((row): row is QuotingWorkflowRow => !!row);
+
+  const workflowRows = [...incompleteWorkflowRows, ...activeAiWorkflowRows]
+    .sort((a, b) => {
+      if (a.summary.sortPriority !== b.summary.sortPriority) {
+        return a.summary.sortPriority - b.summary.sortPriority;
+      }
+      return a.updatedAt < b.updatedAt ? 1 : -1;
+    });
 
   // Sort order:
   //   1. Manual priorityRank desc — pinned (1) → default (0) →
@@ -229,6 +441,13 @@ export function TasksPage() {
       const pa = a.priorityRank ?? 0;
       const pb = b.priorityRank ?? 0;
       if (pa !== pb) return pb - pa;
+      const qa = a.queuePosition;
+      const qb = b.queuePosition;
+      if (qa != null || qb != null) {
+        const va = qa ?? Number.MAX_SAFE_INTEGER;
+        const vb = qb ?? Number.MAX_SAFE_INTEGER;
+        if (va !== vb) return va - vb;
+      }
       const ra = rank[a.severity ?? "info"] ?? 9;
       const rb = rank[b.severity ?? "info"] ?? 9;
       if (ra !== rb) return ra - rb;
@@ -269,7 +488,7 @@ export function TasksPage() {
 
   return (
     <div className="space-y-6">
-      {focusedTaskId && (
+      {focusedTaskId ? (
         <button
           type="button"
           className="btn-ghost -ml-2"
@@ -277,23 +496,18 @@ export function TasksPage() {
         >
           <ArrowLeft className="h-4 w-4" /> Back
         </button>
+      ) : (
+        <EmployeeBackButton />
       )}
-      <div className="flex items-start justify-between gap-4 flex-wrap">
+      <div>
         <div>
           <h1 className="font-display text-3xl">Activity Center</h1>
           <p className="text-ink-500 text-sm mt-1">
             {isManager
-              ? "Route unrouted prospects + clients, view any agent's queue, or work your own. The Viewing queue picker below scopes the columns to a specific agent or all agents."
+              ? "Route unrouted prospects + clients, inspect service activities, or work your own queue. Assignment follow-ups belong to the assignee; managers can inspect them by switching queues."
               : "AI actions taken on your behalf, plus the follow-ups you still owe. Each entry shows the customer's request, the policy in play, and a one-click link to the carrier's agent portal so you can service the change end-to-end."}
           </p>
         </div>
-        <button
-          type="button"
-          className="btn-gold text-sm shrink-0"
-          onClick={() => setCreateActivityOpen(true)}
-        >
-          <Plus className="h-4 w-4" /> Create new activity
-        </button>
       </div>
 
       <CreateActivityModal
@@ -302,6 +516,12 @@ export function TasksPage() {
         tenantId={agency.id}
         viewer={{ id: user.id, role: user.role }}
         onCreated={refresh}
+      />
+      <CreateQuoteFlowModal
+        open={createQuoteFlowOpen}
+        onClose={() => setCreateQuoteFlowOpen(false)}
+        tenantId={agency.id}
+        viewer={viewer}
       />
 
       {/* Manager-only routing surface */}
@@ -317,45 +537,54 @@ export function TasksPage() {
       )}
 
       {/* Filters */}
-      {(openTasks.length > 0 || snoozedTasks.length > 0 || isManager) && (
-        <div className="flex items-end gap-3 flex-wrap">
-          {isManager && (
-            <FilterSelect
-              label="Viewing queue"
-              value={managerView}
-              onChange={setManagerView}
-              options={[
-                { value: "me", label: `Me — ${user.name}` },
-                { value: "all", label: "All agents" },
-                ...agents
-                  .filter((a) => a.id !== user.id)
-                  .map((a) => ({ value: a.id, label: `${a.name} (${a.role})` })),
-              ]}
-            />
+      <div className="flex items-end gap-3 flex-wrap">
+          {(openTasks.length > 0 || snoozedTasks.length > 0 || isManager) && (
+            <>
+              {isManager && (
+                <FilterSelect
+                  label="Viewing queue"
+                  value={managerView}
+                  onChange={setManagerView}
+                  options={[
+                    { value: "me", label: `Me — ${user.name}` },
+                    { value: "all", label: "All service activities" },
+                    ...agents
+                      .filter((a) => a.id !== user.id)
+                      .map((a) => ({ value: a.id, label: `${a.name} (${staffRoleLabel(a.role)})` })),
+                  ]}
+                />
+              )}
+              <FilterSelect
+                label="Status"
+                value={statusFilter}
+                onChange={(v) => setStatusFilter(v as StatusFilter)}
+                options={[
+                  { value: "all", label: "All statuses" },
+                  { value: "open", label: "Open" },
+                  { value: "in_progress", label: "In progress" },
+                  { value: "snoozed", label: "Snoozed" },
+                  { value: "resolved", label: "Resolved" },
+                ]}
+              />
+              <FilterSelect
+                label="Carrier"
+                value={carrierFilter}
+                onChange={setCarrierFilter}
+                options={[
+                  { value: "all", label: "All carriers" },
+                  ...carriers.map((c) => ({ value: c.id, label: c.name })),
+                ]}
+              />
+            </>
           )}
-          <FilterSelect
-            label="Status"
-            value={statusFilter}
-            onChange={(v) => setStatusFilter(v as StatusFilter)}
-            options={[
-              { value: "all", label: "All statuses" },
-              { value: "open", label: "Open" },
-              { value: "in_progress", label: "In progress" },
-              { value: "snoozed", label: "Snoozed" },
-              { value: "resolved", label: "Resolved" },
-            ]}
-          />
-          <FilterSelect
-            label="Carrier"
-            value={carrierFilter}
-            onChange={setCarrierFilter}
-            options={[
-              { value: "all", label: "All carriers" },
-              ...carriers.map((c) => ({ value: c.id, label: c.name })),
-            ]}
-          />
-        </div>
-      )}
+          <button
+            type="button"
+            className="btn-gold text-sm shrink-0 ml-auto"
+            onClick={() => setCreateActivityOpen(true)}
+          >
+            <Plus className="h-4 w-4" /> Create new activity
+          </button>
+      </div>
 
       {/* Two-column board: To do | In progress */}
       <ActivityBoard
@@ -397,8 +626,15 @@ export function TasksPage() {
       )}
 
       {/* Completed band — collapsible */}
+      <QuotingWorkflowsPanel
+        rows={workflowRows}
+        onStartReply={startReply}
+        onCreateQuoteFlow={() => setCreateQuoteFlowOpen(true)}
+      />
+
       <CompletedSection
         tasks={completedTasks}
+        workflows={completedWorkflowRows}
         onReopen={(id) => api.tasks.reopen(id, user.id)}
         canSee={(cId) => customerLink(cId) !== null}
         customerLink={customerLink}
@@ -435,26 +671,30 @@ export function TasksPage() {
         . When a portal URL is missing, the activity card shows a manager-only "Add carrier portal
         link" prompt so the next user can fix it inline.
       </div>
+
     </div>
   );
 
   function CompletedSection({
     tasks,
+    workflows,
     onReopen,
     canSee: _canSee,
     customerLink: linkFor,
   }: {
     tasks: Task[];
+    workflows: QuotingWorkflowRow[];
     onReopen: (id: string) => void;
     canSee: (id?: string) => boolean;
     customerLink: (id?: string) => React.ReactNode;
   }) {
     const [open, setOpen] = useState(false);
+    const total = tasks.length + workflows.length;
     return (
       <Card>
         <CardHeader
-          title={`Resolved (${tasks.length})`}
-          subtitle="Closed activities. Reopen if you need to revisit one."
+          title={`Resolved (${total})`}
+          subtitle="Closed activities and completed quote flows. Reopen an activity if you need to revisit one."
           action={
             <button className="btn-ghost text-xs" onClick={() => setOpen((v) => !v)}>
               {open ? "Hide" : "Show"}
@@ -462,12 +702,18 @@ export function TasksPage() {
           }
         />
         {open && (
-          tasks.length === 0 ? (
-            <div className="text-sm text-ink-400">No resolved activities yet.</div>
+          total === 0 ? (
+            <div className="text-sm text-ink-400">No resolved activities or completed quote flows yet.</div>
           ) : (
-            <ul className="divide-y divide-ink-100">
+            <div className="space-y-5">
+            {tasks.length > 0 && (
+            <div>
+              <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-ink-500">
+                Completed activities
+              </div>
+              <ul className="divide-y divide-ink-100 rounded-md border border-ink-100 bg-white">
               {tasks.map((t) => (
-                <li key={t.id} className="py-3 flex items-start justify-between gap-3">
+                <li key={t.id} className="px-3 py-3 flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
                     <div className="text-sm text-ink-700 line-through truncate">{t.title}</div>
                     <div className="text-[11px] text-ink-400 mt-0.5">
@@ -490,6 +736,49 @@ export function TasksPage() {
                 </li>
               ))}
             </ul>
+            </div>
+            )}
+            {workflows.length > 0 && (
+              <div>
+                <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-ink-500">
+                  Completed quote flows
+                </div>
+                <ul className="divide-y divide-ink-100 rounded-md border border-ink-100 bg-white">
+                  {workflows.map((row) => (
+                    <li
+                      key={row.id}
+                      className="grid gap-3 px-3 py-3 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_auto] lg:items-center"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex min-w-0 flex-wrap items-center gap-2">
+                          <span className="truncate text-sm font-semibold text-ink-800">
+                            {row.contactName}
+                          </span>
+                          <Badge tone="success">{row.summary.stage}</Badge>
+                          <Badge tone={row.lineLabel === "Commercial" ? "gold" : "info"}>
+                            {row.lineLabel}
+                          </Badge>
+                        </div>
+                        <div className="mt-1 text-[11px] text-ink-500">
+                          {row.assetLabel} · Owner: {row.ownerLabel}
+                        </div>
+                      </div>
+                      <div className="min-w-0 text-xs text-ink-600">
+                        <div>{row.summary.detail}</div>
+                        <div className="mt-1 text-[11px] text-ink-400">
+                          Completed {fmt.dateTime(row.completedAt ?? row.updatedAt)}
+                          {row.summary.quoteCount > 0 && <> · {row.summary.quoteCount} ranked</>}
+                        </div>
+                      </div>
+                      <Link to={row.href} className="btn-outline text-xs justify-center">
+                        <ExternalLink className="h-3.5 w-3.5" /> Open
+                      </Link>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            </div>
           )
         )}
       </Card>
@@ -505,6 +794,316 @@ export function TasksPage() {
 // resolved" from either column to close it out.
 // ---------------------------------------------------------------------
 
+function QuotingWorkflowsPanel({
+  rows,
+  onStartReply,
+  onCreateQuoteFlow,
+}: {
+  rows: QuotingWorkflowRow[];
+  onStartReply: (t: Task) => void;
+  onCreateQuoteFlow: () => void;
+}) {
+  const readyCount = rows.filter(
+    (row) => row.summary.stage === "Ranking ready" || row.summary.stage === "Accepted ranking live"
+  ).length;
+  const incompleteCount = rows.filter((row) => row.kind === "incomplete_customer_quote").length;
+
+  return (
+    <Card>
+      <CardHeader
+        title={
+          <span className="inline-flex items-center gap-2">
+            <Workflow className="h-5 w-5 text-gold-700" />
+            Quote flows
+            <CountBadge
+              value={rows.length}
+              tone={rows.length > 0 ? "gold" : "neutral"}
+              title={`${rows.length} active quote flow${rows.length === 1 ? "" : "s"}`}
+            />
+          </span>
+        }
+        subtitle="Live AI quoting sessions. Accepted commercial markets can rank here while supplemental questions are still out."
+        action={
+          <button
+            type="button"
+            className="btn-gold text-sm"
+            onClick={onCreateQuoteFlow}
+          >
+            <Plus className="h-4 w-4" /> Create new quote flow
+          </button>
+        }
+      />
+
+      {rows.length === 0 ? (
+        <EmptyState
+          title="No active quote flows"
+          description="When an agent starts an AI quote, it will appear here until the ranking is reviewed."
+          icon={<Workflow className="h-8 w-8" />}
+        />
+      ) : (
+        <div className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <WorkflowMetric label="In session" value={rows.length} />
+            <WorkflowMetric label="Incomplete customer quotes" value={incompleteCount} tone="warn" />
+            <WorkflowMetric label="Ranking visible" value={readyCount} tone="success" />
+          </div>
+
+          <ul className="divide-y divide-ink-100 rounded-lg border border-ink-100 bg-white">
+            {rows.map((row) => (
+              <li
+                key={row.id}
+                className="grid gap-3 px-4 py-3 lg:grid-cols-[minmax(0,1.25fr)_minmax(12rem,0.9fr)_minmax(0,1fr)_auto] lg:items-center"
+              >
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="text-sm font-semibold text-ink-900 truncate">
+                      {row.contactName}
+                    </span>
+                    <Badge tone="neutral">{row.contactKind}</Badge>
+                    <Badge tone={row.lineLabel === "Commercial" ? "gold" : "info"}>
+                      {row.lineLabel}
+                    </Badge>
+                    {row.kind === "incomplete_customer_quote" && (
+                      <Badge tone="warn">Customer stopped</Badge>
+                    )}
+                  </div>
+                  <div className="mt-1 text-xs text-ink-500 truncate">
+                    {row.assetLabel} · Owner: {row.ownerLabel}
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between gap-2">
+                    <Badge tone={row.summary.tone}>{row.summary.stage}</Badge>
+                    <span className="text-[11px] text-ink-400">
+                      {fmt.relative(row.updatedAt)} ago
+                    </span>
+                  </div>
+                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-ink-100">
+                    <div
+                      className="h-full rounded-full bg-gold-500"
+                      style={{ width: `${Math.max(0, Math.min(100, row.summary.progress))}%` }}
+                    />
+                  </div>
+                </div>
+
+                <div className="min-w-0">
+                  <div className="text-xs text-ink-700">{row.summary.detail}</div>
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-ink-500">
+                    <span>{row.summary.blocker}</span>
+                    {row.summary.acceptedCount > 0 && (
+                      <span className="rounded bg-emerald-50 px-1.5 py-0.5 text-emerald-700">
+                        {row.summary.acceptedCount} accepted
+                      </span>
+                    )}
+                    {row.summary.waitingCount > 0 && (
+                      <span className="rounded bg-amber-50 px-1.5 py-0.5 text-amber-800">
+                        {row.summary.waitingCount} waiting
+                      </span>
+                    )}
+                    {row.summary.quoteCount > 0 && (
+                      <span className="rounded bg-blue-50 px-1.5 py-0.5 text-blue-700">
+                        {row.summary.quoteCount} ranked
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap justify-end gap-2">
+                  {row.task && (
+                    <button
+                      type="button"
+                      className="btn-gold text-xs"
+                      onClick={() => onStartReply(row.task!)}
+                    >
+                      Send to client
+                    </button>
+                  )}
+                  <Link to={row.href} className="btn-primary text-xs inline-flex justify-center">
+                    <ExternalLink className="h-3.5 w-3.5" /> Open
+                  </Link>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+type QuoteFlowTarget = {
+  id: string;
+  name: string;
+  kind: "Client" | "Prospect";
+  email?: string;
+  lineLabel: "Personal" | "Commercial";
+  detail: string;
+  href: string;
+};
+
+function CreateQuoteFlowModal({
+  open,
+  onClose,
+  tenantId,
+  viewer,
+}: {
+  open: boolean;
+  onClose: () => void;
+  tenantId: string;
+  viewer: { id: string; role: UserType["role"] };
+}) {
+  const [query, setQuery] = useState("");
+
+  useEffect(() => {
+    if (!open) setQuery("");
+  }, [open]);
+
+  const targets = useMemo<QuoteFlowTarget[]>(() => {
+    const clientRows = api.customers.listVisible(tenantId, viewer).map((client) =>
+      quoteFlowClientTarget(client)
+    );
+    const prospectRows = api.prospects.listVisible(tenantId, viewer).map((prospect) =>
+      quoteFlowProspectTarget(prospect)
+    );
+    return [...clientRows, ...prospectRows].sort((a, b) =>
+      a.name.localeCompare(b.name)
+    );
+  }, [tenantId, viewer.id, viewer.role, open]);
+
+  const normalizedQuery = query.trim().toLowerCase();
+  const visibleTargets = normalizedQuery
+    ? targets.filter((target) =>
+        [
+          target.name,
+          target.kind,
+          target.email ?? "",
+          target.lineLabel,
+          target.detail,
+        ]
+          .join(" ")
+          .toLowerCase()
+          .includes(normalizedQuery)
+      )
+    : targets;
+
+  return (
+    <Modal open={open} onClose={onClose} title="Create new quote flow" size="lg">
+      <div className="space-y-4">
+        <div>
+          <label className="label">Choose a client or prospect</label>
+          <div className="relative">
+            <UserSearch className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-400" />
+            <input
+              className="input pl-9"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search by name, email, line, asset, or business..."
+              autoFocus
+            />
+          </div>
+        </div>
+
+        {visibleTargets.length === 0 ? (
+          <EmptyState
+            title="No matching records"
+            description="A quote flow needs to start from a client or prospect profile."
+            icon={<Workflow className="h-8 w-8" />}
+          />
+        ) : (
+          <ul className="max-h-[440px] divide-y divide-ink-100 overflow-y-auto rounded-lg border border-ink-100 bg-white">
+            {visibleTargets.map((target) => (
+              <li key={`${target.kind}-${target.id}`}>
+                <Link
+                  to={target.href}
+                  onClick={onClose}
+                  className="grid gap-3 px-4 py-3 transition hover:bg-gold-50/60 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"
+                >
+                  <div className="min-w-0">
+                    <div className="flex min-w-0 flex-wrap items-center gap-2">
+                      <span className="truncate text-sm font-semibold text-ink-900">
+                        {target.name}
+                      </span>
+                      <Badge tone="neutral">{target.kind}</Badge>
+                      <Badge tone={target.lineLabel === "Commercial" ? "gold" : "info"}>
+                        {target.lineLabel}
+                      </Badge>
+                    </div>
+                    <div className="mt-1 text-xs text-ink-500">
+                      {target.email ? `${target.email} · ` : ""}
+                      {target.detail}
+                    </div>
+                  </div>
+                  <span className="btn-primary text-xs justify-center">
+                    <Sparkles className="h-3.5 w-3.5" /> Open AI workspace
+                  </span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
+function quoteFlowClientTarget(client: CustomerProfile): QuoteFlowTarget {
+  const assets = api.assets.listByCustomer(client.id);
+  const lineLabel = client.lineOfBusiness === "commercial" ? "Commercial" : "Personal";
+  const displayName =
+    client.lineOfBusiness === "commercial" && client.businessName
+      ? `${client.businessName} — ${client.name}`
+      : client.name;
+  const detail =
+    assets.length > 0
+      ? `${assets.length} asset${assets.length === 1 ? "" : "s"} on file`
+      : "No assets on file yet";
+  return {
+    id: client.id,
+    name: displayName,
+    kind: "Client",
+    email: client.email,
+    lineLabel,
+    detail,
+    href: `/employee/clients/${client.id}#ai-quoting-workspace`,
+  };
+}
+
+function quoteFlowProspectTarget(prospect: Prospect): QuoteFlowTarget {
+  return {
+    id: prospect.id,
+    name: prospect.name,
+    kind: "Prospect",
+    email: prospect.email,
+    lineLabel: prospect.lineOfBusiness === "commercial" ? "Commercial" : "Personal",
+    detail: api.helpers.assetTypeLabel(prospect.assetType),
+    href: `/employee/prospects/${prospect.id}#ai-quoting-workspace`,
+  };
+}
+
+function WorkflowMetric({
+  label,
+  value,
+  tone = "neutral",
+}: {
+  label: string;
+  value: number;
+  tone?: "neutral" | "warn" | "success";
+}) {
+  const toneClass =
+    tone === "success"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+      : tone === "warn"
+      ? "border-amber-200 bg-amber-50 text-amber-800"
+      : "border-ink-100 bg-ink-50 text-ink-800";
+  return (
+    <div className={`rounded-md border px-3 py-2 ${toneClass}`}>
+      <div className="text-[10px] uppercase tracking-wider opacity-70">{label}</div>
+      <div className="mt-1 text-2xl font-semibold tabular-nums">{value}</div>
+    </div>
+  );
+}
+
 // =====================================================================
 // Manager-only routing card. Shows every prospect + client in
 // the tenant with no assigned agent and gives the manager a
@@ -516,11 +1115,13 @@ interface AssignIntent {
   kind: "prospect" | "client" | "activity";
   id: string;
   name: string;
+  contactKind?: "prospect" | "client";
   // Pre-checked agents when the modal opens. The manager can
   // add or remove agents before confirming. For prospects the
   // modal collapses to single-select (radio); for clients it's
   // multi-select (checkbox).
   preselected: string[];
+  csrId?: string;
 }
 
 function RoutingCard({
@@ -540,20 +1141,210 @@ function RoutingCard({
 }) {
   // Two-click confirmation: every assignment goes through a
   // confirm modal before mutating state. The same modal also
-  // lets the manager add or remove agents (multi-select for
-  // clients, single-select for prospects).
+  // lets the manager add or remove co-owners before confirming.
   const [confirming, setConfirming] = useState<AssignIntent | null>(null);
-  const total = prospects.length + clients.length + activities.length;
+  const routeRequests = activities.filter((task) => !!task.routeRequestKind);
+  const activityHandoffs = activities.filter((task) => !task.routeRequestKind);
+  const prospectRouteRequests = routeRequests.filter(
+    (task) => task.routeRequestKind === "prospect" && !!task.prospectId
+  );
+  const clientRouteRequests = routeRequests.filter(
+    (task) => task.routeRequestKind === "client" && !!task.customerId
+  );
 
-  function performAssign(selectedIds: string[]) {
+  function requestedAgentNames(t: Task): string[] {
+    return (t.routeRequestToAgentIds ?? [])
+      .map((id) => api.users.get(id)?.name)
+      .filter((name): name is string => !!name);
+  }
+
+  function routeRequestLabel(t: Task): string {
+    return t.routeRequestMode === "reroute" ? "Reroute request" : "Route request";
+  }
+
+  function routeRequestTags(t: Task): NonNullable<RoutingRow["tags"]> {
+    const requestedAgents = requestedAgentNames(t);
+    return [
+      { label: routeRequestLabel(t), tone: t.routeRequestMode === "reroute" ? "amber" : "gold" },
+      ...(requestedAgents.length > 0
+        ? [
+            {
+              label: `Requested: ${requestedAgents.slice(0, 2).join(", ")}${
+                requestedAgents.length > 2 ? ` +${requestedAgents.length - 2}` : ""
+              }`,
+              tone: "gold" as const,
+            },
+          ]
+        : []),
+    ];
+  }
+
+  function requestHint(t: Task, fallback?: string): string {
+    const sender = t.createdById ? api.users.get(t.createdById)?.name : undefined;
+    const requestedAgents = requestedAgentNames(t);
+    if (sender && requestedAgents.length > 0) {
+      return `Requested by ${sender} for ${requestedAgents.join(", ")}`;
+    }
+    if (sender) return `${routeRequestLabel(t)} from ${sender}`;
+    return fallback ?? routeRequestLabel(t);
+  }
+
+  function taskRoutingRow(t: Task): RoutingRow {
+    const sender = t.createdById ? api.users.get(t.createdById)?.name : undefined;
+    const client = t.customerId ? api.customers.get(t.customerId) : undefined;
+    const prospect = t.prospectId ? api.prospects.get(t.prospectId) : undefined;
+    const contactName = client?.name ?? prospect?.name;
+    const requestedAgents = requestedAgentNames(t);
+    const tags: NonNullable<RoutingRow["tags"]> = t.routeRequestKind ? routeRequestTags(t) : [];
+    if (t.severity)
+      tags.push({
+        label: t.severity === "urgent" ? "High" : t.severity === "warning" ? "Medium" : "Low",
+        tone: t.severity === "urgent" ? "amber" : "neutral",
+      });
+    if (contactName) tags.push({ label: contactName, tone: "neutral" });
+    const contactLink =
+      t.routeRequestKind === "client" && t.customerId
+        ? `/employee/clients/${t.customerId}`
+        : t.routeRequestKind === "prospect" && t.prospectId
+        ? `/employee/prospects/${t.prospectId}`
+        : `/employee/tasks?focus=${t.id}`;
+    return {
+      id: t.id,
+      name: t.routeRequestKind ? contactName ?? t.title : t.title,
+      hint:
+        sender && requestedAgents.length > 0
+          ? `Requested by ${sender} for ${requestedAgents.join(", ")}`
+          : sender
+          ? `Handed off by ${sender}`
+          : "Handed off for assignment",
+      link: contactLink,
+      tags,
+      assignKind: "activity",
+      assignId: t.id,
+      contactKind: t.routeRequestKind,
+      preselected: t.routeRequestToAgentIds ?? [],
+      csrId: client?.assignedCsrId ?? prospect?.assignedCsrId,
+    };
+  }
+
+  const prospectRows: RoutingRow[] = [
+    ...prospects.map((p) => {
+      const request = prospectRouteRequests.find((t) => t.prospectId === p.id);
+      // Personal vs commercial isn't an explicit field on
+      // Prospect - derive from the asset type. All current
+      // asset types are personal lines for this private-
+      // client demo book; the helper returns a friendly
+      // label either way.
+      const line = prospectLineLabel(p.assetType);
+      const tags: NonNullable<RoutingRow["tags"]> = [
+        ...(request ? routeRequestTags(request) : [{ label: "Needs route", tone: "neutral" as const }]),
+        { label: line, tone: line === "Personal lines" ? "gold" : "indigo" },
+        { label: api.helpers.assetTypeLabel(p.assetType), tone: "neutral" },
+      ];
+      if (p.estimatedValue) {
+        tags.push({ label: `~${fmt.money(p.estimatedValue)}`, tone: "neutral" });
+      }
+      return {
+        id: p.id,
+        name: p.name,
+        hint: request ? requestHint(request, p.email) : p.email,
+        link: `/employee/prospects/${p.id}`,
+        tags,
+        assignKind: request ? ("activity" as const) : undefined,
+        assignId: request?.id,
+        contactKind: request?.routeRequestKind,
+        preselected: request?.routeRequestToAgentIds ?? [],
+        csrId: p.assignedCsrId,
+      };
+    }),
+    ...prospectRouteRequests
+      .filter((t) => t.prospectId && !prospects.some((p) => p.id === t.prospectId))
+      .map(taskRoutingRow),
+  ];
+
+  const clientRows: RoutingRow[] = [
+    ...clients.map((c) => {
+      const request = clientRouteRequests.find((t) => t.customerId === c.id);
+      const policies = api.policies.listByCustomer(c.id);
+      const tags: NonNullable<RoutingRow["tags"]> = [
+        ...(request ? routeRequestTags(request) : [{ label: "Needs route", tone: "neutral" as const }]),
+      ];
+      if (policies.length > 0) {
+        const dept = policies.some((p) => p.department === "commercial")
+          ? "Commercial lines"
+          : "Personal lines";
+        tags.push({
+          label: dept,
+          tone: dept === "Commercial lines" ? "indigo" : "gold",
+        });
+        // Show up to 2 distinct asset types as a hint of
+        // what the manager will be routing.
+        const seen = new Set<string>();
+        for (const p of policies) {
+          const a = api.assets.get(p.assetId);
+          if (!a) continue;
+          const label = api.helpers.assetTypeLabel(a.type);
+          if (seen.has(label)) continue;
+          seen.add(label);
+          tags.push({ label, tone: "neutral" });
+          if (seen.size >= 2) break;
+        }
+        tags.push({
+          label: `${policies.length} polic${policies.length === 1 ? "y" : "ies"}`,
+          tone: "neutral",
+        });
+      } else {
+        tags.push({ label: "No policies yet", tone: "amber" });
+      }
+      return {
+        id: c.id,
+        name: c.name,
+        hint: request ? requestHint(request, c.email) : c.email,
+        link: `/employee/clients/${c.id}`,
+        tags,
+        assignKind: request ? ("activity" as const) : undefined,
+        assignId: request?.id,
+        contactKind: request?.routeRequestKind,
+        preselected: request?.routeRequestToAgentIds ?? [],
+        csrId: c.assignedCsrId,
+      };
+    }),
+    ...clientRouteRequests
+      .filter((t) => t.customerId && !clients.some((c) => c.id === t.customerId))
+      .map(taskRoutingRow),
+  ];
+
+  const total = prospectRows.length + clientRows.length + activityHandoffs.length;
+  const routingSummary =
+    total === 0
+      ? "No routing needed"
+      : [
+          `${prospectRows.length} ${prospectRows.length === 1 ? "prospect" : "prospects"}`,
+          `${clientRows.length} ${clientRows.length === 1 ? "client" : "clients"}`,
+          ...(activityHandoffs.length > 0
+            ? [
+                `${activityHandoffs.length} ${
+                  activityHandoffs.length === 1 ? "activity" : "activities"
+                }`,
+              ]
+            : []),
+        ].join(" / ") + " to route";
+
+  function performAssign(selectedIds: string[], csrIds?: string[]) {
     if (!confirming || selectedIds.length === 0) return;
     if (confirming.kind === "prospect") {
-      api.prospects.assignAgents(confirming.id, selectedIds, currentUserId);
+      api.prospects.assignAgents(confirming.id, selectedIds, currentUserId, { csrIds });
     } else if (confirming.kind === "client") {
-      api.customers.assignAgents(confirming.id, selectedIds, currentUserId);
+      api.customers.assignAgents(confirming.id, selectedIds, currentUserId, { csrIds });
     } else {
       // Activities take a single owner — the manager's pick.
-      api.tasks.assign(confirming.id, selectedIds[0], currentUserId);
+      const completedRoute = api.routing.completeContactRouteRequest(
+        confirming.id,
+        selectedIds,
+        currentUserId,
+        confirming.contactKind ? { csrIds } : undefined
+      );
+      if (!completedRoute) api.tasks.assign(confirming.id, selectedIds, currentUserId);
     }
     setConfirming(null);
   }
@@ -562,90 +1353,45 @@ function RoutingCard({
     <div className="rounded-lg border border-gold-200 bg-gold-50/40 p-4">
       <div className="flex items-start justify-between gap-3 mb-3">
         <div>
-          <h3 className="font-display text-lg flex items-center gap-2">
-            <UserCog className="h-4 w-4 text-gold-700" /> Routing
-            {total > 0 && (
-              <span className="inline-flex items-center justify-center min-w-[22px] h-[20px] px-1.5 rounded-full text-[11px] font-semibold tabular-nums bg-gold-600 text-white">
-                {total}
-              </span>
-            )}
-          </h3>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="font-display text-lg flex items-center gap-2">
+              <UserCog className="h-4 w-4 text-gold-700" /> Routing
+              {total > 0 && (
+                <CountBadge
+                  value={total}
+                  tone="gold"
+                  title={`${total} ${total === 1 ? "routing item" : "routing items"}`}
+                />
+              )}
+            </h3>
+            <span className="rounded-full border border-gold-200 bg-white px-2.5 py-1 text-[11px] font-semibold leading-none text-gold-800">
+              {routingSummary}
+            </span>
+          </div>
           <p className="text-xs text-ink-500 mt-0.5">
-            Route unassigned prospects and clients to an agent — and pick up activities an
-            agent has handed off for you to assign. Each assignment is confirmed in a second
+            Route unassigned prospects and clients to agency staff - and pick up activities an
+            employee has handed off for you to assign. Each assignment is confirmed in a second
             step so you don't misroute.
           </p>
         </div>
       </div>
 
-      {total === 0 ? (
-        <div className="rounded-md border border-dashed border-ink-200 bg-white px-4 py-4 text-xs text-ink-400 text-center">
-          Nothing waiting to be routed — every prospect, client, and handed-off activity has an
-          agent assigned.
-        </div>
-      ) : (
-        <div className="space-y-4">
-        {activities.length > 0 && (
-          <RoutingList
-            label="Activities to assign"
-            emptyHint="No handed-off activities."
-            rows={activities.map((t) => {
-              const sender = t.createdById
-                ? api.users.get(t.createdById)?.name
-                : undefined;
-              const contactName = t.customerId
-                ? api.customers.get(t.customerId)?.name
-                : t.prospectId
-                ? api.prospects.get(t.prospectId)?.name
-                : undefined;
-              const tags: RoutingRow["tags"] = [];
-              if (t.severity)
-                tags.push({
-                  label: t.severity === "urgent" ? "High" : t.severity === "warning" ? "Medium" : "Low",
-                  tone: t.severity === "urgent" ? "amber" : "neutral",
-                });
-              if (contactName) tags.push({ label: contactName, tone: "neutral" });
-              return {
-                id: t.id,
-                name: t.title,
-                hint: sender ? `Handed off by ${sender}` : "Handed off for assignment",
-                link: `/employee/tasks?focus=${t.id}`,
-                tags,
-              };
-            })}
-            kind="activity"
-            agents={agents}
-            currentUserId={currentUserId}
-            currentUserName={currentUserName}
-            onAssign={(intent) => setConfirming(intent)}
-          />
-        )}
+      <div className="space-y-4">
+        <RoutingList
+          label="Activities to assign"
+          emptyHint="No handed-off activities."
+          rows={activityHandoffs.map(taskRoutingRow)}
+          kind="activity"
+          agents={agents}
+          currentUserId={currentUserId}
+          currentUserName={currentUserName}
+          onAssign={(intent) => setConfirming(intent)}
+        />
         <div className="grid lg:grid-cols-2 gap-4">
           <RoutingList
             label="Prospects"
             emptyHint="No unrouted prospects."
-            rows={prospects.map((p) => {
-              // Personal vs commercial isn't an explicit field on
-              // Prospect — derive from the asset type. All current
-              // asset types are personal lines for this private-
-              // client demo book; the helper returns a friendly
-              // label either way.
-              const line = prospectLineLabel(p.assetType);
-              const tags: RoutingRow["tags"] = [
-                { label: line, tone: line === "Personal lines" ? "gold" : "indigo" },
-                { label: api.helpers.assetTypeLabel(p.assetType), tone: "neutral" },
-              ];
-              if (p.estimatedValue) {
-                tags.push({ label: `~${fmt.money(p.estimatedValue)}`, tone: "neutral" });
-              }
-              return {
-                id: p.id,
-                name: p.name,
-                hint: p.email,
-                link: `/employee/prospects/${p.id}`,
-                tags,
-              };
-            })}
+            rows={prospectRows}
             kind="prospect"
             agents={agents}
             currentUserId={currentUserId}
@@ -655,44 +1401,7 @@ function RoutingCard({
           <RoutingList
             label="Clients"
             emptyHint="No unrouted clients."
-            rows={clients.map((c) => {
-              const policies = api.policies.listByCustomer(c.id);
-              const tags: RoutingRow["tags"] = [];
-              if (policies.length > 0) {
-                const dept = policies.some((p) => p.department === "commercial")
-                  ? "Commercial lines"
-                  : "Personal lines";
-                tags.push({
-                  label: dept,
-                  tone: dept === "Commercial lines" ? "indigo" : "gold",
-                });
-                // Show up to 2 distinct asset types as a hint of
-                // what the manager will be routing.
-                const seen = new Set<string>();
-                for (const p of policies) {
-                  const a = api.assets.get(p.assetId);
-                  if (!a) continue;
-                  const label = api.helpers.assetTypeLabel(a.type);
-                  if (seen.has(label)) continue;
-                  seen.add(label);
-                  tags.push({ label, tone: "neutral" });
-                  if (seen.size >= 2) break;
-                }
-                tags.push({
-                  label: `${policies.length} polic${policies.length === 1 ? "y" : "ies"}`,
-                  tone: "neutral",
-                });
-              } else {
-                tags.push({ label: "No policies yet", tone: "amber" });
-              }
-              return {
-                id: c.id,
-                name: c.name,
-                hint: c.email,
-                link: `/employee/clients/${c.id}`,
-                tags,
-              };
-            })}
+            rows={clientRows}
             kind="client"
             agents={agents}
             currentUserId={currentUserId}
@@ -700,8 +1409,7 @@ function RoutingCard({
             onAssign={(intent) => setConfirming(intent)}
           />
         </div>
-        </div>
-      )}
+      </div>
 
       <RoutingConfirmModal
         intent={confirming}
@@ -723,7 +1431,7 @@ function RoutingConfirmModal({
 }: {
   intent: AssignIntent | null;
   onCancel: () => void;
-  onConfirm: (agentIds: string[]) => void;
+  onConfirm: (agentIds: string[], csrIds?: string[]) => void;
   agents: { id: string; name: string; role: string }[];
   currentUserId: string;
 }) {
@@ -731,19 +1439,48 @@ function RoutingConfirmModal({
   // list on the intent (e.g. "Assign to me" pre-checks the
   // current user). Multi-select for both clients and prospects.
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selectedCsrIds, setSelectedCsrIds] = useState<Set<string>>(new Set());
+  const isContactAssignment =
+    !!intent && (intent.kind === "client" || intent.kind === "prospect" || !!intent.contactKind);
+  const ownerOptions = isContactAssignment
+    ? agents.filter((a) => a.role === "agent" || a.role === "manager")
+    : agents;
+  const csrOptions = agents.filter((a) => a.role === "csr");
+  const ownerOptionKey = ownerOptions.map((a) => a.id).join("|");
   useEffect(() => {
-    if (intent) setSelected(new Set(intent.preselected));
-  }, [intent?.id, intent?.preselected.join(",")]);
+    if (!intent) return;
+    const preselectedOwners = intent.preselected.filter((id) =>
+      ownerOptions.some((a) => a.id === id)
+    );
+    const preselectedCsrs = [
+      intent.csrId,
+      ...intent.preselected.filter((id) => agents.some((a) => a.role === "csr" && a.id === id)),
+    ].filter((id): id is string => !!id);
+    setSelected(new Set(preselectedOwners));
+    setSelectedCsrIds(new Set(preselectedCsrs));
+  }, [agents, intent?.csrId, intent?.id, intent?.preselected.join(","), ownerOptionKey]);
   if (!intent) return null;
+  const contactKind =
+    intent.contactKind ??
+    (intent.kind === "client" || intent.kind === "prospect" ? intent.kind : undefined);
   const kindLabel =
-    intent.kind === "client"
+    contactKind === "client"
       ? "client"
-      : intent.kind === "prospect"
+      : contactKind === "prospect"
       ? "prospect"
       : "activity";
 
   function toggle(id: string) {
     setSelected((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleCsr(id: string) {
+    setSelectedCsrIds((s) => {
       const next = new Set(s);
       if (next.has(id)) next.delete(id);
       else next.add(id);
@@ -762,18 +1499,18 @@ function RoutingConfirmModal({
   return (
     <Modal open onClose={onCancel} title={`Assign ${intent.name}`} size="md">
       <p className="text-sm text-ink-700">
-        {intent.kind === "activity"
-          ? "Pick the agent who should own this activity."
-          : `Pick one or more agents to own this ${kindLabel}.`}
+        {!isContactAssignment
+          ? "Pick the staff member who should own this activity."
+          : `Pick the assigned owner for this ${kindLabel}, then choose whether a CSR should also be assigned.`}
       </p>
       <p className="text-xs text-ink-500 mt-1">
-        {intent.kind === "activity"
-          ? "The activity moves to that agent's queue. If you select more than one, the first is used."
-          : "The first agent in the list becomes the primary owner; the rest co-own. Each newly-routed agent gets a follow-up task on their Activity Center queue."}
+        {!isContactAssignment
+          ? "The first selected teammate becomes the primary owner; the rest co-own and see it in their queues."
+          : "Agent/manager ownership is required. CSR support is optional and kept separate from the primary assignment."}
       </p>
 
       <ul className="mt-4 divide-y divide-ink-100 rounded-md border border-ink-100 max-h-[280px] overflow-y-auto">
-        {agents.map((a) => {
+        {ownerOptions.map((a) => {
           const checked = selected.has(a.id);
           return (
             <li key={a.id}>
@@ -791,7 +1528,7 @@ function RoutingConfirmModal({
                   )}
                 </span>
                 <span className="text-[11px] text-ink-400 uppercase tracking-wider">
-                  {a.role}
+                  {staffRoleLabel(a.role)}
                 </span>
               </label>
             </li>
@@ -799,14 +1536,42 @@ function RoutingConfirmModal({
         })}
       </ul>
 
+      {isContactAssignment && (
+        <div className="mt-4 rounded-md border border-ink-100 bg-ink-50 p-3">
+          <label className="label">Assigned CSRs</label>
+          {csrOptions.length === 0 ? (
+            <p className="text-xs text-ink-500">No CSRs are active for this agency.</p>
+          ) : (
+            <div className="max-h-40 overflow-y-auto rounded-md border border-ink-100 bg-white divide-y divide-ink-100">
+              {csrOptions.map((csr) => (
+                <label key={csr.id} className="flex items-center gap-2.5 px-3 py-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={selectedCsrIds.has(csr.id)}
+                    onChange={() => toggleCsr(csr.id)}
+                  />
+                  <span className="min-w-0 flex-1 truncate">{csr.name}</span>
+                  <span className="text-[11px] text-ink-400 uppercase tracking-wider">
+                    {staffRoleLabel(csr.role)}
+                  </span>
+                </label>
+              ))}
+            </div>
+          )}
+          <p className="mt-1 text-[11px] text-ink-500">
+            It is okay to leave this as no CSR assigned. Select every CSR who should see and work this file.
+          </p>
+        </div>
+      )}
+
       <div className="mt-5 flex items-center justify-between gap-2">
         <div className="text-[11px] text-ink-500">
           {selected.size === 0
-            ? "Pick at least one agent."
+            ? "Pick at least one staff member."
             : selected.size === 1
-            ? "1 agent selected."
-            : `${selected.size} agents selected — primary owner: ${
-                agents.find((a) => a.id === orderedIds[0])?.name ?? "—"
+            ? "1 staff member selected."
+            : `${selected.size} staff selected - primary owner: ${
+                ownerOptions.find((a) => a.id === orderedIds[0])?.name ?? "-"
               }`}
         </div>
         <div className="flex items-center gap-2">
@@ -817,7 +1582,14 @@ function RoutingConfirmModal({
             type="button"
             className="btn-gold text-sm"
             disabled={selected.size === 0}
-            onClick={() => onConfirm(orderedIds)}
+            onClick={() =>
+              onConfirm(
+                orderedIds,
+                isContactAssignment
+                  ? csrOptions.filter((csr) => selectedCsrIds.has(csr.id)).map((csr) => csr.id)
+                  : undefined
+              )
+            }
           >
             Confirm assign
           </button>
@@ -832,6 +1604,11 @@ interface RoutingRow {
   name: string;
   link: string;
   hint?: string;
+  preselected?: string[];
+  assignKind?: "prospect" | "client" | "activity";
+  assignId?: string;
+  contactKind?: "prospect" | "client";
+  csrId?: string;
   // Visual tags rendered as small pills in front of the hint
   // text. Used by the routing surface so a manager knows the
   // shape of the work — line (personal / commercial), asset
@@ -902,30 +1679,17 @@ function RoutingList({
                   className="btn-gold text-xs"
                   onClick={() =>
                     onAssign({
-                      kind,
-                      id: r.id,
+                      kind: r.assignKind ?? kind,
+                      id: r.assignId ?? r.id,
                       name: r.name,
-                      preselected: [currentUserId],
+                      contactKind: r.contactKind,
+                      preselected: r.preselected ?? [],
+                      csrId: r.csrId,
                     })
                   }
-                  title="Assign to me (will confirm)"
+                  title={`Pick one or more staff members to route this ${kind}`}
                 >
-                  Assign to me
-                </button>
-                <button
-                  type="button"
-                  className="btn-outline text-xs"
-                  onClick={() =>
-                    onAssign({
-                      kind,
-                      id: r.id,
-                      name: r.name,
-                      preselected: [],
-                    })
-                  }
-                  title={`Pick one or more agents to co-own this ${kind}`}
-                >
-                  Pick agents…
+                  Assign to staff
                 </button>
               </div>
             </li>
@@ -951,6 +1715,7 @@ function ActivityBoard({
 }) {
   const todo = tasks.filter((t) => api.tasks.statusOf(t) === "open");
   const inProgress = tasks.filter((t) => api.tasks.statusOf(t) === "in_progress");
+  const [draggingTaskId, setDraggingTaskId] = useState<string | null>(null);
 
   if (totalUnfiltered === 0) {
     return (
@@ -983,6 +1748,9 @@ function ActivityBoard({
         onStartReply={onStartReply}
         tone="alert"
         focusedTaskId={focusedTaskId}
+        draggingTaskId={draggingTaskId}
+        onDragStart={setDraggingTaskId}
+        onDragEnd={() => setDraggingTaskId(null)}
       />
       <BoardColumn
         title="In progress"
@@ -992,6 +1760,9 @@ function ActivityBoard({
         onStartReply={onStartReply}
         tone="info"
         focusedTaskId={focusedTaskId}
+        draggingTaskId={draggingTaskId}
+        onDragStart={setDraggingTaskId}
+        onDragEnd={() => setDraggingTaskId(null)}
       />
     </div>
   );
@@ -1005,6 +1776,9 @@ function BoardColumn({
   onStartReply,
   tone,
   focusedTaskId,
+  draggingTaskId,
+  onDragStart,
+  onDragEnd,
 }: {
   title: string;
   tasks: Task[];
@@ -1013,21 +1787,51 @@ function BoardColumn({
   onStartReply: (t: Task) => void;
   tone: "alert" | "info";
   focusedTaskId?: string | null;
+  draggingTaskId: string | null;
+  onDragStart: (taskId: string) => void;
+  onDragEnd: () => void;
 }) {
-  const chipClass =
-    tone === "alert"
-      ? "bg-alert text-white"
-      : "bg-indigo-500 text-white";
+  const { user } = useAuth();
+  const [dropTarget, setDropTarget] = useState<{ taskId: string; edge: DropEdge } | null>(null);
+  const taskIds = tasks.map((t) => t.id);
+  const acceptsCurrentDrag = !!draggingTaskId && taskIds.includes(draggingTaskId);
+
+  function dropEdgeFor(event: React.DragEvent<HTMLElement>): DropEdge {
+    const rect = event.currentTarget.getBoundingClientRect();
+    return event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+  }
+
+  function reorderedIds(targetTaskId: string, edge: DropEdge): string[] {
+    if (!draggingTaskId || draggingTaskId === targetTaskId) return taskIds;
+    const withoutDragged = taskIds.filter((id) => id !== draggingTaskId);
+    const targetIndex = withoutDragged.indexOf(targetTaskId);
+    if (targetIndex === -1) return taskIds;
+    const insertAt = edge === "after" ? targetIndex + 1 : targetIndex;
+    const next = [...withoutDragged];
+    next.splice(insertAt, 0, draggingTaskId);
+    return next;
+  }
+
+  function handleDrop(targetTaskId: string, edge: DropEdge) {
+    if (!acceptsCurrentDrag || !draggingTaskId) return;
+    const nextIds = reorderedIds(targetTaskId, edge);
+    if (nextIds.join("|") !== taskIds.join("|")) {
+      api.tasks.reorderQueue(nextIds, draggingTaskId, user?.id);
+    }
+    setDropTarget(null);
+    onDragEnd();
+  }
+
   return (
-    <div className="rounded-lg border border-ink-100 bg-ink-50/40 p-3 min-w-0">
+    <div className="rounded-lg border border-ink-100 bg-ink-50/40 p-3 min-w-0 min-h-[274px]">
       <div className="flex items-center justify-between mb-3 px-1">
         <div className="flex items-center gap-2">
           <h3 className="font-display text-lg">{title}</h3>
-          <span
-            className={`inline-flex items-center justify-center min-w-[22px] h-[20px] px-1.5 rounded-full text-[11px] font-semibold tabular-nums ${chipClass}`}
-          >
-            {tasks.length}
-          </span>
+          <CountBadge
+            value={tasks.length}
+            tone={tone === "alert" ? "alert" : "neutral"}
+            title={`${tasks.length} ${tasks.length === 1 ? "activity" : "activities"}`}
+          />
         </div>
       </div>
       {tasks.length === 0 ? (
@@ -1043,6 +1847,35 @@ function BoardColumn({
               viewerIsManager={viewerIsManager}
               onStartReply={onStartReply}
               isFocused={focusedTaskId === t.id}
+              isDragging={draggingTaskId === t.id}
+              dropEdge={dropTarget?.taskId === t.id ? dropTarget.edge : null}
+              onCollapsedDragStart={(event) => {
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("application/x-quotex-task-id", t.id);
+                event.dataTransfer.setData("text/plain", t.id);
+                onDragStart(t.id);
+              }}
+              onCollapsedDragOver={(event) => {
+                if (!acceptsCurrentDrag || draggingTaskId === t.id) return;
+                event.preventDefault();
+                event.dataTransfer.dropEffect = "move";
+                setDropTarget({ taskId: t.id, edge: dropEdgeFor(event) });
+              }}
+              onCollapsedDragLeave={() => {
+                setDropTarget((current) => (current?.taskId === t.id ? null : current));
+              }}
+              onCollapsedDrop={(event) => {
+                event.preventDefault();
+                const draggedId =
+                  event.dataTransfer.getData("application/x-quotex-task-id") ||
+                  event.dataTransfer.getData("text/plain");
+                if (draggedId && draggedId !== draggingTaskId) onDragStart(draggedId);
+                handleDrop(t.id, dropEdgeFor(event));
+              }}
+              onCollapsedDragEnd={() => {
+                setDropTarget(null);
+                onDragEnd();
+              }}
             />
           ))}
         </div>
@@ -1060,11 +1893,25 @@ function ActivityCard({
   viewerIsManager,
   onStartReply,
   isFocused,
+  isDragging,
+  dropEdge,
+  onCollapsedDragStart,
+  onCollapsedDragOver,
+  onCollapsedDragLeave,
+  onCollapsedDrop,
+  onCollapsedDragEnd,
 }: {
   task: Task;
   viewerIsManager: boolean;
   onStartReply: (t: Task) => void;
   isFocused?: boolean;
+  isDragging?: boolean;
+  dropEdge?: DropEdge | null;
+  onCollapsedDragStart?: (event: React.DragEvent<HTMLDivElement>) => void;
+  onCollapsedDragOver?: (event: React.DragEvent<HTMLDivElement>) => void;
+  onCollapsedDragLeave?: (event: React.DragEvent<HTMLDivElement>) => void;
+  onCollapsedDrop?: (event: React.DragEvent<HTMLDivElement>) => void;
+  onCollapsedDragEnd?: (event: React.DragEvent<HTMLDivElement>) => void;
 }) {
   const { user } = useAuth();
   const { agency } = useTenant();
@@ -1087,37 +1934,26 @@ function ActivityCard({
   const [requestReassignOpen, setRequestReassignOpen] = useState(false);
   const [reminderOpen, setReminderOpen] = useState(false);
   const [importanceOpen, setImportanceOpen] = useState(false);
+  const [dueDraft, setDueDraft] = useState(toDateTimeLocalValue(task.dueAt));
+
+  useEffect(() => {
+    setDueDraft(toDateTimeLocalValue(task.dueAt));
+  }, [task.dueAt]);
 
   const customer = task.customerId ? api.customers.get(task.customerId) : undefined;
   // For routing-driven activities the work is tied to a prospect
   // (not yet a client). Look that name up so the collapsed bar
   // can show "New prospect assigned: <name>" instead of "—".
   const prospect = task.prospectId ? api.prospects.get(task.prospectId) : undefined;
-  // Resolution gate: if the AI suggester still flags missing
-  // documents for this customer, the agent can't close out the
-  // activity until those are uploaded. Stops them from marking
-  // "done" before all carrier-required paperwork is on file.
-  const missingDocs = task.customerId
-    ? api.documents.suggestMissingForCustomer(task.customerId)
-    : [];
-  const missingDocCount = missingDocs.reduce(
-    (sum, g) => sum + g.missing.length,
-    0
-  );
-  // AI resolution checklist — fed by the same suggester + audit
-  // trail. The Mark resolved button only appears for activities
-  // the agent has marked in progress, and it's locked until
-  // canResolve returns true (or a manager grants an override).
-  const checklist = api.tasks.checklistFor(task);
-  const resolveGate = api.tasks.canResolve(task);
-  const resolveBlocked = !resolveGate.allowed;
   const questionnaireSent = api.tasks.hasSentQuestionnaire(task);
+  const pendingEsignCount = api.tasks.pendingEsignDocs(task).length;
+  const esignAuditSent = api.tasks
+    .history(task.id)
+    .some((h) => h.action === "task.esign_docs_sent");
   const esignDocsSent = api.tasks.hasSentEsignDocs(task);
-  const overrideGranted = !!task.overrideGrantedAt;
-  const overrideRequested = !!task.overrideRequestedAt && !overrideGranted;
   // Personal reminders the viewer has set against this task.
   const myReminders = user ? api.reminders.listForTask(task.id, user.id) : [];
-  const [disclaimerOpen, setDisclaimerOpen] = useState(false);
+  const [resolveNoteOpen, setResolveNoteOpen] = useState(false);
   const policy = task.policyId ? api.policies.get(task.policyId) : undefined;
   const asset = task.assetId
     ? api.assets.get(task.assetId)
@@ -1125,19 +1961,26 @@ function ActivityCard({
     ? api.assets.get(policy.assetId)
     : undefined;
   const carrier = policy ? api.carriers.get(policy.carrierId) : undefined;
-  const assignedAgent = task.assignedToId
-    ? api.users.list(task.tenantId).find((u) => u.id === task.assignedToId)
-    : undefined;
-  const agents = api.users.list(task.tenantId).filter((u) => u.role === "agent" || u.role === "manager");
+  const agents = routableStaff(api.users.list(task.tenantId), task.tenantId);
+  const assignedAgents = [task.assignedToId, ...(task.additionalAssignedToIds ?? [])]
+    .filter((id): id is string => !!id)
+    .map((id) => agents.find((u) => u.id === id))
+    .filter((u): u is UserType => !!u);
+  const assignedAgent = assignedAgents[0];
+  const assignedAgentLabel = assignedAgents.map((a) => a.name).join(", ");
   const status = api.tasks.statusOf(task);
   const severity = task.severity ?? "info";
   const AssetIcon = ASSET_ICON[asset?.type ?? "other"];
 
+  useEffect(() => {
+    if (status !== "in_progress" || !task.customerId) return;
+    api.tasks.ensureAutopilot(task.id, user?.id);
+  }, [status, task.id, task.customerId, questionnaireSent, pendingEsignCount, user?.id]);
+
   // Compact collapsed bar — two-row layout. Row 1: severity
   // icon + summary + status chip. Row 2: metadata strip showing
   // policy ref, opened-when, assigned agent (when viewer is
-  // looking at someone else's queue), and any blocking state
-  // (missing docs / override pending). Designed so the agent
+  // looking at someone else's queue), and due state. Designed so the agent
   // can scan a long Activity Center without expanding each card.
   if (!expanded) {
     const metaParts: React.ReactNode[] = [];
@@ -1153,45 +1996,48 @@ function ActivityCard({
         <Clock className="h-3 w-3" /> {fmt.relative(task.createdAt)} ago
       </span>
     );
-    if (assignedAgent && assignedAgent.id !== user?.id) {
+    if (task.dueAt) {
+      metaParts.push(
+        <span key="due" className={`inline-flex items-center gap-1 ${isPastDue(task.dueAt) ? "text-alert" : "text-gold-700"}`}>
+          <CalendarDays className="h-3 w-3" /> Due {fmt.dateTime(task.dueAt)}
+        </span>
+      );
+    }
+    if (assignedAgents.some((a) => a.id !== user?.id)) {
       metaParts.push(
         <span key="agent" className="inline-flex items-center gap-1">
-          <UserCog className="h-3 w-3" /> {assignedAgent.name}
-        </span>
-      );
-    }
-    if (missingDocCount > 0) {
-      metaParts.push(
-        <span key="docs" className="inline-flex items-center gap-1 text-alert">
-          <FileText className="h-3 w-3" /> {missingDocCount} doc
-          {missingDocCount === 1 ? "" : "s"} missing
-        </span>
-      );
-    }
-    if (overrideRequested) {
-      metaParts.push(
-        <span key="ovr" className="inline-flex items-center gap-1 text-amber-700">
-          <Lock className="h-3 w-3" /> Override requested
-        </span>
-      );
-    }
-    if (overrideGranted) {
-      metaParts.push(
-        <span key="ovg" className="inline-flex items-center gap-1 text-emerald-700">
-          <CheckCircle2 className="h-3 w-3" /> Override granted
+          <UserCog className="h-3 w-3" /> {assignedAgentLabel}
         </span>
       );
     }
     return (
-      <div className="relative rounded-lg border border-ink-100 bg-white shadow-luxe overflow-hidden flex items-stretch">
+      <div
+        draggable
+        onDragStart={onCollapsedDragStart}
+        onDragOver={onCollapsedDragOver}
+        onDragLeave={onCollapsedDragLeave}
+        onDrop={onCollapsedDrop}
+        onDragEnd={onCollapsedDragEnd}
+        className={`relative rounded-lg border border-ink-100 bg-white shadow-luxe overflow-hidden flex items-stretch transition ${
+          isDragging ? "opacity-55 ring-2 ring-gold-200" : ""
+        } ${dropEdge ? "ring-2 ring-gold-300" : ""}`}
+        title="Drag to reorder this activity"
+      >
+        {dropEdge === "before" && (
+          <div className="pointer-events-none absolute -top-0.5 left-3 right-3 z-20 h-1 rounded-full bg-gold-500 shadow-sm" />
+        )}
+        {dropEdge === "after" && (
+          <div className="pointer-events-none absolute -bottom-0.5 left-3 right-3 z-20 h-1 rounded-full bg-gold-500 shadow-sm" />
+        )}
         <SeverityBar severity={severity} />
         <button
           type="button"
           onClick={() => setExpanded(true)}
-          className="flex-1 flex items-center gap-3 px-3 sm:px-4 py-2.5 text-left min-w-0 hover:bg-ink-50/60"
+          className="flex-1 flex items-center gap-3 px-3 sm:px-4 py-2.5 text-left min-w-0 hover:bg-ink-50/60 cursor-grab active:cursor-grabbing"
           aria-expanded={false}
           title="Expand activity"
         >
+          <GripVertical className="h-4 w-4 text-ink-300 shrink-0" aria-hidden="true" />
           <SeverityIcon severity={severity} />
           <div className="min-w-0 flex-1">
             <div className="text-sm font-medium text-ink-900 truncate">
@@ -1236,6 +2082,16 @@ function ActivityCard({
                 Opened {fmt.dateTime(task.createdAt)}
                 <span className="text-ink-500"> · {fmt.relative(task.createdAt)} ago</span>
               </span>
+              {task.dueAt && (
+                <span
+                  className={`inline-flex items-center gap-1 ${
+                    isPastDue(task.dueAt) && status !== "resolved" ? "text-alert" : "text-gold-700"
+                  }`}
+                >
+                  <CalendarDays className="h-3 w-3" />
+                  Due {fmt.dateTime(task.dueAt)}
+                </span>
+              )}
               {task.startedAt && (
                 <span className="inline-flex items-center gap-1 text-indigo-600">
                   <Hand className="h-3 w-3" />
@@ -1311,16 +2167,25 @@ function ActivityCard({
               />
               <Row label="Asset" value={asset?.label ?? "—"} />
               <Row
-                label="Assigned agent"
+                label={assignedAgents.length > 1 ? "Assigned agents" : "Assigned agent"}
                 value={
-                  assignedAgent ? (
-                    <span>
-                      {assignedAgent.name}
-                      {assignedAgent.email && (
-                        <a className="text-ink-500 ml-1" href={`mailto:${assignedAgent.email}`}>
-                          ({assignedAgent.email})
-                        </a>
-                      )}
+                  assignedAgents.length > 0 ? (
+                    <span className="space-y-1">
+                      {assignedAgents.map((a, i) => (
+                        <span key={a.id} className="block">
+                          {a.name}
+                          {i === 0 && assignedAgents.length > 1 && (
+                            <span className="ml-1 text-[10px] uppercase tracking-wider text-ink-400">
+                              primary
+                            </span>
+                          )}
+                          {a.email && (
+                            <a className="text-ink-500 ml-1" href={`mailto:${a.email}`}>
+                              ({a.email})
+                            </a>
+                          )}
+                        </span>
+                      ))}
                     </span>
                   ) : (
                     <span className="text-alert">Unassigned</span>
@@ -1411,14 +2276,26 @@ function ActivityCard({
           </div>
         )}
 
-        {/* Quick actions */}
-        <div className="flex flex-wrap gap-2 pt-3 border-t border-ink-100">
+        {/* Activity workbench */}
+        <div className="pt-3 border-t border-ink-100 space-y-3">
+          <div className="rounded-lg border border-ink-100 bg-ink-50/70 p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-ink-500 font-semibold">
+                  Next steps
+                </div>
+                <div className="text-xs text-ink-500 mt-0.5">
+                  Work the customer, add an optional close note, then resolve.
+                </div>
+              </div>
+            </div>
+            <div className="mt-3 grid gap-2 sm:grid-cols-2 [&>*]:min-h-9 [&>*]:justify-center [&>*]:text-center">
           {status !== "in_progress" && (
             <button
               type="button"
               className="btn bg-blue-600 text-white hover:bg-blue-700 text-xs"
               onClick={() => api.tasks.markInProgress(task.id, user?.id)}
-              title="Start working this activity — the customer is auto-texted that an agent is on it."
+              title="Start working this activity. The customer is auto-texted, and AI sends the questionnaire/e-sign requests when needed."
             >
               <Hand className="h-3.5 w-3.5" /> Start activity
             </button>
@@ -1432,8 +2309,11 @@ function ActivityCard({
             if (task.customerId) {
               const c = api.customers.get(task.customerId);
               if (c && api.customers.canSee(c, user ? { id: user.id, role: user.role } : undefined)) {
+                const quoteHash = task.quoteSessionId || task.quoteRequestId || task.expressQuoteFollowUp
+                  ? "#ai-quoting-workspace"
+                  : "";
                 return (
-                  <Link to={`/employee/clients/${task.customerId}`} className="btn-primary text-xs inline-flex">
+                  <Link to={`/employee/clients/${task.customerId}${quoteHash}`} className="btn-primary text-xs inline-flex">
                     <User className="h-3.5 w-3.5" /> Go to client profile
                   </Link>
                 );
@@ -1449,149 +2329,66 @@ function ActivityCard({
             }
             return null;
           })()}
-          {/* Required outbound actions before resolve unlocks. Both
-              must be sent (the resolve gate enforces this). Once
-              sent, the button shows a done state. */}
-          {status === "in_progress" && task.customerId && (
+          {/* Autopilot outbound actions. These chips stay as helpful
+              context; resolving the activity remains a staff decision. */}
+          {task.customerId && (
             <>
-              <button
-                type="button"
+              <div
                 className={`text-xs ${
                   questionnaireSent
-                    ? "btn-outline !border-emerald-300 !text-emerald-700"
-                    : "btn-outline"
+                    ? "btn-outline !border-emerald-300 !bg-emerald-50 !text-emerald-700"
+                    : "btn-outline !border-blue-200 !bg-blue-50 !text-blue-700"
                 }`}
-                disabled={questionnaireSent}
-                onClick={() => api.tasks.sendQuestionnaire(task.id, user?.id)}
                 title={
                   questionnaireSent
-                    ? "Questionnaire already sent"
-                    : "Email the intake questionnaire to the customer"
+                    ? "AI sent the questionnaire automatically and recorded it in the activity audit."
+                    : "AI will send the questionnaire automatically when this activity starts."
                 }
               >
                 {questionnaireSent ? (
                   <CheckCircle2 className="h-3.5 w-3.5" />
                 ) : (
-                  <Mail className="h-3.5 w-3.5" />
+                  <Sparkles className="h-3.5 w-3.5" />
                 )}
-                {questionnaireSent ? "Questionnaire sent" : "Send questionnaire"}
-              </button>
-              <button
-                type="button"
+                {questionnaireSent ? "AI sent questionnaire" : "AI questionnaire queued"}
+              </div>
+              <div
                 className={`text-xs ${
-                  esignDocsSent
-                    ? "btn-outline !border-emerald-300 !text-emerald-700"
-                    : "btn-outline"
+                  esignAuditSent
+                    ? "btn-outline !border-emerald-300 !bg-emerald-50 !text-emerald-700"
+                    : pendingEsignCount > 0
+                    ? "btn-outline !border-blue-200 !bg-blue-50 !text-blue-700"
+                    : "btn-outline !border-ink-200 !bg-ink-50 !text-ink-600"
                 }`}
-                disabled={esignDocsSent}
-                onClick={() => api.tasks.sendEsignDocuments(task.id, user?.id)}
                 title={
-                  esignDocsSent
-                    ? "Nothing waiting on the customer's e-signature, or already sent"
+                  esignAuditSent
+                    ? "AI sent the customer e-signature request and marked the documents sent."
                     : "Email the customer the documents that need their e-signature — signed copies file themselves"
                 }
               >
-                {esignDocsSent ? (
+                {esignAuditSent || esignDocsSent ? (
                   <CheckCircle2 className="h-3.5 w-3.5" />
                 ) : (
                   <FileText className="h-3.5 w-3.5" />
                 )}
-                {esignDocsSent ? "E-sign docs sent" : "Send documents requiring e-sign"}
-              </button>
+                {esignAuditSent
+                  ? "AI sent e-sign docs"
+                  : pendingEsignCount > 0
+                  ? "E-sign docs queued"
+                  : "No e-sign docs needed"}
+              </div>
             </>
           )}
-          {/* Mark resolved only renders for activities the agent
-              has picked up. It stays locked until every AI
-              checklist item is done (or a manager grants an
-              override). Locked state opens the disclaimer modal. */}
           {status === "in_progress" && (
             <button
               type="button"
-              className={`text-xs ${
-                resolveBlocked
-                  ? "btn-outline !border-alert-ring !text-alert"
-                  : "btn-outline"
-              }`}
-              onClick={() => {
-                // Blocked + agent → disclaimer (with request-
-                // override button). Blocked + manager → same
-                // disclaimer but with "Resolve anyway (override)"
-                // CTA so the override is visible + audited.
-                if (resolveBlocked && !overrideGranted) {
-                  setDisclaimerOpen(true);
-                  return;
-                }
-                api.tasks.markComplete(task.id, user?.id);
-              }}
-              title={
-                resolveBlocked
-                  ? viewerIsManager
-                    ? `${resolveGate.missingSteps} checklist item${
-                        resolveGate.missingSteps === 1 ? "" : "s"
-                      } still pending — managers can override, click to confirm.`
-                    : `Locked — click to see what the AI is still waiting on.`
-                  : "Mark this activity resolved"
-              }
+              className="btn-outline text-xs"
+              onClick={() => setResolveNoteOpen(true)}
+              title="Mark this activity resolved"
             >
-              {resolveBlocked ? (
-                <Lock className="h-3.5 w-3.5" />
-              ) : (
-                <CheckCircle2 className="h-3.5 w-3.5" />
-              )}
-              {resolveBlocked
-                ? viewerIsManager
-                  ? overrideGranted
-                    ? "Mark resolved"
-                    : "Mark resolved (override)"
-                  : "Mark resolved (locked)"
-                : "Mark resolved"}
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              Mark resolved
             </button>
-          )}
-          {status === "in_progress" && resolveBlocked && task.customerId && missingDocCount > 0 && (
-            <Link
-              to={`/employee/clients/${task.customerId}#client-doc-uploader`}
-              className="btn-outline text-xs !border-alert-ring !text-alert hover:!bg-alert-soft"
-              title="Open the client's Documents card to upload the required files"
-            >
-              <FileText className="h-3.5 w-3.5" /> Upload {missingDocCount} missing doc
-              {missingDocCount === 1 ? "" : "s"}
-            </Link>
-          )}
-          {overrideRequested && viewerIsManager && (
-            <button
-              type="button"
-              className="btn-primary text-xs"
-              onClick={() => {
-                if (!user) return;
-                if (
-                  !confirm(
-                    `Grant manager override?\n\nThe agent will be able to mark this activity resolved without finishing the AI checklist. The override${
-                      task.overrideReason ? ` (reason: ${task.overrideReason})` : ""
-                    } is recorded in the audit trail.`
-                  )
-                )
-                  return;
-                api.tasks.grantManagerOverride(task.id, user.id);
-                // Clear the matching broadcast so it stops pumping the badge.
-                const notif = api.aiNotifications
-                  .listUnacked(task.tenantId)
-                  .find((n) => n.kind === "override_request" && n.taskId === task.id);
-                if (notif) api.aiNotifications.acknowledge(notif.id, user.id);
-              }}
-              title="Agent requested an override. Grant it to unlock their Mark resolved button."
-            >
-              <CheckCircle2 className="h-3.5 w-3.5" /> Grant override
-            </button>
-          )}
-          {overrideRequested && !viewerIsManager && (
-            <span className="inline-flex items-center gap-1 text-[11px] text-ink-500 px-2 py-1 rounded bg-ink-50 border border-ink-100">
-              <Clock className="h-3 w-3" /> Override requested
-            </span>
-          )}
-          {overrideGranted && (
-            <span className="inline-flex items-center gap-1 text-[11px] text-emerald-700 px-2 py-1 rounded bg-emerald-50 border border-emerald-200">
-              <CheckCircle2 className="h-3 w-3" /> Override granted
-            </span>
           )}
           {task.awaitingManagerAssignment && (
             <span
@@ -1617,6 +2414,19 @@ function ActivityCard({
               <Bell className="h-3 w-3" /> Reminder · {fmt.dateTime(myReminders[0].remindAt)}
             </span>
           )}
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-ink-100 bg-white p-3">
+            <div>
+              <div className="text-[10px] uppercase tracking-wider text-ink-500 font-semibold">
+                Manage activity
+              </div>
+              <div className="text-xs text-ink-500 mt-0.5">
+                Reminder, priority, queue position, and ownership.
+              </div>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2 [&>button]:min-h-9 [&>button]:justify-center [&>a]:min-h-9 [&>a]:justify-center">
           <button
             type="button"
             className="btn-outline text-xs"
@@ -1625,6 +2435,39 @@ function ActivityCard({
           >
             <Bell className="h-3.5 w-3.5" /> Set personal reminder
           </button>
+          <div className="inline-flex min-h-9 flex-wrap items-center gap-1.5 rounded-md border border-ink-200 bg-white px-2 py-1 text-xs shadow-sm">
+            <CalendarDays className="h-3.5 w-3.5 text-gold-600" />
+            <span className="font-medium text-ink-700">Due</span>
+            <input
+              type="datetime-local"
+              className="h-7 min-w-[12.5rem] rounded border border-ink-200 bg-white px-2 text-xs text-ink-800 outline-none focus:border-gold-400 focus:ring-1 focus:ring-gold-300"
+              value={dueDraft}
+              onChange={(event) => setDueDraft(event.target.value)}
+              title="Activity due date and time"
+            />
+            <button
+              type="button"
+              className="rounded bg-ink-900 px-2 py-1 text-[11px] font-semibold text-white hover:bg-ink-800 disabled:opacity-40"
+              onClick={() => api.tasks.setDueAt(task.id, fromDateTimeLocalValue(dueDraft), user?.id)}
+              disabled={!dueDraft}
+              title="Save activity due date"
+            >
+              Save
+            </button>
+            {task.dueAt && (
+              <button
+                type="button"
+                className="rounded px-1.5 py-1 text-[11px] font-semibold text-ink-500 hover:bg-ink-50 hover:text-alert"
+                onClick={() => {
+                  setDueDraft("");
+                  api.tasks.setDueAt(task.id, undefined, user?.id);
+                }}
+                title="Clear due date"
+              >
+                Clear
+              </button>
+            )}
+          </div>
           {/* Importance: collapsed by default into a single button
               showing the current level. Clicking expands inline to
               the three options (matching the same icons used for the
@@ -1788,6 +2631,8 @@ function ActivityCard({
             </button>
           )}
         </div>
+          </div>
+        </div>
         {viewerIsManager && (
           <ReassignModal
             open={reassignOpen}
@@ -1816,178 +2661,81 @@ function ActivityCard({
         )}
       </div>
 
-      <ResolveDisclaimerModal
-        open={disclaimerOpen}
-        onClose={() => setDisclaimerOpen(false)}
+      <ResolveActivityModal
+        open={resolveNoteOpen}
+        onClose={() => setResolveNoteOpen(false)}
         task={task}
-        checklist={checklist}
         currentUserId={user?.id ?? null}
-        viewerIsManager={viewerIsManager}
-        onManagerResolve={() => {
-          logManagerOverride(task, resolveGate.missingSteps, user?.id);
-          api.tasks.markComplete(task.id, user?.id);
-          setDisclaimerOpen(false);
-        }}
       />
     </div>
   );
 }
 
 // =====================================================================
-// Resolution-checklist disclaimer.
+// Resolve activity modal.
 //
-// Pops when an agent clicks a locked Mark resolved button. Shows
-// the AI's checklist with each pending step explained, plus a
-// "Request manager override" button that drops a notification on
-// the manager's Activity Center.
+// Closing is never checklist-blocked, but staff must leave a
+// resolution note. api.tasks.markComplete writes that note to the task
+// and to the client/prospect remarks feed.
 // =====================================================================
 
-function ResolveDisclaimerModal({
+function ResolveActivityModal({
   open,
   onClose,
   task,
-  checklist,
   currentUserId,
-  viewerIsManager,
-  onManagerResolve,
 }: {
   open: boolean;
   onClose: () => void;
   task: Task;
-  checklist: { label: string; detail: string; done: boolean }[];
   currentUserId: string | null;
-  viewerIsManager: boolean;
-  onManagerResolve: () => void;
 }) {
-  const [reason, setReason] = useState("");
-  const [submitted, setSubmitted] = useState(false);
-  const pending = checklist.filter((s) => !s.done);
-  const alreadyRequested = !!task.overrideRequestedAt && !task.overrideGrantedAt;
+  const [note, setNote] = useState("");
+  const canResolve = note.trim().length > 0;
 
-  function requestOverride() {
-    if (!currentUserId) return;
-    api.tasks.requestManagerOverride(task.id, currentUserId, reason.trim() || undefined);
-    setSubmitted(true);
+  useEffect(() => {
+    if (open) setNote("");
+  }, [open, task.id]);
+
+  function resolveActivity() {
+    if (!canResolve) return;
+    api.tasks.markComplete(task.id, currentUserId ?? undefined, {
+      resolutionNote: note.trim(),
+    });
+    onClose();
   }
 
-  const title = viewerIsManager
-    ? "Resolve before checklist is complete?"
-    : "Mark resolved is locked";
-
   return (
-    <Modal open={open} onClose={onClose} title={title} size="md">
+    <Modal open={open} onClose={onClose} title="Close activity" size="md">
       <p className="text-sm text-ink-700">
-        {viewerIsManager
-          ? `${pending.length} checklist item${
-              pending.length === 1 ? "" : "s"
-            } still pending. As a manager you can resolve anyway — the bypass is recorded in the audit trail. The list below shows what the AI was waiting on.`
-          : "The AI hasn't seen all the steps it expects before this activity can be marked resolved. Knock out the remaining items below, or ask a manager to override."}
+        Mark <span className="font-medium text-ink-900">"{task.title}"</span> resolved.
+        Add a resolution note for the client file before closing it.
       </p>
-
-      <ul className="mt-4 space-y-2">
-        {checklist.map((step, i) => (
-          <li
-            key={i}
-            className={`flex items-start gap-3 rounded-md border p-3 ${
-              step.done
-                ? "border-emerald-200 bg-emerald-50/60"
-                : "border-alert-ring bg-alert-soft/60"
-            }`}
-          >
-            {step.done ? (
-              <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5" />
-            ) : (
-              <Lock className="h-4 w-4 text-alert shrink-0 mt-0.5" />
-            )}
-            <div className="text-xs">
-              <div
-                className={`font-medium ${
-                  step.done ? "text-emerald-900" : "text-ink-900"
-                }`}
-              >
-                {step.label}
-              </div>
-              <div className={step.done ? "text-emerald-700" : "text-ink-600"}>
-                {step.detail}
-              </div>
-            </div>
-          </li>
-        ))}
-      </ul>
-
-      {viewerIsManager && (
-        <div className="mt-5 rounded-md border border-alert-ring bg-alert-soft/60 p-3">
-          <div className="text-xs uppercase tracking-wider text-alert font-semibold mb-1 flex items-center gap-1.5">
-            <Lock className="h-3 w-3" /> Manager override
-          </div>
-          <p className="text-xs text-ink-700 mb-3">
-            Resolving now bypasses the AI checklist. A
-            <code className="px-1 mx-0.5 rounded bg-ink-100">task.manager_override</code>
-            audit row is written with your user id + the pending-step count so the bypass is
-            traceable.
-          </p>
-          <div className="flex items-center justify-end gap-2">
-            <button type="button" className="btn-outline text-sm" onClick={onClose}>
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="btn-gold text-sm"
-              onClick={onManagerResolve}
-              disabled={pending.length === 0}
-            >
-              <CheckCircle2 className="h-3.5 w-3.5" /> Resolve anyway (override)
-            </button>
-          </div>
-        </div>
-      )}
-
-      {!viewerIsManager && !submitted && !alreadyRequested && (
-        <div className="mt-5 rounded-md border border-ink-100 bg-ink-50/60 p-3">
-          <div className="text-xs uppercase tracking-wider text-ink-500 mb-2">
-            Request manager override
-          </div>
-          <p className="text-xs text-ink-600 mb-2">
-            If the remaining items legitimately don't apply, ask your manager to grant a one-time
-            override. They'll see this in their Activity Center labeled{" "}
-            <em>"Agent requested manager override"</em> and can inspect from there.
-          </p>
-          <textarea
-            className="input text-sm min-h-[60px]"
-            placeholder="(Optional) Tell the manager why the remaining steps don't apply…"
-            value={reason}
-            onChange={(e) => setReason(e.target.value)}
-          />
-          <div className="flex items-center justify-end gap-2 mt-3">
-            <button type="button" className="btn-outline text-sm" onClick={onClose}>
-              Close
-            </button>
-            <button
-              type="button"
-              className="btn-gold text-sm"
-              onClick={requestOverride}
-              disabled={pending.length === 0}
-            >
-              <Sparkles className="h-3.5 w-3.5" /> Request manager override
-            </button>
-          </div>
-        </div>
-      )}
-
-      {(submitted || alreadyRequested) && (
-        <div className="mt-5 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
-          <div className="font-medium">Override request sent.</div>
-          <p className="text-xs mt-1">
-            Your manager will see "Agent requested manager override" in their Activity Center.
-            Once granted, the Mark resolved button on this card unlocks for you.
-          </p>
-          <div className="mt-3 text-right">
-            <button type="button" className="btn-primary text-sm" onClick={onClose}>
-              Close
-            </button>
-          </div>
-        </div>
-      )}
+      <label className="label mt-4">Resolution note</label>
+      <textarea
+        required
+        className="input min-h-[110px] text-sm"
+        value={note}
+        onChange={(event) => setNote(event.target.value)}
+        placeholder="Example: Called Alexandra, confirmed renewal documents were reviewed, and no further action is needed."
+      />
+      <p className="mt-2 text-xs text-ink-500">
+        This note appears in the related client or prospect remarks as an internal
+        time-stamped remark attached to this closed activity.
+      </p>
+      <div className="mt-5 flex items-center justify-end gap-2">
+        <button type="button" className="btn-outline text-sm" onClick={onClose}>
+          Cancel
+        </button>
+        <button
+          type="button"
+          className="btn-primary text-sm disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={resolveActivity}
+          disabled={!canResolve}
+        >
+          <CheckCircle2 className="h-3.5 w-3.5" /> Resolve activity
+        </button>
+      </div>
     </Modal>
   );
 }
@@ -2000,15 +2748,6 @@ function ResolveDisclaimerModal({
 // with the topic + client so the agent has the most-decision-
 // relevant context at a glance, then trail with the carrier when
 // known.
-// Persists a manager-override audit row so the missing-docs
-// gate bypass is traceable in api.tasks.history.
-function logManagerOverride(task: Task, missingDocCount: number, actorId?: string) {
-  api.tasks.logManagerOverride(task.id, actorId, {
-    overrideKind: "missing_docs_gate",
-    missingDocCount,
-  });
-}
-
 function compactSummary(
   task: Task,
   customerName: string | undefined,
@@ -2046,7 +2785,7 @@ function compactTopicLabel(t: NonNullable<Task["topic"]>): string {
     policy_edit_request: "Policy edit request",
     coverage_change: "Coverage change",
     cancellation_request: "Cancellation request",
-    claim_status: "Claim status update",
+    claim_status: "Claim remark",
     claim_filed: "Claim filed",
     renewal_approaching: "Renewal approaching",
     payment_issue: "Payment issue",
@@ -2071,6 +2810,24 @@ function durationLabel(fromIso: string, toIso: string): string {
   const days = Math.floor(hours / 24);
   const h = hours % 24;
   return h ? `${days}d ${h}h` : `${days}d`;
+}
+
+function toDateTimeLocalValue(iso?: string): string {
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return "";
+  const offsetMs = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
+function fromDateTimeLocalValue(value: string): string | undefined {
+  if (!value) return undefined;
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
+}
+
+function isPastDue(iso?: string): boolean {
+  return !!iso && new Date(iso).getTime() < Date.now();
 }
 
 function SeverityBar({ severity }: { severity: "urgent" | "warning" | "info" }) {

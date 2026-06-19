@@ -26,21 +26,26 @@ afterEach(() => {
 });
 
 describe("api.categories — per-tenant link/unlink", () => {
-  it("seeds 30 categories", async () => {
+  it("seeds a broad personal and commercial category catalog", async () => {
     const { api } = await import("../api");
-    expect(api.categories.list().length).toBe(30);
+    const categories = api.categories.list();
+    expect(categories.length).toBeGreaterThanOrEqual(175);
+    expect(categories.filter((c) => c.lineOfBusiness === "personal").length).toBeGreaterThanOrEqual(75);
+    expect(categories.filter((c) => c.lineOfBusiness === "commercial").length).toBeGreaterThanOrEqual(100);
   });
 
-  it("seed links both demo agencies to all 30 categories", async () => {
+  it("seed links both demo agencies to every category", async () => {
     const { api } = await import("../api");
-    expect(api.categories.listActiveForTenant("agency_palmcoast").length).toBe(30);
-    expect(api.categories.listActiveForTenant("agency_lakeshore").length).toBe(30);
+    const categoryCount = api.categories.list().length;
+    expect(api.categories.listActiveForTenant("agency_palmcoast").length).toBe(categoryCount);
+    expect(api.categories.listActiveForTenant("agency_lakeshore").length).toBe(categoryCount);
   });
 
   it("falls back to ALL active categories for a tenant with zero links", async () => {
     const { api } = await import("../api");
+    const categoryCount = api.categories.listActive().length;
     const out = api.categories.listActiveForTenant("agency_brand_new_no_links");
-    expect(out.length).toBe(30);
+    expect(out.length).toBe(categoryCount);
   });
 
   it("unlinkFromAgency drops the category from listActiveForTenant", async () => {
@@ -80,6 +85,13 @@ describe("api.categories — per-tenant link/unlink", () => {
 });
 
 describe("category schema questions — seed sanity", () => {
+  it("every seeded category is explicitly personal or commercial", async () => {
+    const { SEED_CATEGORIES } = await import("../seed");
+    for (const cat of SEED_CATEGORIES) {
+      expect(["personal", "commercial"]).toContain(cat.lineOfBusiness);
+    }
+  });
+
   it("every seeded category has a coherent questions schema (keys + labels + inputType)", async () => {
     const { SEED_CATEGORIES } = await import("../seed");
     for (const cat of SEED_CATEGORIES) {

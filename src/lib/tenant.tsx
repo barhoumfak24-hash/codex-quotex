@@ -1,7 +1,9 @@
 import { createContext, useContext, useMemo, useState } from "react";
 import type { Agency } from "@/types";
+import { getConfiguredAgencyId, getCurrentHost } from "./appSurface";
 import { api } from "./api";
 import { useAuth } from "./auth";
+import { resolveAgencyByKey, resolveAgencyForWebsite } from "./agencyWebsite";
 
 interface TenantContextValue {
   agency: Agency | null;
@@ -17,14 +19,32 @@ const TenantContext = createContext<TenantContextValue | null>(null);
 const STORAGE_KEY = "quotex.tenantId.v1";
 const PUBLIC_DEFAULT = "agency_palmcoast";
 
+function initialPublicAgencyId(): string {
+  const agencies = api.agencies.list();
+  const params =
+    typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
+  const agencyKey = params?.get("agency");
+  const queryAgency = resolveAgencyByKey(agencies, agencyKey);
+  if (queryAgency) return queryAgency.id;
+
+  const configuredAgency = resolveAgencyForWebsite(agencies, {
+    agencyId: getConfiguredAgencyId(),
+    host: getCurrentHost(),
+  });
+  if (configuredAgency) return configuredAgency.id;
+
+  if (typeof window !== "undefined") {
+    return window.localStorage.getItem(STORAGE_KEY) ?? PUBLIC_DEFAULT;
+  }
+  return PUBLIC_DEFAULT;
+}
+
 export function TenantProvider({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
   // Used only for the master admin's browsing selection and the public
   // (logged-out) marketing/quote context.
   const [floatingAgencyId, _setFloatingAgencyId] = useState<string | null>(() =>
-    typeof window !== "undefined"
-      ? window.localStorage.getItem(STORAGE_KEY) ?? PUBLIC_DEFAULT
-      : PUBLIC_DEFAULT
+    initialPublicAgencyId()
   );
 
   // Resolve the active agency:

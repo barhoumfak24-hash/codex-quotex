@@ -1,19 +1,20 @@
-import { useEffect, useRef, useState } from "react";
+﻿import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { Bot, Mail, MessageSquare, Reply, Zap } from "lucide-react";
+import { Bot, Reply, Zap } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import {
   MessageComposer,
   type ComposedMessage,
   type ReplyTarget,
 } from "@/components/messages/MessageComposer";
+import { RichMessageBody } from "@/components/messages/RichMessageBody";
 import { api } from "@/lib/api";
 import { fmt } from "@/lib/format";
 import type { Communication, MarketingMessage } from "@/types";
 
-// Build a reply target from a clicked message — inherit its thread
+// Build a reply target from a clicked message â€” inherit its thread
 // (or seed one from the message id) and normalize the subject to
-// "Re: …".
+// "Re: â€¦".
 function replyTargetFor(row: Communication | MarketingMessage): ReplyTarget {
   const threadId = (row as Communication).threadId ?? `thread_msg_${row.id}`;
   const rawSubject = row.subject?.trim() || "your message";
@@ -24,14 +25,14 @@ function replyTargetFor(row: Communication | MarketingMessage): ReplyTarget {
 // =====================================================================
 // Inline iPhone-style message thread between an agent / manager and
 // one client or prospect. Merges every channel into one chronological
-// feed:
+// email feed:
 //
-//   • Communications (inbound replies, agent outbound notes)
-//   • MarketingMessages (AI sends + custom message sends)
+//   â€¢ Communications (inbound replies, agent outbound notes)
+//   â€¢ MarketingMessages (AI sends + custom message sends)
 //
-// Composer at the bottom lets the agent reply via email or SMS in one
-// click. Used on the client + prospect detail pages so the user
-// doesn't have to leave the record to read or respond.
+// Composer at the bottom lets the agent reply by email. Used on the
+// client + prospect detail pages so the user doesn't have to leave the
+// record to read or respond.
 // =====================================================================
 
 type Row =
@@ -44,7 +45,6 @@ export function ContactMessageThread({
   contactKind,
   contactId,
   onChanged,
-  defaultChannel = "email",
   fillHeight = false,
 }: {
   tenantId: string;
@@ -52,12 +52,11 @@ export function ContactMessageThread({
   contactKind: "client" | "prospect";
   contactId: string;
   onChanged?: () => void;
-  defaultChannel?: "email" | "sms";
   // When true the thread fills its parent's height (used inside the
   // expand-to-full-screen card) instead of the default capped height.
   fillHeight?: boolean;
 }) {
-  const [channel, setChannel] = useState<"email" | "sms">(defaultChannel);
+  const channel = "email" as const;
   const [busy, setBusy] = useState(false);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
   // Deep-link target: `?msg=<communicationId|marketingMessageId>`
@@ -116,12 +115,12 @@ export function ContactMessageThread({
       b.kind === "comm" ? b.row.createdAt : b.row.sentAt ?? b.row.createdAt;
     return aAt < bAt ? -1 : 1;
   });
-  // Email and SMS are viewed separately — the channel toggle filters
-  // the feed down to one medium at a time (and drives the composer).
+  // Messages is email-only; non-email rows are hidden from this view.
+  // The composer always sends email.
   const visibleRows = merged.filter((r) => r.row.channel === channel);
 
   // Land on the most recent message whenever the thread is opened,
-  // the channel changes, the card is expanded, or a new message lands.
+  // the card is expanded, or a new message lands.
   // (Skip when a ?msg= deep-link wants a specific bubble instead.)
   useEffect(() => {
     if (targetMessageId) return;
@@ -144,6 +143,7 @@ export function ContactMessageThread({
         threadId: msg.threadId,
         replyToId: msg.replyToId,
         body: msg.body,
+        attachments: msg.attachments,
         createdById: userId,
       });
       setReplyTarget(null);
@@ -155,41 +155,14 @@ export function ContactMessageThread({
 
   return (
     <div
-      className={`rounded-md border border-ink-100 flex flex-col ${
+      className={`min-w-0 overflow-hidden rounded-md border border-ink-100 flex flex-col ${
         fillHeight ? "h-full" : "max-h-[480px]"
       }`}
     >
-      {/* Channel switch — Email and SMS are kept in separate views. */}
-      <div className="px-3 pt-2 shrink-0 border-b border-ink-100 pb-2">
-        <div className="inline-flex rounded-md border border-ink-200 overflow-hidden text-xs">
-          <button
-            type="button"
-            onClick={() => setChannel("email")}
-            className={`inline-flex items-center gap-1 px-3 py-1.5 ${
-              channel === "email"
-                ? "bg-ink-900 text-white"
-                : "bg-white text-ink-700 hover:bg-ink-50"
-            }`}
-          >
-            <Mail className="h-3.5 w-3.5" /> Email
-          </button>
-          <button
-            type="button"
-            onClick={() => setChannel("sms")}
-            className={`inline-flex items-center gap-1 px-3 py-1.5 border-l border-ink-200 ${
-              channel === "sms"
-                ? "bg-ink-900 text-white"
-                : "bg-white text-ink-700 hover:bg-ink-50"
-            }`}
-          >
-            <MessageSquare className="h-3.5 w-3.5" /> SMS
-          </button>
-        </div>
-      </div>
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-3 space-y-2.5 min-h-[200px]">
+      <div ref={scrollRef} className="message-scroll-pane flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-2.5 min-h-[200px]">
         {visibleRows.length === 0 ? (
           <div className="text-sm text-ink-400 text-center py-6">
-            No {channel === "email" ? "email" : "SMS"} messages yet — send the first one below.
+            No email messages yet - send the first one below.
           </div>
         ) : (
           visibleRows.map((r, i) => {
@@ -206,6 +179,7 @@ export function ContactMessageThread({
               r.kind === "comm" ? String(r.row.channel) : r.row.channel;
             const messageId = r.row.id;
             const isHighlighted = highlightedId === messageId;
+            const isMarketingPamphlet = isAi && text.includes("[[quotex:marketing-pamphlet");
             const aiTaskId = r.kind === "comm" ? r.row.aiActivityTaskId : undefined;
             return (
               <div
@@ -216,24 +190,28 @@ export function ContactMessageThread({
                   ref={(el) => {
                     messageRefs.current[messageId] = el;
                   }}
-                  className={`w-[min(85%,600px)] rounded-lg px-3 py-2 text-sm transition-shadow duration-300 ${
-                    isInbound
-                      ? "bg-ink-100 text-ink-900"
-                      : isOutboundComm
-                      ? "bg-gold-100 text-ink-900"
-                      : "bg-violet-100 text-violet-900"
-                  } ${aiTaskId ? "ring-2 ring-violet-300" : ""} ${
+                  className={`${
+                    isMarketingPamphlet
+                      ? "w-[min(96%,980px)] max-w-full rounded-lg bg-transparent px-0 py-0 text-sm text-ink-900"
+                      : `w-[min(85%,600px)] max-w-full rounded-lg px-3 py-2 text-sm ${
+                          isInbound
+                            ? "bg-ink-100 text-ink-900"
+                            : isOutboundComm
+                            ? "bg-gold-100 text-ink-900"
+                            : "bg-violet-100 text-violet-900"
+                        }`
+                  } transition-shadow duration-300 ${aiTaskId ? "ring-2 ring-violet-300" : ""} ${
                     isHighlighted
                       ? "ring-4 ring-gold-300 ring-offset-2 ring-offset-white shadow-lg"
                       : ""
                   }`}
                 >
-                  <div className="text-[10px] text-ink-500 mb-0.5 flex items-center gap-1">
+                  <div className="text-[10px] text-ink-500 mb-0.5 flex flex-wrap items-center gap-1">
                     {isAi && <Bot className="h-3 w-3 text-violet-600" />}
                     {isInbound ? "Inbound" : isOutboundComm ? "You" : "AI send"}
-                    {" · "}
+                    {" Â· "}
                     {channelChip.toUpperCase()}
-                    {" · "}
+                    {" Â· "}
                     {fmt.dateTime(at)}
                     {r.kind === "out" && (
                       <Badge
@@ -246,21 +224,16 @@ export function ContactMessageThread({
                   {r.row.subject && (
                     <div className="font-medium mb-0.5">{r.row.subject}</div>
                   )}
-                  <p className="whitespace-pre-wrap leading-snug">{text}</p>
-                  {/* Reply to this specific email → threads the
+                  <RichMessageBody body={text} tenantId={tenantId} />
+                  {/* Reply to this specific email â†’ threads the
                       response under it. */}
-                  {String(channelChip) === "email" && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setChannel("email");
-                        setReplyTarget(replyTargetFor(r.row));
-                      }}
-                      className="mt-1 inline-flex items-center gap-1 text-[10px] text-ink-500 hover:text-ink-800"
-                    >
-                      <Reply className="h-3 w-3" /> Reply
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => setReplyTarget(replyTargetFor(r.row))}
+                    className="mt-1 inline-flex items-center gap-1 text-[10px] text-ink-500 hover:text-ink-800"
+                  >
+                    <Reply className="h-3 w-3" /> Reply
+                  </button>
                   {aiTaskId && (
                     <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-violet-300 bg-violet-50 px-2 py-1.5 text-[11px] text-violet-800">
                       <span className="inline-flex items-center gap-1 min-w-0">
@@ -271,7 +244,7 @@ export function ContactMessageThread({
                         to={`/employee/tasks?focus=${aiTaskId}`}
                         className="shrink-0 inline-flex items-center gap-1 font-medium text-violet-700 hover:text-violet-900"
                       >
-                        Go to activity →
+                        Go to activity â†’
                       </Link>
                     </div>
                   )}
@@ -282,8 +255,6 @@ export function ContactMessageThread({
         )}
       </div>
       <MessageComposer
-        channel={channel}
-        onChannelChange={setChannel}
         replyTarget={replyTarget}
         onCancelReply={() => setReplyTarget(null)}
         onSend={send}

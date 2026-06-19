@@ -29,6 +29,8 @@ export default {
           500: "#a98532",
           600: "#876826",
           700: "#5f4a1c",
+          800: "#3f300f",
+          900: "#241b08",
         },
         // Unified alert palette. Replaces the ad-hoc rose-500
         // sprinkled across cards, banners, and badges so the whole

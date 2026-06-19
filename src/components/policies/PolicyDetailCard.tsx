@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { CardHeader } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
+import { isAddressLikeKey, MapLink } from "@/components/ui/MapLink";
 import { PolicyStatusBadge, RenewalStatusBadge } from "@/components/ui/StatusBadge";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
@@ -258,12 +259,21 @@ export function PolicyDetailCard({
           {asset && Object.keys(asset.details ?? {}).length > 0 && (
             <Section title="Insured asset">
               <dl className="grid sm:grid-cols-2 gap-x-6 gap-y-1.5 text-sm">
-                {Object.entries(asset.details as Record<string, unknown>).map(([k, v]) => (
-                  <div key={k} className="flex justify-between gap-3">
-                    <dt className="text-ink-500 capitalize">{k.replace(/([A-Z])/g, " $1").toLowerCase()}</dt>
-                    <dd className="text-ink-900 text-right">{maskSensitive(k, String(v))}</dd>
-                  </div>
-                ))}
+                {Object.entries(asset.details as Record<string, unknown>).map(([k, v]) => {
+                  const shouldMap = isAddressLikeKey(k) && typeof v === "string";
+                  return (
+                    <div key={k} className="flex justify-between gap-3">
+                      <dt className="text-ink-500 capitalize">{k.replace(/([A-Z])/g, " $1").toLowerCase()}</dt>
+                      <dd className="min-w-0 max-w-[62%] text-right text-ink-900">
+                        {shouldMap ? (
+                          <MapLink address={v} className="max-w-full justify-end text-right" />
+                        ) : (
+                          maskSensitive(k, String(v))
+                        )}
+                      </dd>
+                    </div>
+                  );
+                })}
               </dl>
             </Section>
           )}

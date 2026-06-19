@@ -109,15 +109,15 @@ describe("aiEnhanceMessage", () => {
     expect(out).toMatch(/Hey wanted to follow up on your renewal\./);
   });
 
-  it("keeps SMS short and courteous (no email sign-off block)", async () => {
+  it("polishes a short email with a greeting and sign-off", async () => {
     const { aiEnhanceMessage } = await import("../ai");
     const out = await aiEnhanceMessage({
       body: "your docs are ready to sign",
-      channel: "sms",
+      channel: "email",
       contactName: "Sam",
     });
     expect(out).toMatch(/^Hi Sam,/);
-    expect(out).not.toMatch(/Warm regards,/);
+    expect(out).toMatch(/Warm regards,/);
   });
 
   it("returns empty for an empty draft", async () => {

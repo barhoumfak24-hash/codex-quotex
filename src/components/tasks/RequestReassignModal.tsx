@@ -3,6 +3,7 @@ import { Search, UserCog } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
 import { Badge } from "@/components/ui/Badge";
 import { api } from "@/lib/api";
+import { staffRoleLabel } from "@/lib/roles";
 import type { Task, User } from "@/types";
 
 // =====================================================================
@@ -42,8 +43,14 @@ export function RequestReassignModal({
 
   // Can't request reassignment to whoever already owns it.
   const candidates = useMemo(
-    () => agents.filter((a) => a.id !== (actorId ?? "") && a.id !== task.assignedToId),
-    [agents, actorId, task.assignedToId]
+    () =>
+      agents.filter(
+        (a) =>
+          a.id !== (actorId ?? "") &&
+          a.id !== task.assignedToId &&
+          !(task.additionalAssignedToIds ?? []).includes(a.id)
+      ),
+    [agents, actorId, task.assignedToId, task.additionalAssignedToIds]
   );
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -106,7 +113,9 @@ export function RequestReassignModal({
                         <div className="truncate">{a.name}</div>
                         <div className="text-[11px] text-ink-500 truncate">{a.email}</div>
                       </div>
-                      <Badge tone={a.role === "manager" ? "gold" : "neutral"}>{a.role}</Badge>
+                      <Badge tone={a.role === "manager" ? "gold" : "neutral"}>
+                        {staffRoleLabel(a.role)}
+                      </Badge>
                     </button>
                   </li>
                 );

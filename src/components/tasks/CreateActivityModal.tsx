@@ -4,6 +4,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Button } from "@/components/ui/Button";
 import { ImportancePicker } from "@/components/tasks/ImportancePicker";
 import { api } from "@/lib/api";
+import { isRoutingManagerRole, routableStaff, staffRoleLabel } from "@/lib/roles";
 import type { Role, TaskSeverity } from "@/types";
 
 // =====================================================================
@@ -39,7 +40,7 @@ export function CreateActivityModal({
   fixedContact?: ContactPick;
   onCreated?: (taskId: string) => void;
 }) {
-  const isManager = viewer.role === "manager";
+  const isManager = isRoutingManagerRole(viewer.role);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [severity, setSeverity] = useState<TaskSeverity>("info");
@@ -53,10 +54,7 @@ export function CreateActivityModal({
   const agents = useMemo(
     () =>
       isManager
-        ? api.users
-            .list(tenantId)
-            .filter((u) => u.role === "agent" || u.role === "manager")
-            .sort((a, b) => a.name.localeCompare(b.name))
+        ? routableStaff(api.users.list(tenantId), tenantId)
         : [],
     [tenantId, isManager, open]
   );
@@ -107,6 +105,9 @@ export function CreateActivityModal({
         if (!(p.name.toLowerCase().includes(q) || p.email.toLowerCase().includes(q)))
           return false;
         if (isManager) return true;
+        if (viewer.role === "csr") {
+          return p.assignedCsrId === viewer.id || (p.additionalCsrIds ?? []).includes(viewer.id);
+        }
         return (
           p.assignedAgentId === viewer.id ||
           (p.additionalAgentIds ?? []).includes(viewer.id)
@@ -306,7 +307,7 @@ export function CreateActivityModal({
               {agents.map((a) => (
                 <option key={a.id} value={a.id}>
                   {a.name}
-                  {a.id === viewer.id ? " (you)" : ""} · {a.role === "manager" ? "Manager" : "Agent"}
+                  {a.id === viewer.id ? " (you)" : ""} · {staffRoleLabel(a.role)}
                 </option>
               ))}
             </select>

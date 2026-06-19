@@ -30,6 +30,10 @@ export interface BallparkInput {
   // their pricingTendency values. Without this, the function returns
   // the same pure-industry-average ballpark as before.
   carriers?: Carrier[];
+  // Optional uncertainty band. Higher-quality research inputs can use
+  // a tighter band; thin intake can widen the range without pretending
+  // the estimate is more precise than it is.
+  rangeHalfWidth?: number;
 }
 
 export interface BallparkRange {
@@ -151,6 +155,9 @@ export function estimateBallparkPremium(input: BallparkInput): BallparkRange {
   const safeValue = Number.isFinite(value) && value > 0 ? value : 0;
   const baseRate = BASE_RATES[assetType] ?? BASE_RATES.other;
   const riskMultiplier = RISK_MULTIPLIERS[riskLevel] ?? RISK_MULTIPLIERS.medium;
+  const rangeHalfWidth = Number.isFinite(input.rangeHalfWidth)
+    ? Math.max(0.08, Math.min(0.4, Number(input.rangeHalfWidth)))
+    : RANGE_HALF_WIDTH;
 
   // Carrier-aware bias. When the caller passes a pool of carriers,
   // we filter to those whose appetites match this exact risk (asset
@@ -165,8 +172,8 @@ export function estimateBallparkPremium(input: BallparkInput): BallparkRange {
       : 1.0;
 
   const centerline = safeValue * baseRate * riskMultiplier * carrierBias;
-  const lowerRaw = Math.max(MIN_PREMIUM, centerline * (1 - RANGE_HALF_WIDTH));
-  const upperRaw = Math.min(MAX_PREMIUM, centerline * (1 + RANGE_HALF_WIDTH));
+  const lowerRaw = Math.max(MIN_PREMIUM, centerline * (1 - rangeHalfWidth));
+  const upperRaw = Math.min(MAX_PREMIUM, centerline * (1 + rangeHalfWidth));
 
   const min = snapPremium(lowerRaw);
   const max = snapPremium(Math.max(upperRaw, lowerRaw + 1));
@@ -187,7 +194,7 @@ export function estimateBallparkPremium(input: BallparkInput): BallparkRange {
       riskLevel,
       baseRate,
       riskMultiplier,
-      rangeWidth: RANGE_HALF_WIDTH,
+      rangeWidth: rangeHalfWidth,
       carrierBias,
       matchedCarriers: matched.map((m) => ({
         id: m.carrier.id,

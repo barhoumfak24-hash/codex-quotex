@@ -4,6 +4,7 @@ import { ArrowLeft, FileText, User } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Card, CardHeader, EmptyState } from "@/components/ui/Card";
 import { DocumentList } from "@/components/ui/DocumentList";
+import { isAddressLikeKey, MapLink } from "@/components/ui/MapLink";
 import { PolicyStatusBadge } from "@/components/ui/StatusBadge";
 import { Timeline } from "@/components/ui/Timeline";
 import { useAuth } from "@/lib/auth";
@@ -78,16 +79,23 @@ export function EmployeeAssetPage() {
             <div className="text-sm text-ink-400">No structured details on file.</div>
           ) : (
             <dl className="text-sm space-y-2">
-              {Object.entries(asset.details as Record<string, unknown>).map(([k, v]) => (
-                <div key={k} className="flex justify-between gap-3 text-ink-700">
-                  <dt className="text-ink-500 capitalize">
-                    {k.replace(/([A-Z])/g, " $1").toLowerCase()}
-                  </dt>
-                  <dd className="text-ink-900 text-right max-w-[60%] truncate">
-                    {String(v)}
-                  </dd>
-                </div>
-              ))}
+              {Object.entries(asset.details as Record<string, unknown>).map(([k, v]) => {
+                const shouldMap = isAddressLikeKey(k) && typeof v === "string";
+                return (
+                  <div key={k} className="flex justify-between gap-3 text-ink-700">
+                    <dt className="text-ink-500 capitalize">
+                      {k.replace(/([A-Z])/g, " $1").toLowerCase()}
+                    </dt>
+                    <dd className="min-w-0 max-w-[62%] text-right text-ink-900">
+                      {shouldMap ? (
+                        <MapLink address={v} className="max-w-full justify-end text-right" />
+                      ) : (
+                        <span className="block truncate">{String(v)}</span>
+                      )}
+                    </dd>
+                  </div>
+                );
+              })}
             </dl>
           )}
         </Card>

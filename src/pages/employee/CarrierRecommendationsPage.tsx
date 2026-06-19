@@ -6,6 +6,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { DocumentUploader } from "@/components/ui/DocumentUploader";
 import { DocumentList } from "@/components/ui/DocumentList";
+import { EmployeeBackButton } from "@/components/layout/EmployeeBackButton";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
@@ -45,11 +46,13 @@ export function CarrierRecommendationsPage() {
 
   return (
     <div className="space-y-6">
+      <EmployeeBackButton />
       <div className="flex items-end justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="font-display text-3xl">Carrier recommendations</h1>
+          <h1 className="font-display text-3xl">Carrier library</h1>
           <p className="text-ink-500 text-sm mt-1">
-            AI-recommended carriers per quote. Final binding decisions stay with the agent.
+            Agency carrier markets, contacts, appetite documents, and AI quote recommendations.
+            Final binding decisions stay with the agent.
           </p>
         </div>
         {isManager && (
@@ -64,14 +67,14 @@ export function CarrierRecommendationsPage() {
       </div>
 
       <Disclaimer>
-        Recommendations are internal-only by default — customers do not see carrier
-        suggestions unless your agency explicitly enables it.
+        AI recommendations are internal-only by default — customers do not see carrier
+        suggestions unless your agency explicitly enables them.
       </Disclaimer>
 
       <Card>
         <CardHeader
           title="Available carriers"
-          subtitle="Tap a card to manage carrier-rep contacts (underwriters, adjusters, claims reps, etc.). Contacts surface on the Messages page so the agent can email them in one click."
+          subtitle="Agency carrier markets, agent sign-ins, and carrier-rep contacts. Contacts surface on the Messages page so the agent can email them in one click."
         />
         {linkedCarriers.length === 0 ? (
           <div className="text-sm text-ink-400">
@@ -84,23 +87,37 @@ export function CarrierRecommendationsPage() {
               const contacts = api.carrierContacts.listForCarrier(agency.id, c.id);
               return (
                 <li key={c.id}>
-                  <button
-                    type="button"
-                    onClick={() => setActiveCarrier(c)}
-                    className="w-full text-left border border-ink-100 rounded-md p-3 hover:border-gold-300 hover:bg-ink-50/50 transition-colors"
-                  >
+                  <div className="w-full border border-ink-100 rounded-md p-3 transition-colors hover:border-gold-300 hover:bg-ink-50/50">
                     <div className="font-semibold">{c.name}</div>
                     <div className="text-xs text-ink-500 mt-0.5 truncate">
                       {c.preferredAssetTypes.map((t) => t.replace(/_/g, " ")).join(", ") ||
                         "No preferred lines"}
                     </div>
-                    <div className="mt-3 flex items-center justify-between text-[11px] text-ink-600">
+                    <div className="mt-3 flex items-center justify-between gap-2 text-[11px] text-ink-600">
                       <span>
                         {contacts.length} contact{contacts.length === 1 ? "" : "s"}
                       </span>
-                      <span className="text-gold-700">Manage →</span>
+                      <div className="flex items-center justify-end gap-2">
+                        {c.agentPortalUrl && (
+                          <a
+                            href={c.agentPortalUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 rounded-md border border-ink-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-ink-900 shadow-sm hover:border-gold-300"
+                          >
+                            <ExternalLink className="h-3 w-3" /> Agent sign-in
+                          </a>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setActiveCarrier(c)}
+                          className="inline-flex items-center gap-1 rounded-md bg-ink-900 px-2.5 py-1.5 text-xs font-semibold text-white shadow-sm hover:bg-black"
+                        >
+                          Manage
+                        </button>
+                      </div>
                     </div>
-                  </button>
+                  </div>
                 </li>
               );
             })}
@@ -315,7 +332,7 @@ function CarrierContactsModal({
           <a
             href={carrier.agentPortalUrl}
             target="_blank"
-            rel="noreferrer"
+            rel="noopener noreferrer"
             className="btn-outline text-sm w-full justify-center"
           >
             <ExternalLink className="h-3.5 w-3.5" /> Open {carrier.name} agent sign-in

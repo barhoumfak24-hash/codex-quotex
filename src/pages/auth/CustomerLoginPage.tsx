@@ -1,10 +1,12 @@
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useState } from "react";
-import { Sparkles } from "lucide-react";
+import { Building2, Sparkles } from "lucide-react";
 import { AuthShell } from "./AuthShell";
 import { Modal } from "@/components/ui/Modal";
+import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
+import { getAppSurface, toAppRoute, toSurfaceRoute } from "@/lib/appSurface";
 
 // Customer-only sign-in. Staff (agent, manager, master admin) sign-ins live
 // in the public footer and at /employee/login and /master/login.
@@ -15,43 +17,141 @@ export function CustomerLoginPage() {
     signInWithGoogle,
     resetCustomerPassword,
   } = useAuth();
-  const { setAgencyId } = useTenant();
+  const { agency, setAgencyId } = useTenant();
   const nav = useNavigate();
   const location = useLocation();
   const redirectFrom = (location.state as { from?: { pathname?: string } } | null)?.from?.pathname;
-  const target = redirectFrom || "/customer";
+  const isAppSurface = getAppSurface() === "agencyApp";
+  const surfaceRoute = (path: string) =>
+    isAppSurface ? toAppRoute(path) : toSurfaceRoute(path, location.pathname);
+  const target = redirectFrom ? surfaceRoute(redirectFrom) : surfaceRoute("/customer");
+  const activeAgencies = api.agencies.list().filter((item) => item.active);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [forgotOpen, setForgotOpen] = useState(false);
+  const [selectedAgencyId, setSelectedAgencyId] = useState(
+    () => agency?.id ?? activeAgencies[0]?.id ?? "agency_palmcoast"
+  );
+  const [selectedBranchId, setSelectedBranchId] = useState("");
+  const selectedAgency =
+    activeAgencies.find((item) => item.id === selectedAgencyId) ?? activeAgencies[0] ?? agency;
+  const agencyBranches = selectedAgency ? api.branches.listByAgency(selectedAgency.id) : [];
+
+  const selectAgency = (id: string) => {
+    setSelectedAgencyId(id);
+    setSelectedBranchId("");
+    setAgencyId(id);
+  };
+
+  const rememberBranchForUser = (signedUser: {
+    id: string;
+    role: string;
+    name: string;
+    email: string;
+    phone?: string;
+  }) => {
+    if (!selectedBranchId || signedUser.role !== "customer" || !selectedAgency) return;
+    const profile = api.customers.byUserId(signedUser.id);
+    if (profile) {
+      api.customers.update(profile.id, { branchId: selectedBranchId });
+      return;
+    }
+    api.customers.create({
+      tenantId: selectedAgency.id,
+      userId: signedUser.id,
+      name: signedUser.name,
+      email: signedUser.email,
+      phone: signedUser.phone,
+      branchId: selectedBranchId,
+      marketingOptInEmail: true,
+      marketingOptInSms: false,
+    });
+  };
 
   const enterAsDemoCustomer = () => {
-    signInDemo("customer", "agency_palmcoast");
-    setAgencyId("agency_palmcoast");
+    const demoUser = signInDemo("customer", selectedAgencyId);
+    rememberBranchForUser(demoUser);
+    setAgencyId(selectedAgencyId);
     nav(target, { replace: true });
   };
 
   return (
     <AuthShell
-      title="Customer sign-in"
-      subtitle="Access your private client portfolio."
+      title={isAppSurface ? "Quotex app sign-in" : "Customer sign-in"}
+      subtitle={
+        isAppSurface
+          ? "Choose your agency, then access your client portal."
+          : "Access your private client portfolio."
+      }
       footer={
         <>
           New here?{" "}
-          <Link to="/signup" className="text-ink-900 underline hover:text-gold-600">
+          <Link
+            to={surfaceRoute("/signup")}
+            onClick={() => setAgencyId(selectedAgencyId)}
+            className="text-ink-900 underline hover:text-gold-600"
+          >
             Create an account
           </Link>
-          <div className="mt-3 text-[11px] text-ink-400">
-            Staff (agent, manager, master admin) sign-ins are in the footer below.
-          </div>
+          {!isAppSurface && (
+            <div className="mt-3 text-[11px] text-ink-400">
+              Staff (agent, manager, master admin) sign-ins are in the footer below.
+            </div>
+          )}
         </>
       }
     >
+      <div className="mb-4 rounded-lg border border-ink-200 bg-white p-3">
+        <label className="label flex items-center gap-2" htmlFor="agency">
+          <Building2 className="h-4 w-4 text-gold-600" />
+          Agency
+        </label>
+        <select
+          id="agency"
+          className="input mt-1"
+          value={selectedAgencyId}
+          onChange={(e) => selectAgency(e.target.value)}
+        >
+          {activeAgencies.map((item) => (
+            <option key={item.id} value={item.id}>
+              {item.name}
+            </option>
+          ))}
+        </select>
+        {agencyBranches.length > 0 && (
+          <div className="mt-3">
+            <label className="label" htmlFor="branch">
+              Branch
+            </label>
+            <select
+              id="branch"
+              className="input mt-1"
+              value={selectedBranchId}
+              onChange={(e) => setSelectedBranchId(e.target.value)}
+            >
+              <option value="">Headquarters / main office</option>
+              {agencyBranches.map((branch) => (
+                <option key={branch.id} value={branch.id}>
+                  {branch.name}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+        <p className="mt-2 text-[11px] leading-relaxed text-ink-500">
+          The Quotex app is one client app. Your agency selection controls which
+          customer portal opens after sign-in.
+        </p>
+      </div>
+
       <button
         type="button"
         onClick={() => {
-          signInWithGoogle();
+          setAgencyId(selectedAgencyId);
+          const googleUser = signInWithGoogle(selectedAgencyId);
+          rememberBranchForUser(googleUser);
           nav(target, { replace: true });
         }}
         className="btn-outline w-full"
@@ -75,13 +175,15 @@ export function CustomerLoginPage() {
         onSubmit={(e) => {
           e.preventDefault();
           setError(null);
-          const u = signInCustomer(email.trim(), password);
+          setAgencyId(selectedAgencyId);
+          const u = signInCustomer(email.trim(), password, selectedAgencyId);
           if (!u) {
             setError(
-              "Email and password don't match. Try the Forgot password link below."
+              `Email and password don't match for ${selectedAgency?.name ?? "that agency"}. Try the Forgot password link below.`
             );
             return;
           }
+          rememberBranchForUser(u);
           nav(target, { replace: true });
         }}
         className="space-y-3"
@@ -131,7 +233,7 @@ export function CustomerLoginPage() {
         open={forgotOpen}
         onClose={() => setForgotOpen(false)}
         initialEmail={email}
-        onReset={(input) => resetCustomerPassword(input)}
+        onReset={(input) => resetCustomerPassword(input, selectedAgencyId)}
       />
 
       <div className="mt-5 pt-5 border-t border-ink-100">

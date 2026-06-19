@@ -1,3 +1,4 @@
+import { MasterBackButton } from "@/components/layout/MasterBackButton";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { db } from "@/lib/db";
@@ -5,6 +6,7 @@ import { db } from "@/lib/db";
 export function DataToolsPage() {
   return (
     <div className="space-y-6">
+      <MasterBackButton />
       <div>
         <h1 className="font-display text-3xl">Data tools</h1>
         <p className="text-ink-500 text-sm mt-1">Developer utilities for the local demo data store.</p>

@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { Role, User } from "@/types";
 import { api } from "./api";
+import { isStaffRole, type StaffRole } from "./roles";
 
 interface AuthContextValue {
   user: User | null;
@@ -11,21 +12,38 @@ interface AuthContextValue {
   signInWithEmail: (email: string) => User | null;
   // Customer sign-in: email + password. If the user has no password
   // on file (legacy seed accounts), falls back to email-only auth.
-  signInCustomer: (email: string, password: string) => User | null;
+  signInCustomer: (
+    email: string,
+    password: string,
+    tenantId?: string | null
+  ) => User | null;
   // Trigger a customer password reset. Generates a new temporary
   // password and returns it so the demo can show the new value;
   // production fires an actual email with a reset token.
   resetCustomerPassword: (
-    email: string
+    email: string,
+    tenantId?: string | null
   ) => { user: User; tempPassword: string } | null;
   // Update the signed-in customer's password (account settings UI).
   changeMyPassword: (
     currentPassword: string,
     newPassword: string
   ) => { ok: true } | { ok: false; reason: string };
-  // Staff sign-in: accepts username or email, verifies password if present.
+  // Staff sign-in: business email/username + password. Tenant is derived from the staff user.
   signInStaff: (identifier: string, password: string) => User | null;
-  signInWithGoogle: () => User;
+  registerStaff: (input: {
+    agencyCode: string;
+    branchId?: string;
+    role: StaffRole;
+    firstName: string;
+    lastName: string;
+    phone: string;
+    businessEmail: string;
+    password: string;
+  }) =>
+    | { ok: true; user: User; agencyId: string }
+    | { ok: false; reason: ReturnType<typeof api.users.registerStaff> extends { ok: false; reason: infer R } ? R : string };
+  signInWithGoogle: (tenantId?: string | null) => User;
   signOut: () => void;
   // Re-fetch the current user from the data layer. Use after mutating the
   // signed-in user (e.g. completing first-login profile) so the in-memory
@@ -132,8 +150,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const signInCustomer = useCallback(
-    (email: string, password: string) => {
-      const u = api.users.byEmail(email.trim());
+    (email: string, password: string, tenantId?: string | null) => {
+      const normalized = email.trim().toLowerCase();
+      const u = api
+        .users
+        .list(tenantId ?? undefined)
+        .find((row) => row.role === "customer" && row.email.toLowerCase() === normalized);
       if (!u || u.role !== "customer") return null;
       if (u.generatedPassword && u.generatedPassword !== password) return null;
       persist(u);
@@ -143,8 +165,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const resetCustomerPassword = useCallback(
-    (email: string) => {
-      const u = api.users.byEmail(email.trim());
+    (email: string, tenantId?: string | null) => {
+      const normalized = email.trim().toLowerCase();
+      const u = api
+        .users
+        .list(tenantId ?? undefined)
+        .find((row) => row.role === "customer" && row.email.toLowerCase() === normalized);
       if (!u || u.role !== "customer") return null;
       const tempPassword = generateTempPassword();
       const updated =
@@ -177,7 +203,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const signInStaff = useCallback(
     (identifier: string, password: string) => {
       const u = api.users.byIdentifier(identifier.trim());
-      if (!u) return null;
+      if (!u || !isStaffRole(u.role)) return null;
+      const agency = u.tenantId ? api.agencies.get(u.tenantId) : undefined;
+      if (!agency || !agency.active) return null;
+      if (!u.active || u.staffAccessStatus === "banned" || u.staffAccessStatus === "deleted") {
+        return null;
+      }
       // If the account has a generated password on file, it must match.
       // Seed accounts that pre-date the credential system fall back to
       // identifier-only sign-in (acceptable for the demo).
@@ -188,13 +219,37 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [persist]
   );
 
-  const signInWithGoogle = useCallback(() => {
+  const registerStaff = useCallback(
+    (input: {
+      agencyCode: string;
+      branchId?: string;
+      role: StaffRole;
+      firstName: string;
+      lastName: string;
+      phone: string;
+      businessEmail: string;
+      password: string;
+    }) => {
+      const result = api.users.registerStaff(input);
+      if (!result.ok) return result;
+      persist(result.user);
+      return { ok: true as const, user: result.user, agencyId: result.agency.id };
+    },
+    [persist]
+  );
+
+  const signInWithGoogle = useCallback((tenantId: string | null = "agency_palmcoast") => {
+    const resolvedTenantId = tenantId ?? "agency_palmcoast";
     const demo =
-      api.users.byEmail("customer@demo.example") ??
+      api
+        .users
+        .list(resolvedTenantId)
+        .find((u) => u.role === "customer" && u.email === "customer@demo.example") ??
+      api.users.list(resolvedTenantId).find((u) => u.role === "customer") ??
       api.users.create({
         role: "customer",
-        tenantId: "agency_palmcoast",
-        email: "customer@demo.example",
+        tenantId: resolvedTenantId,
+        email: `customer+${resolvedTenantId}@demo.example`,
         name: "Demo Customer",
       });
     persist(demo);
@@ -226,6 +281,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       resetCustomerPassword,
       changeMyPassword,
       signInStaff,
+      registerStaff,
       signInWithGoogle,
       signOut,
       refreshUser,
@@ -240,6 +296,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       resetCustomerPassword,
       changeMyPassword,
       signInStaff,
+      registerStaff,
       signInWithGoogle,
       signOut,
       refreshUser,

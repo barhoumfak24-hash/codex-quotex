@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { useAuth } from "./auth";
 import { api } from "./api";
+import { ensureDemoCustomerPortfolio } from "./demoPortfolio";
 import { useTenant } from "./tenant";
 
 // Returns the CustomerProfile bound to the signed-in user, creating one
@@ -21,6 +22,9 @@ export function useCustomer() {
         marketingOptInEmail: true,
         marketingOptInSms: false,
       });
+    }
+    if (profile) {
+      ensureDemoCustomerPortfolio(profile);
     }
     return profile ?? null;
   }, [user, agency]);

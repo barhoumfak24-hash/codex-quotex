@@ -19,6 +19,7 @@ afterEach(() => {
 describe("auto-appended email signature on api.communications.create", () => {
   it("appends the sender's signature to an outbound email body", async () => {
     const { api } = await import("../api");
+    const { splitEmailSignatureBody } = await import("../emailSignature");
     const agency = api.agencies.list()[0];
     const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
     const customer = api.customers.list(agency.id)[0];
@@ -32,19 +33,50 @@ describe("auto-appended email signature on api.communications.create", () => {
       body: "Here's the quote.",
       createdById: agent.id,
     });
-    expect(out.body).toContain("Here's the quote.");
-    expect(out.body).toContain("—");
-    expect(out.body).toContain("Jane Smith");
-    expect(out.body).toContain("Senior Advisor");
+    const parsed = splitEmailSignatureBody(out.body);
+    expect(parsed.message).toBe("Here's the quote.");
+    expect(parsed.signature?.text).toBe("Jane Smith\nSenior Advisor");
   });
 
-  it("includes image markers for any embedded logos", async () => {
+  it("uses the saved agency logo when the sender has no custom signature image", async () => {
     const { api } = await import("../api");
+    const { splitEmailSignatureBody } = await import("../emailSignature");
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const customer = api.customers.list(agency.id)[0];
+    api.agencies.update(agency.id, { logoUrl: "data:image/png;base64,agencylogo" });
+    api.users.update(agent.id, { emailSignature: "Jane Smith\nSenior Advisor" });
+    const out = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "outbound",
+      subject: "Quote update",
+      body: "Here's the quote.",
+      createdById: agent.id,
+    });
+    const parsed = splitEmailSignatureBody(out.body);
+    expect(parsed.signature?.text).toBe("Jane Smith\nSenior Advisor");
+    expect(parsed.signature?.images?.[0]).toEqual({
+      name: `${agency.name} logo`,
+      dataUrl: "data:image/png;base64,agencylogo",
+    });
+  });
+
+  it("stores embedded logos and e-signatures as renderable signature payloads", async () => {
+    const { api } = await import("../api");
+    const { splitEmailSignatureBody } = await import("../emailSignature");
     const agency = api.agencies.list()[0];
     const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
     const customer = api.customers.list(agency.id)[0];
     api.users.update(agent.id, {
       emailSignature: "Jane Smith",
+      emailSignatureIncludesEsignature: true,
+      electronicSignature: {
+        name: "Jane Smith",
+        fontFamily: "cursive",
+        fontSize: 44,
+      },
       emailSignatureImages: [
         { name: "agency-logo.png", dataUrl: "data:image/png;base64,abc" },
       ],
@@ -57,10 +89,18 @@ describe("auto-appended email signature on api.communications.create", () => {
       body: "Body",
       createdById: agent.id,
     });
-    expect(out.body).toContain("[Image: agency-logo.png]");
+    const parsed = splitEmailSignatureBody(out.body);
+    expect(parsed.message).toBe("Body");
+    expect(parsed.signature?.text).toBe("Jane Smith");
+    expect(parsed.signature?.images?.[0]).toEqual({
+      name: "agency-logo.png",
+      dataUrl: "data:image/png;base64,abc",
+    });
+    expect(parsed.signature?.electronicSignature?.name).toBe("Jane Smith");
+    expect(parsed.signature?.electronicSignature?.fontSize).toBe(44);
   });
 
-  it("leaves SMS / inbound / no-signature bodies untouched", async () => {
+  it("leaves inbound / no-signature bodies untouched", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
@@ -79,16 +119,6 @@ describe("auto-appended email signature on api.communications.create", () => {
 
     // SMS with signature set → ignored.
     api.users.update(agent.id, { emailSignature: "Jane" });
-    const sms = api.communications.create({
-      tenantId: agency.id,
-      customerId: customer.id,
-      channel: "sms",
-      direction: "outbound",
-      body: "Quick note.",
-      createdById: agent.id,
-    });
-    expect(sms.body).toBe("Quick note.");
-
     // Inbound (customer reply) → never gets the staff signature.
     const inbound = api.communications.create({
       tenantId: agency.id,
@@ -104,6 +134,7 @@ describe("auto-appended email signature on api.communications.create", () => {
 describe("custom message sends pick up the signature", () => {
   it("appends the sender's signature to a custom-email body on create", async () => {
     const { api } = await import("../api");
+    const { splitEmailSignatureBody } = await import("../emailSignature");
     const agency = api.agencies.list()[0];
     const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
     api.users.update(agent.id, { emailSignature: "Jane Smith" });
@@ -115,11 +146,12 @@ describe("custom message sends pick up the signature", () => {
       body: "Body of the quarterly note.",
       audience: "all_clients",
     });
-    expect(cm.body).toContain("Body of the quarterly note.");
-    expect(cm.body).toContain("Jane Smith");
+    const parsed = splitEmailSignatureBody(cm.body);
+    expect(parsed.message).toBe("Body of the quarterly note.");
+    expect(parsed.signature?.text).toBe("Jane Smith");
   });
 
-  it("custom SMS sends are not touched", async () => {
+  it("custom email sends are signed", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
@@ -127,10 +159,11 @@ describe("custom message sends pick up the signature", () => {
     const cm = api.customMessages.create({
       tenantId: agency.id,
       createdById: agent.id,
-      channel: "sms",
-      body: "Quick text.",
+      channel: "email",
+      body: "Quick email.",
       audience: "all_clients",
     });
-    expect(cm.body).toBe("Quick text.");
+    expect(cm.body).toContain("Quick email.");
+    expect(cm.body).toContain("Jane");
   });
 });

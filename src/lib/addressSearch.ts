@@ -39,6 +39,12 @@ export interface AddressParts {
 
 export type AddressSearchMode = "address" | "marina";
 
+export interface AddressSearchOptions {
+  // Defaults to true for legacy demo surfaces. Customer quote intake
+  // passes false so the dropdown only shows real provider results.
+  allowMockFallback?: boolean;
+}
+
 interface ProviderError {
   provider: string;
   query: string;
@@ -96,6 +102,7 @@ const telemetry: AddressSearchTelemetry = {
 // Tests can reset the cache + telemetry between cases.
 export function _resetAddressSearchForTest() {
   responseCache.clear();
+  googleJsSessionTokens.clear();
   telemetry.errors.length = 0;
   telemetry.lastSuccessProvider = null;
   telemetry.nonStreetFilteredCount = 0;
@@ -396,7 +403,7 @@ async function searchGoogleJs(
       input: query,
       includedPrimaryTypes: ["street_address", "premise", "subpremise"],
       includedRegionCodes: ["us"],
-      sessionToken,
+      sessionToken: getGoogleJsSessionToken(places, sessionToken),
     });
   } catch (err) {
     logGoogleFailure("google_js", query, err);
@@ -441,7 +448,7 @@ async function fetchGooglePlaceDetailsViaJs(
     const place = new places.Place({ id: placeId });
     const { place: data } = await place.fetchFields({
       fields: ["addressComponents", "formattedAddress"],
-      sessionToken,
+      sessionToken: getGoogleJsSessionToken(places, sessionToken),
     });
     const components = (data.addressComponents ?? []) as GoogleAddressComponent[];
     if (components.length === 0) return null;
@@ -450,6 +457,24 @@ async function fetchGooglePlaceDetailsViaJs(
     logGoogleFailure("google_js_details", placeId, err);
     return null;
   }
+}
+
+const googleJsSessionTokens = new Map<string, unknown>();
+
+function getGoogleJsSessionToken(
+  places: { AutocompleteSessionToken?: new () => unknown },
+  sessionToken: string
+): unknown | undefined {
+  if (!sessionToken || !places.AutocompleteSessionToken) return undefined;
+  const existing = googleJsSessionTokens.get(sessionToken);
+  if (existing) return existing;
+  const token = new places.AutocompleteSessionToken();
+  googleJsSessionTokens.set(sessionToken, token);
+  if (googleJsSessionTokens.size > 64) {
+    const oldest = googleJsSessionTokens.keys().next().value;
+    if (oldest) googleJsSessionTokens.delete(oldest);
+  }
+  return token;
 }
 
 // Google addressComponents come back as an array of
@@ -1041,7 +1066,8 @@ export async function searchAddresses(
   query: string,
   mode: AddressSearchMode = "address",
   signal?: AbortSignal,
-  googleSessionToken?: string
+  googleSessionToken?: string,
+  options: AddressSearchOptions = {}
 ): Promise<AddressPrediction[]> {
   if (!query.trim()) return [];
 
@@ -1087,6 +1113,7 @@ export async function searchAddresses(
   // 4. Still nothing → fall back to the mock pool so the UI never
   //    goes blank when both real providers fail.
   if (raw.length === 0) {
+    if (options.allowMockFallback === false) return [];
     return enforcePrefixMatch("mock", query, buildFallbackPredictions(query));
   }
 

@@ -78,7 +78,9 @@ describe("Tasks badge — AI auto-reply notifications", () => {
   // which counts unacknowledged AI notifications plus open tasks.
   function tasksBadge(tenantId: string) {
     return (
-      api.aiNotifications.listUnacked(tenantId).length +
+      api.aiNotifications
+        .listUnacked(tenantId)
+        .filter((n) => n.kind !== "goal_request" && n.kind !== "inbound_notice").length +
       api.tasks.listOpen(tenantId).length
     );
   }
@@ -165,6 +167,27 @@ describe("Tasks badge — AI auto-reply notifications", () => {
     api.policies.requestEdit({ tenantId: agency.id, customerId: customer.id, assetId: asset.id, body: "C" });
     expect(api.aiNotifications.listUnacked(agency.id).length).toBe(before + 3);
   });
+
+  it("notification-only inbound notices do not pump the Tasks badge", async () => {
+    ({ api } = await import("../../../lib/api"));
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const before = tasksBadge(agency.id);
+    api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      body: "I uploaded the signed form.",
+    });
+    api.communications.sweepInboundForActivities(agency.id);
+    expect(
+      api.aiNotifications
+        .listUnacked(agency.id)
+        .some((n) => n.kind === "inbound_notice")
+    ).toBe(true);
+    expect(tasksBadge(agency.id)).toBe(before);
+  });
 });
 
 describe("Clients badge — manager-only unassigned alert", () => {
@@ -214,6 +237,32 @@ describe("Clients badge — manager-only unassigned alert", () => {
     api.customers.update(customer.id, { assignedAgentId: agent.id });
     const after = clientsBadgeFor(api, agency.id, "manager");
     expect(after).toBe(before - 1);
+  });
+});
+
+describe("Employee layout badge resilience", () => {
+  it("does not blank the portal when a cached open task is missing a title", async () => {
+    const { api } = await import("../../../lib/api");
+    const { db } = await import("../../../lib/db");
+    const { computeEmployeeBadges } = await import("../EmployeeLayout");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+
+    db.insert("tasks", {
+      id: "task_cached_missing_title",
+      tenantId: agency.id,
+      assignedToId: manager.id,
+      title: undefined,
+      summary: "Malformed legacy row from an older demo cache.",
+      source: "manual",
+      status: "open",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    } as never);
+
+    expect(() =>
+      computeEmployeeBadges(agency.id, { id: manager.id, role: "manager" })
+    ).not.toThrow();
   });
 });
 

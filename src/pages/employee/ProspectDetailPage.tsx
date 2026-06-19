@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Bot, Download, Lock, Sparkles, Undo2 } from "lucide-react";
+import { Archive, ArrowLeft, Bot, Download, Lock, Sparkles, Undo2 } from "lucide-react";
 import { Card, CardHeader, EmptyState } from "@/components/ui/Card";
 import { ExpandableCard } from "@/components/ui/ExpandableCard";
 import { CreateActivityModal } from "@/components/tasks/CreateActivityModal";
 import { ContactActivitiesCard } from "@/pages/employee/ClientDetailPage";
+import { ContactRouteButton } from "@/components/routing/ContactRouteButton";
 import { Badge } from "@/components/ui/Badge";
 import { ProspectStatusBadge } from "@/components/ui/StatusBadge";
 import { Timeline } from "@/components/ui/Timeline";
@@ -13,6 +14,7 @@ import { useTenant } from "@/lib/tenant";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { fmt } from "@/lib/format";
+import { isRoutingManagerRole } from "@/lib/roles";
 import { downloadContactDossier } from "@/lib/contactDossier";
 import { ContactMessageThread } from "@/components/messages/ContactMessageThread";
 import { AiQuotingWorkspace } from "@/components/quoting/AiQuotingWorkspace";
@@ -28,6 +30,7 @@ export function ProspectDetailPage() {
   const location = useLocation();
   const [, setRev] = useState(0);
   const [createActivityOpen, setCreateActivityOpen] = useState(false);
+  const [showImplementedQuoteAudit, setShowImplementedQuoteAudit] = useState(false);
 
   // Hash-based deep-link (e.g. #messages-thread from the Activity
   // timeline detail modal). Scroll the target card into view once
@@ -43,6 +46,14 @@ export function ProspectDetailPage() {
   if (!prospectId || !agency || !user) return null;
   const prospect = api.prospects.get(prospectId);
   if (!prospect || prospect.tenantId !== agency.id) return <EmptyState title="Prospect not found" />;
+  if (!api.prospects.canSee(prospect, { id: user.id, role: user.role })) {
+    return (
+      <EmptyState
+        title="Prospect not available"
+        description="This prospect is not assigned to your role. Managers can route it from the Activity Center."
+      />
+    );
+  }
   const docs = prospect.quoteRequestId
     ? api.documents.listByEntity({ quoteRequestId: prospect.quoteRequestId })
     : [];
@@ -55,18 +66,31 @@ export function ProspectDetailPage() {
     .filter((t) => t.prospectId === prospect.id);
   const recommendedCarrier = carrierMatch?.aiRecommendedCarrierId ? api.carriers.get(carrierMatch.aiRecommendedCarrierId) : null;
   const events = api.status.listFor({ prospectId: prospect.id });
-  const agents = api.users.list(agency.id).filter((u) => u.role === "agent" || u.role === "manager");
+  const agentOptions = api.users
+    .list(agency.id)
+    .filter((u) => u.role === "agent" || u.role === "manager" || u.role === "csr");
+  const csrOptions = api.users.list(agency.id).filter((u) => u.role === "csr");
   const refresh = () => setRev((r) => r + 1);
+  const quoteSession = api.quoting.getForProspect(prospect.id);
+  const implementedQuote = quoteSession?.quotes.find((quote) => quote.implementation?.policyId);
+  const implementedPolicy = implementedQuote?.implementation?.policyId
+    ? api.policies.get(implementedQuote.implementation.policyId)
+    : undefined;
+  const shouldCollapseImplementedWorkspace =
+    !!implementedQuote?.implementation?.policyId && !showImplementedQuoteAudit;
 
   // Only managers + the prospect's primary or co-assigned agents
   // can flip the conversion state. Agents who aren't on the
   // assignment see the buttons greyed out with a tooltip explaining
   // why; the API layer is the source of truth, this is the UX gate.
   const isManager = user.role === "manager";
+  const canManageRouting = isRoutingManagerRole(user.role);
   const isAssignedAgent =
-    user.role === "agent" &&
+    (user.role === "agent" || user.role === "csr") &&
     (prospect.assignedAgentId === user.id ||
-      (prospect.additionalAgentIds ?? []).includes(user.id));
+      (prospect.additionalAgentIds ?? []).includes(user.id) ||
+      prospect.assignedCsrId === user.id ||
+      (prospect.additionalCsrIds ?? []).includes(user.id));
   const canConvert = isManager || isAssignedAgent;
 
   function convertToClient() {
@@ -128,6 +152,13 @@ export function ProspectDetailPage() {
         <div className="flex items-center gap-2 flex-wrap">
           <ProspectStatusBadge status={prospect.status} />
           <Badge tone="gold">{api.helpers.assetTypeLabel(prospect.assetType)}</Badge>
+          <ContactRouteButton
+            kind="prospect"
+            contact={prospect}
+            tenantId={agency.id}
+            viewer={user}
+            onChanged={refresh}
+          />
           <button
             type="button"
             className="btn-outline text-xs"
@@ -135,6 +166,17 @@ export function ProspectDetailPage() {
             title="Download a print-ready PDF dossier with this prospect's full record"
           >
             <Download className="h-3.5 w-3.5" /> Download prospect information
+          </button>
+          <button
+            type="button"
+            className="btn-ghost text-xs text-rose-600"
+            onClick={() => {
+              if (!confirm(`Archive ${prospect.name}? You can unarchive from Archive.`)) return;
+              api.prospects.archive(prospect.id);
+              nav("/employee/prospects");
+            }}
+          >
+            <Archive className="h-3.5 w-3.5" /> Archive prospect
           </button>
         </div>
       </div>
@@ -232,13 +274,13 @@ export function ProspectDetailPage() {
             <div>
               <label className="label flex items-center gap-1.5">
                 Assigned agent
-                {user.role !== "manager" && (
+                {!canManageRouting && (
                   <span className="inline-flex items-center gap-0.5 text-[10px] uppercase tracking-wider text-ink-400">
                     <Lock className="h-3 w-3" /> manager only
                   </span>
                 )}
               </label>
-              {user.role === "manager" ? (
+              {canManageRouting ? (
                 <select
                   className="input"
                   value={prospect.assignedAgentId ?? ""}
@@ -248,7 +290,7 @@ export function ProspectDetailPage() {
                   }}
                 >
                   <option value="">— Unassigned —</option>
-                  {agents.map((a) => (
+                  {agentOptions.map((a) => (
                     <option key={a.id} value={a.id}>
                       {a.name}
                     </option>
@@ -267,9 +309,51 @@ export function ProspectDetailPage() {
                   aria-readonly="true"
                 >
                   <option value="">Unassigned</option>
-                  {agents.map((a) => (
+                  {agentOptions.map((a) => (
                     <option key={a.id} value={a.id}>
                       {a.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+            <div>
+              <label className="label flex items-center gap-1.5">
+                Assigned CSR
+                {!canManageRouting && (
+                  <span className="inline-flex items-center gap-0.5 text-[10px] uppercase tracking-wider text-ink-400">
+                    <Lock className="h-3 w-3" /> manager only
+                  </span>
+                )}
+              </label>
+              {canManageRouting ? (
+                <select
+                  className="input"
+                  value={prospect.assignedCsrId ?? ""}
+                  onChange={(e) => {
+                    api.prospects.update(prospect.id, { assignedCsrId: e.target.value || undefined });
+                    refresh();
+                  }}
+                >
+                  <option value="">No CSR assigned</option>
+                  {csrOptions.map((csr) => (
+                    <option key={csr.id} value={csr.id}>
+                      {csr.name}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <select
+                  className="input bg-ink-100 text-ink-500 cursor-not-allowed appearance-none"
+                  disabled
+                  value={prospect.assignedCsrId ?? ""}
+                  title="Only a manager can change the assigned CSR."
+                  aria-readonly="true"
+                >
+                  <option value="">No CSR assigned</option>
+                  {csrOptions.map((csr) => (
+                    <option key={csr.id} value={csr.id}>
+                      {csr.name}
                     </option>
                   ))}
                 </select>
@@ -321,7 +405,7 @@ export function ProspectDetailPage() {
         />
 
         {/* AI summary — full-width below the action row */}
-        <Card className="lg:col-span-3">
+        <Card id="ai-quoting-workspace" className="lg:col-span-3">
           <CardHeader title="AI summary" subtitle="Generated from quote intake and behavior signals." />
           <div className="rounded-md bg-ink-50 border border-ink-100 p-4 text-sm text-ink-800">
             <Bot className="inline h-4 w-4 text-gold-600 mr-1.5" />
@@ -341,23 +425,70 @@ export function ProspectDetailPage() {
           )}
         </Card>
 
-        <Card className="lg:col-span-3">
+        <Card className="relative lg:col-span-3">
           <CardHeader
             title="AI quoting workspace"
             subtitle="Pulls public records, drafts a questionnaire for anything it can't find, and ranks every linked carrier's quote against this risk."
           />
-          <AiQuotingWorkspace
-            tenantId={agency.id}
-            userId={user.id}
-            contact={{
-              kind: "prospect",
-              id: prospect.id,
-              name: prospect.name,
-              assetType: prospect.assetType,
-              estimatedValue: prospect.estimatedValue,
-            }}
-            onChanged={refresh}
-          />
+          {shouldCollapseImplementedWorkspace ? (
+            <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3">
+              <div className="flex items-start justify-between gap-3 flex-wrap">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-emerald-800">
+                    Policy implemented
+                  </div>
+                  <div className="mt-1 text-sm text-ink-800">
+                    {implementedPolicy?.policyNumber
+                      ? `Policy #${implementedPolicy.policyNumber}`
+                      : "The selected carrier quote"}{" "}
+                    has been added to Policies and Billing.
+                  </div>
+                  <div className="mt-1 text-xs text-ink-500">
+                    The quoting workspace closed automatically so the bound
+                    policy record becomes the source of truth.
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {implementedPolicy && (
+                    <>
+                      <Link
+                        className="btn-outline text-sm"
+                        to={`/employee/policies/${implementedPolicy.id}`}
+                      >
+                        Open policy
+                      </Link>
+                      <Link
+                        className="btn-outline text-sm"
+                        to={`/employee/billing/${implementedPolicy.id}`}
+                      >
+                        Open billing
+                      </Link>
+                    </>
+                  )}
+                  <button
+                    type="button"
+                    className="btn-outline text-sm"
+                    onClick={() => setShowImplementedQuoteAudit(true)}
+                  >
+                    View quote audit
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <AiQuotingWorkspace
+              tenantId={agency.id}
+              userId={user.id}
+              contact={{
+                kind: "prospect",
+                id: prospect.id,
+                name: prospect.name,
+                assetType: prospect.assetType,
+                estimatedValue: prospect.estimatedValue,
+              }}
+              onChanged={refresh}
+            />
+          )}
         </Card>
 
         <Card className="lg:col-span-3">
@@ -367,8 +498,8 @@ export function ProspectDetailPage() {
 
         <Card className="lg:col-span-3">
           <CardHeader
-            title="Activity timeline & prospect remarks"
-            subtitle="One unified record. AI outreach, status changes, and your own time-stamped remarks all flow into the feed below."
+            title="Prospect remarks"
+            subtitle="AI outreach, status changes, and your own time-stamped remarks all flow into the feed below."
           />
           <ProspectRemarksInput
             tenantId={agency.id}

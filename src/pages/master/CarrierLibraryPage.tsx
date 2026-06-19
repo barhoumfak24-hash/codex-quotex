@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { useState } from "react";
 import { Plus } from "lucide-react";
+import { MasterBackButton } from "@/components/layout/MasterBackButton";
 import { Card } from "@/components/ui/Card";
 import { Modal } from "@/components/ui/Modal";
 import { api } from "@/lib/api";
@@ -14,6 +15,7 @@ export function CarrierLibraryPage() {
 
   return (
     <div className="space-y-6">
+      <MasterBackButton />
       <div className="flex items-end justify-between gap-4 flex-wrap">
         <div>
           <h1 className="font-display text-3xl">Carrier library</h1>

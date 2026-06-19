@@ -22,6 +22,14 @@ describe("marketing.getConfig", () => {
     expect(cfg.messageStyle).toBe("concierge");
     expect(cfg.autoSendOnNewProspect).toBe(true);
     expect(cfg.followUpCadenceDays).toBe(3);
+    expect(cfg.autoMessageRules).toHaveLength(1);
+    expect(cfg.autoMessageRules[0]).toMatchObject({
+      enabled: true,
+      trigger: "new_prospect",
+      messageType: "quote_intake",
+      audience: "new_prospects",
+      approvalMode: "auto_send",
+    });
     expect(cfg.attachments).toEqual([]);
     expect(cfg.senderName).toContain(agency.name);
   });
@@ -38,6 +46,54 @@ describe("marketing.getConfig", () => {
     expect(cfg.messageStyle).toBe("friendly");
     expect(cfg.signOff).toBe("Cheers,\nThe team");
     expect(cfg.customBlurb).toBe("All quotes honored within 30 days.");
+  });
+
+  it("keeps pamphlet branding owned by agency setup, not marketing config", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    api.agencies.update(agency.id, { logoUrl: "data:image/png;base64,agency-logo" });
+    api.marketing.updateConfig(agency.id, {
+      agencyLogo: {
+        fileName: "legacy-pamphlet-logo.png",
+        dataUrl: "data:image/png;base64,legacy",
+        uploadedAt: "2026-06-04T12:00:00.000Z",
+      },
+    } as never);
+    const cfg = api.marketing.getConfig(agency.id);
+    expect(Object.prototype.hasOwnProperty.call(cfg, "agencyLogo")).toBe(false);
+    expect(api.agencies.get(agency.id)?.logoUrl).toContain("data:image/png");
+  });
+
+  it("persists advanced AI auto-message rules", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const cfg = api.marketing.getConfig(agency.id);
+    api.marketing.updateConfig(agency.id, {
+      autoMessageRules: [
+        {
+          ...cfg.autoMessageRules[0],
+          name: "Draft-only renewal nudge",
+          enabled: true,
+          trigger: "renewal_due",
+          messageType: "retention",
+          audience: "renewal_clients",
+          approvalMode: "draft_for_review",
+          timing: "delay",
+          delayAmount: 5,
+          delayUnit: "days",
+          channels: ["email"],
+          updatedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    const updated = api.marketing.getConfig(agency.id);
+    expect(updated.autoMessageRules[0]).toMatchObject({
+      name: "Draft-only renewal nudge",
+      trigger: "renewal_due",
+      approvalMode: "draft_for_review",
+      delayAmount: 5,
+      channels: ["email"],
+    });
   });
 });
 
@@ -81,8 +137,7 @@ describe("marketing.autoSendProspectOutreach", () => {
     expect(messages.length).toBe(beforeMessages + 1);
     const sent = messages[messages.length - 1];
     expect(sent.deliveryStatus).toBe("sent");
-    // Promotional auto-outreach is SMS-only now.
-    expect(sent.channel).toBe("sms");
+    expect(sent.channel).toBe("email");
     expect(sent.sentAt).toBeTruthy();
   });
 
@@ -95,6 +150,32 @@ describe("marketing.autoSendProspectOutreach", () => {
       tenantId: agency.id,
       name: "Manual Prospect",
       email: "manual@example.com",
+      assetType: "luxury_vehicle",
+      aiSummary: "x",
+      lastAction: "x",
+      lastActivityAt: new Date().toISOString(),
+      recommendedFollowUp: "x",
+      marketingStatus: "none",
+      status: "new",
+    });
+    expect(api.marketing.listMessages(agency.id).length).toBe(beforeMessages);
+  });
+
+  it("respects disabled new-prospect auto-message rule", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const cfg = api.marketing.getConfig(agency.id);
+    api.marketing.updateConfig(agency.id, {
+      autoSendOnNewProspect: true,
+      autoMessageRules: cfg.autoMessageRules.map((rule) =>
+        rule.trigger === "new_prospect" ? { ...rule, enabled: false } : rule
+      ),
+    });
+    const beforeMessages = api.marketing.listMessages(agency.id).length;
+    api.prospects.create({
+      tenantId: agency.id,
+      name: "Rule Disabled",
+      email: "disabled@example.com",
       assetType: "luxury_vehicle",
       aiSummary: "x",
       lastAction: "x",
@@ -124,12 +205,11 @@ describe("marketing.autoSendProspectOutreach", () => {
     });
     const messages = api.marketing.messagesForProspect(p.id);
     expect(messages.length).toBe(1);
-    // Auto-outreach is an SMS now; concise style uses the short hook.
-    expect(messages[0].channel).toBe("sms");
+    expect(messages[0].channel).toBe("email");
     expect(messages[0].content).toMatch(/ready to wrap up your quote\?/i);
   });
 
-  it("an SMS auto-send appends only SMS-tagged attachments (email-only ones are skipped)", async () => {
+  it("an email auto-send appends email-tagged attachments", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     api.marketing.addAttachment(agency.id, {
@@ -151,7 +231,6 @@ describe("marketing.autoSendProspectOutreach", () => {
       status: "new",
     });
     const msg = api.marketing.messagesForProspect(p.id)[0];
-    // Email-only attachment must NOT appear in the SMS body.
-    expect(msg.content).not.toMatch(/About our agency/);
+    expect(msg.content).toMatch(/About our agency/);
   });
 });

@@ -56,25 +56,27 @@ export function CustomerAssetsPage() {
                 <li key={a.id}>
                   <Link
                     to={`/customer/assets/${a.id}`}
-                    className="flex items-center justify-between gap-4 px-5 py-4 hover:bg-ink-50/40 transition-colors"
+                    className="grid min-h-[72px] grid-cols-[2.5rem_minmax(0,1fr)_7rem] items-center gap-3 px-5 py-4 hover:bg-ink-50/40 transition-colors"
                   >
-                    <div className="flex items-center gap-3 min-w-0">
-                      <span className="inline-flex items-center justify-center h-10 w-10 rounded-md bg-ink-100 text-ink-700 shrink-0">
+                    <div className="contents">
+                      <span className="inline-flex h-10 w-10 items-center justify-center rounded-md bg-ink-100 text-ink-700">
                         <Icon className="h-5 w-5" />
                       </span>
                       <div className="min-w-0">
-                        <div className="text-sm font-semibold text-ink-900 truncate">
+                        <div className="truncate text-sm font-semibold text-ink-900">
                           {a.label}
                         </div>
-                        <div className="text-xs text-ink-500 mt-0.5">
+                        <div className="mt-0.5 truncate text-xs text-ink-500">
                           {api.helpers.assetTypeLabel(a.type)} ·{" "}
                           {fmt.money(a.estimatedValue)}
                         </div>
                       </div>
                     </div>
-                    <div className="flex items-center gap-2 shrink-0">
-                      {policies[0] && (
+                    <div className="grid grid-cols-[3.6rem_3rem] items-center justify-end gap-2">
+                      {policies[0] ? (
                         <PolicyStatusBadge status={policies[0].status} />
+                      ) : (
+                        <span className="block h-6" aria-hidden="true" />
                       )}
                       <span className="text-xs text-gold-700 font-medium">View →</span>
                     </div>

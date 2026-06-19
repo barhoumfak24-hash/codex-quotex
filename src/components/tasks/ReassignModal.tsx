@@ -3,13 +3,13 @@ import { Search, UserCog, X } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
 import { Badge } from "@/components/ui/Badge";
 import { api } from "@/lib/api";
+import { staffRoleLabel } from "@/lib/roles";
 import type { Task, User } from "@/types";
 
 // =====================================================================
-// Manager-only Reassign modal. Same shape as SetReminderModal — list
-// of agents (incl. unassigned + managers), a quick filter, footer
-// with Cancel + primary Reassign CTA. Used when the activity-card
-// inline dropdown gets clipped by the card overflow.
+// Manager-only Reassign modal. Supports the same co-owner model as the
+// initial routing assignment dialog: the first checked teammate becomes
+// primary, and every checked teammate sees the activity in their queue.
 // =====================================================================
 
 export function ReassignModal({
@@ -26,19 +26,20 @@ export function ReassignModal({
   actorId?: string;
 }) {
   const [query, setQuery] = useState("");
-  // Default to the agent an agent requested (if any), else the current
-  // owner.
-  const [selectedId, setSelectedId] = useState<string | null>(
-    task.reassignRequestToId ?? task.assignedToId ?? null
-  );
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     setQuery("");
-    setSelectedId(task.reassignRequestToId ?? task.assignedToId ?? null);
+    const current = task.reassignRequestToId
+      ? [task.reassignRequestToId]
+      : [task.assignedToId, ...(task.additionalAssignedToIds ?? [])].filter(
+          (id): id is string => !!id
+        );
+    setSelectedIds(new Set(current));
     setBusy(false);
-  }, [open, task.assignedToId, task.reassignRequestToId]);
+  }, [open, task.assignedToId, task.additionalAssignedToIds, task.reassignRequestToId]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -48,10 +49,21 @@ export function ReassignModal({
     );
   }, [agents, query]);
 
+  const orderedIds = Array.from(selectedIds);
+
+  function toggle(id: string) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
   function submit() {
     setBusy(true);
     try {
-      api.tasks.assign(task.id, selectedId ?? undefined, actorId);
+      api.tasks.assign(task.id, orderedIds.length > 0 ? orderedIds : undefined, actorId);
       onClose();
     } finally {
       setBusy(false);
@@ -62,16 +74,16 @@ export function ReassignModal({
     <Modal open={open} onClose={onClose} title="Reassign activity" size="md">
       <div className="space-y-4">
         <p className="text-sm text-ink-600">
-          Move <span className="font-medium text-ink-900">"{task.title}"</span> to a
-          different agent. The activity (and any reminders set on it) follow the
-          assignment.
+          Move <span className="font-medium text-ink-900">"{task.title}"</span> to one or
+          more teammates. The first checked user becomes the primary owner, and every checked
+          user sees the activity in their queue.
         </p>
 
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-ink-400" />
           <input
             className="input pl-9 text-sm"
-            placeholder="Filter by name or email…"
+            placeholder="Filter by name or email..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             autoFocus
@@ -81,12 +93,14 @@ export function ReassignModal({
         <div className="rounded-md border border-ink-100 max-h-[280px] overflow-y-auto">
           <button
             type="button"
-            onClick={() => setSelectedId(null)}
+            onClick={() => setSelectedIds(new Set())}
             className={`flex items-center gap-2 w-full text-left px-3 py-2 text-sm border-b border-ink-100 ${
-              selectedId === null ? "bg-gold-50 font-medium" : "hover:bg-ink-50 text-ink-500"
+              selectedIds.size === 0
+                ? "bg-gold-50 font-medium"
+                : "hover:bg-ink-50 text-ink-500"
             }`}
           >
-            <X className="h-3.5 w-3.5 text-ink-400" />— Unassigned —
+            <X className="h-3.5 w-3.5 text-ink-400" /> Unassigned
           </button>
           {filtered.length === 0 ? (
             <div className="px-3 py-4 text-sm text-ink-400">
@@ -95,24 +109,33 @@ export function ReassignModal({
           ) : (
             <ul className="divide-y divide-ink-100">
               {filtered.map((a) => {
-                const active = selectedId === a.id;
+                const active = selectedIds.has(a.id);
                 return (
                   <li key={a.id}>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedId(a.id)}
-                      className={`flex items-center justify-between gap-2 w-full text-left px-3 py-2 text-sm ${
+                    <label
+                      className={`flex items-center justify-between gap-2 w-full text-left px-3 py-2 text-sm cursor-pointer ${
                         active ? "bg-gold-50 font-medium" : "hover:bg-ink-50"
                       }`}
                     >
-                      <div className="min-w-0">
+                      <input
+                        type="checkbox"
+                        checked={active}
+                        onChange={() => toggle(a.id)}
+                        className="shrink-0"
+                      />
+                      <div className="min-w-0 flex-1">
                         <div className="truncate">{a.name}</div>
                         <div className="text-[11px] text-ink-500 truncate">{a.email}</div>
                       </div>
+                      {orderedIds[0] === a.id && (
+                        <span className="text-[10px] uppercase tracking-wider text-gold-700">
+                          Primary
+                        </span>
+                      )}
                       <Badge tone={a.role === "manager" ? "gold" : "neutral"}>
-                        {a.role}
+                        {staffRoleLabel(a.role)}
                       </Badge>
-                    </button>
+                    </label>
                   </li>
                 );
               })}
@@ -122,9 +145,13 @@ export function ReassignModal({
 
         <div className="flex items-center justify-between gap-3 pt-3 border-t border-ink-100 flex-wrap">
           <div className="text-[11px] text-ink-500">
-            {selectedId === null
+            {selectedIds.size === 0
               ? "Will be unassigned."
-              : `Will assign to ${agents.find((a) => a.id === selectedId)?.name ?? "—"}.`}
+              : selectedIds.size === 1
+              ? `Will assign to ${agents.find((a) => a.id === orderedIds[0])?.name ?? "-"}.`
+              : `${selectedIds.size} users selected. Primary owner: ${
+                  agents.find((a) => a.id === orderedIds[0])?.name ?? "-"
+                }.`}
           </div>
           <div className="flex items-center gap-2">
             <button
@@ -142,7 +169,7 @@ export function ReassignModal({
               disabled={busy}
             >
               <UserCog className="h-3.5 w-3.5" />
-              {busy ? "Saving…" : "Reassign"}
+              {busy ? "Saving..." : "Reassign"}
             </button>
           </div>
         </div>

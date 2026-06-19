@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
+import type { DependencyList, RefObject } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
@@ -8,10 +9,12 @@ import {
   BellOff,
   Bot,
   Check,
+  ExternalLink,
+  FileText,
   Info,
-  Mail,
-  MessageSquare,
+  Loader2,
   MoreVertical,
+  Paperclip,
   Pin,
   Plus,
   Reply,
@@ -25,6 +28,8 @@ import {
 import { ExpandableCard } from "@/components/ui/ExpandableCard";
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
+import { DocumentViewerModal } from "@/components/ui/DocumentViewerModal";
+import { EmployeeBackButton } from "@/components/layout/EmployeeBackButton";
 import { ImportancePicker } from "@/components/tasks/ImportancePicker";
 import { EmailSignatureCard } from "@/components/messages/EmailSignatureCard";
 import {
@@ -32,15 +37,25 @@ import {
   type ComposedMessage,
   type ReplyTarget,
 } from "@/components/messages/MessageComposer";
+import { RichMessageBody } from "@/components/messages/RichMessageBody";
 import { positionLabel } from "@/pages/employee/CarrierRecommendationsPage";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
 import { subscribeToDbChanges } from "@/lib/db";
 import { fmt } from "@/lib/format";
+import {
+  inferMailProvider,
+  mailboxUrl,
+  mailboxThreadUrl,
+  mailProviderShortLabel,
+} from "@/lib/mailProvider";
+import { fileToCommunicationAttachment, formatAttachmentSize } from "@/lib/messageAttachments";
 import type {
   Communication,
+  CommunicationAttachment,
   CustomerProfile,
+  Document,
   InternalMessage,
   InternalThread,
   MarketingMessage,
@@ -49,31 +64,138 @@ import type {
   User,
 } from "@/types";
 
+const MESSAGE_CARD_CLASS = "h-[620px] overflow-hidden";
+const MESSAGE_SCROLL_PANE_CLASS = "message-scroll-pane flex-1 overflow-y-auto overflow-x-hidden p-3";
+
+type ConnectedMailbox = {
+  address: string;
+  provider: NonNullable<User["mailProvider"]>;
+  providerName: string;
+  connectionId?: string;
+  status?: string;
+  authMode?: string;
+};
+
+function useAnchoredMessageScroll(
+  scrollRef: RefObject<HTMLDivElement | null>,
+  contentRef: RefObject<HTMLDivElement | null>,
+  deps: DependencyList
+) {
+  const stickToBottomRef = useRef(true);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const updateStickiness = () => {
+      stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 72;
+    };
+    updateStickiness();
+    el.addEventListener("scroll", updateStickiness, { passive: true });
+    return () => el.removeEventListener("scroll", updateStickiness);
+  }, [scrollRef]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const frame = window.requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+      stickToBottomRef.current = true;
+    });
+    return () => window.cancelAnimationFrame(frame);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    const content = contentRef.current;
+    if (!el || !content || typeof ResizeObserver === "undefined") return;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (!stickToBottomRef.current) return;
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        el.scrollTop = el.scrollHeight;
+      });
+    });
+    observer.observe(content);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scrollRef, contentRef, ...deps]);
+}
+
 // =====================================================================
-// Activity Center → Messages. Two-column inbox:
-//   • Left  → Client + prospect threads (Communications + AI / custom
+// Activity Center â†’ Messages. Two-column inbox:
+//   â€¢ Left  â†’ Client + prospect + holder threads (Communications + AI / custom
 //              marketing messages aggregated per contact).
-//   • Right → Internal staff DMs / group threads.
+//   â€¢ Right â†’ Internal staff DMs / group threads.
 // Both columns mirror an iPhone-style threads list with search,
 // last-message preview, urgency-colored dot, and an active thread
-// pane. Composer at the bottom of each side: urgency picker,
-// channel picker (email/sms) for the client side, recipients picker
-// for new internal DMs.
+// pane. External conversations are email-only; internal threads stay
+// inside Quotex.
 // =====================================================================
 
 type ContactThread = {
-  kind: "client" | "prospect" | "carrier";
+  kind: "client" | "prospect" | "holder" | "carrier";
   id: string;
   name: string;
   email?: string;
   phone?: string;
-  // Carrier-contact threads carry the carrier name on `subtitle`
-  // (e.g. "Underwriter · Chubb") so the iPhone list reads cleanly.
+  // Carrier-contact threads use `badgeLabel` for the contact position
+  // and `subtitle` for the carrier name.
+  badgeLabel?: string;
   subtitle?: string;
   lastBody: string;
   lastAt: string;
   hasUnreadInbound: boolean;
 };
+
+function holderThreadId(email?: string): string {
+  return (email ?? "").trim().toLowerCase();
+}
+
+function attachmentPreviewDocument(
+  attachment: CommunicationAttachment,
+  context: {
+    tenantId: string;
+    uploadedById?: string;
+    uploadedAt: string;
+  }
+): Document {
+  const linkedDocument = attachment.documentId
+    ? api.documents.get(attachment.documentId)
+    : undefined;
+  if (linkedDocument) return linkedDocument;
+
+  return {
+    id: attachment.documentId ?? `email_attachment_${attachment.id}`,
+    tenantId: context.tenantId,
+    uploadedById: context.uploadedById ?? "system",
+    fileName: attachment.fileName,
+    fileType: attachment.fileType || "application/pdf",
+    documentName: attachment.description ?? "Email attachment",
+    templateFields: {
+      "Email attachment": attachment.fileName,
+      ...(attachment.description ? { Description: attachment.description } : {}),
+      ...(typeof attachment.filledFieldCount === "number"
+        ? { "Mapped field count": String(attachment.filledFieldCount) }
+        : {}),
+      ...(attachment.filledFields ?? {}),
+    },
+    type: "email_attachment",
+    visibility: "employee_only",
+    status: "approved",
+    storagePath:
+      attachment.storagePath ??
+      `s3://placeholder/${context.tenantId}/email-attachments/${attachment.id}/${attachment.fileName}`,
+    downloadUrl: attachment.dataUrl,
+    uploadedAt: context.uploadedAt,
+    lastChangeAction: "uploaded",
+    lastChangeAt: context.uploadedAt,
+  };
+}
 
 export function MessagesPage() {
   const { agency } = useTenant();
@@ -84,19 +206,19 @@ export function MessagesPage() {
   const [clientQuery, setClientQuery] = useState("");
   const [internalQuery, setInternalQuery] = useState("");
   const [carrierQuery, setCarrierQuery] = useState("");
-  // Unified "New send" modal — start a fresh conversation in whichever
-  // card the button was clicked (clients/prospects, internal, carriers).
+  // Unified "New send" modal â€” start a fresh conversation in whichever
+  // card the button was clicked (clients/prospects/holders, internal, carriers).
   const [newSend, setNewSend] = useState<null | "contact" | "internal" | "carrier">(null);
-  // Count of activities the AI auto-opened from inbound messages this
-  // visit — drives the "AI triaged your inbox" banner.
+  // Count of inbound messages the AI triaged into activities or notices this
+  // visit â€” drives the "AI triaged your inbox" banner.
   const [aiTriaged, setAiTriaged] = useState(0);
-  // Active selections — keep them in URL so deep-links from the
+  // Active selections â€” keep them in URL so deep-links from the
   // dashboard notification card land you on the right thread.
   const activeContactKey = searchParams.get("contact") ?? null;
   const activeInternalId = searchParams.get("thread") ?? null;
 
-  // AI scans inbound messages on load and opens activities for anything
-  // that needs follow-up; the thread flags each one inline.
+  // AI scans inbound messages on load. Actionable items become activities;
+  // informational items become dashboard notifications.
   useEffect(() => {
     if (!agency || !user) return;
     const created = api.communications.sweepInboundForActivities(agency.id, user.id);
@@ -118,6 +240,8 @@ export function MessagesPage() {
   const prospects = api.prospects.listByTenant(agency.id);
   const allComms = api.communications.listByTenant(agency.id);
   const allOutbound = api.marketing.listMessages(agency.id);
+  const emailComms = allComms.filter((c) => c.channel === "email");
+  const emailOutbound = allOutbound.filter((m) => m.channel === "email");
 
   // Build threads keyed by `kind:id`. Each contact gets one thread
   // mixing inbound communications + outbound marketing messages.
@@ -174,7 +298,7 @@ export function MessagesPage() {
           hasUnreadInbound: false,
         });
       });
-    allComms
+    emailComms
       .filter((c) => !c.customerId || visibleCustomerIds.has(c.customerId))
       .forEach((c) => {
         const key = c.customerId
@@ -190,7 +314,7 @@ export function MessagesPage() {
           isUnreadInbound: c.direction === "inbound" && !c.resolvedAt,
         });
       });
-    allOutbound
+    emailOutbound
       .filter((m) => !m.customerId || visibleCustomerIds.has(m.customerId))
       .forEach((m) => {
         const key = m.customerId
@@ -204,14 +328,36 @@ export function MessagesPage() {
           at: m.sentAt ?? m.createdAt,
         });
       });
+    emailComms
+      .filter((c) => !!c.externalRecipientEmail?.trim())
+      .forEach((c) => {
+        const id = holderThreadId(c.externalRecipientEmail);
+        if (!id) return;
+        const key = `holder:${id}`;
+        const base: ContactThread = map.get(key) ?? {
+          kind: "holder",
+          id,
+          name: c.externalRecipientName?.trim() || c.externalRecipientEmail || "Policy holder",
+          email: c.externalRecipientEmail,
+          subtitle: c.externalRecipientRole?.trim() || "Policy holder",
+          lastBody: "",
+          lastAt: c.createdAt,
+          hasUnreadInbound: false,
+        };
+        upsert(key, base, {
+          body: c.body,
+          at: c.createdAt,
+          isUnreadInbound: c.direction === "inbound" && !c.resolvedAt,
+        });
+      });
     // Surface carrier contacts as their own threads in the
-    // Carriers card — NOT mixed into the clients & prospects
+    // Carriers card â€” NOT mixed into the clients & prospects
     // column. The merging happens below in the separate
     // carrierThreads useMemo.
     return Array.from(map.values())
       .filter((t) => t.lastBody !== "" || t.hasUnreadInbound)
       .sort((a, b) => (a.lastAt < b.lastAt ? 1 : -1));
-  }, [customers, prospects, allComms, allOutbound, visibleCustomerIds]);
+  }, [customers, prospects, emailComms, emailOutbound, visibleCustomerIds]);
 
   const carrierThreads: ContactThread[] = useMemo(() => {
     const map = new Map<string, ContactThread>();
@@ -232,19 +378,21 @@ export function MessagesPage() {
     carrierContacts.forEach((cc) => {
       const carrier = api.carriers.get(cc.carrierId);
       const key = `carrier:${cc.id}`;
+      const carrierName = carrier?.name ?? "Carrier";
       map.set(key, {
         kind: "carrier",
         id: cc.id,
         name: cc.name,
         email: cc.email,
         phone: cc.phone,
-        subtitle: `${positionLabel(cc.position)} · ${carrier?.name ?? "Carrier"}`,
+        badgeLabel: positionLabel(cc.position),
+        subtitle: carrierName,
         lastBody: "",
         lastAt: cc.createdAt,
         hasUnreadInbound: false,
       });
     });
-    allComms
+    emailComms
       .filter((c) => c.carrierContactId)
       .forEach((c) => {
         const key = `carrier:${c.carrierContactId}`;
@@ -254,7 +402,7 @@ export function MessagesPage() {
     return Array.from(map.values()).sort((a, b) =>
       a.lastAt < b.lastAt ? 1 : -1
     );
-  }, [allComms, agency.id]);
+  }, [emailComms, agency.id]);
 
   const filteredContactThreads = useMemo(() => {
     const q = clientQuery.trim().toLowerCase();
@@ -292,6 +440,7 @@ export function MessagesPage() {
       (t) =>
         t.name.toLowerCase().includes(q) ||
         (t.email ?? "").toLowerCase().includes(q) ||
+        (t.badgeLabel ?? "").toLowerCase().includes(q) ||
         (t.subtitle ?? "").toLowerCase().includes(q) ||
         t.lastBody.toLowerCase().includes(q)
     );
@@ -305,6 +454,18 @@ export function MessagesPage() {
   const activeInternalThread = activeInternalId
     ? internalThreads.find((t) => t.id === activeInternalId) ?? null
     : null;
+  const staffMailbox = api.mailboxes.staff(user.id);
+  const connectedMailbox = staffMailbox?.address ?? user.businessEmail ?? user.email;
+  const connectedProvider = staffMailbox?.provider ?? user.mailProvider ?? inferMailProvider(connectedMailbox);
+  const connectedProviderName = mailProviderShortLabel(connectedProvider);
+  const mailbox: ConnectedMailbox = {
+    address: connectedMailbox,
+    provider: connectedProvider,
+    providerName: connectedProviderName,
+    connectionId: staffMailbox?.id,
+    status: staffMailbox?.status,
+    authMode: staffMailbox?.authMode,
+  };
 
   // Auto-mark internal thread read on focus.
   useEffect(() => {
@@ -328,33 +489,35 @@ export function MessagesPage() {
 
   return (
     <div className="space-y-4">
+      <EmployeeBackButton />
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="font-display text-3xl">Messages</h1>
           <p className="text-ink-500 text-sm mt-1">
-            Two-column inbox: client &amp; prospect threads on the left, internal staff
-            DMs on the right.
+            Email-only inbox {staffMailbox?.status === "connected" ? "connected" : "prepared"} for{" "}
+            {mailbox.providerName} through {mailbox.address}. Client, prospect, holder, and carrier
+            email threads stay mirrored here.
           </p>
         </div>
-        <Link to="/employee/tasks" className="btn-outline text-xs inline-flex">
-          ← Activity Center
-        </Link>
       </div>
+
+      {mailbox.authMode === "demo" && (
+        <div className="rounded-md border border-gold-200 bg-gold-50/60 px-4 py-3 text-xs text-gold-900">
+          Demo mailbox connection active. Production send/sync requires Google or Microsoft OAuth
+          tokens stored in the encrypted backend vault for this exact staff mailbox.
+        </div>
+      )}
 
       {aiTriaged > 0 && (
         <div className="rounded-md border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-900 flex items-start gap-3">
           <Bot className="h-4 w-4 mt-0.5 shrink-0 text-violet-600" />
           <div className="flex-1">
             <div className="font-medium">
-              AI opened {aiTriaged} activit{aiTriaged === 1 ? "y" : "ies"} from your inbox
+              AI triaged {aiTriaged} inbox message{aiTriaged === 1 ? "" : "s"}
             </div>
             <div className="text-xs text-violet-800 mt-0.5">
-              Inbound messages that need follow-up are flagged in their thread with a link to the
-              activity. Find them all in the{" "}
-              <Link to="/employee/tasks" className="underline">
-                Activity Center
-              </Link>
-              .
+              Actionable messages are linked to activities. Informational messages are logged as
+              dashboard notifications instead.
             </div>
           </div>
           <button
@@ -368,18 +531,31 @@ export function MessagesPage() {
       )}
 
       <div className="grid lg:grid-cols-2 gap-4">
-        {/* LEFT — Clients & prospects */}
+        {/* LEFT â€” Clients, prospects, and holders */}
         <ExpandableCard
-          title="Clients &amp; prospects"
+          className={MESSAGE_CARD_CLASS}
+          title="Clients, prospects, and holders"
           subtitle="One thread per contact, mixing inbound replies + outbound (AI / custom) sends."
           action={
-            <button
-              type="button"
-              className="btn-outline text-xs inline-flex"
-              onClick={() => setNewSend("contact")}
-            >
-              <Plus className="h-3 w-3" /> New send
-            </button>
+            <>
+              <a
+                href={mailboxUrl(connectedMailbox, connectedProvider)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn-outline text-xs inline-flex"
+                title={`Connected mailbox: ${connectedMailbox}`}
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+                Open {mailbox.providerName}
+              </a>
+              <button
+                type="button"
+                className="btn-outline text-xs inline-flex"
+                onClick={() => setNewSend("contact")}
+              >
+                <Plus className="h-3 w-3" /> New send
+              </button>
+            </>
           }
         >
           {(expanded) => (
@@ -389,7 +565,7 @@ export function MessagesPage() {
                 <SearchInput
                   value={clientQuery}
                   onChange={setClientQuery}
-                  placeholder="Search clients, prospects, body…"
+                  placeholder="Search clients, prospects, holders, body..."
                 />
               }
               renderList={(fill, compact) => (
@@ -417,6 +593,7 @@ export function MessagesPage() {
                   onSent={() => {
                     /* db change tick rerenders */
                   }}
+                  mailbox={mailbox}
                   fill={fill}
                 />
               )}
@@ -424,8 +601,9 @@ export function MessagesPage() {
           )}
         </ExpandableCard>
 
-        {/* RIGHT — Internal */}
+        {/* RIGHT â€” Internal */}
         <ExpandableCard
+          className={MESSAGE_CARD_CLASS}
           title="Internal"
           subtitle="Staff DMs and group threads. Private to the agency."
           action={
@@ -445,7 +623,7 @@ export function MessagesPage() {
                 <SearchInput
                   value={internalQuery}
                   onChange={setInternalQuery}
-                  placeholder="Search teammates or topic…"
+                  placeholder="Search teammates or topicâ€¦"
                 />
               }
               renderList={(fill, compact) => (
@@ -477,18 +655,31 @@ export function MessagesPage() {
       </div>
 
       <div className="grid lg:grid-cols-2 gap-4">
-        {/* LEFT — Carriers */}
+        {/* LEFT â€” Carriers */}
         <ExpandableCard
+          className={MESSAGE_CARD_CLASS}
           title="Carriers"
-          subtitle="Email threads with carrier reps (underwriters, adjusters, claims reps, etc.). Add or edit contacts under Carrier recommendations."
+          subtitle="Email threads with carrier reps (underwriters, adjusters, claims reps, etc.). Add or edit contacts under Carrier library."
           action={
-            <button
-              type="button"
-              className="btn-outline text-xs inline-flex"
-              onClick={() => setNewSend("carrier")}
-            >
-              <Plus className="h-3 w-3" /> New send
-            </button>
+            <>
+              <a
+                href={mailboxUrl(connectedMailbox, connectedProvider)}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn-outline text-xs inline-flex"
+                title={`Connected mailbox: ${connectedMailbox}`}
+              >
+                <ExternalLink className="h-3.5 w-3.5" />
+                Open {mailbox.providerName}
+              </a>
+              <button
+                type="button"
+                className="btn-outline text-xs inline-flex"
+                onClick={() => setNewSend("carrier")}
+              >
+                <Plus className="h-3 w-3" /> New send
+              </button>
+            </>
           }
         >
           {(expanded) => (
@@ -498,7 +689,7 @@ export function MessagesPage() {
                 <SearchInput
                   value={carrierQuery}
                   onChange={setCarrierQuery}
-                  placeholder="Search carrier reps, body…"
+                  placeholder="Search carrier reps, bodyâ€¦"
                 />
               }
               renderList={(fill, compact) => (
@@ -526,6 +717,7 @@ export function MessagesPage() {
                   onSent={() => {
                     /* db change tick rerenders */
                   }}
+                  mailbox={mailbox}
                   fill={fill}
                 />
               )}
@@ -533,9 +725,13 @@ export function MessagesPage() {
           )}
         </ExpandableCard>
 
-        {/* RIGHT — Email signature, sized to half-width so the
+        {/* RIGHT â€” Email signature, sized to half-width so the
             editor doesn't dominate the bottom of the page. */}
-        <EmailSignatureCard user={user} onSaved={() => setRev((r) => r + 1)} />
+        <EmailSignatureCard
+          user={user}
+          className="h-[620px] overflow-y-auto"
+          onSaved={() => setRev((r) => r + 1)}
+        />
       </div>
 
       <NewSendModal
@@ -584,11 +780,11 @@ function InboxBody({
     );
   }
   return (
-    <div>
+    <div className="h-[500px] min-h-0 flex flex-col">
       {search}
-      <div className="grid grid-cols-2 gap-3 mt-3 min-h-[440px]">
-        {renderList(false, false)}
-        {renderPane(false)}
+      <div className="grid grid-cols-1 gap-3 mt-3 flex-1 min-h-0 2xl:grid-cols-[minmax(220px,0.85fr)_minmax(340px,1.15fr)]">
+        {renderList(true, false)}
+        {renderPane(true)}
       </div>
     </div>
   );
@@ -646,7 +842,7 @@ function ContactThreadsList({
 }) {
   if (threads.length === 0) {
     return (
-      <div className="rounded-md border border-ink-100 text-sm text-ink-400 p-4 text-center">
+      <div className={`rounded-md border border-ink-100 text-sm text-ink-400 p-4 text-center ${fill ? "h-full flex items-center justify-center" : ""}`}>
         No conversations yet.
       </div>
     );
@@ -659,7 +855,7 @@ function ContactThreadsList({
     return a.lastAt < b.lastAt ? 1 : -1;
   });
   return (
-    <ul className={`rounded-md border border-ink-100 overflow-y-auto divide-y divide-ink-100 ${fill ? "h-full" : "max-h-[520px]"}`}>
+    <ul className={`message-scroll-pane rounded-md border border-ink-100 overflow-y-auto divide-y divide-ink-100 ${fill ? "h-full" : "max-h-[520px]"}`}>
       {sorted.map((t) => {
         const key = `${t.kind}:${t.id}`;
         const active = activeKey === key;
@@ -677,43 +873,45 @@ function ContactThreadsList({
               onClick={() => onSelect(key)}
               className="w-full text-left px-3 py-2 pr-9"
             >
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-1.5 min-w-0">
-                  {pinned && (
-                    <Pin className="h-3 w-3 text-gold-700 shrink-0" />
-                  )}
-                  {muted && <BellOff className="h-3 w-3 text-ink-400 shrink-0" />}
-                  {t.hasUnreadInbound && !muted && (
-                    <span className="h-2 w-2 rounded-full bg-blue-500 shrink-0" />
-                  )}
-                  <span className="text-sm font-medium truncate">{t.name}</span>
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    {pinned && (
+                      <Pin className="h-3 w-3 text-gold-700 shrink-0" />
+                    )}
+                    {muted && <BellOff className="h-3 w-3 text-ink-400 shrink-0" />}
+                    {t.hasUnreadInbound && !muted && (
+                      <span className="h-2 w-2 rounded-full bg-blue-500 shrink-0" />
+                    )}
+                    <span className="truncate text-sm font-medium">{t.name}</span>
+                  </div>
                   {!compact && (
-                    <Badge
-                      tone={
-                        t.kind === "client"
-                          ? "info"
-                          : t.kind === "carrier"
-                          ? "gold"
-                          : "neutral"
-                      }
-                    >
-                      {t.kind}
-                    </Badge>
+                    <div className="mt-1 flex min-w-0 items-center gap-1.5">
+                      <Badge
+                        tone={
+                          t.kind === "client"
+                            ? "info"
+                            : t.kind === "carrier"
+                            ? "gold"
+                            : "neutral"
+                        }
+                      >
+                        {t.badgeLabel ?? t.kind}
+                      </Badge>
+                      {t.subtitle && (
+                        <span className="min-w-[5rem] truncate text-[11px] font-medium text-ink-600">
+                          {t.subtitle}
+                        </span>
+                      )}
+                      <span className="ml-auto shrink-0 text-right text-[10px] leading-none text-ink-500">
+                        {fmt.dateTime(t.lastAt)}
+                      </span>
+                    </div>
                   )}
                 </div>
-                {!compact && (
-                  <span className="text-[10px] text-ink-500 shrink-0">
-                    {fmt.dateTime(t.lastAt)}
-                  </span>
-                )}
               </div>
-              {!compact && t.subtitle && (
-                <div className="text-[11px] text-ink-500 mt-0.5 truncate">
-                  {t.subtitle}
-                </div>
-              )}
               {!compact && (
-                <div className="text-xs text-ink-500 mt-0.5 truncate">
+                <div className="text-xs text-ink-500 mt-1 truncate">
                   {t.lastBody || "No messages yet."}
                 </div>
               )}
@@ -735,8 +933,8 @@ function ContactThreadsList({
 // Small absolute-positioned pin / unpin chip on the right edge of
 // each threads-list row. Catches its own click so it doesn't open
 // the thread.
-// Per-thread "⋯" actions menu. Opens a small popover with all of a
-// conversation's settings — pin, mute, and room to grow. Replaces the
+// Per-thread "â‹¯" actions menu. Opens a small popover with all of a
+// conversation's settings â€” pin, mute, and room to grow. Replaces the
 // old single pin chip.
 function ThreadActionsMenu({
   tenantId,
@@ -747,7 +945,7 @@ function ThreadActionsMenu({
 }: {
   tenantId: string;
   userId: string;
-  kind: "internal" | "client" | "prospect" | "carrier";
+  kind: "internal" | "client" | "prospect" | "holder" | "carrier";
   refId: string;
   onChanged: () => void;
 }) {
@@ -785,6 +983,8 @@ function ThreadActionsMenu({
       ? { prospectId: refId }
       : kind === "carrier"
       ? { carrierContactId: refId }
+      : kind === "holder"
+      ? { externalRecipientEmail: refId }
       : {};
 
   function markRead() {
@@ -916,12 +1116,30 @@ function ThreadActionsMenu({
   );
 }
 
+function mailboxUrlForContact(
+  mailbox: ConnectedMailbox,
+  contact: ContactThread,
+  row?: Communication | MarketingMessage
+): string {
+  const comm = row && "mailboxOrigin" in row ? row : undefined;
+  return mailboxThreadUrl({
+    mailbox: mailbox.address,
+    provider: mailbox.provider,
+    contactEmail: contact.email,
+    subject: row?.subject,
+    threadId: comm?.threadId,
+    externalThreadId: comm?.externalThreadId,
+    externalUrl: comm?.externalUrl,
+  });
+}
+
 function ActiveContactPane({
   tenantId,
   userId,
   contact,
   onClose,
   onSent,
+  mailbox,
   fill = false,
 }: {
   tenantId: string;
@@ -929,41 +1147,37 @@ function ActiveContactPane({
   contact: ContactThread | null;
   onClose: () => void;
   onSent: () => void;
+  mailbox: ConnectedMailbox;
   fill?: boolean;
 }) {
-  const [channel, setChannel] = useState<"email" | "sms">("email");
   const [busy, setBusy] = useState(false);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
+  const [previewDocument, setPreviewDocument] = useState<Document | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  // Carrier threads are email-only — never leave the view stuck on the
-  // (always empty) SMS tab.
-  useEffect(() => {
-    if (contact?.kind === "carrier") setChannel("email");
-  }, [contact?.kind, contact?.id]);
+  const scrollContentRef = useRef<HTMLDivElement | null>(null);
   // Message count drives the auto-scroll-to-latest effect below.
   const msgCount = contact
     ? api.communications
         .listByTenant(tenantId)
         .filter(
           (c) =>
-            (contact.kind === "client" && c.customerId === contact.id) ||
-            (contact.kind === "prospect" && c.prospectId === contact.id) ||
-            (contact.kind === "carrier" && c.carrierContactId === contact.id)
+            c.channel === "email" &&
+            ((contact.kind === "client" && c.customerId === contact.id) ||
+              (contact.kind === "prospect" && c.prospectId === contact.id) ||
+              (contact.kind === "carrier" && c.carrierContactId === contact.id) ||
+              (contact.kind === "holder" &&
+                holderThreadId(c.externalRecipientEmail) === contact.id))
         ).length +
       api.marketing
         .listMessages(tenantId)
         .filter(
           (m) =>
-            (contact.kind === "client" && m.customerId === contact.id) ||
-            (contact.kind === "prospect" && m.prospectId === contact.id)
+            m.channel === "email" &&
+            ((contact.kind === "client" && m.customerId === contact.id) ||
+              (contact.kind === "prospect" && m.prospectId === contact.id))
         ).length
     : 0;
-  // Land on the most recent message when the thread opens, the channel
-  // switches, the card is expanded, or a new message arrives.
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [contact?.id, channel, fill, msgCount]);
+  useAnchoredMessageScroll(scrollRef, scrollContentRef, [contact?.id, fill, msgCount]);
   if (!contact) {
     return (
       <div className={`rounded-md border border-dashed border-ink-200 text-sm text-ink-400 p-4 text-center flex items-center justify-center ${fill ? "h-full" : ""}`}>
@@ -972,10 +1186,12 @@ function ActiveContactPane({
     );
   }
 
-  const allTenantComms = api.communications.listByTenant(tenantId);
+  const allTenantComms = api.communications
+    .listByTenant(tenantId)
+    .filter((c) => c.channel === "email");
   const inbound =
     contact.kind === "client"
-      ? api.communications.listByCustomer(contact.id)
+      ? api.communications.listByCustomer(contact.id).filter((c) => c.channel === "email")
       : [];
   const fromProspect =
     contact.kind === "prospect"
@@ -985,11 +1201,16 @@ function ActiveContactPane({
     contact.kind === "carrier"
       ? allTenantComms.filter((c) => c.carrierContactId === contact.id)
       : [];
+  const holderComms =
+    contact.kind === "holder"
+      ? allTenantComms.filter((c) => holderThreadId(c.externalRecipientEmail) === contact.id)
+      : [];
   const outbound =
-    contact.kind === "carrier"
+    contact.kind === "carrier" || contact.kind === "holder"
       ? []
       : api.marketing
-          .listMessages(tenantId)
+        .listMessages(tenantId)
+          .filter((m) => m.channel === "email")
           .filter((m) =>
             contact.kind === "client"
               ? m.customerId === contact.id
@@ -1002,17 +1223,16 @@ function ActiveContactPane({
     ...inbound.map((c) => ({ kind: "comm" as const, row: c })),
     ...fromProspect.map((c) => ({ kind: "comm" as const, row: c })),
     ...carrierComms.map((c) => ({ kind: "comm" as const, row: c })),
+    ...holderComms.map((c) => ({ kind: "comm" as const, row: c })),
     ...outbound.map((m) => ({ kind: "out" as const, row: m })),
   ].sort((a, b) => {
     const aAt = a.kind === "comm" ? a.row.createdAt : a.row.sentAt ?? a.row.createdAt;
     const bAt = b.kind === "comm" ? b.row.createdAt : b.row.sentAt ?? b.row.createdAt;
     return aAt < bAt ? -1 : 1;
   });
-  // Email and SMS are viewed separately — the channel toggle filters
-  // the thread down to one medium at a time (and drives what the
-  // composer sends).
-  const allowSms = contact.kind !== "carrier";
-  const visibleRows = merged.filter((r) => r.row.channel === channel);
+  const visibleRows = merged;
+  const latestEmailRow = visibleRows.length ? visibleRows[visibleRows.length - 1].row : undefined;
+  const threadUrl = mailboxUrlForContact(mailbox, contact, latestEmailRow);
 
   function send(msg: ComposedMessage) {
     setBusy(true);
@@ -1025,12 +1245,19 @@ function ActiveContactPane({
         prospectId: contact!.kind === "prospect" ? contact!.id : undefined,
         carrierContactId:
           contact!.kind === "carrier" ? contact!.id : undefined,
+        externalRecipientName:
+          contact!.kind === "holder" ? contact!.name : undefined,
+        externalRecipientEmail:
+          contact!.kind === "holder" ? contact!.email ?? contact!.id : undefined,
+        externalRecipientRole:
+          contact!.kind === "holder" ? contact!.subtitle : undefined,
         channel: msg.channel,
         direction: "outbound",
         subject: msg.subject,
         threadId: msg.threadId,
         replyToId: msg.replyToId,
         body: msg.body,
+        attachments: msg.attachments,
         createdById: userId,
       });
       setReplyTarget(null);
@@ -1041,7 +1268,8 @@ function ActiveContactPane({
   }
 
   return (
-    <div className={`rounded-md border border-ink-100 flex flex-col ${fill ? "h-full" : "max-h-[520px]"}`}>
+    <>
+    <div className={`min-w-0 overflow-hidden rounded-md border border-ink-100 flex flex-col ${fill ? "h-full" : "max-h-[520px]"}`}>
       <div className="px-3 py-2 border-b border-ink-100 flex items-center justify-between gap-2 shrink-0">
         <div className="min-w-0">
           <div className="text-sm font-semibold truncate">{contact.name}</div>
@@ -1049,7 +1277,7 @@ function ActiveContactPane({
             <div className="text-[11px] text-ink-500 truncate">{contact.subtitle}</div>
           )}
           <div className="text-[11px] text-ink-500 truncate">
-            {contact.email ?? contact.phone ?? "—"} ·{" "}
+            {contact.email ?? contact.phone ?? "â€”"} Â·{" "}
             <Badge
               tone={
                 contact.kind === "client"
@@ -1059,78 +1287,75 @@ function ActiveContactPane({
                   : "neutral"
               }
             >
-              {contact.kind}
+              {contact.badgeLabel ?? contact.kind}
             </Badge>
           </div>
         </div>
-        <button
-          type="button"
-          className="text-ink-400 hover:text-ink-700 text-xs"
-          onClick={onClose}
-          aria-label="Close conversation"
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
-      </div>
-      {/* Channel switch — Email and SMS are kept in separate views. */}
-      <div className="px-3 pt-2 shrink-0">
-        <div className="inline-flex rounded-md border border-ink-200 overflow-hidden text-xs">
+        <div className="shrink-0 flex items-center gap-1.5">
+          <a
+            href={threadUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="btn-outline text-xs inline-flex"
+            title={`Open this thread in ${mailbox.providerName} (${mailbox.address})`}
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+            Open in {mailbox.providerName}
+          </a>
           <button
             type="button"
-            onClick={() => setChannel("email")}
-            className={`inline-flex items-center gap-1 px-3 py-1.5 ${
-              channel === "email"
-                ? "bg-ink-900 text-white"
-                : "bg-white text-ink-700 hover:bg-ink-50"
-            }`}
+            className="text-ink-400 hover:text-ink-700 text-xs"
+            onClick={onClose}
+            aria-label="Close conversation"
           >
-            <Mail className="h-3.5 w-3.5" /> Email
-          </button>
-          <button
-            type="button"
-            onClick={() => allowSms && setChannel("sms")}
-            disabled={!allowSms}
-            title={allowSms ? undefined : "This contact is email-only."}
-            className={`inline-flex items-center gap-1 px-3 py-1.5 border-l border-ink-200 ${
-              channel === "sms"
-                ? "bg-ink-900 text-white"
-                : "bg-white text-ink-700 hover:bg-ink-50"
-            } ${!allowSms ? "opacity-40 cursor-not-allowed" : ""}`}
-          >
-            <MessageSquare className="h-3.5 w-3.5" /> SMS
+            <X className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-3 space-y-2.5">
-        {visibleRows.length === 0 ? (
-          <div className="text-sm text-ink-400 text-center py-6">
-            No {channel === "email" ? "email" : "SMS"} messages yet — send the first one below.
-          </div>
-        ) : (
-          visibleRows.map((r, i) => {
+      <div ref={scrollRef} className={MESSAGE_SCROLL_PANE_CLASS}>
+        <div ref={scrollContentRef} className="space-y-2.5">
+          {visibleRows.length === 0 ? (
+            <div className="text-sm text-ink-400 text-center py-6">
+              No email messages yet - send the first one below.
+            </div>
+          ) : (
+            visibleRows.map((r, i) => {
             const isInbound = r.kind === "comm" && r.row.direction === "inbound";
             const isOut = r.kind === "out";
             const isOutboundComm = r.kind === "comm" && r.row.direction === "outbound";
             const fromCustomer = isInbound;
             const at = r.kind === "comm" ? r.row.createdAt : r.row.sentAt ?? r.row.createdAt;
             const body = r.kind === "comm" ? r.row.body : r.row.content;
+            const attachments = r.kind === "comm" ? r.row.attachments ?? [] : [];
             const channelChip =
               r.kind === "comm" ? r.row.channel : r.row.channel;
             const ai = isOut;
+            const isMarketingPamphlet = isOut && body.includes("[[quotex:marketing-pamphlet");
             const aiTaskId = r.kind === "comm" ? r.row.aiActivityTaskId : undefined;
+            const aiNoticeId = r.kind === "comm" ? r.row.aiActivityNotificationId : undefined;
             return (
               <div
                 key={i}
                 className={`flex ${fromCustomer ? "justify-start" : "justify-end"}`}
               >
                 <div
-                  className={`w-[min(85%,600px)] rounded-lg px-3 py-2 text-sm ${
-                    fromCustomer
-                      ? "bg-ink-100 text-ink-900"
-                      : isOutboundComm
-                      ? "bg-gold-100 text-ink-900"
-                      : "bg-violet-100 text-violet-900"
-                  } ${aiTaskId ? "ring-2 ring-violet-300" : ""}`}
+                  className={`${
+                    isMarketingPamphlet
+                      ? "w-[min(96%,980px)] rounded-lg bg-transparent px-0 py-0 text-sm text-ink-900"
+                      : `w-[min(85%,600px)] rounded-lg px-3 py-2 text-sm ${
+                          fromCustomer
+                            ? "bg-ink-100 text-ink-900"
+                            : isOutboundComm
+                            ? "bg-gold-100 text-ink-900"
+                            : "bg-violet-100 text-violet-900"
+                        }`
+                  } ${
+                    aiTaskId
+                      ? "ring-2 ring-violet-300"
+                      : aiNoticeId
+                      ? "ring-2 ring-blue-200"
+                      : ""
+                  }`}
                 >
                   <div className="text-[10px] text-ink-500 mb-0.5 flex items-center gap-1">
                     {ai && <Bot className="h-3 w-3 text-violet-600" />}
@@ -1139,27 +1364,66 @@ function ActiveContactPane({
                       : isOutboundComm
                       ? "You"
                       : "AI send"}
-                    {" · "}
+                    {" Â· "}
                     {String(channelChip).toUpperCase()}
-                    {" · "}
+                    {" Â· "}
                     {fmt.dateTime(at)}
                   </div>
                   {r.row.subject && (
                     <div className="font-medium mb-0.5">{r.row.subject}</div>
                   )}
-                  <p className="whitespace-pre-wrap leading-snug">{body}</p>
-                  {String(channelChip) === "email" && (
+                  <RichMessageBody body={body} tenantId={tenantId} />
+                  {attachments.length > 0 && (
+                    <div className="mt-2 space-y-1.5">
+                      {attachments.map((attachment) => (
+                        <button
+                          key={attachment.id}
+                          type="button"
+                          className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-ink-200 bg-white/80 px-2 py-1 text-left text-[11px] text-ink-700 transition hover:border-gold-300 hover:bg-white hover:text-ink-950 focus:outline-none focus:ring-2 focus:ring-gold-200"
+                          title={`Preview ${attachment.fileName}`}
+                          aria-label={`Preview ${attachment.fileName}`}
+                          onClick={() =>
+                            setPreviewDocument(
+                              attachmentPreviewDocument(attachment, {
+                                tenantId,
+                                uploadedById:
+                                  r.kind === "comm" ? r.row.createdById : undefined,
+                                uploadedAt: at,
+                              })
+                            )
+                          }
+                        >
+                          <Paperclip className="h-3 w-3 shrink-0 text-ink-500" />
+                          <FileText className="h-3 w-3 shrink-0 text-gold-700" />
+                          <span className="min-w-0 truncate">{attachment.fileName}</span>
+                          <span className="shrink-0 rounded-full bg-ink-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-ink-500">
+                            {attachment.fileType === "application/pdf" ||
+                            /\.pdf$/i.test(attachment.fileName)
+                              ? "PDF"
+                              : "File"}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => {
-                        setChannel("email");
-                        setReplyTarget(replyTargetForRow(r.row));
-                      }}
-                      className="mt-1 inline-flex items-center gap-1 text-[10px] text-ink-500 hover:text-ink-800"
+                      onClick={() => setReplyTarget(replyTargetForRow(r.row))}
+                      className="inline-flex items-center gap-1 text-[10px] text-ink-500 hover:text-ink-800"
                     >
                       <Reply className="h-3 w-3" /> Reply
                     </button>
-                  )}
+                    <a
+                      href={mailboxUrlForContact(mailbox, contact, r.row)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-[10px] text-ink-500 hover:text-ink-800"
+                      title={`Open this message in ${mailbox.providerName}`}
+                    >
+                      <ExternalLink className="h-3 w-3" /> Open in {mailbox.providerName}
+                    </a>
+                  </div>
                   {aiTaskId && (
                     <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-violet-300 bg-violet-50 px-2 py-1.5 text-[11px] text-violet-800">
                       <span className="inline-flex items-center gap-1 min-w-0">
@@ -1170,27 +1434,37 @@ function ActiveContactPane({
                         to={`/employee/tasks?focus=${aiTaskId}`}
                         className="shrink-0 inline-flex items-center gap-1 font-medium text-violet-700 hover:text-violet-900"
                       >
-                        Go to activity →
+                        Go to activity â†’
                       </Link>
+                    </div>
+                  )}
+                  {!aiTaskId && aiNoticeId && (
+                    <div className="mt-2 flex items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-2 py-1.5 text-[11px] text-blue-800">
+                      <Zap className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+                      <span className="truncate">AI logged a notification for this</span>
                     </div>
                   )}
                 </div>
               </div>
             );
-          })
-        )}
+            })
+          )}
+        </div>
       </div>
       <MessageComposer
-        channel={channel}
-        onChannelChange={setChannel}
         replyTarget={replyTarget}
         onCancelReply={() => setReplyTarget(null)}
         onSend={send}
         busy={busy}
         contactName={contact.name}
-        allowSms={contact.kind !== "carrier"}
       />
     </div>
+    <DocumentViewerModal
+      document={previewDocument}
+      open={!!previewDocument}
+      onClose={() => setPreviewDocument(null)}
+    />
+    </>
   );
 }
 
@@ -1225,7 +1499,7 @@ function InternalThreadsList({
 }) {
   if (threads.length === 0) {
     return (
-      <div className="rounded-md border border-ink-100 text-sm text-ink-400 p-4 text-center">
+      <div className={`rounded-md border border-ink-100 text-sm text-ink-400 p-4 text-center ${fill ? "h-full flex items-center justify-center" : ""}`}>
         No DMs yet. Click <span className="font-medium">New</span> to start one.
       </div>
     );
@@ -1238,7 +1512,7 @@ function InternalThreadsList({
     return a.lastMessageAt < b.lastMessageAt ? 1 : -1;
   });
   return (
-    <ul className={`rounded-md border border-ink-100 overflow-y-auto divide-y divide-ink-100 ${fill ? "h-full" : "max-h-[520px]"}`}>
+    <ul className={`message-scroll-pane rounded-md border border-ink-100 overflow-y-auto divide-y divide-ink-100 ${fill ? "h-full" : "max-h-[520px]"}`}>
       {sorted.map((t) => {
         const others = t.participantIds.filter((id) => id !== viewerId);
         const label =
@@ -1272,33 +1546,37 @@ function InternalThreadsList({
               onClick={() => onSelect(t.id)}
               className="w-full text-left px-3 py-2 pr-9"
             >
-              <div className="flex items-center justify-between gap-2">
-                <div className="flex items-center gap-1.5 min-w-0">
-                  {pinned && (
-                    <Pin className="h-3 w-3 text-gold-700 shrink-0" />
-                  )}
-                  {muted && <BellOff className="h-3 w-3 text-ink-400 shrink-0" />}
-                  {unread && !muted && (
-                    <span className="h-2 w-2 rounded-full bg-blue-500 shrink-0" />
-                  )}
-                  <span className="text-sm font-medium truncate">{label}</span>
-                  {!compact && others.length > 1 && (
-                    <Badge tone="neutral">
-                      <Users className="h-3 w-3" /> {others.length + 1}
-                    </Badge>
-                  )}
-                  {latest?.urgency && latest.urgency !== "info" && (
-                    <UrgencyDot urgency={latest.urgency} />
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    {pinned && (
+                      <Pin className="h-3 w-3 text-gold-700 shrink-0" />
+                    )}
+                    {muted && <BellOff className="h-3 w-3 text-ink-400 shrink-0" />}
+                    {unread && !muted && (
+                      <span className="h-2 w-2 rounded-full bg-blue-500 shrink-0" />
+                    )}
+                    <span className="truncate text-sm font-medium">{label}</span>
+                  </div>
+                  {!compact && (
+                    <div className="mt-1 flex min-w-0 items-center gap-1.5">
+                      {others.length > 1 && (
+                        <Badge tone="neutral">
+                          <Users className="h-3 w-3" /> {others.length + 1}
+                        </Badge>
+                      )}
+                      {latest?.urgency && latest.urgency !== "info" && (
+                        <UrgencyDot urgency={latest.urgency} />
+                      )}
+                      <span className="ml-auto shrink-0 text-right text-[10px] leading-none text-ink-500">
+                        {fmt.dateTime(t.lastMessageAt)}
+                      </span>
+                    </div>
                   )}
                 </div>
-                {!compact && (
-                  <span className="text-[10px] text-ink-500 shrink-0">
-                    {fmt.dateTime(t.lastMessageAt)}
-                  </span>
-                )}
               </div>
               {!compact && (
-                <div className="text-xs text-ink-500 mt-0.5 truncate">
+                <div className="text-xs text-ink-500 mt-1 truncate">
                   {latest?.body ?? "No messages yet."}
                 </div>
               )}
@@ -1345,6 +1623,7 @@ function ActiveInternalPane({
   const [busy, setBusy] = useState(false);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const scrollContentRef = useRef<HTMLDivElement | null>(null);
   // Grow the composer downward as the message gets longer.
   useEffect(() => {
     const el = taRef.current;
@@ -1355,12 +1634,7 @@ function ActiveInternalPane({
   const threadMsgCount = thread
     ? api.internalMessages.listMessages(thread.id).length
     : 0;
-  // Land on the latest message when the thread opens, the card is
-  // expanded, or a new message arrives.
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [thread?.id, fill, threadMsgCount]);
+  useAnchoredMessageScroll(scrollRef, scrollContentRef, [thread?.id, fill, threadMsgCount]);
   if (!thread) {
     return (
       <div className={`rounded-md border border-dashed border-ink-200 text-sm text-ink-400 p-4 text-center flex items-center justify-center ${fill ? "h-full" : ""}`}>
@@ -1395,7 +1669,7 @@ function ActiveInternalPane({
   }
 
   return (
-    <div className={`rounded-md border border-ink-100 flex flex-col ${fill ? "h-full" : "max-h-[520px]"}`}>
+    <div className={`min-w-0 overflow-hidden rounded-md border border-ink-100 flex flex-col ${fill ? "h-full" : "max-h-[520px]"}`}>
       <div className="px-3 py-2 border-b border-ink-100 flex items-center justify-between gap-2 shrink-0">
         <div className="min-w-0">
           <div className="text-sm font-semibold truncate">{label}</div>
@@ -1413,17 +1687,18 @@ function ActiveInternalPane({
           <X className="h-3.5 w-3.5" />
         </button>
       </div>
-      <div ref={scrollRef} className="flex-1 overflow-y-auto p-3 space-y-2.5">
-        {msgs.length === 0 ? (
-          <div className="text-sm text-ink-400 text-center py-6">
-            Empty thread — send the first message below.
-          </div>
-        ) : (
-          msgs.map((m) => {
+      <div ref={scrollRef} className={MESSAGE_SCROLL_PANE_CLASS}>
+        <div ref={scrollContentRef} className="space-y-2.5">
+          {msgs.length === 0 ? (
+            <div className="text-sm text-ink-400 text-center py-6">
+              Empty thread â€” send the first message below.
+            </div>
+          ) : (
+            msgs.map((m) => {
             const mine = m.fromUserId === user.id;
             const fromName = mine
               ? "You"
-              : staff.find((s) => s.id === m.fromUserId)?.name ?? "—";
+              : staff.find((s) => s.id === m.fromUserId)?.name ?? "â€”";
             const bg = mine
               ? "bg-gold-100 text-ink-900"
               : m.urgency === "urgent"
@@ -1436,20 +1711,21 @@ function ActiveInternalPane({
                 key={m.id}
                 className={`flex ${mine ? "justify-end" : "justify-start"}`}
               >
-                <div className={`w-[min(85%,600px)] rounded-lg px-3 py-2 text-sm ${bg}`}>
-                  <div className="text-[10px] mb-0.5 flex items-center gap-1 opacity-80">
+                <div className={`w-[min(85%,600px)] max-w-full rounded-lg px-3 py-2 text-sm ${bg}`}>
+                  <div className="text-[10px] mb-0.5 flex flex-wrap items-center gap-1 opacity-80">
                     <span>{fromName}</span>
                     {m.urgency && m.urgency !== "info" && (
                       <UrgencyDot urgency={m.urgency} />
                     )}
-                    <span>· {fmt.dateTime(m.createdAt)}</span>
+                    <span>Â· {fmt.dateTime(m.createdAt)}</span>
                   </div>
-                  <p className="whitespace-pre-wrap leading-snug">{m.body}</p>
+                  <p className="whitespace-pre-wrap break-words leading-snug">{m.body}</p>
                 </div>
               </div>
             );
-          })
-        )}
+            })
+          )}
+        </div>
       </div>
       <div className="border-t border-ink-100 p-3 space-y-2 shrink-0">
         <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -1461,7 +1737,7 @@ function ActiveInternalPane({
         <textarea
           ref={taRef}
           className="input text-sm w-full min-h-[60px] max-h-72 resize-none overflow-y-auto"
-          placeholder="Write a message…"
+          placeholder="Write a messageâ€¦"
           value={body}
           onChange={(e) => setBody(e.target.value)}
         />
@@ -1473,7 +1749,7 @@ function ActiveInternalPane({
             disabled={busy || !body.trim()}
           >
             <Send className="h-3.5 w-3.5" />
-            {busy ? "Sending…" : "Send"}
+            {busy ? "Sendingâ€¦" : "Send"}
           </button>
         </div>
       </div>
@@ -1482,12 +1758,12 @@ function ActiveInternalPane({
 }
 
 // Unified "New send" composer. Start a fresh conversation in any of
-// the three message cards — clients/prospects, internal staff, or
+// the three message cards â€” clients/prospects/holders, internal staff, or
 // carrier reps. You can only pick a contact you don't already have a
-// conversation with; choose the channel + (email) subject / (internal)
-// urgency, write the first message, and send.
+// conversation with; choose an email subject / internal urgency, write
+// the first message, and send.
 type SendTarget = {
-  kind: "client" | "prospect" | "carrier" | "internal";
+  kind: "client" | "prospect" | "holder" | "carrier" | "internal";
   id: string;
 };
 
@@ -1506,25 +1782,28 @@ function NewSendModal({
 }) {
   const [query, setQuery] = useState("");
   const [pickedId, setPickedId] = useState<string | null>(null);
-  const [channel, setChannel] = useState<"email" | "sms">("email");
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
+  const [attachments, setAttachments] = useState<CommunicationAttachment[]>([]);
+  const [attaching, setAttaching] = useState(false);
   const [urgency, setUrgency] = useState<TaskSeverity>("info");
   const [busy, setBusy] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (!mode) return;
     setQuery("");
     setPickedId(null);
-    setChannel("email");
     setSubject("");
     setBody("");
+    setAttachments([]);
+    setAttaching(false);
     setUrgency("info");
     setBusy(false);
   }, [mode]);
 
   type Opt = {
-    kind: "client" | "prospect" | "carrier" | "internal";
+    kind: "client" | "prospect" | "holder" | "carrier" | "internal";
     id: string;
     name: string;
     sub?: string;
@@ -1549,7 +1828,9 @@ function NewSendModal({
         .map<Opt>((s) => ({ kind: "internal", id: s.id, name: s.name, sub: s.email, tag: s.role }));
     }
     if (mode === "carrier") {
-      const comms = api.communications.listByTenant(tenantId);
+      const comms = api.communications
+        .listByTenant(tenantId)
+        .filter((c) => c.channel === "email");
       return api.carrierContacts
         .listForTenant(tenantId)
         .filter((cc) => !comms.some((c) => c.carrierContactId === cc.id))
@@ -1562,12 +1843,37 @@ function NewSendModal({
     }
     const customers = api.customers.listVisible(tenantId, { id: viewer.id, role: viewer.role });
     const prospects = api.prospects.listByTenant(tenantId);
-    const allComms = api.communications.listByTenant(tenantId);
-    const allMarketing = api.marketing.listMessages(tenantId);
+    const allComms = api.communications
+      .listByTenant(tenantId)
+      .filter((c) => c.channel === "email");
+    const allMarketing = api.marketing
+      .listMessages(tenantId)
+      .filter((m) => m.channel === "email");
+    const policies = api.policies.listByTenant(tenantId);
     const clientHasChat = (id: string) =>
       allComms.some((c) => c.customerId === id) || allMarketing.some((m) => m.customerId === id);
     const prospectHasChat = (id: string) =>
       allComms.some((c) => c.prospectId === id) || allMarketing.some((m) => m.prospectId === id);
+    const holderHasChat = (email: string) =>
+      allComms.some((c) => holderThreadId(c.externalRecipientEmail) === holderThreadId(email));
+    const holderOptions = new Map<string, Opt>();
+    policies.forEach((policy) => {
+      [...(policy.additionalInsureds ?? []), ...(policy.beneficiaries ?? [])].forEach((holder) => {
+        const email = holder.email?.trim();
+        const id = holderThreadId(email);
+        if (!email || !id || holderHasChat(email) || holderOptions.has(id)) return;
+        const role =
+          holder.relationship?.trim() ||
+          (holder.holderType ? fmt.titleCase(holder.holderType.replace(/_/g, " ")) : "Policy holder");
+        holderOptions.set(id, {
+          kind: "holder",
+          id,
+          name: holder.name,
+          sub: `${role} - ${email}`,
+          tag: "holder",
+        });
+      });
+    });
     return [
       ...customers
         .filter((c) => !c.archived && !clientHasChat(c.id))
@@ -1575,6 +1881,7 @@ function NewSendModal({
       ...prospects
         .filter((p) => !p.archived && !prospectHasChat(p.id))
         .map<Opt>((p) => ({ kind: "prospect", id: p.id, name: p.name, sub: p.email, tag: "prospect" })),
+      ...Array.from(holderOptions.values()),
     ];
   }, [mode, tenantId, viewer.id, viewer.role]);
 
@@ -1582,7 +1889,6 @@ function NewSendModal({
 
   const isInternal = mode === "internal";
   const isCarrier = mode === "carrier";
-  const effChannel: "email" | "sms" = isCarrier ? "email" : channel;
   const q = query.trim().toLowerCase();
   const filtered = options.filter(
     (o) => !q || o.name.toLowerCase().includes(q) || (o.sub ?? "").toLowerCase().includes(q)
@@ -1593,7 +1899,24 @@ function NewSendModal({
     ? "You already have a direct thread with every teammate."
     : isCarrier
     ? "Every carrier contact already has a thread."
-    : "Every client and prospect already has a conversation.";
+    : "Every client, prospect, and holder already has a conversation.";
+
+  async function handleFiles(files: FileList | null) {
+    const pickedFiles = Array.from(files ?? []);
+    if (pickedFiles.length === 0) return;
+    setAttaching(true);
+    try {
+      const next = await Promise.all(pickedFiles.map(fileToCommunicationAttachment));
+      setAttachments((current) => [...current, ...next]);
+    } finally {
+      setAttaching(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  }
+
+  function removeAttachment(id: string) {
+    setAttachments((current) => current.filter((attachment) => attachment.id !== id));
+  }
 
   function send() {
     if (!picked || !body.trim()) return;
@@ -1620,11 +1943,14 @@ function NewSendModal({
         customerId: picked.kind === "client" ? picked.id : undefined,
         prospectId: picked.kind === "prospect" ? picked.id : undefined,
         carrierContactId: picked.kind === "carrier" ? picked.id : undefined,
-        channel: effChannel,
+        externalRecipientName: picked.kind === "holder" ? picked.name : undefined,
+        externalRecipientEmail: picked.kind === "holder" ? picked.id : undefined,
+        externalRecipientRole: picked.kind === "holder" ? picked.sub?.split(" - ")[0] : undefined,
+        channel: "email",
         direction: "outbound",
-        subject:
-          effChannel === "email" ? subject.trim() || "A message from your agent" : undefined,
+        subject: subject.trim() || "A message from your agent",
         body: body.trim(),
+        attachments,
         createdById: viewer.id,
       });
       onDone({ kind: picked.kind, id: picked.id });
@@ -1643,7 +1969,7 @@ function NewSendModal({
 
         <div>
           <label className="label">Recipient</label>
-          <SearchInput value={query} onChange={setQuery} placeholder="Search by name or email…" />
+          <SearchInput value={query} onChange={setQuery} placeholder="Search by name or emailâ€¦" />
           <div className="mt-2 rounded-md border border-ink-100 max-h-[220px] overflow-y-auto divide-y divide-ink-100">
             {filtered.length === 0 ? (
               <div className="px-3 py-4 text-sm text-ink-400">
@@ -1680,34 +2006,7 @@ function NewSendModal({
           </div>
         </div>
 
-        {!isInternal && !isCarrier && (
-          <div>
-            <label className="label">Channel</label>
-            <div className="flex gap-2">
-              {(["email", "sms"] as const).map((c) => (
-                <button
-                  key={c}
-                  type="button"
-                  onClick={() => setChannel(c)}
-                  className={`text-xs px-3 py-1.5 rounded border inline-flex items-center gap-1 ${
-                    channel === c
-                      ? "bg-gold-100 border-gold-300 text-gold-800"
-                      : "bg-white border-ink-200 text-ink-600 hover:border-ink-300"
-                  }`}
-                >
-                  {c === "email" ? (
-                    <Mail className="h-3.5 w-3.5" />
-                  ) : (
-                    <MessageSquare className="h-3.5 w-3.5" />
-                  )}
-                  {c.toUpperCase()}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {!isInternal && effChannel === "email" && (
+        {!isInternal && (
           <div>
             <label className="label">Subject</label>
             <input
@@ -1730,11 +2029,62 @@ function NewSendModal({
           <label className="label">Message</label>
           <textarea
             className="input text-sm min-h-[100px]"
-            placeholder="Write your message…"
+            placeholder="Write your messageâ€¦"
             value={body}
             onChange={(e) => setBody(e.target.value)}
           />
         </div>
+
+        {!isInternal && (
+          <div className="space-y-2">
+            <button
+              type="button"
+              className="btn-outline text-xs"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={attaching || busy}
+              title="Attach a file from your computer"
+            >
+              {attaching ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Plus className="h-3.5 w-3.5" />
+              )}
+              <Paperclip className="h-3.5 w-3.5" />
+              Attach file
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              multiple
+              onChange={(event) => void handleFiles(event.target.files)}
+            />
+            {attachments.length > 0 && (
+              <div className="flex flex-wrap gap-1.5">
+                {attachments.map((attachment) => (
+                  <span
+                    key={attachment.id}
+                    className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-ink-200 bg-white px-2 py-1 text-[11px] text-ink-700"
+                  >
+                    <Paperclip className="h-3 w-3 shrink-0 text-ink-400" />
+                    <span className="max-w-[14rem] truncate">{attachment.fileName}</span>
+                    {attachment.sizeBytes ? (
+                      <span className="shrink-0 text-ink-400">{formatAttachmentSize(attachment.sizeBytes)}</span>
+                    ) : null}
+                    <button
+                      type="button"
+                      className="text-ink-400 hover:text-rose-600"
+                      onClick={() => removeAttachment(attachment.id)}
+                      aria-label={`Remove ${attachment.fileName}`}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="flex items-center justify-end gap-2 pt-3 border-t border-ink-100">
           <button type="button" className="btn-outline text-sm" onClick={onClose}>
@@ -1744,9 +2094,9 @@ function NewSendModal({
             type="button"
             className="btn-gold text-sm"
             onClick={send}
-            disabled={busy || !canSend}
+            disabled={busy || attaching || !canSend}
           >
-            <Send className="h-3.5 w-3.5" /> {busy ? "Sending…" : "Send"}
+            <Send className="h-3.5 w-3.5" /> {busy ? "Sendingâ€¦" : "Send"}
           </button>
         </div>
       </div>

@@ -24,14 +24,33 @@ import type {
   Carrier,
   CarrierAppetite,
   CarrierAppetiteLine,
+  PublicDataEvidenceMap,
+  PublicDataFieldEvidence,
+  PublicDataFieldSourceKind,
   Prospect,
   QuoteRequest,
   QuotingQuestion,
   TaskTopic,
 } from "@/types";
+import { postServerAi } from "@/lib/aiGateway";
+import {
+  quoteAssetPublicFieldValue,
+  quoteAssetQuestionAnswered,
+  summarizeQuoteAssetDetails,
+} from "@/lib/quoteAssetIntake";
+import {
+  campaignPromptTopic,
+  createCampaignDraft,
+  promptAwareCampaignImagePrompt,
+} from "@/lib/campaignCreative";
+import { quotePricingTendencyScore } from "@/lib/quoteMatch";
 
 const PRELIMINARY_DISCLAIMER =
   "This is a preliminary AI-generated estimate. Final pricing, binding, and coverage decisions must be reviewed and approved by a licensed insurance professional. A deposit does not constitute proof of active coverage.";
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 function clamp(n: number, lo: number, hi: number) {
   return Math.max(lo, Math.min(hi, n));
@@ -48,6 +67,24 @@ function inferAssetType(text: string): AssetType {
   return "other";
 }
 
+function isAssetType(value: unknown): value is AssetType {
+  return (
+    value === "coastal_home" ||
+    value === "luxury_vehicle" ||
+    value === "yacht" ||
+    value === "jewelry" ||
+    value === "umbrella_liability" ||
+    value === "full_portfolio" ||
+    value === "other"
+  );
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+}
+
 function extractValue(text: string): number | undefined {
   const m = text.match(/\$?\s?([\d,]+(?:\.\d+)?)\s?(k|m|million|thousand)?/i);
   if (!m) return undefined;
@@ -59,7 +96,22 @@ function extractValue(text: string): number | undefined {
 }
 
 export async function aiParseIntake(rawDescription: string): Promise<AiParsedIntake> {
-  // Real impl: POST /api/ai/parse-intake { rawDescription }
+  const server = await postServerAi<AiParsedIntake>("/ai/parse-intake", { rawDescription });
+  if (
+    server &&
+    isAssetType(server.assetType) &&
+    isRecord(server.fields) &&
+    typeof server.confidence === "number"
+  ) {
+    return {
+      assetType: server.assetType,
+      fields: server.fields,
+      confidence: clamp(server.confidence, 0, 0.95),
+      followUpQuestions: stringArray(server.followUpQuestions),
+    };
+  }
+
+  // Demo fallback: local deterministic extraction.
   await new Promise((r) => setTimeout(r, 600));
   const assetType = inferAssetType(rawDescription);
   const value = extractValue(rawDescription);
@@ -138,43 +190,399 @@ function extractStateFromAddress(addr: unknown): string | undefined {
   return m?.[1];
 }
 
+function stableCarrierTieBreak(carrierId: string): number {
+  return (hashSeed(carrierId) % 100) / 10_000;
+}
+
+function formatValueBand(min?: number, max?: number): string {
+  const money = (n: number) => `$${n.toLocaleString()}`;
+  if (typeof min === "number" && typeof max === "number") return `${money(min)}-${money(max)}`;
+  if (typeof min === "number") return `${money(min)}+`;
+  if (typeof max === "number") return `up to ${money(max)}`;
+  return "not specified";
+}
+
+type PremiumRiskLevel = "low" | "medium" | "high";
+
+interface PremiumResearchProfile {
+  riskLevel: PremiumRiskLevel;
+  pricingFactors: string[];
+  researchSignals: string[];
+  missingDocuments: string[];
+  evidenceCount: number;
+}
+
+function normalizeLookupText(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  return "";
+}
+
+function readText(parsed: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = normalizeLookupText(parsed[key]);
+    if (value) return value;
+  }
+  return "";
+}
+
+function parseNumberish(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return undefined;
+  const text = value.trim().toLowerCase();
+  if (!text) return undefined;
+  const match = text.match(/-?\d[\d,]*(?:\.\d+)?/);
+  if (!match) return undefined;
+  let n = Number(match[0].replace(/,/g, ""));
+  if (!Number.isFinite(n)) return undefined;
+  if (/\b(m|mm|million)\b/.test(text)) n *= 1_000_000;
+  if (/\b(k|thousand)\b/.test(text)) n *= 1_000;
+  return n;
+}
+
+function readNumber(parsed: Record<string, unknown>, keys: string[]): number | undefined {
+  for (const key of keys) {
+    const value = parseNumberish(parsed[key]);
+    if (typeof value === "number" && value > 0) return value;
+  }
+  return undefined;
+}
+
+function readBoolean(parsed: Record<string, unknown>, keys: string[]): boolean | undefined {
+  for (const key of keys) {
+    const raw = parsed[key];
+    if (typeof raw === "boolean") return raw;
+    const text = normalizeLookupText(raw).toLowerCase();
+    if (!text) continue;
+    if (/^(yes|true|y|on|available|filed)\b/i.test(text) || text.includes("on file")) return true;
+    if (/^(no|false|n|none|unknown)\b/i.test(text) || text.includes("not available")) return false;
+  }
+  return undefined;
+}
+
+function includesAny(text: string, needles: string[]): boolean {
+  const lower = text.toLowerCase();
+  return needles.some((needle) => lower.includes(needle));
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  values.forEach((value) => {
+    const text = value.trim();
+    if (!text || seen.has(text.toLowerCase())) return;
+    seen.add(text.toLowerCase());
+    out.push(text);
+  });
+  return out;
+}
+
+function derivePremiumValue(
+  assetType: AssetType,
+  parsed: Record<string, unknown>
+): { value: number; source: string; defaulted: boolean } {
+  const keysByAsset: Record<AssetType, string[]> = {
+    coastal_home: [
+      "estimatedValue",
+      "replacementCost",
+      "coverageA",
+      "propertyValue",
+      "buildingLimit",
+      "propertyLimits",
+      "requestedAmount",
+    ],
+    luxury_vehicle: ["estimatedValue", "agreedValue", "marketValue", "msrp", "statedValue", "requestedAmount"],
+    yacht: ["estimatedValue", "hullValue", "marketValue", "agreedValue", "requestedAmount"],
+    jewelry: ["appraisedValue", "scheduledValue", "estimatedValue", "requestedAmount"],
+    umbrella_liability: ["requestedLimit", "limit", "estimatedValue", "requestedAmount"],
+    full_portfolio: ["totalInsuredValue", "portfolioValue", "estimatedValue", "requestedAmount"],
+    other: ["requestedAmount", "estimatedValue", "limit", "propertyLimits"],
+  };
+  const keys = [...(keysByAsset[assetType] ?? []), "assetValue", "insuredValue"];
+  for (const key of keys) {
+    const value = readNumber(parsed, [key]);
+    if (value) return { value, source: key, defaulted: false };
+  }
+  return { value: 1_000_000, source: "default underwriting placeholder", defaulted: true };
+}
+
+function buildPremiumResearchProfile(
+  assetType: AssetType,
+  parsed: Record<string, unknown>
+): PremiumResearchProfile {
+  let score = 0;
+  let evidenceCount = 0;
+  const pricingFactors: string[] = [];
+  const researchSignals: string[] = [];
+  const missingDocuments: string[] = [];
+  const currentYear = new Date().getFullYear();
+  const factor = (delta: number, label: string) => {
+    score += delta;
+    pricingFactors.push(label);
+    evidenceCount += 1;
+  };
+  const signal = (label: string) => {
+    researchSignals.push(label);
+    evidenceCount += 1;
+  };
+  const missing = (label: string) => missingDocuments.push(label);
+
+  const address = readText(parsed, [
+    "address",
+    "propertyAddress",
+    "riskAddress",
+    "primaryResidenceAddress",
+    "primaryAddress",
+    "location",
+  ]);
+  const vin = readText(parsed, ["vin"]);
+  const hin = readText(parsed, ["hin", "hullId", "vesselRegistration"]);
+  const publicSearchKey = readText(parsed, ["publicSearchKey", "website", "legalBusinessName", "businessName"]);
+
+  if (address) signal("Address available for public-record and territory lookup");
+  if (vin) signal("VIN available for vehicle decode and symbol lookup");
+  if (hin) signal("Hull ID available for vessel lookup");
+  if (publicSearchKey) signal("Business/public search key available");
+
+  if (assetType === "coastal_home") {
+    const occupancy = readText(parsed, ["occupancy", "occupancyType"]);
+    if (includesAny(occupancy, ["rental", "short-term", "vacant"])) {
+      factor(1.4, `Occupancy: ${occupancy}`);
+    } else if (occupancy) {
+      factor(-0.25, `Occupancy: ${occupancy}`);
+    }
+
+    const floodZone = readText(parsed, ["floodZone", "floodZoneCode"]).toUpperCase();
+    if (/^(VE|V|AE|A|AO|AH)/.test(floodZone)) factor(1.6, `Flood zone ${floodZone}`);
+    else if (floodZone) factor(-0.3, `Flood zone ${floodZone}`);
+
+    const coastMiles = readNumber(parsed, ["distanceToCoast", "distanceToCoastMiles"]);
+    if (coastMiles !== undefined && coastMiles <= 1) factor(1.2, "Within 1 mile of coast");
+    else if (coastMiles !== undefined && coastMiles <= 5) factor(0.5, "Within 5 miles of coast");
+    else if (coastMiles !== undefined) factor(-0.2, "Coastal distance verified");
+
+    const roofYear = readNumber(parsed, ["roofYear", "roofReplacementYear"]);
+    const roofAge = readNumber(parsed, ["roofAge"]) ?? (roofYear ? Math.max(0, currentYear - roofYear) : undefined);
+    if (roofAge !== undefined && roofAge >= 20) factor(1.2, `Roof age ${Math.round(roofAge)} years`);
+    else if (roofAge !== undefined && roofAge >= 12) factor(0.45, `Roof age ${Math.round(roofAge)} years`);
+    else if (roofAge !== undefined) factor(-0.3, "Roof age verified");
+    else missing("Roof age or replacement year");
+
+    const construction = readText(parsed, ["constructionType", "construction"]);
+    if (includesAny(construction, ["masonry", "concrete", "cbs", "block", "icf"])) {
+      factor(-0.45, `Construction: ${construction}`);
+    } else if (includesAny(construction, ["frame", "wood"])) {
+      factor(0.35, `Construction: ${construction}`);
+    }
+
+    const windMitigation = readBoolean(parsed, ["windMitigation", "windMitigationReport", "windMitigationOnFile"]);
+    if (windMitigation === true) factor(-0.6, "Wind mitigation indicated");
+    else if (windMitigation === false) factor(0.5, "Wind mitigation not indicated");
+    else missing("Wind mitigation report");
+  } else if (assetType === "luxury_vehicle") {
+    if (!vin) missing("VIN");
+    const use = readText(parsed, ["primaryUse", "usage"]);
+    if (includesAny(use, ["business", "commute", "rideshare", "delivery"])) factor(0.7, `Use: ${use}`);
+    else if (includesAny(use, ["collector", "limited", "pleasure", "seasonal"])) factor(-0.45, `Use: ${use}`);
+
+    const miles = readNumber(parsed, ["annualMileage", "mileage"]);
+    if (miles !== undefined && miles >= 15_000) factor(0.6, `${Math.round(miles).toLocaleString()} annual miles`);
+    else if (miles !== undefined && miles <= 3_000) factor(-0.35, "Low annual mileage");
+
+    const driverNotes = readText(parsed, ["driverExceptions", "drivers", "householdDrivers"]);
+    if (includesAny(driverNotes, ["youth", "teen", "violation", "dui", "accident"])) factor(1, "Driver exception noted");
+    else if (driverNotes) signal("Driver disclosure available");
+  } else if (assetType === "yacht") {
+    if (!hin) missing("HIN or hull identification");
+    const length = readNumber(parsed, ["length", "hullLength"]);
+    if (length !== undefined && length >= 55) factor(0.9, `${Math.round(length)} ft vessel`);
+    else if (length !== undefined) signal("Hull length available");
+
+    const territory = readText(parsed, ["navigationTerritory", "cruisingArea", "navigationArea"]);
+    if (includesAny(territory, ["bahamas", "caribbean", "offshore", "bluewater", "atlantic"])) factor(0.8, `Navigation: ${territory}`);
+    else if (territory) signal("Navigation territory available");
+
+    const survey = readBoolean(parsed, ["surveyOrAppraisal", "surveyOnFile", "marineSurvey"]);
+    if (survey === true) factor(-0.45, "Recent survey/appraisal indicated");
+    else missing("Most recent marine survey");
+
+    const operator = readText(parsed, ["operatorExperience", "operator", "captain"]);
+    if (includesAny(operator, ["captain", "licensed", "uscg"])) factor(-0.25, "Experienced operator/captain indicated");
+    else if (length !== undefined && length >= 50 && !operator) missing("Operator or captain experience");
+  } else if (assetType === "jewelry") {
+    const value = readNumber(parsed, ["appraisedValue", "scheduledValue", "estimatedValue"]);
+    if (value !== undefined) signal("Appraised or scheduled value available");
+    else missing("Appraised value");
+
+    const storage = readText(parsed, ["storageLocation", "storage"]);
+    if (includesAny(storage, ["bank", "vault"])) factor(-0.55, `Storage: ${storage}`);
+    else if (includesAny(storage, ["worn", "travel", "person"])) factor(0.7, `Storage/use: ${storage}`);
+
+    const travelExposure = readBoolean(parsed, ["travelExposure", "travelFrequency"]);
+    if (travelExposure === true) factor(0.55, "Travel exposure indicated");
+
+    const appraisalDate = readText(parsed, ["appraisalDate"]);
+    if (appraisalDate) signal("Appraisal date available");
+    else missing("Current appraisal");
+  } else if (assetType === "umbrella_liability") {
+    const limit = readNumber(parsed, ["requestedLimit", "limit"]);
+    if (limit !== undefined && limit >= 5_000_000) factor(0.65, `${Math.round(limit / 1_000_000)}M umbrella limit`);
+    else if (limit !== undefined) signal("Requested umbrella limit available");
+
+    const notes = readText(parsed, ["householdExposureNotes", "propertyExposures", "publicExposure"]);
+    if (includesAny(notes, ["pool", "dog", "board", "staff", "rental", "trust", "llc", "public"])) {
+      factor(0.65, "Liability exposure noted");
+    } else if (notes) signal("Household exposure notes available");
+
+    const underlying = readText(parsed, ["underlyingPoliciesNotInQuotex", "underlyingLimits", "currentCoverage"]);
+    if (underlying) signal("Underlying policies/limits available");
+    else missing("Underlying liability limits");
+  } else if (assetType === "full_portfolio") {
+    const summary = readText(parsed, ["portfolioSummary", "assetsNotAlreadyListed"]);
+    if (summary) signal("Portfolio schedule summary available");
+    else missing("Portfolio schedule summary");
+    if (includesAny(summary, ["llc", "trust", "entity", "business"])) factor(0.35, "Entity/trust ownership noted");
+  } else {
+    const operations = readText(parsed, ["riskDescription", "useCase", "operations", "description"]);
+    if (operations) signal("Risk description available");
+    else missing("Risk description");
+  }
+
+  const lossText = readText(parsed, ["lossHistory", "losses", "claims", "claimHistory"]);
+  if (includesAny(lossText, ["claim", "loss", "paid", "$", "incident"])) factor(0.6, "Loss history disclosed");
+  else if (lossText) signal("Loss history response available");
+
+  const riskLevel: PremiumRiskLevel = score >= 1.6 ? "high" : score <= -0.8 ? "low" : "medium";
+  return {
+    riskLevel,
+    pricingFactors: uniqueStrings(pricingFactors),
+    researchSignals: uniqueStrings(researchSignals),
+    missingDocuments: uniqueStrings(missingDocuments),
+    evidenceCount,
+  };
+}
+
+function estimateResearchConfidence(input: {
+  profile: PremiumResearchProfile;
+  matchedCarrierCount: number;
+  hasState: boolean;
+  valueDefaulted: boolean;
+}): number {
+  const evidenceBonus = Math.min(input.profile.evidenceCount, 9) * 0.045;
+  const carrierBonus = input.matchedCarrierCount > 0 ? 0.12 : 0;
+  const stateBonus = input.hasState ? 0.04 : 0;
+  const valuePenalty = input.valueDefaulted ? 0.12 : 0;
+  const gapPenalty = Math.min(input.profile.missingDocuments.length, 5) * 0.025;
+  return Number(clamp(0.48 + evidenceBonus + carrierBonus + stateBonus - valuePenalty - gapPenalty, 0.35, 0.92).toFixed(2));
+}
+
+function rangeHalfWidthForConfidence(confidence: number): number {
+  if (confidence >= 0.84) return 0.1;
+  if (confidence >= 0.72) return 0.14;
+  if (confidence >= 0.6) return 0.2;
+  return 0.3;
+}
+
+function premiumSourceSummary(input: {
+  assetType: AssetType;
+  state?: string;
+  valueSource: string;
+  matchedCarrierCount: number;
+  valueDefaulted: boolean;
+  profile: PremiumResearchProfile;
+}): string[] {
+  return uniqueStrings([
+    input.valueDefaulted ? "Value pending verification" : `Value source: ${input.valueSource}`,
+    input.state ? `State/territory filter: ${input.state}` : "",
+    input.profile.researchSignals[0] ?? "",
+    input.matchedCarrierCount > 0
+      ? `${input.matchedCarrierCount} linked carrier appetite ${input.matchedCarrierCount === 1 ? "match" : "matches"}`
+      : "No exact carrier appetite match in linked carrier pool",
+    `Asset class: ${input.assetType.replace(/_/g, " ")}`,
+  ]);
+}
+
 export async function aiPremiumEstimate(
   quote: Pick<QuoteRequest, "assetType" | "parsedData">,
   carriers?: Carrier[]
 ): Promise<AiPremiumEstimate> {
+  const server = await postServerAi<AiPremiumEstimate>("/ai/premium-estimate", {
+    assetType: quote.assetType,
+    parsedData: quote.parsedData,
+  });
+  if (
+    server &&
+    typeof server.min === "number" &&
+    typeof server.max === "number" &&
+    server.min >= 0 &&
+    server.max >= server.min
+  ) {
+    return {
+      min: server.min,
+      max: server.max,
+      rationale: typeof server.rationale === "string" ? server.rationale : "Preliminary model range.",
+      confidence:
+        typeof server.confidence === "number" ? clamp(server.confidence, 0, 0.98) : undefined,
+      sourceSummary: stringArray(server.sourceSummary),
+      pricingFactors: stringArray(server.pricingFactors),
+      researchSignals: stringArray(server.researchSignals),
+      missingDocuments: stringArray(server.missingDocuments),
+      recommendedNextSteps: stringArray(server.recommendedNextSteps),
+      disclaimer: PRELIMINARY_DISCLAIMER,
+    };
+  }
+
   await new Promise((r) => setTimeout(r, 700));
-  const value = Number(quote.parsedData.estimatedValue ?? 1_000_000);
-  const riskLevel = classifyRiskLevel(quote.assetType, quote.parsedData);
+  const valueBasis = derivePremiumValue(quote.assetType, quote.parsedData);
+  const profile = buildPremiumResearchProfile(quote.assetType, quote.parsedData);
+  const riskLevel = profile.riskLevel || classifyRiskLevel(quote.assetType, quote.parsedData);
   const state =
     extractStateFromAddress(quote.parsedData.address) ??
+    extractStateFromAddress(quote.parsedData.propertyAddress) ??
+    extractStateFromAddress(quote.parsedData.riskAddress) ??
     extractStateFromAddress(quote.parsedData.garagingAddress) ??
+    extractStateFromAddress(quote.parsedData.garagingAddressIfDifferent) ??
+    extractStateFromAddress(quote.parsedData.marinaAddress) ??
     extractStateFromAddress(quote.parsedData.marinaLocation);
 
   // Delegate to the shared, deterministic estimator. When a carrier
   // pool is supplied, the centerline gets biased by the average
   // pricingTendency of carriers whose appetite matches this risk.
-  const { estimateBallparkPremium } = await import("./ballparkPremium");
+  const { estimateBallparkPremium, matchCarriersForRisk } = await import("./ballparkPremium");
+  const matchedCarriers = carriers
+    ? matchCarriersForRisk(carriers, {
+        assetType: quote.assetType,
+        value: valueBasis.value,
+        riskLevel,
+        state,
+      })
+    : [];
+  const confidence = estimateResearchConfidence({
+    profile,
+    matchedCarrierCount: matchedCarriers.length,
+    hasState: !!state,
+    valueDefaulted: valueBasis.defaulted,
+  });
   const ballpark = estimateBallparkPremium({
     assetType: quote.assetType,
-    value,
+    value: valueBasis.value,
     riskLevel,
     state,
     carriers,
+    rangeHalfWidth: rangeHalfWidthForConfidence(confidence),
   });
 
-  const missing: string[] = [];
-  if (quote.assetType === "coastal_home") {
-    if (!quote.parsedData.windMitigation) missing.push("Wind mitigation report");
-    if (!quote.parsedData.roofAge) missing.push("Roof age (or replacement date)");
-  }
-  if (quote.assetType === "luxury_vehicle" && !quote.parsedData.vin) missing.push("VIN");
-  if (quote.assetType === "yacht") {
-    missing.push("Most recent marine survey");
-    if (!quote.parsedData.operator) missing.push("Captain credentials (if captain operated)");
-  }
-  if (quote.assetType === "jewelry") missing.push("Appraisal per scheduled item (within 3 yrs)");
-
   const matchedCount = ballpark.basis.matchedCarriers.length;
+  const sourceSummary = premiumSourceSummary({
+    assetType: quote.assetType,
+    state,
+    valueSource: valueBasis.source,
+    matchedCarrierCount: matchedCount,
+    valueDefaulted: valueBasis.defaulted,
+    profile,
+  });
   const rationale =
     matchedCount > 0
       ? `Range derived from ${matchedCount} carrier${matchedCount === 1 ? "" : "s"} whose appetite matches this asset (${quote.assetType.replace("_", " ")}, ${riskLevel} risk${state ? `, ${state}` : ""}). Centerline biased by their average pricing tendency (${(ballpark.basis.carrierBias * 100).toFixed(0)}% of market).`
@@ -183,12 +591,19 @@ export async function aiPremiumEstimate(
   return {
     min: ballpark.min,
     max: ballpark.max,
-    rationale,
-    missingDocuments: missing,
+    rationale: (
+      matchedCount > 0
+        ? `Research range derived from ${valueBasis.source}, ${riskLevel} risk scoring, ${matchedCount} matching carrier appetite ${matchedCount === 1 ? "row" : "rows"}${state ? `, and ${state} availability` : ""}. Centerline is biased to ${(ballpark.basis.carrierBias * 100).toFixed(0)}% of market and range width reflects ${Math.round(confidence * 100)}% confidence.`
+        : `Research range derived from ${valueBasis.source}, ${riskLevel} risk scoring, and linked agency pricing rules. No exact carrier appetite row matched yet, so the range remains wider pending underwriter validation.`) || rationale,
+    confidence,
+    sourceSummary,
+    pricingFactors: profile.pricingFactors,
+    researchSignals: profile.researchSignals,
+    missingDocuments: profile.missingDocuments,
     recommendedNextSteps: [
-      "Upload missing documents",
-      "Schedule a 15-minute review with your dedicated agent",
-      "Pay refundable deposit to lock the carrier review slot",
+      "Agent verifies public-record findings",
+      "Carrier validates eligibility, limits, and deductible",
+      "Any remaining source gaps move to a secondary questionnaire",
     ],
     disclaimer: PRELIMINARY_DISCLAIMER,
   };
@@ -198,18 +613,93 @@ export async function aiCarrierMatch(
   quote: Pick<QuoteRequest, "assetType" | "parsedData">,
   availableCarriers: Carrier[]
 ): Promise<AiCarrierMatch | null> {
+  const server = await postServerAi<AiCarrierMatch | null>("/ai/carrier-match", {
+    assetType: quote.assetType,
+    parsedData: quote.parsedData,
+    carriers: availableCarriers,
+  });
+  if (
+    server &&
+    typeof server.carrierId === "string" &&
+    availableCarriers.some((c) => c.id === server.carrierId)
+  ) {
+    const alternates = Array.isArray(server.alternates) ? server.alternates : [];
+    return {
+      carrierId: server.carrierId,
+      carrierName: server.carrierName,
+      score: clamp(Number(server.score ?? 0.72), 0, 0.99),
+      reason: server.reason,
+      alternates: alternates
+        .filter((alt) => alt && availableCarriers.some((c) => c.id === alt.carrierId))
+        .slice(0, 3)
+        .map((alt) => ({
+          carrierId: alt.carrierId,
+          carrierName: alt.carrierName,
+          score: clamp(Number(alt.score ?? 0.6), 0, 0.99),
+          reason: alt.reason,
+        })),
+    };
+  }
+
   await new Promise((r) => setTimeout(r, 500));
-  const candidates = availableCarriers
+  const value = Number(quote.parsedData.estimatedValue ?? 0);
+  const riskLevel = classifyRiskLevel(quote.assetType, quote.parsedData);
+  const state =
+    extractStateFromAddress(quote.parsedData.address) ??
+    extractStateFromAddress(quote.parsedData.garagingAddress) ??
+    extractStateFromAddress(quote.parsedData.marinaLocation);
+  const { matchCarriersForRisk } = await import("./ballparkPremium");
+
+  const exactMatches = matchCarriersForRisk(availableCarriers, {
+    assetType: quote.assetType,
+    value,
+    riskLevel,
+    state,
+  }).map(({ carrier, appetite }) => {
+    const tendencyBonus = clamp(1.15 - appetite.pricingTendency, 0, 0.25);
+    const score = clamp(0.74 + tendencyBonus + stableCarrierTieBreak(carrier.id), 0, 0.99);
+    return {
+      carrier,
+      score,
+      reason: [
+        "Matches active appetite row",
+        state ? `writes in ${state}` : null,
+        `value band ${formatValueBand(appetite.minValue, appetite.maxValue)}`,
+        `${riskLevel} risk accepted`,
+      ]
+        .filter((part): part is string => Boolean(part))
+        .join("; "),
+    };
+  });
+
+  const fallbackMatches = availableCarriers
     .filter((c) => c.status === "active" && c.preferredAssetTypes.includes(quote.assetType))
-    .map((c) => {
+    .map((carrier) => {
       let score = 0.5;
-      if (c.preferredAssetTypes[0] === quote.assetType) score += 0.2;
-      const value = Number(quote.parsedData.estimatedValue ?? 0);
-      if (value > 1_000_000) score += 0.15;
-      score = clamp(score + Math.random() * 0.1, 0, 0.99);
-      return { carrier: c, score };
-    })
-    .sort((a, b) => b.score - a.score);
+      if (carrier.preferredAssetTypes[0] === quote.assetType) score += 0.12;
+      if (!state || carrier.stateAvailability.length === 0 || carrier.stateAvailability.includes(state)) {
+        score += 0.12;
+      }
+      if (value >= 1_000_000) score += 0.06;
+      score = clamp(score + stableCarrierTieBreak(carrier.id), 0, 0.82);
+      return {
+        carrier,
+        score,
+        reason: `Preferred asset-type match for ${quote.assetType.replace("_", " ")}${
+          state ? `; state availability ${carrier.stateAvailability.includes(state) ? "matches" : "needs review"}` : ""
+        }. ${carrier.appetiteNotes ?? ""}`.trim(),
+      };
+    });
+
+  const byCarrier = new Map<string, { carrier: Carrier; score: number; reason: string }>();
+  [...exactMatches, ...fallbackMatches].forEach((candidate) => {
+    const existing = byCarrier.get(candidate.carrier.id);
+    if (!existing || candidate.score > existing.score) byCarrier.set(candidate.carrier.id, candidate);
+  });
+
+  const candidates = Array.from(byCarrier.values()).sort(
+    (a, b) => b.score - a.score || a.carrier.name.localeCompare(b.carrier.name)
+  );
 
   if (candidates.length === 0) return null;
   const [best, ...rest] = candidates;
@@ -217,12 +707,12 @@ export async function aiCarrierMatch(
     carrierId: best.carrier.id,
     carrierName: best.carrier.name,
     score: Number(best.score.toFixed(2)),
-    reason: `Best appetite alignment for ${quote.assetType.replace("_", " ")}. ${best.carrier.appetiteNotes ?? ""}`.trim(),
+    reason: best.reason,
     alternates: rest.slice(0, 3).map((r) => ({
       carrierId: r.carrier.id,
       carrierName: r.carrier.name,
       score: Number(r.score.toFixed(2)),
-      reason: r.carrier.appetiteNotes ?? "Secondary appetite match.",
+      reason: r.reason || r.carrier.appetiteNotes || "Secondary appetite match.",
     })),
   };
 }
@@ -248,8 +738,19 @@ export async function aiProspectSummary(input: {
 
 export async function aiMarketingMessage(
   prospect: Prospect,
-  channel: "email" | "sms"
+  channel: "email"
 ): Promise<{ subject?: string; body: string }> {
+  const server = await postServerAi<{ subject?: string; body: string }>("/ai/marketing-message", {
+    prospect: { name: prospect.name, assetType: prospect.assetType },
+    channel,
+  });
+  if (server && typeof server.body === "string" && server.body.trim()) {
+    return {
+      subject: typeof server.subject === "string" && server.subject.trim() ? server.subject.trim() : undefined,
+      body: server.body.trim(),
+    };
+  }
+
   await new Promise((r) => setTimeout(r, 300));
   if (channel === "email") {
     return {
@@ -273,28 +774,315 @@ export async function aiEmailSubject(input: {
   contactName?: string;
   context?: string;
 }): Promise<string> {
-  await new Promise((r) => setTimeout(r, 250));
-  const text = `${input.context ?? ""} ${input.body ?? ""}`.toLowerCase();
-  const first = (input.contactName ?? "").split(/\s+/)[0];
-  const tag = first ? `, ${first}` : "";
-  // Topic heuristics — first match wins.
-  if (/\brenew|expir|lapse\b/.test(text)) return `Your upcoming renewal${tag}`;
-  if (/\bclaim|fnol|loss\b/.test(text)) return `Regarding your claim${tag}`;
-  if (/\b(document|upload|sign|esign|paperwork|form)\b/.test(text))
-    return `Documents we need from you${tag}`;
-  if (/\bquestionnaire|underwriting|details we need|few questions\b/.test(text))
-    return `A few questions to finalize your coverage${tag}`;
-  if (/\bquote|premium|estimate|pricing\b/.test(text)) return `Your insurance quote${tag}`;
-  if (/\bpayment|invoice|bill|deposit\b/.test(text)) return `Your payment${tag}`;
-  if (/\bschedule|call|appointment|meeting\b/.test(text)) return `Let's find a time to connect${tag}`;
-  if (/\bwelcome|thanks|thank you\b/.test(text)) return `Thank you for choosing us${tag}`;
-  // Fallback: trim the first sentence of the body into a subject.
-  const sentence = (input.body ?? "").trim().split(/[.!?\n]/)[0].trim();
-  if (sentence) {
-    const words = sentence.split(/\s+/).slice(0, 8).join(" ");
-    return words.charAt(0).toUpperCase() + words.slice(1);
+  const local = draftEmailSubject(input);
+  const server = await postServerAi<{ subject?: string; confidence?: number }>("/ai/email-subject", {
+    body: input.body ?? "",
+    contactName: input.contactName,
+    context: input.context,
+  });
+  const serverCandidates: EmailSubjectCandidate[] = [];
+  if (server && typeof server.subject === "string" && server.subject.trim()) {
+    serverCandidates.push({
+      subject: server.subject,
+      score: 72 + clamp(Number(server.confidence ?? 0.72), 0, 1) * 25,
+      reason: "model",
+    });
   }
-  return `A message from your agent`;
+  const best = selectBestEmailSubject([...serverCandidates, ...local.candidates], input);
+  if (best) return best.subject;
+
+  await new Promise((r) => setTimeout(r, 250));
+  return local.fallback;
+}
+
+export async function aiCorrectSpelling(input: {
+  body: string;
+  channel?: "email";
+}): Promise<string> {
+  await new Promise((r) => setTimeout(r, 220));
+  const corrections: Record<string, string> = {
+    accomodate: "accommodate",
+    adress: "address",
+    alredy: "already",
+    aplicable: "applicable",
+    appication: "application",
+    availible: "available",
+    buisness: "business",
+    calender: "calendar",
+    carrrier: "carrier",
+    comercial: "commercial",
+    definately: "definitely",
+    documet: "document",
+    documets: "documents",
+    eligable: "eligible",
+    endorsment: "endorsement",
+    immediatly: "immediately",
+    insurace: "insurance",
+    insurence: "insurance",
+    liabilty: "liability",
+    messsage: "message",
+    neccessary: "necessary",
+    nessasary: "necessary",
+    occured: "occurred",
+    occurence: "occurrence",
+    policie: "policy",
+    policys: "policies",
+    plicy: "policy",
+    premimum: "premium",
+    profesional: "professional",
+    questionaire: "questionnaire",
+    questionaiire: "questionnaire",
+    qusetionnaire: "questionnaire",
+    recieved: "received",
+    recieve: "receive",
+    recieveing: "receiving",
+    recomend: "recommend",
+    referal: "referral",
+    renwal: "renewal",
+    seperate: "separate",
+    suplemental: "supplemental",
+    teh: "the",
+    thorugh: "through",
+    tomorow: "tomorrow",
+    underwritting: "underwriting",
+    untill: "until",
+  };
+
+  const preserveCase = (source: string, replacement: string) => {
+    if (source.toUpperCase() === source) return replacement.toUpperCase();
+    if (source[0] === source[0]?.toUpperCase()) {
+      return replacement.charAt(0).toUpperCase() + replacement.slice(1);
+    }
+    return replacement;
+  };
+
+  return input.body
+    .replace(/\b[A-Za-z']+\b/g, (word) => {
+      const fixed = corrections[word.toLowerCase()];
+      return fixed ? preserveCase(word, fixed) : word;
+    })
+    .replace(/[ \t]+([,.;:!?])/g, "$1")
+    .replace(/([,.;:!?])(?=[A-Za-z])/g, "$1 ")
+    .replace(/\bi\b/g, "I")
+    .replace(/\s+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function stripMessageBoilerplate(body: string): string {
+  return body
+    .replace(/\[\[quotex-email-signature:[\s\S]*?\]\]/g, "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => {
+      if (!line) return false;
+      if (/^(hi|hello|hey)\b[\s,\w.-]*$/i.test(line)) return false;
+      if (/^(thanks|thank you|best|regards|sincerely|warmly)[,!.\s]*$/i.test(line)) return false;
+      if (/^[-–—]+$/.test(line)) return false;
+      return true;
+    })
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function subjectFromBodyTopic(text: string, body: string): string | null {
+  return draftEmailSubject({ body, context: text }).candidates[0]?.subject ?? null;
+}
+
+function titleCaseSubject(subject: string): string {
+  const clean = subject
+    .replace(/^(hi|hello|hey)\s+[^,]+,\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!clean) return "A message from your agent";
+  const capped = clean.charAt(0).toUpperCase() + clean.slice(1);
+  return capped.length > 64 ? `${capped.slice(0, 61).trim()}...` : capped;
+}
+
+interface EmailSubjectCandidate {
+  subject: string;
+  score: number;
+  reason: string;
+}
+
+const GENERIC_SUBJECT_RE =
+  /^(a message from|message from|quick follow[- ]?up|follow[- ]?up|checking in|touching base|hello|hi there)\b/i;
+
+function draftEmailSubject(input: {
+  body?: string;
+  contactName?: string;
+  context?: string;
+}): { candidates: EmailSubjectCandidate[]; fallback: string } {
+  const body = stripMessageBoilerplate(input.body ?? "");
+  const text = `${input.context ?? ""} ${body}`.toLowerCase();
+  const candidates: EmailSubjectCandidate[] = [];
+  const push = (subject: string, score: number, reason: string) => {
+    const cleaned = normalizeEmailSubject(subject, input);
+    if (!cleaned) return;
+    candidates.push({ subject: cleaned, score, reason });
+  };
+
+  const asset = extractSubjectAsset(text);
+  const assetSuffix = asset ? ` for your ${asset}` : "";
+  const carrier = extractSubjectCarrier(text);
+  const doc = extractSubjectDocument(text);
+  const hasDoc = /\b(document|documents|doc|packet|form|paperwork|declaration|dec page|proof|license|appraisal|supplemental)\b/.test(text);
+
+  if (/\b(e-?sign|signature|signatures?|signed|signing)\b/.test(text) && hasDoc) {
+    push(`${doc ?? "Documents"} ready for e-signature`, 95, "e-signature");
+    if (/renew|renewal/.test(text)) push("Renewal packet ready for e-signature", 98, "renewal e-signature");
+  }
+  if (/\b(upload|send|provide|need|needed|missing|still need|require|required)\b/.test(text) && hasDoc) {
+    push(`${doc ?? "Documents"} needed to continue`, 92, "missing documents");
+    if (/underwriting|carrier|quote|application/.test(text)) {
+      push(`${doc ?? "Documents"} needed for underwriting`, 96, "underwriting documents");
+    }
+  }
+  if (/\b(questionnaire|questions?|underwriting details|supplemental|application fields?|missing fields?)\b/.test(text)) {
+    push("A few underwriting details needed", 90, "questionnaire");
+    if (/supplemental/.test(text)) push("Supplemental details needed for carrier review", 93, "supplemental");
+  }
+  if (/\b(renew|renewal|expir|expiration|lapse|term)\b/.test(text)) {
+    push(`Renewal review${assetSuffix}`, 88, "renewal");
+    push(`Your${assetSuffix || " policy"} renewal next steps`, 84, "renewal next step");
+  }
+  if (/\b(claim|fnol|loss|adjuster|damage|incident)\b/.test(text)) {
+    push(`${carrier ? `${carrier} ` : ""}Claim follow-up`, 88, "claim");
+    push(`Claim update${assetSuffix}`, 84, "claim update");
+  }
+  if (/\b(quote|premium|estimate|pricing|proposal|carrier option|market option|indication)\b/.test(text)) {
+    push(`Quote options${assetSuffix}`, 88, "quote");
+    push(`Your${assetSuffix || " coverage"} quote next steps`, 84, "quote next step");
+  }
+  if (/\b(payment|invoice|bill|billing|deposit|checkout|autopay|past due)\b/.test(text)) {
+    push("Payment details for your policy", 86, "payment");
+  }
+  if (/\b(schedule|call|appointment|meeting|connect|available|time works)\b/.test(text)) {
+    push(`Time to review${assetSuffix || " your coverage"}`, 82, "meeting");
+  }
+  if (/\b(welcome|thank you|thanks for choosing|portal access|login)\b/.test(text)) {
+    push("Welcome to your agency portal", 80, "welcome");
+  }
+  if (/\b(policy change|endorsement|update|change request|edit request)\b/.test(text)) {
+    push(`Policy update${assetSuffix}`, 87, "policy change");
+  }
+
+  const firstSentence = body.split(/[.!?\n]/)[0]?.trim();
+  if (firstSentence) {
+    push(firstSentence.split(/\s+/).slice(0, 10).join(" "), 48, "first sentence");
+  }
+  const selected = selectBestEmailSubject(candidates, input);
+  return {
+    candidates,
+    fallback: selected?.subject ?? "A clear next step from your agency",
+  };
+}
+
+function selectBestEmailSubject(
+  candidates: EmailSubjectCandidate[],
+  input: { body?: string; contactName?: string; context?: string }
+): EmailSubjectCandidate | null {
+  const source = `${input.context ?? ""} ${stripMessageBoilerplate(input.body ?? "")}`.toLowerCase();
+  const ranked = candidates
+    .map((candidate) => {
+      const subject = normalizeEmailSubject(candidate.subject, input);
+      if (!subject) return null;
+      return {
+        ...candidate,
+        subject,
+        score: candidate.score + emailSubjectQualityScore(subject, source),
+      };
+    })
+    .filter((candidate): candidate is EmailSubjectCandidate => !!candidate)
+    .sort((a, b) => b.score - a.score);
+  return ranked[0] ?? null;
+}
+
+function emailSubjectQualityScore(subject: string, source: string): number {
+  const words = subject.split(/\s+/).filter(Boolean);
+  let score = 0;
+  if (subject.length >= 28 && subject.length <= 62) score += 12;
+  if (subject.length > 72) score -= 35;
+  if (subject.length < 12) score -= 20;
+  if (GENERIC_SUBJECT_RE.test(subject)) score -= 35;
+  if (/\b(e-?signature|documents?|renewal|quote|claim|underwriting|payment|policy|coverage|supplemental)\b/i.test(subject)) {
+    score += 14;
+  }
+  const overlap = words.filter((word) => word.length > 4 && source.includes(word.toLowerCase())).length;
+  score += Math.min(10, overlap * 2);
+  if (/[!?]{2,}|!!!/.test(subject)) score -= 12;
+  if (/\bguaranteed|approved|savings|save \$|bound coverage\b/i.test(subject)) score -= 40;
+  return score;
+}
+
+function normalizeEmailSubject(
+  raw: string,
+  input: { contactName?: string }
+): string | null {
+  let subject = raw
+    .replace(/^subject:\s*/i, "")
+    .replace(/^["']|["']$/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .trim();
+  subject = subject
+    .replace(/^(hi|hello|hey)\s+[^,]+,\s*/i, "")
+    .replace(/\bplease\b\s*/i, "")
+    .replace(/[.?!]+$/g, "")
+    .trim();
+  const names = (input.contactName ?? "")
+    .split(/\s+/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 2);
+  const full = (input.contactName ?? "").trim();
+  [full, ...names].filter(Boolean).forEach((name) => {
+    subject = subject.replace(new RegExp(`\\b${escapeRegExp(name)}\\b'?s?`, "gi"), "your");
+  });
+  subject = subject
+    .replace(/\byour your\b/gi, "your")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!subject || GENERIC_SUBJECT_RE.test(subject)) return null;
+  if (subject.length > 72) subject = trimSubjectAtWord(subject, 72);
+  return subject.charAt(0).toUpperCase() + subject.slice(1);
+}
+
+function trimSubjectAtWord(subject: string, max: number): string {
+  if (subject.length <= max) return subject;
+  const clipped = subject.slice(0, max - 1);
+  const lastSpace = clipped.lastIndexOf(" ");
+  return `${(lastSpace > 32 ? clipped.slice(0, lastSpace) : clipped).trim()}...`;
+}
+
+function extractSubjectAsset(text: string): string | null {
+  if (/\b(coastal home|beach house|homeowner|homeowners|home|house|estate|condo)\b/.test(text)) return "home";
+  if (/\b(auto|vehicle|car|driver|garaging|porsche|ferrari|lamborghini|bentley)\b/.test(text)) return "auto";
+  if (/\b(yacht|boat|vessel|watercraft|marina)\b/.test(text)) return "yacht";
+  if (/\b(jewelry|jewellery|watch|ring|appraisal|valuables|collection)\b/.test(text)) return "valuables";
+  if (/\b(umbrella|excess liability|liability)\b/.test(text)) return "liability";
+  if (/\b(commercial|business|general liability|workers'? comp|property)\b/.test(text)) return "business";
+  return null;
+}
+
+function extractSubjectCarrier(text: string): string | null {
+  const match = text.match(/\b(chubb|pure|aig|cincinnati|travelers|progressive|nationwide|berkley|hanover|hartford)\b/i);
+  return match ? match[1].charAt(0).toUpperCase() + match[1].slice(1).toLowerCase() : null;
+}
+
+function extractSubjectDocument(text: string): string | null {
+  if (/\brenewal packet\b/.test(text)) return "Renewal packet";
+  if (/\b(declarations?|dec page)\b/.test(text)) return "Declarations page";
+  if (/\b(wind mitigation|roof certificate|inspection)\b/.test(text)) return "Inspection documents";
+  if (/\b(appraisal|appraisals)\b/.test(text)) return "Appraisal documents";
+  if (/\b(driver'?s? license|license)\b/.test(text)) return "Driver information";
+  if (/\b(supplemental|supplementals)\b/.test(text)) return "Supplemental documents";
+  if (/\b(application|applications)\b/.test(text)) return "Application documents";
+  return null;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 // =====================================================================
@@ -309,9 +1097,18 @@ export async function aiEmailSubject(input: {
 // =====================================================================
 export async function aiEnhanceMessage(input: {
   body: string;
-  channel: "email" | "sms";
+  channel: "email";
   contactName?: string;
 }): Promise<string> {
+  const server = await postServerAi<{ body?: string }>("/ai/enhance-message", {
+    body: input.body,
+    channel: input.channel,
+    contactName: input.contactName,
+  });
+  if (server && typeof server.body === "string" && server.body.trim()) {
+    return server.body.trim();
+  }
+
   await new Promise((r) => setTimeout(r, 450));
   const raw = input.body.trim();
   if (!raw) return raw;
@@ -334,7 +1131,7 @@ export async function aiEnhanceMessage(input: {
     });
   const coreText = sentences.join(" ");
 
-  if (input.channel === "sms") {
+  if (false) {
     // SMS: keep it tight + courteous, no greeting/sign-off bulk.
     const trimmed = coreText.length > 320 ? `${coreText.slice(0, 317)}…` : coreText;
     return `Hi${first ? ` ${first}` : ""}, ${trimmed
@@ -423,6 +1220,84 @@ interface GeocodeResult {
   lat: number;
   lon: number;
   displayName: string;
+  provider: "smarty" | "google" | "census" | "nominatim";
+}
+
+function publicFieldEvidence(
+  fieldKey: string,
+  sourceKind: PublicDataFieldSourceKind,
+  sourceLabel: string,
+  options: {
+    confidence: number;
+    verified: boolean;
+    allowDocumentAutofill: boolean;
+    notes?: string;
+  }
+): PublicDataFieldEvidence {
+  return {
+    fieldKey,
+    sourceKind,
+    sourceLabel,
+    confidence: Math.max(0, Math.min(1, options.confidence)),
+    verified: options.verified,
+    allowDocumentAutofill: options.allowDocumentAutofill,
+    collectedAt: new Date().toISOString(),
+    notes: options.notes,
+  };
+}
+
+function markEvidence(
+  evidence: PublicDataEvidenceMap,
+  fieldKey: string,
+  sourceKind: PublicDataFieldSourceKind,
+  sourceLabel: string,
+  options: {
+    confidence: number;
+    verified: boolean;
+    allowDocumentAutofill: boolean;
+    notes?: string;
+  }
+): void {
+  evidence[fieldKey] = publicFieldEvidence(fieldKey, sourceKind, sourceLabel, options);
+}
+
+function geocoderEvidenceSource(geo: GeocodeResult): {
+  sourceKind: PublicDataFieldSourceKind;
+  sourceLabel: string;
+  confidence: number;
+  verified: boolean;
+} {
+  switch (geo.provider) {
+    case "smarty":
+      return {
+        sourceKind: "validated_address",
+        sourceLabel: "Smarty US Street validation",
+        confidence: 0.96,
+        verified: true,
+      };
+    case "census":
+      return {
+        sourceKind: "government_api",
+        sourceLabel: "US Census Geocoder",
+        confidence: 0.9,
+        verified: true,
+      };
+    case "google":
+      return {
+        sourceKind: "public_geocoder",
+        sourceLabel: "Google Geocoding API",
+        confidence: 0.86,
+        verified: true,
+      };
+    case "nominatim":
+    default:
+      return {
+        sourceKind: "public_geocoder",
+        sourceLabel: "OpenStreetMap Nominatim",
+        confidence: 0.74,
+        verified: false,
+      };
+  }
 }
 
 // Pull the Google Maps Platform key the same way addressSearch does.
@@ -475,7 +1350,7 @@ async function geocodeViaGoogle(address: string): Promise<GeocodeResult | null> 
     const lat = r.geometry?.location?.lat;
     const lon = r.geometry?.location?.lng;
     if (typeof lat !== "number" || typeof lon !== "number") return null;
-    return { lat, lon, displayName: r.formatted_address ?? address };
+    return { lat, lon, displayName: r.formatted_address ?? address, provider: "google" };
   } catch (err) {
     // eslint-disable-next-line no-console
     console.warn("[propertyLookup] Google geocode failed", err);
@@ -508,6 +1383,7 @@ async function geocodeViaNominatim(address: string): Promise<GeocodeResult | nul
       lat: Number(first.lat),
       lon: Number(first.lon),
       displayName: first.display_name,
+      provider: "nominatim",
     };
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -550,6 +1426,7 @@ async function geocodeViaCensus(address: string): Promise<GeocodeResult | null> 
       lat: y,
       lon: x,
       displayName: match?.matchedAddress ?? address,
+      provider: "census",
     };
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -574,6 +1451,7 @@ async function geocodeViaSmarty(address: string): Promise<GeocodeResult | null> 
       lat: validated.lat,
       lon: validated.lon,
       displayName: validated.composed,
+      provider: "smarty",
     };
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -701,13 +1579,39 @@ async function enrichCoastalHome(seed: Record<string, unknown>): Promise<AiAsset
   const synth = synthesizeCoastalHomeFields(geo);
 
   const fields: Record<string, unknown> = { ...synth.fields };
+  const evidence: PublicDataEvidenceMap = {};
   const sources: string[] = ["Geocoder (address resolution)"];
   // Truly unavailable from any public source — homeowner-submitted only.
   const unavailable: string[] = ["windMitigation"];
+  const addressEvidence = geocoderEvidenceSource(geo);
+
+  markEvidence(evidence, "address", addressEvidence.sourceKind, addressEvidence.sourceLabel, {
+    confidence: addressEvidence.confidence,
+    verified: addressEvidence.verified,
+    allowDocumentAutofill: addressEvidence.verified,
+    notes: "Normalized address returned by the geocoding provider.",
+  });
+
+  Object.keys(synth.fields).forEach((fieldKey) => {
+    if (fieldKey === "address") return;
+    markEvidence(evidence, fieldKey, "model_estimate", "AI property estimator (demo)", {
+      confidence: 0.48,
+      verified: false,
+      allowDocumentAutofill: false,
+      notes:
+        "Used only for preliminary quote ranking until a property-record provider or the client verifies it.",
+    });
+  });
 
   if (flood) {
     fields.floodZone = flood.zone;
     sources.push("FEMA National Flood Hazard Layer (NFHL)");
+    markEvidence(evidence, "floodZone", "government_api", "FEMA National Flood Hazard Layer (NFHL)", {
+      confidence: 0.96,
+      verified: true,
+      allowDocumentAutofill: true,
+      notes: flood.subtype ? `Zone subtype: ${flood.subtype}` : undefined,
+    });
   } else {
     unavailable.unshift("floodZone");
   }
@@ -715,6 +1619,7 @@ async function enrichCoastalHome(seed: Record<string, unknown>): Promise<AiAsset
 
   return {
     fields,
+    evidence,
     sources,
     confidence: flood ? 0.78 : 0.55,
     unavailableFields: unavailable,
@@ -851,6 +1756,23 @@ async function enrichLuxuryVehicle(seed: Record<string, unknown>): Promise<AiAss
   if (decoded.year) fields.year = decoded.year;
   if (decoded.make) fields.make = decoded.make;
   if (decoded.model) fields.model = decoded.model;
+  const evidence: PublicDataEvidenceMap = {};
+  Object.keys(fields).forEach((fieldKey) => {
+    markEvidence(evidence, fieldKey, "government_api", "NHTSA VIN decoder (vpic.nhtsa.dot.gov)", {
+      confidence: clean ? 0.95 : 0.6,
+      verified: clean,
+      allowDocumentAutofill: clean,
+      notes: clean
+        ? `Decoded from VIN ${vin}.`
+        : `Partial NHTSA decode; error code ${errorCode || "unknown"}.`,
+    });
+  });
+  markEvidence(evidence, "vin", "client_intake", "Client-entered VIN", {
+    confidence: vin.length === 17 ? 0.9 : 0.7,
+    verified: clean,
+    allowDocumentAutofill: vin.length >= 11,
+    notes: clean ? "VIN accepted by NHTSA decoder." : "VIN should be reviewed before binding.",
+  });
 
   const unavailable: string[] = [];
   // Market value requires a commercial valuation provider — never
@@ -862,6 +1784,7 @@ async function enrichLuxuryVehicle(seed: Record<string, unknown>): Promise<AiAss
 
   return {
     fields,
+    evidence,
     sources: ["NHTSA VIN decoder (vpic.nhtsa.dot.gov)"],
     confidence: clean ? 0.95 : 0.6,
     unavailableFields: unavailable,
@@ -918,12 +1841,16 @@ export async function aiEnrichAsset(
   assetType: AssetType,
   seed: Record<string, unknown>
 ): Promise<AiAssetEnrichment> {
-  // Real public APIs are called directly. No artificial delay — actual
-  // network latency provides the loading state. Production should
-  // additionally proxy through /api/ai/enrich-asset on the server so
-  // commercial property-data providers (CoreLogic / Estated / ATTOM
-  // for homes; Manheim / KBB for vehicles) can populate the fields
-  // listed in unavailableFields server-side without exposing keys.
+  // Public-record lookups and model calls run server-side so provider
+  // credentials never cross into the browser. If the API is unavailable,
+  // the deterministic local fallbacks keep the demo usable.
+  const server = await postServerAi<AiAssetEnrichment>(
+    "/ai/enrich-asset",
+    { assetType, seed },
+    { timeoutMs: 25_000 }
+  );
+  if (server) return server;
+
   switch (assetType) {
     case "coastal_home":
       return enrichCoastalHome(seed);
@@ -957,9 +1884,8 @@ export const ENRICHMENT_SUPPORT: Partial<Record<AssetType, { requires: string[];
 //
 // The real implementation OCRs PDFs / images, parses common quote
 // intake forms, and uses an LLM to return a structured contact record.
-//
-// Demo: pulls patterns out of the filename and synthesizes plausible
-// values from a hash so the same file always produces the same output.
+// The local fallback is intentionally conservative: it extracts only
+// visible text patterns and never fabricates contact data from a filename.
 // =====================================================================
 
 const DEMO_NAMES = [
@@ -980,60 +1906,272 @@ function inferAssetTypeFromFilename(name: string): AssetType | undefined {
   return undefined;
 }
 
+function contactExtractionText(input: { fileName: string; text?: string }): string {
+  return `${input.fileName}\n${input.text ?? ""}`
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function labeledContactValue(text: string, labels: string[]): string {
+  for (const label of labels) {
+    const pattern = new RegExp(
+      String.raw`(?:^|\n)\s*(?:${label})\s*[:#-]?\s*([^\n]{2,120})`,
+      "i"
+    );
+    const match = text.match(pattern);
+    const value = match?.[1]?.trim().replace(/\s{2,}/g, " ");
+    if (value && !/^(n\/a|none|unknown)$/i.test(value)) return value;
+  }
+  return "";
+}
+
+function titleCaseName(value: string): string {
+  return value
+    .replace(/\b(MR|MRS|MS|DR)\.?\s+/gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .map((part) =>
+      /^(LLC|INC|CO|CORP|LTD|LP|LLP)$/i.test(part)
+        ? part.toUpperCase()
+        : part.charAt(0).toUpperCase() + part.slice(1).toLowerCase()
+    )
+    .join(" ");
+}
+
+function extractEmailFromText(text: string): string | undefined {
+  return text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0];
+}
+
+function extractPhoneFromText(text: string): string | undefined {
+  const match = text.match(
+    /(?:phone|mobile|cell|tel|telephone|contact)?\s*[:#-]?\s*(\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})(?!\d)/i
+  );
+  return match?.[1]?.replace(/\s+/g, " ").trim();
+}
+
+function extractAddressFromText(text: string): string | undefined {
+  const labeled = labeledContactValue(text, [
+    "mailing address",
+    "insured address",
+    "applicant address",
+    "property address",
+    "risk address",
+    "address",
+  ]);
+  if (/\d{1,6}\s+/.test(labeled) && /,\s*[A-Z]{2}\s+\d{5}/i.test(labeled)) return labeled;
+  const match = text.match(
+    /\b\d{1,6}\s+[A-Za-z0-9.' -]+(?:Street|St\.?|Avenue|Ave\.?|Road|Rd\.?|Drive|Dr\.?|Lane|Ln\.?|Boulevard|Blvd\.?|Way|Court|Ct\.?|Circle|Cir\.?|Trail|Trl\.?|Place|Pl\.?|Highway|Hwy\.?)\b[^\n,]*(?:,\s*[A-Za-z .'-]+){1,2},?\s+[A-Z]{2}\s+\d{5}(?:-\d{4})?/i
+  );
+  return match?.[0]?.replace(/\s+/g, " ").trim();
+}
+
+function extractBusinessNameFromText(text: string): string | undefined {
+  const labeled = labeledContactValue(text, [
+    "business name",
+    "company name",
+    "named insured",
+    "insured name",
+    "applicant business",
+    "entity name",
+    "legal name",
+  ]);
+  const businessLike = /\b(LLC|L\.L\.C\.|INC\.?|CORP\.?|CORPORATION|CO\.?|COMPANY|LTD\.?|LP|LLP|DBA)\b/i;
+  if (labeled && businessLike.test(labeled)) return labeled.replace(/\s+/g, " ").trim();
+  const match = text.match(
+    /\b([A-Z][A-Za-z0-9&'., -]{2,80}\s+(?:LLC|L\.L\.C\.|Inc\.?|Corp\.?|Corporation|Co\.?|Company|Ltd\.?|LP|LLP))\b/
+  );
+  return match?.[1]?.replace(/\s+/g, " ").trim();
+}
+
+function extractPersonNameFromText(text: string, businessName?: string): string | undefined {
+  const first = labeledContactValue(text, ["first name", "given name"]);
+  const last = labeledContactValue(text, ["last name", "surname"]);
+  if (first && last) return titleCaseName(`${first} ${last}`);
+  const labeled = labeledContactValue(text, [
+    "contact name",
+    "primary contact",
+    "client name",
+    "applicant name",
+    "customer name",
+    "name",
+  ]);
+  if (
+    labeled &&
+    labeled !== businessName &&
+    !/\b(LLC|INC|CORP|COMPANY|AGENCY|INSURANCE|CARRIER)\b/i.test(labeled)
+  ) {
+    return titleCaseName(labeled);
+  }
+  const email = extractEmailFromText(text);
+  if (email) {
+    const local = email.split("@")[0].replace(/[._-]+/g, " ");
+    if (/[a-z]{2,}\s+[a-z]{2,}/i.test(local)) return titleCaseName(local);
+  }
+  return undefined;
+}
+
+function inferLineOfBusinessFromText(text: string, businessName?: string): "personal" | "commercial" | undefined {
+  const lower = text.toLowerCase();
+  if (
+    businessName ||
+    /\b(commercial|business owners|bop|general liability|workers comp|workers compensation|commercial auto|professional liability|premises|operations|payroll|fein|naics|sic)\b/.test(lower)
+  ) {
+    return "commercial";
+  }
+  if (/\b(homeowners?|personal auto|personal lines|dwelling|umbrella|jewelry|yacht|primary residence|household)\b/.test(lower)) {
+    return "personal";
+  }
+  return undefined;
+}
+
+function inferAssetTypeFromText(text: string): AssetType | undefined {
+  const lower = text.toLowerCase();
+  return inferAssetTypeFromFilename(lower) ?? (inferAssetType(lower) === "other" ? undefined : inferAssetType(lower));
+}
+
+function extractBestContactValue(text: string): number | undefined {
+  const labeled = labeledContactValue(text, [
+    "estimated value",
+    "replacement cost",
+    "dwelling limit",
+    "coverage a",
+    "building limit",
+    "appraised value",
+    "scheduled value",
+    "hull value",
+    "market value",
+    "requested limit",
+    "asset value",
+  ]);
+  const labeledValue = extractValue(labeled);
+  if (labeledValue) return labeledValue;
+  const moneyMatches = Array.from(
+    text.matchAll(/\$\s?([\d,]+(?:\.\d+)?)\s?(m|mm|million|k|thousand)?/gi)
+  )
+    .map((match) => extractValue(match[0]))
+    .filter((value): value is number => typeof value === "number" && value >= 5_000);
+  if (moneyMatches.length === 0) return undefined;
+  return Math.max(...moneyMatches);
+}
+
+function extractContactNotes(text: string, assetType?: AssetType): string | undefined {
+  const snippets = [
+    labeledContactValue(text, ["notes", "remarks", "description", "operations", "coverage requested"]),
+    labeledContactValue(text, ["current carrier", "carrier"]),
+    labeledContactValue(text, ["policy number", "prior policy"]),
+  ].filter(Boolean);
+  if (assetType === "luxury_vehicle") {
+    const vin = text.match(/\b[A-HJ-NPR-Z0-9]{17}\b/i)?.[0];
+    if (vin) snippets.push(`VIN: ${vin.toUpperCase()}`);
+  }
+  if (assetType === "yacht") {
+    const hin = text.match(/\b[A-Z]{3}[A-Z0-9]{9}\b/i)?.[0];
+    if (hin) snippets.push(`Hull ID: ${hin.toUpperCase()}`);
+  }
+  return uniqueStrings(snippets).join("\n") || undefined;
+}
+
+function contactFieldCount(contact: Partial<AiExtractedContact>): number {
+  return [
+    contact.lineOfBusiness,
+    contact.businessName,
+    contact.name,
+    contact.email,
+    contact.phone,
+    contact.address,
+    contact.assetType,
+    contact.estimatedValue,
+    contact.notes,
+  ].filter(Boolean).length;
+}
+
 export async function aiExtractContactFromFile(input: {
   fileName: string;
   fileType?: string;
+  text?: string;
+  dataUrl?: string;
 }): Promise<AiExtractedContact> {
-  // Real impl: POST /api/ai/extract-contact (multipart form upload)
-  await new Promise((r) => setTimeout(r, 700));
-  const seed = input.fileName.toLowerCase();
-  const rng = rngFromSeed(seed);
-  const name = DEMO_NAMES[Math.floor(rng() * DEMO_NAMES.length)];
-  const handle = name.toLowerCase().replace(/[^a-z]+/g, ".");
-  const email = `${handle}@example.com`;
-  const phone = `+1 (555) 0${Math.floor(rng() * 90 + 10)}-${Math.floor(rng() * 9000 + 1000)}`;
-  // Nationwide-flavored fake address — small inline pool so the
-  // extraction output mirrors the autocomplete service's variety
-  // without an import cycle.
-  const SAMPLE_CITIES: [string, string, string][] = [
-    ["Austin", "TX", "78701"],
-    ["Chicago", "IL", "60601"],
-    ["Denver", "CO", "80202"],
-    ["Atlanta", "GA", "30303"],
-    ["Seattle", "WA", "98101"],
-    ["Boston", "MA", "02108"],
-    ["Phoenix", "AZ", "85003"],
-    ["Nashville", "TN", "37203"],
-    ["Minneapolis", "MN", "55401"],
-    ["Charlotte", "NC", "28202"],
-  ];
-  const SAMPLE_STREETS = ["Main Street", "Oak Avenue", "Maple Drive", "Park Avenue", "Elm Street", "Highland Drive"];
-  const [city, st, zip] = SAMPLE_CITIES[Math.floor(rng() * SAMPLE_CITIES.length)];
-  const street = SAMPLE_STREETS[Math.floor(rng() * SAMPLE_STREETS.length)];
-  const address = `${Math.floor(rng() * 9000 + 100)} ${street}, ${city}, ${st} ${zip}`;
-  const assetType = inferAssetTypeFromFilename(input.fileName);
-  const baseValue = 750_000 + Math.floor(rng() * 4_250_000);
-  const estimatedValue = assetType ? Math.round(baseValue / 25_000) * 25_000 : undefined;
+  const server = await postServerAi<AiExtractedContact>("/ai/extract-contact", {
+    fileName: input.fileName,
+    fileType: input.fileType,
+    text: input.text,
+    dataUrl: input.dataUrl,
+  });
+  if (
+    server &&
+    typeof server.summary === "string" &&
+    typeof server.confidence === "number" &&
+    contactFieldCount(server) > 0
+  ) {
+    return server;
+  }
 
-  const summary = assetType
-    ? `Extracted from "${input.fileName}". Contact appears interested in ${assetType.replace(/_/g, " ")} coverage near $${(estimatedValue ?? baseValue).toLocaleString()}.`
-    : `Extracted from "${input.fileName}". Coverage type not specified in the document; recommend a discovery call.`;
+  await new Promise((r) => setTimeout(r, 700));
+  const scannedText = contactExtractionText(input);
+  if (input.text && scannedText.length > input.fileName.length + 8) {
+    const email = extractEmailFromText(scannedText);
+    const phone = extractPhoneFromText(scannedText);
+    const businessName = extractBusinessNameFromText(scannedText);
+    const name = extractPersonNameFromText(scannedText, businessName);
+    const address = extractAddressFromText(scannedText);
+    const assetType = inferAssetTypeFromText(scannedText);
+    const lineOfBusiness =
+      inferLineOfBusinessFromText(scannedText, businessName) ??
+      (businessName ? "commercial" : assetType ? "personal" : undefined);
+    const estimatedValue = extractBestContactValue(scannedText);
+    const notes = extractContactNotes(scannedText, assetType);
+    const filledCount = [
+      lineOfBusiness,
+      businessName,
+      name,
+      email,
+      phone,
+      address,
+      assetType,
+      estimatedValue,
+      notes,
+    ].filter(Boolean).length;
+    if (filledCount > 0) {
+      const label = businessName || name || "the uploaded intake";
+      return {
+        lineOfBusiness,
+        businessName,
+        name,
+        email,
+        phone,
+        address,
+        assetType,
+        estimatedValue,
+        notes,
+        summary: `Scanned "${input.fileName}" and extracted ${filledCount} profile field${
+          filledCount === 1 ? "" : "s"
+        } for ${label}. Review before saving.`,
+        confidence: clamp(0.42 + filledCount * 0.07 + (email ? 0.08 : 0) + (address ? 0.08 : 0), 0, 0.92),
+        sources: [
+          `Document: ${input.fileName}`,
+          "Full document text scan",
+          ...(input.dataUrl ? ["Vision attachment available for server AI"] : []),
+        ],
+      };
+    }
+  }
 
   return {
-    name,
-    email,
-    phone,
-    address,
-    assetType,
-    estimatedValue,
-    summary,
-    confidence: assetType ? 0.78 : 0.6,
+    summary: input.dataUrl
+      ? `Scanned "${input.fileName}", but no fields were confidently extracted in this environment. Review the file and fill only verified details.`
+      : `No readable contact fields were found in "${input.fileName}". Review the file and enter verified details manually.`,
+    confidence: 0.18,
     sources: [
       `Document: ${input.fileName}`,
-      "OCR + LLM contact extraction",
-      assetType ? "Asset-type classifier" : "No asset hint found",
+      input.dataUrl ? "Vision attachment available for server AI" : "No readable text found",
+      "No fabricated filename data",
     ],
   };
+
+  // Nationwide-flavored fake address — small inline pool so the
 }
 
 // Extract policy fields from an uploaded declarations page / carrier
@@ -1044,6 +2182,15 @@ export async function aiExtractPolicyFromFile(input: {
   fileType?: string;
   carrierNames?: string[];
 }): Promise<AiExtractedPolicy> {
+  const server = await postServerAi<AiExtractedPolicy>("/ai/extract-policy", {
+    fileName: input.fileName,
+    fileType: input.fileType,
+    carrierNames: input.carrierNames,
+  });
+  if (server && typeof server.summary === "string" && typeof server.confidence === "number") {
+    return server;
+  }
+
   await new Promise((r) => setTimeout(r, 700));
   const rng = rngFromSeed(input.fileName.toLowerCase());
 
@@ -1188,7 +2335,15 @@ export async function aiParseCarrierAppetite(input: {
   text?: string;
   carrier?: Pick<Carrier, "name" | "id">;
 }): Promise<AiParsedCarrierAppetite> {
-  // Simulate the LLM round-trip.
+  const server = await postServerAi<AiParsedCarrierAppetite>("/ai/parse-carrier-appetite", {
+    fileName: input.fileName,
+    text: input.text,
+    carrier: input.carrier,
+  });
+  if (server && Array.isArray(server.missingFields) && typeof server.confidence === "number") {
+    return server;
+  }
+
   await new Promise((r) => setTimeout(r, 600));
   const haystack = [input.fileName ?? "", input.text ?? ""].join("\n");
   const seed = haystack || (input.carrier?.name ?? "carrier");
@@ -1435,6 +2590,7 @@ const QUESTIONNAIRE_BY_ASSET: Partial<Record<AssetType, string[]>> = {
 export interface AiQuotingPrep {
   assetType: AssetType;
   publicFields: Record<string, string>;
+  publicFieldEvidence: PublicDataEvidenceMap;
   missingFields: string[];
   summary: string;
 }
@@ -1444,31 +2600,173 @@ export async function aiPreparePublicFields(input: {
   prospectName: string;
   address?: string;
   estimatedValue?: number;
+  assetDetails?: Record<string, string>;
   rngSeed?: string;
 }): Promise<AiQuotingPrep> {
-  await new Promise((r) => setTimeout(r, 400));
-  const seed = input.rngSeed ?? `${input.prospectName}-${input.assetType}`;
-  const rng = rngFromSeed(seed);
   const labels = PUBLIC_FIELDS_BY_ASSET[input.assetType] ?? [];
   const publicFields: Record<string, string> = {};
+  const publicFieldEvidence: PublicDataEvidenceMap = {};
+  const setPublicField = (
+    label: string,
+    value: unknown,
+    sourceKind: PublicDataFieldSourceKind,
+    sourceLabel: string,
+    options: {
+      confidence: number;
+      verified: boolean;
+      allowDocumentAutofill: boolean;
+      notes?: string;
+    }
+  ) => {
+    const text = normalizeLookupText(value);
+    if (!text) return;
+    const existingEvidence = publicFieldEvidence[label];
+    if (publicFields[label] && existingEvidence?.sourceKind !== "model_estimate") return;
+    publicFields[label] = text;
+    markEvidence(publicFieldEvidence, label, sourceKind, sourceLabel, options);
+  };
   for (const label of labels) {
+    const provided = quoteAssetPublicFieldValue(input.assetType, label, input.assetDetails, {
+      address: input.address,
+      estimatedValue: input.estimatedValue,
+    });
+    if (provided) {
+      setPublicField(label, provided, "agent_seed", "QuoteX intake", {
+        confidence: 0.9,
+        verified: true,
+        allowDocumentAutofill: true,
+        notes: "Already present in the client or agent quote intake.",
+      });
+    }
     // Some fields the AI "couldn't pull" from public records — flip
     // ~25% of them off so missingFields has real signal.
-    if (rng() < 0.25) continue;
-    publicFields[label] = synthValueForLabel(label, input, rng);
   }
+  if (input.estimatedValue) {
+    setPublicField("Estimated exposure value", input.estimatedValue, "agent_seed", "QuoteX intake", {
+      confidence: 0.86,
+      verified: true,
+      allowDocumentAutofill: true,
+      notes: "Exposure value supplied in the quote request.",
+    });
+  }
+
+  const enrichmentSeed = publicLookupSeedForQuotePrep(input.assetType, input.address, input.assetDetails);
+  if (Object.keys(enrichmentSeed).length > 0) {
+    const enrichment = await aiEnrichAsset(input.assetType, enrichmentSeed);
+    applyEnrichmentToQuotePrep(input.assetType, labels, enrichment, setPublicField);
+  }
+
   const missingLabels = labels.filter((l) => !(l in publicFields));
-  const intakeQs = QUESTIONNAIRE_BY_ASSET[input.assetType] ?? [];
+  const intakeQs = (QUESTIONNAIRE_BY_ASSET[input.assetType] ?? []).filter(
+    (label) => !quoteAssetQuestionAnswered(input.assetType, label, input.assetDetails)
+  );
   const missingFields = [...missingLabels, ...intakeQs];
-  const summary = `Pulled ${Object.keys(publicFields).length} field${
-    Object.keys(publicFields).length === 1 ? "" : "s"
-  } from public records for the ${input.assetType.replace(/_/g, " ")}; need ${missingFields.length} confirmation${missingFields.length === 1 ? "" : "s"} from the client to bind a carrier quote.`;
+  const providedDetails = summarizeQuoteAssetDetails(input.assetType, input.assetDetails);
+  const documentReadyCount = Object.values(publicFieldEvidence).filter(
+    (item) => item.allowDocumentAutofill
+  ).length;
+  const estimateOnlyCount = Object.values(publicFieldEvidence).filter(
+    (item) => item.sourceKind === "model_estimate"
+  ).length;
+  const summary = `Prepared ${documentReadyCount} document-ready field${
+    documentReadyCount === 1 ? "" : "s"
+  } and ${estimateOnlyCount} estimate-only signal${estimateOnlyCount === 1 ? "" : "s"} for the ${input.assetType.replace(/_/g, " ")}${
+    providedDetails.length > 0
+      ? `, using ${providedDetails.length} agent-provided lookup detail${providedDetails.length === 1 ? "" : "s"}`
+      : ""
+  }; need ${missingFields.length} confirmation${missingFields.length === 1 ? "" : "s"} from the client to bind a carrier quote.`;
   return {
     assetType: input.assetType,
     publicFields,
+    publicFieldEvidence,
     missingFields,
     summary,
   };
+}
+
+function publicLookupSeedForQuotePrep(
+  assetType: AssetType,
+  address: string | undefined,
+  assetDetails: Record<string, string> | undefined
+): Record<string, unknown> {
+  const details = assetDetails ?? {};
+  if (assetType === "coastal_home") {
+    const riskAddress =
+      details.riskAddress ??
+      details.propertyAddress ??
+      details.address ??
+      address;
+    return riskAddress ? { address: riskAddress } : {};
+  }
+  if (assetType === "luxury_vehicle") {
+    return details.vin ? { vin: details.vin } : {};
+  }
+  if (assetType === "yacht") {
+    const make = details.make ?? details.builder;
+    const model = details.model;
+    const year = details.year;
+    return make || model || year ? { make, model, year } : {};
+  }
+  return {};
+}
+
+function applyEnrichmentToQuotePrep(
+  assetType: AssetType,
+  labels: string[],
+  enrichment: AiAssetEnrichment,
+  setPublicField: (
+    label: string,
+    value: unknown,
+    sourceKind: PublicDataFieldSourceKind,
+    sourceLabel: string,
+    options: {
+      confidence: number;
+      verified: boolean;
+      allowDocumentAutofill: boolean;
+      notes?: string;
+    }
+  ) => void
+): void {
+  const fields = enrichment.fields ?? {};
+  const evidence = enrichment.evidence ?? {};
+  const useEvidence = (fieldKey: string) =>
+    evidence[fieldKey] ?? publicFieldEvidence(fieldKey, "unknown", "Unlabeled enrichment", {
+      confidence: enrichment.confidence,
+      verified: false,
+      allowDocumentAutofill: false,
+    });
+  const setFromKey = (label: string, fieldKey: string, value: unknown = fields[fieldKey]) => {
+    if (value === undefined || value === null || value === "") return;
+    const ev = useEvidence(fieldKey);
+    setPublicField(label, value, ev.sourceKind, ev.sourceLabel, {
+      confidence: ev.confidence,
+      verified: ev.verified,
+      allowDocumentAutofill: ev.allowDocumentAutofill,
+      notes: ev.notes,
+    });
+  };
+
+  labels.forEach((label) => {
+    if (assetType === "coastal_home") {
+      if (/year built/i.test(label)) setFromKey(label, "yearBuilt");
+      else if (/square footage|sq ft/i.test(label)) setFromKey(label, "squareFootage");
+      else if (/construction/i.test(label)) setFromKey(label, "constructionType");
+      else if (/roof material/i.test(label)) setFromKey(label, "roofMaterial");
+      else if (/distance to coast/i.test(label)) setFromKey(label, "distanceToCoast");
+      else if (/lot size/i.test(label)) setFromKey(label, "lotSize");
+    }
+    if (assetType === "luxury_vehicle" && /year \/ make \/ model/i.test(label)) {
+      const value = [fields.year, fields.make, fields.model].filter(Boolean).join(" ");
+      if (!value) return;
+      const parts = ["year", "make", "model"].map((fieldKey) => useEvidence(fieldKey));
+      setPublicField(label, value, "government_api", "NHTSA VIN decoder (vpic.nhtsa.dot.gov)", {
+        confidence: Math.min(...parts.map((part) => part.confidence)),
+        verified: parts.every((part) => part.verified),
+        allowDocumentAutofill: parts.every((part) => part.allowDocumentAutofill),
+        notes: "Derived from NHTSA year, make, and model fields.",
+      });
+    }
+  });
 }
 
 function synthValueForLabel(
@@ -1592,6 +2890,7 @@ export function aiGeneratePersonalQuestionnaire(input: {
       // clarifications get marked required so the client doesn't
       // skip critical underwriting items.
       required: true,
+      round: "initial",
     };
   });
 }
@@ -1634,6 +2933,7 @@ export function aiGenerateCommercialQuestionnaire(input: {
       kind: q.kind,
       options: q.options,
       required: q.required,
+      round: "initial",
     });
   });
 
@@ -1682,6 +2982,7 @@ export function aiGenerateCommercialQuestionnaire(input: {
         kind: q.kind,
         options: q.options,
         carrierId: c.id,
+        round: "initial",
       });
     });
   });
@@ -1730,12 +3031,20 @@ export function aiRankCarrierQuotes(input: {
   assetType: AssetType;
   estimatedValue: number;
   state?: string;
+  lineOfBusiness?: "personal" | "commercial";
 }): { quotes: AiCarrierQuoteResult[]; summary: string } {
   const eligible = input.carriers.filter((c) => c.status === "active");
   const quotes: AiCarrierQuoteResult[] = eligible.map((c) => {
-    const appetite = (c.appetites ?? []).find((a) => a.assetType === input.assetType);
-    // Score = appetite-match + value-band-match + state-availability +
-    // tendency bonus. Cap each piece so a single dim doesn't dominate.
+    const line = input.lineOfBusiness ?? "personal";
+    const appetite =
+      (c.appetites ?? []).find(
+        (a) => a.assetType === input.assetType && (a.line ?? "personal") === line
+      ) ??
+      (line === "commercial"
+        ? (c.appetites ?? []).find((a) => a.assetType === input.assetType)
+        : undefined);
+    // Score = appetite-match (40) + value-band-match (20) +
+    // state-availability (20) + pricing tendency fit (20).
     let score = 0;
     let fitParts: string[] = [];
     if (appetite) {
@@ -1756,9 +3065,18 @@ export function aiRankCarrierQuotes(input: {
     } else if (input.state) {
       fitParts.push(`not licensed in ${input.state}`);
     }
-    if (appetite && appetite.pricingTendency < 1) {
-      score += (1 - appetite.pricingTendency) * 0.5;
-      fitParts.push("below-market pricing");
+    if (appetite) {
+      const pricingScore = quotePricingTendencyScore(appetite.pricingTendency);
+      score += pricingScore;
+      if (pricingScore >= 0.18) {
+        fitParts.push("preferred pricing tendency");
+      } else if (pricingScore >= 0.1) {
+        fitParts.push("market pricing tendency");
+      } else if (pricingScore > 0) {
+        fitParts.push("premium pricing tendency");
+      } else {
+        fitParts.push("pricing tendency outside target");
+      }
     }
     // Base premium scales with estimatedValue + asset-type factor +
     // carrier's pricing tendency. Heuristic, not predictive.
@@ -1792,7 +3110,7 @@ export function aiRankCarrierQuotes(input: {
       carrierId: c.id,
       premium,
       confidence,
-      score,
+      score: clamp(score, 0, 1),
       fitReason: fitParts.join(" · "),
       apiStatus,
     };
@@ -1802,7 +3120,9 @@ export function aiRankCarrierQuotes(input: {
   const summary = best
     ? `${eligible.length} carrier${eligible.length === 1 ? "" : "s"} queried. Top recommendation: ${
         eligible.find((c) => c.id === best.carrierId)?.name ?? "—"
-      } based on ${best.fitReason}.`
+      } based on ${best.fitReason}${
+        input.lineOfBusiness === "commercial" ? " after commercial appetite screening" : ""
+      }.`
     : `No active carriers configured for ${input.assetType.replace(/_/g, " ")}.`;
   return { quotes, summary };
 }
@@ -1924,12 +3244,9 @@ const NONE: ActivityResolution = {
 // =====================================================================
 // AI campaign drafter.
 //
-// Takes a plain-language brief from a manager ("hurricane prep reminder
-// for coastal home clients", "monthly nudge to renewal clients about
-// auto coverage") and returns a complete promotional campaign — name,
-// subject, body, recommended channels, recommended audience, and
-// suggested recurrence — that the Draft Campaign card pre-fills for
-// review + edit before send.
+// Thin wrapper around the dedicated creative engine. The manager's
+// conversational prompt becomes campaign copy, audience/channel
+// recommendations, a digital pamphlet description, and image direction.
 // =====================================================================
 
 export type DraftCampaignAudience =
@@ -1948,6 +3265,8 @@ export interface DraftedCampaign {
   audience: DraftCampaignAudience[];
   recurrence: "none" | "daily" | "weekly" | "monthly";
   summary: string;
+  pamphletDescription?: string;
+  imagePrompt?: string;
 }
 
 export function aiDraftCampaign(input: {
@@ -1956,144 +3275,8 @@ export function aiDraftCampaign(input: {
   senderName?: string;
   signOff?: string;
 }): DraftedCampaign {
-  const prompt = input.prompt.trim();
-  const t = prompt.toLowerCase();
-  const has = (re: RegExp) => re.test(t);
-
-  // Audience inference — multi-select; if nothing matches, default to all clients.
-  const audience: DraftCampaignAudience[] = [];
-  if (has(/\b(coastal|hurricane|wind ?mitigation|flood|storm|named storm|cat-?5)\b/) ||
-      (has(/\bhome\b/) && !has(/\bauto\b/)))
-    audience.push("coastal_home_clients");
-  if (has(/\b(auto|vehicle|car|driver|collision|comprehensive)\b/))
-    audience.push("auto_clients");
-  if (has(/\b(high[ -]value|hnw|million|million-dollar|wealthy|premium|luxury)\b/))
-    audience.push("high_value_clients");
-  if (has(/\b(renew|renewal|expir|upcoming term|term end)\b/))
-    audience.push("renewal_clients");
-  if (has(/\bprospects?\b/) && !has(/\bclients?\b/))
-    audience.push("all_prospects");
-  if (has(/\b(everyone|all clients?|whole book|entire book|every client)\b/))
-    audience.push("all_clients");
-  if (audience.length === 0) audience.push("all_clients");
-
-  // Channel inference.
-  const channels: ("email" | "sms")[] = [];
-  if (has(/\b(text|sms)\b/)) channels.push("sms");
-  if (has(/\b(email|newsletter|letter|long form|details?)\b/)) channels.push("email");
-  if (channels.length === 0) {
-    // Default to email when the brief doesn't specify — email gives
-    // room for the substance of the message.
-    channels.push("email");
-  }
-
-  // Recurrence.
-  let recurrence: DraftedCampaign["recurrence"] = "none";
-  if (has(/\bdaily\b/)) recurrence = "daily";
-  else if (has(/\bweekly\b/)) recurrence = "weekly";
-  else if (has(/\bmonthly\b/)) recurrence = "monthly";
-
-  // Name + subject.
-  const name = topicalCampaignName(prompt, audience);
-  const subject = campaignSubject(prompt, audience);
-
-  // Body — channel-aware. Email gets a greeting + sign-off; SMS stays
-  // short.
-  const audienceLabel = humanAudienceLabel(audience);
-  const agencyName = input.agencyName ?? "your agency";
-  const senderName = input.senderName ?? "the team";
-  const signOff = input.signOff ?? "Warm regards,";
-  const isShortChannel = channels.length === 1 && channels[0] === "sms";
-
-  const body = isShortChannel
-    ? `${agencyName}: ${condenseForSms(prompt)} Reply to this thread if you'd like a hand. Reply STOP to opt out.`
-    : [
-        `Hi {first_name},`,
-        ``,
-        expandPromptToBody(prompt, audienceLabel),
-        ``,
-        `If anything looks off — or you'd like to talk through how it applies to your coverage — just reply right here and we'll take it from there.`,
-        ``,
-        signOff,
-        `— ${senderName}`,
-        agencyName,
-      ].join("\n");
-
-  const summary = `AI drafted "${name}" for ${audienceLabel} via ${channels
-    .map((c) => c.toUpperCase())
-    .join(" + ")}${recurrence !== "none" ? `, recurring ${recurrence}` : ""}.`;
-
-  return { name, subject, body, channels, audience, recurrence, summary };
+  return createCampaignDraft(input);
 }
-
-function topicalCampaignName(prompt: string, audience: DraftCampaignAudience[]): string {
-  const t = prompt.toLowerCase();
-  if (/hurricane|storm|wind ?mitigation/.test(t)) return "Hurricane prep — coastal homes";
-  if (/renew|renewal|expir/.test(t)) return "Renewal touch — upcoming terms";
-  if (/auto|vehicle|driver/.test(t)) return "Auto policy check-in";
-  if (/jewelry|appraisal/.test(t)) return "Scheduled valuables review";
-  if (/umbrella|excess/.test(t)) return "Umbrella coverage review";
-  if (/year ?end|annual review|portfolio review/.test(t))
-    return "Annual portfolio review";
-  // Fallback: first 6 meaningful words, title-cased.
-  const words = prompt
-    .replace(/\s+/g, " ")
-    .split(" ")
-    .slice(0, 6)
-    .join(" ")
-    .trim();
-  const audPart = humanAudienceLabel(audience);
-  const base = words.charAt(0).toUpperCase() + words.slice(1);
-  return base.length > 0 ? `${base} — ${audPart}` : `Outreach — ${audPart}`;
-}
-
-function campaignSubject(prompt: string, audience: DraftCampaignAudience[]): string {
-  const t = prompt.toLowerCase();
-  if (/hurricane|storm|wind ?mitigation/.test(t))
-    return "A quick coastal-home prep check before storm season";
-  if (/renew|renewal/.test(t)) return "Your upcoming renewal — what to expect";
-  if (/auto|vehicle/.test(t)) return "Auto coverage tune-up";
-  if (/jewelry|appraisal/.test(t)) return "Time to refresh your scheduled valuables";
-  if (/umbrella|excess/.test(t)) return "Do you have enough excess liability?";
-  if (/year ?end|annual review|portfolio/.test(t))
-    return "Your annual portfolio review";
-  if (/payment|bill|autopay/.test(t)) return "A note about your billing";
-  if (/welcome|new/.test(t)) return `Welcome to ${audienceFirstWord(audience)} care`;
-  // Generic: use the first sentence trimmed.
-  const s = prompt.split(/[.!?\n]/)[0].trim();
-  const words = s.split(/\s+/).slice(0, 8).join(" ");
-  return words.charAt(0).toUpperCase() + words.slice(1);
-}
-
-function expandPromptToBody(prompt: string, audienceLabel: string): string {
-  // Spine = the prompt. Wrap with one framing sentence so it reads as
-  // a real outreach, not a brief. Append a per-topic call-to-action.
-  const opener = `As part of our outreach to ${audienceLabel}, I wanted to share something timely.`;
-  const t = prompt.toLowerCase();
-  let cta = `If you'd like to walk through how this affects your policy, just reply with a few times that work and I'll get back same day.`;
-  if (/renew|renewal/.test(t))
-    cta = `If you'd like me to walk through your renewal options and pull comparison quotes before the deadline, just reply and I'll set aside the time.`;
-  else if (/hurricane|storm|wind/.test(t))
-    cta = `Reply with a quick "review my prep" if you'd like me to send the coastal-home checklist and confirm your wind-mitigation discount is on file.`;
-  else if (/payment|bill|autopay/.test(t))
-    cta = `Reply with any billing question and I'll get you sorted — same day, no auto-attendant.`;
-  else if (/quote|premium|pricing/.test(t))
-    cta = `Reply if you'd like a fresh quote comparison across the carriers we work with.`;
-  return [opener, "", prompt, "", cta].join("\n");
-}
-
-function condenseForSms(prompt: string): string {
-  const s = prompt.replace(/\s+/g, " ").trim();
-  if (s.length <= 140) return s;
-  return `${s.slice(0, 137)}…`;
-}
-
-// =====================================================================
-// Pamphlet drafter v2 — sectioned model, multi-tone / multi-layout,
-// rich content bank with regenerate. Companion to aiDraftCampaign;
-// produces a styled, branded digital flyer the manager can preview,
-// edit section by section, print, and send alongside the campaign.
-// =====================================================================
 
 export type PamphletAccent =
   | "winter"
@@ -2330,6 +3513,7 @@ export interface DraftedPamphlet {
   // explicitly regenerates it. Optional for backwards compatibility
   // with pamphlets drafted before the AI image integration.
   heroImageSeed?: number;
+  campaignDescription?: string;
   // LLM-authored image prompt — when present, this is the description
   // the image generator uses verbatim (rather than the accent's canned
   // scene). Lets the picture and the copy stay perfectly in sync
@@ -2346,6 +3530,8 @@ export interface DraftPamphletInput {
   agencyWebsite?: string;
   agencyAddress?: string;
   senderName?: string;
+  campaignDescription?: string;
+  heroImagePrompt?: string;
   // Optional explicit overrides — when omitted the drafter infers them
   // from the prompt.
   accent?: PamphletAccent;
@@ -2375,7 +3561,21 @@ export function aiDraftPamphlet(input: DraftPamphletInput): DraftedPamphlet {
   const heroImageSeed = hashSeed(
     `${agency.name}|${accent}|${heroSection?.headline ?? ""}`
   );
-  return { accent, tone, layout, agency, sections, heroImageSeed };
+  const heroImagePrompt =
+    input.heroImagePrompt?.trim() ||
+    (accent === "generic"
+      ? promptAwareCampaignImagePrompt(campaignPromptTopic(input.prompt), input.prompt)
+      : undefined);
+  return {
+    accent,
+    tone,
+    layout,
+    agency,
+    sections,
+    heroImageSeed,
+    campaignDescription: input.campaignDescription?.trim() || undefined,
+    heroImagePrompt,
+  };
 }
 
 // Regenerate a single section — picks the next variant in that
@@ -4289,6 +5489,7 @@ function audienceFirstWord(audience: DraftCampaignAudience[]): string {
 // =====================================================================
 
 export interface InboundTriage {
+  disposition: "ignore" | "notification" | "activity";
   warrants: boolean;
   title: string;
   topic: TaskTopic;
@@ -4307,6 +5508,7 @@ export function aiClassifyInboundForActivity(input: {
   const who = input.contactName ?? "Contact";
   const has = (re: RegExp) => re.test(text);
   const noActivity = (): InboundTriage => ({
+    disposition: "ignore",
     warrants: false,
     title: "",
     topic: "other",
@@ -4323,15 +5525,19 @@ export function aiClassifyInboundForActivity(input: {
   const mk = (
     topic: TaskTopic,
     severity: InboundTriage["severity"],
-    label: string
+    label: string,
+    disposition: InboundTriage["disposition"] = "activity"
   ): InboundTriage => ({
-    warrants: true,
+    disposition,
+    warrants: disposition === "activity",
     title: `${who}: ${label}`,
     topic,
     severity,
     reason: `AI read an inbound ${
       input.channel ? input.channel.toUpperCase() + " " : ""
-    }message and opened this activity — "${firstSentence(input.body)}"`,
+    }message and ${
+      disposition === "activity" ? "opened an activity" : "logged a notification"
+    } - "${firstSentence(input.body)}"`,
   });
 
   // Highest-urgency events first.
@@ -4343,6 +5549,12 @@ export function aiClassifyInboundForActivity(input: {
   if (has(/\b(cancel|cancellation|terminate|drop|discontinue)\b/)) {
     return mk("cancellation_request", "urgent", "wants to cancel coverage");
   }
+  if (input.contactKind === "carrier") {
+    if (has(/\b(declin|not eligible|subjectivit|supplemental|additional information|missing information|need|requires|required|bind|binding|deadline|expires?|non[- ]renew|underwriting question)\b/)) {
+      return mk("coverage_change", "warning", "carrier response needs review");
+    }
+    return mk("other", "info", "carrier update received", "notification");
+  }
   if (has(/\b(add|adding|insure|cover|new)\b[\s\S]{0,40}\b(vehicle|car|auto|truck|suv|driver|boat|yacht|jewelry|ring|watch|home|house|property|condo|asset|rv|motorcycle)\b/)) {
     return mk("coverage_change", "warning", "wants to add to their policy");
   }
@@ -4350,20 +5562,33 @@ export function aiClassifyInboundForActivity(input: {
     return mk("coverage_change", "warning", "requested a coverage change");
   }
   if (has(/\b(payment|invoice|bill|billed|charge|charged|refund|autopay|past due|overdue|premium)\b/)) {
-    return mk("payment_issue", "warning", "has a billing / payment question");
+    if (has(/\b(past due|overdue|failed|declined|bounced|nsf|lapse|lapsed|non[- ]payment|nonpayment|chargeback|refund dispute|cancel(?:lation)? notice)\b/)) {
+      return mk("payment_issue", "urgent", "has a billing issue that may affect coverage");
+    }
+    return mk("payment_issue", "info", "billing update received", "notification");
   }
   if (has(/\b(document|upload|sign|signature|e-?sign|form|declaration|dec page|proof of insurance|paperwork|attachment)\b/)) {
-    return mk("document_upload", "warning", "documents needed / sent");
+    if (has(/\b(send|issue|provide|get|need|request)\b[\s\S]{0,35}\b(proof of insurance|certificate|coi|dec page|declaration|id card|binder)\b/) ||
+        has(/\b(wrong|incorrect|rejected|can't|cannot|unable|problem|issue|missing signature|expired)\b[\s\S]{0,35}\b(document|form|signature|attachment|paperwork)\b/)) {
+      return mk("document_upload", "warning", "document request needs service");
+    }
+    return mk("document_upload", "info", "document update received", "notification");
   }
   if (has(/\b(renew|renewal|expire|expiring|expiration)\b/)) {
-    return mk("renewal_approaching", "warning", "renewal question");
+    if (has(/\b(non[- ]renew|not renewing|carrier exiting|lapse|lapsed|expires today|expires tomorrow|remarket|re-shop|shop|review|change|increase|decrease)\b/)) {
+      return mk("renewal_approaching", "warning", "renewal needs review");
+    }
+    return mk("renewal_approaching", "info", "renewal update received", "notification");
   }
-  if (has(/\b(quote|premium|price|pricing|rate|estimate)\b/)) {
+  if (has(/\b(quote|estimate|proposal)\b/)) {
     return mk("coverage_change", "warning", "asking about a quote / pricing");
+  }
+  if (has(/\b(premium|price|pricing|rate)\b/)) {
+    return mk("other", "info", "pricing question received", "notification");
   }
   // Generic question / request that needs a human response.
   if (has(/\?|\b(can you|could you|would you|please|need|how do|how can|when|why|what about|let me know|follow up|following up|waiting)\b/)) {
-    return mk("other", "info", "has a question that needs a reply");
+    return mk("other", "info", "message may need a reply", "notification");
   }
   return noActivity();
 }

@@ -40,10 +40,38 @@ describe("aiClassifyInboundForActivity", () => {
     expect(out.severity).toBe("urgent");
   });
 
-  it("treats a general question as a low-priority follow-up", async () => {
+  it("treats a general question as a notification, not a full activity", async () => {
     const { aiClassifyInboundForActivity } = await import("../ai");
     const out = aiClassifyInboundForActivity({ body: "When does my coverage start?" });
-    expect(out.warrants).toBe(true);
+    expect(out.disposition).toBe("notification");
+    expect(out.warrants).toBe(false);
+  });
+
+  it("keeps routine document/payment/renewal updates notification-only", async () => {
+    const { aiClassifyInboundForActivity } = await import("../ai");
+    expect(aiClassifyInboundForActivity({ body: "I uploaded the signed form." }).disposition).toBe(
+      "notification"
+    );
+    expect(aiClassifyInboundForActivity({ body: "The invoice was paid today." }).disposition).toBe(
+      "notification"
+    );
+    expect(aiClassifyInboundForActivity({ body: "Renewal packet received." }).disposition).toBe(
+      "notification"
+    );
+  });
+
+  it("still opens activities for failed payments and carrier supplementals", async () => {
+    const { aiClassifyInboundForActivity } = await import("../ai");
+    expect(
+      aiClassifyInboundForActivity({ body: "The card was declined and the policy is past due." })
+        .disposition
+    ).toBe("activity");
+    expect(
+      aiClassifyInboundForActivity({
+        body: "Carrier needs a supplemental before binding.",
+        contactKind: "carrier",
+      }).disposition
+    ).toBe("activity");
   });
 });
 
@@ -88,6 +116,30 @@ describe("communications.sweepInboundForActivities", () => {
     expect(api.communications.sweepInboundForActivities(agency.id).length).toBe(0);
   });
 
+  it("logs a notification instead of an activity for informational inbound messages", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const comm = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      body: "I uploaded the signed form.",
+    });
+    const created = api.communications.sweepInboundForActivities(agency.id);
+    expect(created).toHaveLength(1);
+    expect(created[0].task).toBeUndefined();
+    expect(created[0].notification?.kind).toBe("inbound_notice");
+    const fresh = api.communications.listByCustomer(customer.id).find((c) => c.id === comm.id)!;
+    expect(fresh.aiActivityScannedAt).toBeTruthy();
+    expect(fresh.aiActivityTaskId).toBeUndefined();
+    expect(fresh.aiActivityNotificationId).toBeTruthy();
+    expect(
+      api.tasks.listByTenant(agency.id).some((t) => t.messageId === comm.id)
+    ).toBe(false);
+  });
+
   it("skips AI-authored inbound and outbound messages", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
@@ -95,7 +147,7 @@ describe("communications.sweepInboundForActivities", () => {
     api.communications.create({
       tenantId: agency.id,
       customerId: customer.id,
-      channel: "sms",
+      channel: "email",
       direction: "inbound",
       body: "I need to file a claim",
       createdById: "ai",

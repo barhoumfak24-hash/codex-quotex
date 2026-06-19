@@ -10,7 +10,6 @@ import {
   Download,
   ExternalLink,
   Flag,
-  Lock,
   Medal,
   PartyPopper,
   Pencil,
@@ -31,6 +30,8 @@ import { Card, CardHeader, EmptyState, StatCard } from "@/components/ui/Card";
 import { Confetti } from "@/components/ui/Confetti";
 import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
+import { EmployeeBackButton } from "@/components/layout/EmployeeBackButton";
+import { AiCustomFilterChip } from "@/components/ui/AiCustomFilterChip";
 import { DocumentViewerModal, downloadDocumentStub } from "@/components/ui/DocumentViewerModal";
 import {
   ClientList,
@@ -49,19 +50,29 @@ import type {
   PerformanceGoal,
   PerformanceGoalMetric,
   PerformanceGoalPeriod,
+  PerformanceGoalRequest,
   PerformanceGoalScope,
+  Agency,
+  User,
 } from "@/types";
 import {
   GOAL_METRICS,
   actualForMetric,
   coerceGoals,
   goalActual,
+  goalMetricMeta,
+  goalProgressPercent,
   goalScopeLabel,
+  inferCustomGoalMetric,
   periodLabel,
 } from "@/lib/performanceGoals";
 
 // =====================================================================
-// Manager-only analytics surface. Two views in one route:
+// Employee analytics surface. Managers keep the full team view; agents
+// get a self-only view with company goals and a manager-routed goal
+// request workflow.
+//
+// Manager view has two modes in one route:
 //
 //   1. Overview — grid of agent cards with at-a-glance stats
 //      (clients, bound policies, premium under management, open
@@ -111,14 +122,16 @@ export function AnalyticsPage() {
   };
 
   if (!agency || !user) return null;
-  // Hard gate: managers only. Agents who deep-link here see a
-  // locked-out state rather than the analytics tiles.
+  if (user.role === "agent") {
+    return <AgentPersonalAnalytics agency={agency} user={user} />;
+  }
+
   if (user.role !== "manager") {
     return (
       <EmptyState
-        title="Analytics is manager-only"
-        description="Ask your agency manager to review team performance from this page."
-        icon={<Lock className="h-8 w-8" />}
+        title="Analytics is for agency staff"
+        description="Sign in as an agent or manager to view agency analytics."
+        icon={<BarChart3 className="h-8 w-8" />}
       />
     );
   }
@@ -142,6 +155,7 @@ export function AnalyticsPage() {
 
   return (
     <div className="space-y-6">
+      <EmployeeBackButton />
       <div className="flex items-end justify-between gap-3 flex-wrap">
         <div>
           <h1 className="font-display text-3xl">Analytics</h1>
@@ -427,6 +441,7 @@ function AgencyTrends({ agencyId }: { agencyId: string }) {
 // ---------------------------------------------------------------------
 
 function PerformanceGoalsCard({ agencyId }: { agencyId: string }) {
+  const { user } = useAuth();
   const [, setRev] = useState(0);
   const [modalOpen, setModalOpen] = useState(false);
   // Which goal we're editing (by id). null = brand-new goal.
@@ -436,8 +451,12 @@ function PerformanceGoalsCard({ agencyId }: { agencyId: string }) {
   // banner — highlight the row + fire confetti.
   const [celebrateParams] = useSearchParams();
   const celebrateGoalId = celebrateParams.get("celebrate");
+  const requestedGoalId = celebrateParams.get("request");
   const agency = api.agencies.get(agencyId);
   const goals = coerceGoals(agency?.performanceGoals);
+  const requestedGoals = (agency?.performanceGoalRequests ?? []).filter(
+    (request) => request.status === "pending"
+  );
   const history = agency?.performanceGoalHistory ?? [];
   const refresh = () => setRev((r) => r + 1);
 
@@ -469,6 +488,16 @@ function PerformanceGoalsCard({ agencyId }: { agencyId: string }) {
           </button>
         }
       />
+
+      {requestedGoals.length > 0 && (
+        <RequestedGoalsSection
+          agencyId={agencyId}
+          requests={requestedGoals}
+          highlightedRequestId={requestedGoalId}
+          reviewerId={user?.id}
+          onChanged={refresh}
+        />
+      )}
 
       {goals.length === 0 ? (
         <div className="rounded-md border border-dashed border-ink-200 p-6 text-center">
@@ -589,6 +618,118 @@ function PerformanceGoalsCard({ agencyId }: { agencyId: string }) {
   );
 }
 
+function RequestedGoalsSection({
+  agencyId,
+  requests,
+  highlightedRequestId,
+  reviewerId,
+  onChanged,
+}: {
+  agencyId: string;
+  requests: PerformanceGoalRequest[];
+  highlightedRequestId?: string | null;
+  reviewerId?: string;
+  onChanged: () => void;
+}) {
+  return (
+    <div className="mb-5 rounded-lg border border-gold-200 bg-gold-50/35 p-4">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <div className="text-[11px] uppercase tracking-wider font-bold text-gold-800">
+            Requested goals
+          </div>
+          <div className="text-xs text-ink-500 mt-0.5">
+            Agent-submitted requests waiting for manager review.
+          </div>
+        </div>
+        <Badge tone="gold">{requests.length} pending</Badge>
+      </div>
+      <ul className="mt-3 space-y-2">
+        {requests.map((request) => (
+          <RequestedGoalRow
+            key={request.id}
+            agencyId={agencyId}
+            request={request}
+            highlighted={request.id === highlightedRequestId}
+            reviewerId={reviewerId}
+            onChanged={onChanged}
+          />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function RequestedGoalRow({
+  agencyId,
+  request,
+  highlighted,
+  reviewerId,
+  onChanged,
+}: {
+  agencyId: string;
+  request: PerformanceGoalRequest;
+  highlighted?: boolean;
+  reviewerId?: string;
+  onChanged: () => void;
+}) {
+  const requester = api.users.get(request.requestedById);
+  const def = goalMetricMeta(request);
+  const targetLabel =
+    def.format === "money" ? fmt.money(request.target) : request.target.toLocaleString();
+  const managerId = reviewerId ?? "manager";
+  return (
+    <li
+      className={`rounded-md border bg-white p-3 ${
+        highlighted ? "border-gold-500 ring-2 ring-gold-200" : "border-ink-100"
+      }`}
+    >
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-ink-900">
+            {def.label}
+            <span className="ml-2 rounded bg-ink-100 px-1.5 py-0.5 text-[9px] uppercase tracking-wider font-semibold text-ink-600">
+              {request.scope === "company" ? "Company-wide" : requester?.name ?? "Personal"}
+            </span>
+          </div>
+          <div className="mt-1 text-xs text-ink-500">
+            Requested by {requester?.name ?? "Unknown staff"} · {targetLabel} this{" "}
+            {periodLabel(request.period)} · {fmt.dateTime(request.createdAt)}
+            {request.dueDate && <> · due {fmt.date(request.dueDate)}</>}
+          </div>
+          {request.note && (
+            <div className="mt-2 rounded-md bg-ink-50 px-3 py-2 text-xs text-ink-600">
+              {request.note}
+            </div>
+          )}
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            className="btn-primary text-xs"
+            onClick={() => {
+              api.agencies.approvePerformanceGoalRequest(agencyId, request.id, managerId);
+              onChanged();
+            }}
+          >
+            <CheckCircle2 className="h-3.5 w-3.5" /> Approve
+          </button>
+          <button
+            type="button"
+            className="btn-outline text-xs text-rose-600"
+            onClick={() => {
+              api.agencies.rejectPerformanceGoalRequest(agencyId, request.id, managerId);
+              onChanged();
+            }}
+          >
+            <XCircle className="h-3.5 w-3.5" /> Reject
+          </button>
+        </div>
+      </div>
+    </li>
+  );
+}
+
 function GoalRow({
   agencyId,
   goal,
@@ -602,13 +743,13 @@ function GoalRow({
   onEdit: () => void;
   onChanged: () => void;
 }) {
-  const def = GOAL_METRICS.find((m) => m.key === goal.metric);
+  const def = goalMetricMeta(goal);
   const actual = goalActual(agencyId, goal);
-  const pct = goal.target > 0 ? Math.min(150, Math.round((actual / goal.target) * 100)) : 0;
+  const pct = goalProgressPercent(actual, goal.target);
   const achieved = goal.target > 0 && actual >= goal.target;
   const tone = pct >= 100 ? "emerald" : pct >= 75 ? "gold" : pct >= 40 ? "amber" : "rose";
   const fmtVal = (n: number) =>
-    def?.format === "money" ? fmt.money(n) : n.toLocaleString();
+    def.format === "money" ? fmt.money(n) : n.toLocaleString();
   const overdue = goal.dueDate != null && new Date(goal.dueDate).getTime() < Date.now();
   const toneText =
     tone === "emerald" ? "text-emerald-700" : tone === "gold" ? "text-gold-700" : tone === "amber" ? "text-amber-700" : "text-rose-700";
@@ -624,7 +765,7 @@ function GoalRow({
         <div className="min-w-0">
           <div className="text-sm font-semibold inline-flex items-center gap-1.5">
             <Flag className="h-3.5 w-3.5 text-gold-700" />
-            {def?.label ?? goal.metric}
+            {def.label}
             <span className="ml-1 rounded bg-ink-100 px-1.5 py-0.5 text-[9px] uppercase tracking-wider font-semibold text-ink-600">
               {goalScopeLabel(agencyId, goal)}
             </span>
@@ -648,7 +789,7 @@ function GoalRow({
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <span className={`text-xs font-semibold ${achieved ? "text-emerald-700" : toneText}`}>
-            {achieved ? "100%" : `${pct}%`}
+            {pct}%
           </span>
           {achieved ? (
             <button
@@ -693,7 +834,7 @@ function GoalRow({
         </div>
       </div>
       <div className="mt-2 h-2 rounded-full bg-ink-100 overflow-hidden">
-        <div className={`h-full ${toneBar}`} style={{ width: `${Math.min(100, pct)}%` }} />
+        <div className={`h-full ${toneBar}`} style={{ width: `${pct}%` }} />
       </div>
     </li>
   );
@@ -724,15 +865,19 @@ function ArchivedGoalSection({
       {rows.length === 0 ? (
         <div className="text-xs text-ink-400">None yet.</div>
       ) : (
-        <ul className="space-y-2">
+        <ul
+          className={`space-y-2 ${
+            rows.length > 5 ? "max-h-[16rem] dropdown-scroll-y" : ""
+          }`}
+        >
           {rows.map((h, i) => {
-            const def = GOAL_METRICS.find((m) => m.key === h.metric);
+            const def = goalMetricMeta(h);
             const fmtVal = (n: number) =>
               def?.format === "money" ? fmt.money(n) : n.toLocaleString();
             return (
               <li key={i} className="text-xs">
                 <div className="font-medium text-ink-800">
-                  {def?.label ?? h.metric}
+                  {def.label}
                   <span className="ml-1.5 text-[10px] text-ink-400">
                     {goalScopeLabel(agencyId, h)}
                   </span>
@@ -763,13 +908,13 @@ function GoalBarChart({
   // Render a horizontal bar per goal. Tone-graded by progress so the
   // bars match the goal rows below (rose → amber → gold → emerald).
   const rows = goals.map((g) => {
-    const def = GOAL_METRICS.find((m) => m.key === g.metric);
+    const def = goalMetricMeta(g);
     const actual = goalActual(agencyId, g);
-    const pct = g.target > 0 ? Math.min(150, Math.round((actual / g.target) * 100)) : 0;
+    const pct = goalProgressPercent(actual, g.target);
     return {
       id: g.id,
-      label: def?.label ?? g.metric,
-      format: def?.format ?? "count",
+      label: def.label,
+      format: def.format,
       scopeLabel: goalScopeLabel(agencyId, g),
       target: g.target,
       actual,
@@ -802,7 +947,7 @@ function GoalBarChart({
               <div className="h-2 rounded-full bg-ink-100 overflow-hidden">
                 <div
                   className={`h-full ${toneBar}`}
-                  style={{ width: `${Math.min(100, r.pct)}%` }}
+                  style={{ width: `${r.pct}%` }}
                 />
               </div>
             </li>
@@ -826,12 +971,26 @@ function PerformanceGoalModal({
   onClose: () => void;
 }) {
   const isEditing = !!existing;
+  const metricPickerOrder: PerformanceGoalMetric[] = [
+    "premiumWritten",
+    "activitiesResolved",
+    "newCustomers",
+    "newProspects",
+    "policiesBound",
+  ];
+  const metricPickerChoices = metricPickerOrder
+    .map((key) => GOAL_METRICS.find((metric) => metric.key === key))
+    .filter((metric): metric is (typeof GOAL_METRICS)[number] => !!metric);
   const [pickedMetric, setPickedMetric] = useState<PerformanceGoalMetric>("premiumWritten");
   const [target, setTarget] = useState<string>("");
   const [period, setPeriod] = useState<PerformanceGoalPeriod>("monthly");
   const [dueDate, setDueDate] = useState<string>("");
   const [scope, setScope] = useState<PerformanceGoalScope>("company");
   const [assignees, setAssignees] = useState<Set<string>>(new Set());
+  const [customMetricText, setCustomMetricText] = useState("");
+  const [customDraft, setCustomDraft] = useState<ReturnType<typeof inferCustomGoalMetric> | null>(
+    null
+  );
   const [error, setError] = useState<string | null>(null);
 
   const staff = useMemo(
@@ -851,17 +1010,37 @@ function PerformanceGoalModal({
     setDueDate(existing?.dueDate ? existing.dueDate.slice(0, 10) : "");
     setScope(existing?.scope ?? "company");
     setAssignees(new Set(existing?.assigneeIds ?? []));
+    setCustomMetricText(existing?.customMetricPrompt ?? existing?.customMetricLabel ?? "");
+    setCustomDraft(
+      existing?.metric === "custom"
+        ? {
+            prompt: existing.customMetricPrompt ?? existing.customMetricLabel ?? "",
+            formula: existing.customMetricFormula ?? "activitiesResolved",
+            label: existing.customMetricLabel ?? "Custom metric",
+            helper: existing.customMetricHelper ?? "AI-tracked custom operational metric.",
+            format: "count",
+          }
+        : null
+    );
     setError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, existing?.id]);
 
   if (!open) return null;
-  const def = GOAL_METRICS.find((m) => m.key === pickedMetric)!;
+  const def =
+    pickedMetric === "custom"
+      ? customDraft ?? {
+          label: "Custom AI metric",
+          helper: "Describe the operational result you want AI to track.",
+          format: "count" as const,
+        }
+      : GOAL_METRICS.find((m) => m.key === pickedMetric)!;
   const n = Number(target);
   const valid =
     Number.isFinite(n) &&
     n > 0 &&
-    (scope === "company" || assignees.size > 0);
+    (scope === "company" || assignees.size > 0) &&
+    (pickedMetric !== "custom" || customDraft != null || customMetricText.trim().length > 0);
 
   function toggleAssignee(id: string) {
     setAssignees((prev) => {
@@ -870,6 +1049,17 @@ function PerformanceGoalModal({
       else next.add(id);
       return next;
     });
+  }
+
+  function buildCustomMetric() {
+    const prompt = customMetricText.trim();
+    if (!prompt) {
+      setError("Describe the custom metric first.");
+      return;
+    }
+    setCustomDraft(inferCustomGoalMetric(prompt));
+    setPickedMetric("custom");
+    setError(null);
   }
 
   function save() {
@@ -881,8 +1071,18 @@ function PerformanceGoalModal({
       setError("Pick at least one person for a personal goal.");
       return;
     }
+    const resolvedCustom =
+      pickedMetric === "custom" ? customDraft ?? inferCustomGoalMetric(customMetricText) : null;
+    if (pickedMetric === "custom" && !resolvedCustom?.prompt.trim()) {
+      setError("Describe the custom metric you want AI to track.");
+      return;
+    }
     const payload = {
       target: n,
+      customMetricLabel: resolvedCustom?.label,
+      customMetricPrompt: resolvedCustom?.prompt,
+      customMetricHelper: resolvedCustom?.helper,
+      customMetricFormula: resolvedCustom?.formula,
       period,
       dueDate: dueDate ? new Date(dueDate).toISOString() : undefined,
       scope,
@@ -903,15 +1103,18 @@ function PerformanceGoalModal({
         {!isEditing && (
           <div>
             <label className="label">Metric</label>
-            <div className="grid sm:grid-cols-2 gap-1.5">
-              {GOAL_METRICS.map((md) => {
+            <div className="grid auto-rows-fr gap-2 sm:grid-cols-2">
+              {metricPickerChoices.map((md) => {
                 const active = pickedMetric === md.key;
                 return (
                   <button
                     key={md.key}
                     type="button"
-                    onClick={() => setPickedMetric(md.key)}
-                    className={`text-left rounded-md border px-3 py-2 text-sm ${
+                    onClick={() => {
+                      setPickedMetric(md.key);
+                      setError(null);
+                    }}
+                    className={`flex min-h-[4.75rem] flex-col justify-center rounded-md border px-3 py-2 text-left text-sm ${
                       active
                         ? "border-gold-400 bg-gold-50 text-ink-900"
                         : "border-ink-200 bg-white text-ink-700 hover:border-ink-300"
@@ -922,6 +1125,60 @@ function PerformanceGoalModal({
                   </button>
                 );
               })}
+              <button
+                type="button"
+                onClick={() => {
+                  setPickedMetric("custom");
+                  setError(null);
+                }}
+                className={`flex min-h-[4.75rem] flex-col justify-center rounded-md border px-3 py-2 text-left text-sm ${
+                  pickedMetric === "custom"
+                    ? "border-gold-400 bg-gold-50 text-ink-900"
+                    : "border-ink-200 bg-white text-ink-700 hover:border-ink-300"
+                }`}
+              >
+                <div className="font-medium inline-flex items-center gap-1.5">
+                  <Sparkles className="h-3.5 w-3.5 text-gold-600" /> Custom AI metric
+                </div>
+                <div className="text-[11px] text-ink-500">
+                  Type your own metric and AI maps it to live data.
+                </div>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {pickedMetric === "custom" && (
+          <div className="rounded-md border border-gold-200 bg-gold-50/40 p-3">
+            <label className="label">Custom metric</label>
+            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto]">
+              <input
+                className="input text-sm"
+                placeholder="e.g. policies renewed"
+                value={customMetricText}
+                onChange={(e) => {
+                  setCustomMetricText(e.target.value);
+                  setCustomDraft(null);
+                }}
+              />
+              <button
+                type="button"
+                className="btn-primary text-sm whitespace-nowrap"
+                onClick={buildCustomMetric}
+              >
+                <Sparkles className="h-3.5 w-3.5" /> AI build
+              </button>
+            </div>
+            <div className="mt-2 text-xs text-ink-600">
+              {customDraft ? (
+                <>
+                  AI will track{" "}
+                  <span className="font-semibold text-ink-900">{customDraft.label}</span>{" "}
+                  using the closest available agency data signal.
+                </>
+              ) : (
+                "Examples: policies renewed, claims closed, approved documents, new leads."
+              )}
             </div>
           </div>
         )}
@@ -1061,6 +1318,538 @@ function PerformanceGoalModal({
   );
 }
 
+function AgentPersonalAnalytics({ agency, user }: { agency: Agency; user: User }) {
+  const m = useAgentMetrics(agency.id, user.id);
+  const [viewing, setViewing] = useState<MetricKey | null>(null);
+  const goals = coerceGoals(agency.performanceGoals);
+  const companyGoals = goals.filter((g) => g.scope === "company");
+  const myGoals = goals.filter(
+    (g) => g.scope === "personal" && (g.assigneeIds ?? []).includes(user.id)
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-end justify-between gap-3 flex-wrap">
+        <div>
+          <h1 className="font-display text-3xl">Analytics</h1>
+          <p className="text-ink-500 text-sm mt-1">
+            Your personal book, activity performance, and company goals.
+          </p>
+        </div>
+        <Badge tone="info">Personal view</Badge>
+      </div>
+
+      <Section title="My book">
+        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <StatCard
+            label="Assigned clients"
+            value={m.assignedClients}
+            icon={<Users className="h-5 w-5" />}
+            onClick={() => setViewing("assignedClients")}
+          />
+          <StatCard
+            label="Bound policies"
+            value={m.boundPolicies}
+            icon={<ShieldCheck className="h-5 w-5" />}
+            onClick={() => setViewing("boundPolicies")}
+          />
+          <StatCard
+            label="Premium under mgmt"
+            value={fmt.money(m.premiumUnderMgmt)}
+            icon={<TrendingUp className="h-5 w-5" />}
+            onClick={() => setViewing("premiumUnderMgmt")}
+          />
+          <StatCard
+            label="Renewals upcoming"
+            value={m.renewalsUpcoming}
+            icon={<UserCheck className="h-5 w-5" />}
+            onClick={() => setViewing("renewalsUpcoming")}
+          />
+        </div>
+      </Section>
+
+      <Section title="My activity performance">
+        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <StatCard
+            label="Open activities"
+            value={m.openActivities}
+            icon={<BarChart3 className="h-5 w-5" />}
+            onClick={() => setViewing("openActivities")}
+          />
+          <StatCard
+            label="In progress"
+            value={m.inProgress}
+            icon={<Sparkles className="h-5 w-5" />}
+            onClick={() => setViewing("inProgress")}
+          />
+          <StatCard
+            label="Resolved (30d)"
+            value={m.resolvedLast30}
+            icon={<CheckCircle2 className="h-5 w-5" />}
+            onClick={() => setViewing("resolvedLast30")}
+          />
+          <StatCard
+            label="Avg handle time"
+            value={m.avgHandleMs ? formatDurationMs(m.avgHandleMs) : "-"}
+            icon={<Timer className="h-5 w-5" />}
+            hint="Started to resolved"
+            onClick={() => setViewing("avgHandleMs")}
+          />
+        </div>
+        <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-4">
+          <StatCard
+            label="Response rate"
+            value={m.responseRate != null ? `${Math.round(m.responseRate * 100)}%` : "-"}
+            hint="Inbound resolved"
+            onClick={() => setViewing("responseRate")}
+          />
+          <StatCard
+            label="Outbound messages"
+            value={m.outboundMessages}
+            onClick={() => setViewing("outboundMessages")}
+          />
+          <StatCard
+            label="Documents uploaded"
+            value={m.docsUploaded}
+            onClick={() => setViewing("docsUploaded")}
+          />
+          <StatCard
+            label="Open claims"
+            value={m.openClaims}
+            onClick={() => setViewing("openClaims")}
+          />
+        </div>
+      </Section>
+
+      <div className="grid xl:grid-cols-[minmax(0,1.35fr)_minmax(22rem,0.65fr)] gap-4">
+        <Card>
+          <CardHeader
+            title="Company goals"
+            subtitle="Management-set targets for the agency, plus any personal goals assigned to you."
+          />
+          <div className="space-y-5">
+            <AgentGoalGroup
+              title="Company-wide"
+              empty="No company goals are active right now."
+              agencyId={agency.id}
+              userId={user.id}
+              goals={companyGoals}
+            />
+            {myGoals.length > 0 && (
+              <AgentGoalGroup
+                title="Assigned to me"
+                empty="No personal goals assigned."
+                agencyId={agency.id}
+                userId={user.id}
+                goals={myGoals}
+                personal
+              />
+            )}
+          </div>
+        </Card>
+
+        <AgentGoalRequestCard agencyId={agency.id} user={user} />
+      </div>
+
+      <MetricDetailModal
+        metric={viewing}
+        agentId={user.id}
+        agentName={user.name}
+        agencyId={agency.id}
+        onClose={() => setViewing(null)}
+      />
+    </div>
+  );
+}
+
+function AgentGoalGroup({
+  title,
+  empty,
+  agencyId,
+  userId,
+  goals,
+  personal = false,
+}: {
+  title: string;
+  empty: string;
+  agencyId: string;
+  userId: string;
+  goals: PerformanceGoal[];
+  personal?: boolean;
+}) {
+  return (
+    <div>
+      <div className="text-[11px] uppercase tracking-wider text-ink-500 font-semibold">
+        {title}
+      </div>
+      {goals.length === 0 ? (
+        <div className="mt-2 rounded-md border border-dashed border-ink-200 p-4 text-sm text-ink-500">
+          {empty}
+        </div>
+      ) : (
+        <ul className="mt-2 space-y-3">
+          {goals.map((g) => (
+            <AgentGoalProgressRow
+              key={g.id}
+              agencyId={agencyId}
+              userId={userId}
+              goal={g}
+              scopeLabel={personal ? "Your assigned goal" : "Company-wide"}
+            />
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function AgentGoalProgressRow({
+  agencyId,
+  userId,
+  goal,
+  scopeLabel,
+}: {
+  agencyId: string;
+  userId: string;
+  goal: PerformanceGoal;
+  scopeLabel: string;
+}) {
+  const scopedGoal =
+    goal.scope === "personal" ? { ...goal, assigneeIds: [userId] } : goal;
+  const def = goalMetricMeta(goal);
+  const actual = goalActual(agencyId, scopedGoal);
+  const pct = goalProgressPercent(actual, goal.target);
+  const achieved = goal.target > 0 && actual >= goal.target;
+  const toneBar =
+    pct >= 100
+      ? "bg-emerald-500"
+      : pct >= 75
+        ? "bg-gold-500"
+        : pct >= 40
+          ? "bg-amber-500"
+          : "bg-rose-500";
+  const fmtGoal = (n: number) =>
+    def.format === "money" ? fmt.money(n) : n.toLocaleString();
+  return (
+    <li className="rounded-md border border-ink-100 bg-white p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <Flag className="h-3.5 w-3.5 text-gold-700" />
+            <span className="text-sm font-semibold text-ink-900">{def.label}</span>
+            <span className="rounded bg-ink-100 px-1.5 py-0.5 text-[9px] uppercase tracking-wider font-semibold text-ink-600">
+              {scopeLabel}
+            </span>
+            {achieved && <Badge tone="success">Achieved</Badge>}
+          </div>
+          <div className="mt-1 text-xs text-ink-500">
+            {fmtGoal(actual)} of {fmtGoal(goal.target)} this {periodLabel(goal.period)}
+            {goal.dueDate && <> · due {fmt.date(goal.dueDate)}</>}
+          </div>
+        </div>
+        <div className="shrink-0 text-sm font-semibold tabular-nums text-ink-800">
+          {pct}%
+        </div>
+      </div>
+      <div className="mt-2 h-2 rounded-full bg-ink-100 overflow-hidden">
+        <div className={`h-full ${toneBar}`} style={{ width: `${pct}%` }} />
+      </div>
+    </li>
+  );
+}
+
+function AgentGoalRequestCard({ agencyId, user }: { agencyId: string; user: User }) {
+  const [open, setOpen] = useState(false);
+  const [status, setStatus] = useState<string | null>(null);
+  return (
+    <Card>
+      <CardHeader
+        title="Request a performance goal"
+        subtitle="Ask management to add a goal for you or for the agency."
+      />
+      <div className="rounded-md border border-dashed border-ink-200 bg-ink-50/40 p-4">
+        <div className="text-sm font-medium text-ink-900">Use the same goal builder managers use.</div>
+        <p className="mt-1 text-xs text-ink-500">
+          Pick the metric, target, period, and whether it should be company-wide or for you.
+        </p>
+        {status && (
+          <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-700">
+            {status}
+          </div>
+        )}
+        <button
+          type="button"
+          className="btn-primary mt-4 w-full justify-center"
+          onClick={() => setOpen(true)}
+        >
+          <Target className="h-4 w-4" /> Request a goal
+        </button>
+      </div>
+      <AgentGoalRequestModal
+        open={open}
+        agencyId={agencyId}
+        user={user}
+        onClose={() => setOpen(false)}
+        onSent={() => {
+          setOpen(false);
+          setStatus("Request sent to management for review in Analytics.");
+        }}
+      />
+    </Card>
+  );
+}
+
+function AgentGoalRequestModal({
+  open,
+  agencyId,
+  user,
+  onClose,
+  onSent,
+}: {
+  open: boolean;
+  agencyId: string;
+  user: User;
+  onClose: () => void;
+  onSent: () => void;
+}) {
+  const metricPickerOrder: PerformanceGoalMetric[] = [
+    "premiumWritten",
+    "activitiesResolved",
+    "newCustomers",
+    "newProspects",
+    "policiesBound",
+  ];
+  const metricPickerChoices = metricPickerOrder
+    .map((key) => GOAL_METRICS.find((metric) => metric.key === key))
+    .filter((metric): metric is (typeof GOAL_METRICS)[number] => !!metric);
+  const [metric, setMetric] = useState<PerformanceGoalMetric>("premiumWritten");
+  const [customMetric, setCustomMetric] = useState("");
+  const [target, setTarget] = useState("");
+  const [period, setPeriod] = useState<PerformanceGoalPeriod>("monthly");
+  const [scope, setScope] = useState<PerformanceGoalScope>("personal");
+  const [dueDate, setDueDate] = useState("");
+  const [note, setNote] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const customDraft =
+    metric === "custom" && customMetric.trim() ? inferCustomGoalMetric(customMetric) : null;
+  const selectedMeta =
+    metric === "custom"
+      ? customDraft ?? {
+          label: "Custom metric",
+          helper: "Describe the performance target you want management to consider.",
+          format: "count" as const,
+        }
+      : GOAL_METRICS.find((g) => g.key === metric)!;
+
+  useEffect(() => {
+    if (!open) return;
+    setMetric("premiumWritten");
+    setCustomMetric("");
+    setTarget("");
+    setPeriod("monthly");
+    setScope("personal");
+    setDueDate("");
+    setNote("");
+    setError(null);
+  }, [open]);
+
+  function submitRequest() {
+    const targetNumber = Number(target);
+    if (!Number.isFinite(targetNumber) || targetNumber <= 0) {
+      setError("Enter a positive target.");
+      return;
+    }
+    if (metric === "custom" && !customMetric.trim()) {
+      setError("Describe the custom metric you want AI to track.");
+      return;
+    }
+    const resolvedCustom =
+      metric === "custom" ? customDraft ?? inferCustomGoalMetric(customMetric) : null;
+    api.agencies.addPerformanceGoalRequest(agencyId, {
+      requestedById: user.id,
+      metric,
+      customMetricLabel: resolvedCustom?.label,
+      customMetricPrompt: resolvedCustom?.prompt,
+      customMetricHelper: resolvedCustom?.helper,
+      customMetricFormula: resolvedCustom?.formula,
+      target: targetNumber,
+      period,
+      dueDate: dueDate ? new Date(dueDate).toISOString() : undefined,
+      scope,
+      note: note.trim() || undefined,
+    });
+    setError(null);
+    onSent();
+  }
+
+  if (!open) return null;
+
+  return (
+    <Modal open={open} onClose={onClose} title="Request a goal" size="md">
+      <div className="space-y-4">
+        <div>
+          <label className="label">Metric</label>
+          <div className="grid auto-rows-fr gap-2 sm:grid-cols-2">
+            {metricPickerChoices.map((choice) => (
+              <button
+                key={choice.key}
+                type="button"
+                onClick={() => {
+                  setMetric(choice.key);
+                  setError(null);
+                }}
+                className={`flex min-h-[4.75rem] flex-col justify-center rounded-md border px-3 py-2 text-left text-sm ${
+                  metric === choice.key
+                    ? "border-gold-400 bg-gold-50 text-ink-900"
+                    : "border-ink-200 bg-white text-ink-700 hover:border-ink-300"
+                }`}
+              >
+                <div className="font-medium">{choice.label}</div>
+                <div className="text-[11px] text-ink-500">{choice.helper}</div>
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={() => {
+                setMetric("custom");
+                setError(null);
+              }}
+              className={`flex min-h-[4.75rem] flex-col justify-center rounded-md border px-3 py-2 text-left text-sm ${
+                metric === "custom"
+                  ? "border-gold-400 bg-gold-50 text-ink-900"
+                  : "border-ink-200 bg-white text-ink-700 hover:border-ink-300"
+              }`}
+            >
+              <div className="font-medium inline-flex items-center gap-1.5">
+                <Sparkles className="h-3.5 w-3.5 text-gold-600" /> Custom AI metric
+              </div>
+              <div className="text-[11px] text-ink-500">
+                Request something like policies renewed or approved documents.
+              </div>
+            </button>
+          </div>
+        </div>
+
+        {metric === "custom" && (
+          <div>
+            <label className="label">Custom metric</label>
+            <input
+              className="input text-sm"
+              placeholder="e.g. policies renewed"
+              value={customMetric}
+              onChange={(e) => setCustomMetric(e.target.value)}
+            />
+            <div className="mt-1 text-xs text-ink-500">
+              {customDraft
+                ? `AI will map this request to ${customDraft.label}.`
+                : "AI will map your wording to the closest live platform metric."}
+            </div>
+          </div>
+        )}
+
+        <p className="text-sm text-ink-600">{selectedMeta.helper}</p>
+
+        <div>
+          <label className="label">Goal for</label>
+          <div className="grid grid-cols-2 gap-1.5">
+            {[
+              { value: "company" as const, label: "Company-wide", helper: "Whole agency" },
+              { value: "personal" as const, label: "For me", helper: user.name },
+            ].map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                onClick={() => setScope(option.value)}
+                className={`rounded-md border px-3 py-2 text-left text-sm ${
+                  scope === option.value
+                    ? "border-gold-400 bg-gold-50 text-ink-900"
+                    : "border-ink-200 bg-white text-ink-700 hover:border-ink-300"
+                }`}
+              >
+                <div className="font-medium">{option.label}</div>
+                <div className="text-[11px] text-ink-500">{option.helper}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <label className="label">
+            Target ({selectedMeta.format === "money" ? "$" : "count"})
+          </label>
+          <input
+            className="input"
+            type="number"
+            min={0}
+            step={selectedMeta.format === "money" ? 1000 : 1}
+            value={target}
+            onChange={(e) => setTarget(e.target.value)}
+          />
+        </div>
+        <div>
+          <label className="label">Period</label>
+          <div className="grid grid-cols-3 gap-1.5">
+            {(["monthly", "quarterly", "annual"] as PerformanceGoalPeriod[]).map((p) => {
+              const active = period === p;
+              return (
+                <button
+                  key={p}
+                  type="button"
+                  onClick={() => setPeriod(p)}
+                  className={`rounded-md border px-2 py-1.5 text-sm capitalize ${
+                    active
+                      ? "border-gold-400 bg-gold-50 text-ink-900"
+                      : "border-ink-200 bg-white text-ink-700 hover:border-ink-300"
+                  }`}
+                >
+                  {p}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+        <div>
+          <label className="label">Due date (optional)</label>
+          <input
+            className="input"
+            type="date"
+            value={dueDate}
+            onChange={(e) => setDueDate(e.target.value)}
+          />
+          <div className="text-[11px] text-ink-500 mt-1">
+            A custom deadline for this requested target. If approved, it carries into the goal.
+          </div>
+        </div>
+
+        <div>
+          <label className="label">Note for manager</label>
+          <textarea
+            className="input min-h-[5.5rem] resize-none text-sm"
+            placeholder="Why this goal would help, what you want to be measured on, or timing."
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+          />
+        </div>
+
+        {error && (
+          <div className="rounded-md border border-alert-ring bg-alert-soft px-3 py-2 text-xs text-alert">
+            {error}
+          </div>
+        )}
+
+        <div className="flex items-center justify-end gap-2 pt-3 border-t border-ink-100">
+          <button type="button" className="btn-outline text-sm" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="button" className="btn-primary text-sm" onClick={submitRequest}>
+            <Target className="h-3.5 w-3.5" /> Send request
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 // ---------------------------------------------------------------------
 // Performance leaderboard
 //
@@ -1072,7 +1861,7 @@ function PerformanceGoalModal({
 // off without leaving Analytics.
 // ---------------------------------------------------------------------
 
-type LeaderboardMetricKey =
+type BuiltInLeaderboardMetricKey =
   | "premiumUnderMgmt"
   | "boundPolicies"
   | "resolvedLast30"
@@ -1084,6 +1873,15 @@ type LeaderboardMetricKey =
   | "avgAckMs"
   | "docsUploaded"
   | "assignedClients";
+
+type CustomLeaderboardMetricKey =
+  | "newClients"
+  | "newProspects"
+  | "policiesRenewed"
+  | "claimsOpened"
+  | "claimsClosed";
+
+type LeaderboardMetricKey = BuiltInLeaderboardMetricKey | CustomLeaderboardMetricKey;
 
 interface LeaderboardMetricDef {
   key: LeaderboardMetricKey;
@@ -1173,6 +1971,85 @@ const LEADERBOARD_METRICS: LeaderboardMetricDef[] = [
   },
 ];
 
+const CUSTOM_LEADERBOARD_METRICS: Record<CustomLeaderboardMetricKey, LeaderboardMetricDef> = {
+  newClients: {
+    key: "newClients",
+    label: "New clients (30d)",
+    format: "count",
+    direction: "high",
+    blurb: "Client profiles created in the last 30 days, ranked by assigned book.",
+  },
+  newProspects: {
+    key: "newProspects",
+    label: "New prospects (30d)",
+    format: "count",
+    direction: "high",
+    blurb: "Prospect profiles created in the last 30 days and assigned to each staff member.",
+  },
+  policiesRenewed: {
+    key: "policiesRenewed",
+    label: "Policies renewed",
+    format: "count",
+    direction: "high",
+    blurb: "Renewal records marked renewed for policies in each staff member's book.",
+  },
+  claimsOpened: {
+    key: "claimsOpened",
+    label: "Claims opened",
+    format: "count",
+    direction: "low",
+    blurb: "Claims opened for each staff member's assigned clients. Lower usually means a cleaner book.",
+  },
+  claimsClosed: {
+    key: "claimsClosed",
+    label: "Claims closed",
+    format: "count",
+    direction: "high",
+    blurb: "Closed claim files for each staff member's assigned clients.",
+  },
+};
+
+function inferLeaderboardMetric(prompt: string): LeaderboardMetricDef {
+  const q = prompt.trim().toLowerCase();
+  const metric = (key: BuiltInLeaderboardMetricKey) => LEADERBOARD_METRICS.find((m) => m.key === key)!;
+  if (/\b(ack|acknowledge|acknowledged|first response|response time|fastest response|quickest response)\b/.test(q)) {
+    return metric("avgAckMs");
+  }
+  if (/\b(handle time|handling time|turnaround|cycle time|resolution time|fastest close|fastest resolve|quickest close)\b/.test(q)) {
+    return metric("avgHandleMs");
+  }
+  if (/\b(response rate|reply rate|inbound rate|client replies|customer replies)\b/.test(q)) return metric("responseRate");
+  if (/\b(backlog|open queue|open activities|open activity|open tasks|open task|pending tasks|pending task|unresolved)\b/.test(q)) {
+    return metric("openActivities");
+  }
+  if (/\b(premium|revenue|written premium|book premium|aum|management|mgmt)\b/.test(q)) {
+    return metric("premiumUnderMgmt");
+  }
+  if (/\b(book size|largest book|assigned clients|managed clients|client count|customer count|accounts managed)\b/.test(q)) {
+    return metric("assignedClients");
+  }
+  if (/\b(new clients?|new customers?|new accounts?|client growth|customer growth)\b/.test(q)) {
+    return CUSTOM_LEADERBOARD_METRICS.newClients;
+  }
+  if (/\b(prospect|prospects|lead|leads|quote start|quote starts)\b/.test(q)) {
+    return CUSTOM_LEADERBOARD_METRICS.newProspects;
+  }
+  if (/\b(renew|renewal|renewed|retention)\b/.test(q)) return CUSTOM_LEADERBOARD_METRICS.policiesRenewed;
+  if (/\b(closed|close|resolved|settled)\b/.test(q) && /\bclaim/.test(q)) return CUSTOM_LEADERBOARD_METRICS.claimsClosed;
+  if (/\bclaim/.test(q)) return CUSTOM_LEADERBOARD_METRICS.claimsOpened;
+  if (/\b(document|documents|doc|docs|upload|uploaded)\b/.test(q)) {
+    return metric("docsUploaded");
+  }
+  if (/\b(message|messages|outbound|sms|email)\b/.test(q)) {
+    return metric("outboundMessages");
+  }
+  if (/\b(policy|policies|bound|bind|bindings?)\b/.test(q)) return metric("boundPolicies");
+  if (/\b(activity|activities|task|tasks|resolved|closed|completed|done)\b/.test(q)) {
+    return metric("resolvedLast30");
+  }
+  return metric("resolvedLast30");
+}
+
 function formatLeaderboardValue(
   v: number | null,
   format: LeaderboardMetricDef["format"]
@@ -1191,8 +2068,13 @@ function PerformanceLeaderboard({
   agencyId: string;
   onOpenAgent: (id: string) => void;
 }) {
-  const [metricKey, setMetricKey] = useState<LeaderboardMetricKey>("premiumUnderMgmt");
-  const metric = LEADERBOARD_METRICS.find((m) => m.key === metricKey)!;
+  const [metricKey, setMetricKey] = useState<BuiltInLeaderboardMetricKey>("premiumUnderMgmt");
+  const [customMetricPrompt, setCustomMetricPrompt] = useState("");
+  const customMetric = customMetricPrompt.trim()
+    ? inferLeaderboardMetric(customMetricPrompt)
+    : null;
+  const selectedMetricKey = customMetric?.key ?? metricKey;
+  const metric = customMetric ?? LEADERBOARD_METRICS.find((m) => m.key === metricKey)!;
 
   const agents = useMemo(
     () =>
@@ -1209,18 +2091,40 @@ function PerformanceLeaderboard({
     return agents.map((a) => {
       const customers = api.customers
         .list(agencyId)
-        .filter((c) => c.assignedAgentId === a.id);
+        .filter(
+          (c) => c.assignedAgentId === a.id || (c.additionalAgentIds ?? []).includes(a.id)
+        );
       const customerIds = new Set(customers.map((c) => c.id));
+      const prospects = api.prospects
+        .listByTenant(agencyId)
+        .filter(
+          (p) =>
+            p.assignedAgentId === a.id ||
+            (p.additionalAgentIds ?? []).includes(a.id)
+        );
       const policies = api.policies
         .listByTenant(agencyId)
         .filter((p) => customerIds.has(p.customerId));
       const tasks = api.tasks
         .listByTenant(agencyId)
-        .filter((t) => t.assignedToId === a.id);
+        .filter(
+          (t) => t.assignedToId === a.id || (t.additionalAssignedToIds ?? []).includes(a.id)
+        );
       const notifications = api.aiNotifications
         .listByTenant(agencyId)
         .filter((n) => n.assignedToId === a.id);
+      const claims = api.claims
+        .listByTenant(agencyId)
+        .filter((claim) => customerIds.has(claim.customerId));
+      const renewals = api.renewals
+        .listByTenant(agencyId)
+        .filter((renewal) => {
+          const policy = api.policies.get(renewal.policyId);
+          return policy ? customerIds.has(policy.customerId) : false;
+        });
       const since = Date.now() - 30 * 24 * 60 * 60 * 1000;
+      const newClients = customers.filter((c) => new Date(c.createdAt).getTime() >= since).length;
+      const newProspects = prospects.filter((p) => new Date(p.createdAt).getTime() >= since).length;
       const resolved30 = tasks.filter(
         (t) => t.completedAt && new Date(t.completedAt).getTime() >= since
       ).length;
@@ -1275,35 +2179,40 @@ function PerformanceLeaderboard({
         avgAckMs: ackSamples.length ? avg(ackSamples) : null,
         docsUploaded: docs,
         assignedClients: customers.length,
+        newClients,
+        newProspects,
+        policiesRenewed: renewals.filter((r) => r.status === "renewed").length,
+        claimsOpened: claims.length,
+        claimsClosed: claims.filter((claim) => claim.status === "closed").length,
       };
       return { agent: a, values };
     });
-  }, [agentsKey(agents), agencyId, metricKey]);
+  }, [agentsKey(agents), agencyId]);
 
   const ranked = useMemo(() => {
     const dir = metric.direction;
     return [...rows].sort((a, b) => {
-      const av = a.values[metricKey];
-      const bv = b.values[metricKey];
+      const av = a.values[selectedMetricKey];
+      const bv = b.values[selectedMetricKey];
       // Null values always rank last regardless of direction.
       if (av == null && bv == null) return 0;
       if (av == null) return 1;
       if (bv == null) return -1;
       return dir === "high" ? bv - av : av - bv;
     });
-  }, [rows, metric, metricKey]);
+  }, [rows, metric, selectedMetricKey]);
 
   // Scale bar widths against the best non-null value so #1 always
   // fills the track. For low-is-better metrics we still draw the
   // bar based on relative speed (best → 100%, worst → ~10%).
   const scaleMax = useMemo(() => {
     const values = ranked
-      .map((r) => r.values[metricKey])
+      .map((r) => r.values[selectedMetricKey])
       .filter((v): v is number => v != null);
     if (values.length === 0) return 1;
     if (metric.direction === "high") return Math.max(...values, 1);
     return Math.max(...values, 1);
-  }, [ranked, metric, metricKey]);
+  }, [ranked, metric, selectedMetricKey]);
 
   function barWidth(v: number | null): number {
     if (v == null || scaleMax === 0) return 0;
@@ -1312,7 +2221,7 @@ function PerformanceLeaderboard({
     const best =
       Math.min(
         ...ranked
-          .map((r) => r.values[metricKey])
+          .map((r) => r.values[selectedMetricKey])
           .filter((x): x is number => x != null)
       ) || v;
     if (v === 0) return 100;
@@ -1332,12 +2241,15 @@ function PerformanceLeaderboard({
       />
       <div className="flex flex-wrap gap-1.5 mb-4">
         {LEADERBOARD_METRICS.map((m) => {
-          const active = metricKey === m.key;
+          const active = !customMetric && metricKey === m.key;
           return (
             <button
               key={m.key}
               type="button"
-              onClick={() => setMetricKey(m.key)}
+              onClick={() => {
+                setMetricKey(m.key as BuiltInLeaderboardMetricKey);
+                setCustomMetricPrompt("");
+              }}
               className={`px-3 py-1.5 rounded-full text-xs font-medium border ${
                 active
                   ? "bg-ink-900 text-white border-ink-900"
@@ -1351,14 +2263,25 @@ function PerformanceLeaderboard({
             </button>
           );
         })}
+        <AiCustomFilterChip
+          value={customMetricPrompt}
+          onChange={setCustomMetricPrompt}
+          label="AI Custom"
+          placeholder="ex: new prospects, policies renewed, claims closed, response rate"
+        />
       </div>
+      {customMetric && (
+        <div className="mb-4 rounded-md border border-gold-200 bg-gold-50/50 px-3 py-2 text-xs text-gold-900">
+          AI mapped this leaderboard to <span className="font-semibold">{customMetric.label}</span>.
+        </div>
+      )}
 
       {ranked.length === 0 ? (
         <div className="text-sm text-ink-400">No agents on this team yet.</div>
       ) : (
         <ol className="space-y-2">
           {ranked.map((row, i) => {
-            const v = row.values[metricKey];
+            const v = row.values[selectedMetricKey];
             const w = barWidth(v);
             // Rank badge styling — gold / silver / bronze for top 3,
             // muted ink for everyone else.

@@ -1,7 +1,11 @@
 import { useState } from "react";
-import { Image as ImageIcon, Mail, Pencil, Plus, Save, Sparkles, X } from "lucide-react";
+import { Image as ImageIcon, Mail, Pencil, Save, Sparkles, X } from "lucide-react";
 import { Card, CardHeader } from "@/components/ui/Card";
+import { FileDropZone } from "@/components/ui/FileDropZone";
 import { api } from "@/lib/api";
+import { electronicSignaturePreviewStyle } from "@/lib/electronicSignature";
+import { appendEmailSignatureBlock } from "@/lib/emailSignature";
+import { useTenant } from "@/lib/tenant";
 import type { User } from "@/types";
 
 // =====================================================================
@@ -14,21 +18,27 @@ import type { User } from "@/types";
 // it.
 //
 // Supports embedded images / logos uploaded as data URLs; rendered
-// inline in the editor and emitted as [Image: filename] markers in
-// the appended body so the audit trail is honest in plain-text mode.
+// inline in the editor and preserved in outbound demo messages as a
+// renderable signature payload.
 // =====================================================================
 
 export function EmailSignatureCard({
   user,
   onSaved,
+  className = "",
 }: {
   user: User;
   onSaved?: () => void;
+  className?: string;
 }) {
+  const { agency } = useTenant();
   const [locked, setLocked] = useState(true);
   const [body, setBody] = useState(user.emailSignature ?? "");
   const [images, setImages] = useState<{ name: string; dataUrl: string }[]>(
     user.emailSignatureImages ?? []
+  );
+  const [includeEsignature, setIncludeEsignature] = useState(
+    !!user.emailSignatureIncludesEsignature
   );
   const [savedAt, setSavedAt] = useState<string | null>(null);
 
@@ -38,10 +48,23 @@ export function EmailSignatureCard({
   const live = api.users.get(user.id) ?? user;
   const savedSignature = live.emailSignature ?? "";
   const savedImages = live.emailSignatureImages ?? [];
+  const savedIncludesEsignature = !!live.emailSignatureIncludesEsignature;
+  const savedElectronicSignature = live.electronicSignature;
+  const liveAgency = agency ? api.agencies.get(agency.id) ?? agency : null;
+  const agencyFallbackImage = liveAgency?.logoUrl
+    ? { name: `${liveAgency.name} logo`, dataUrl: liveAgency.logoUrl }
+    : null;
+  const previewImages =
+    savedImages.length > 0
+      ? savedImages
+      : agencyFallbackImage
+      ? [agencyFallbackImage]
+      : [];
 
   function startEdit() {
     setBody(savedSignature);
     setImages(savedImages);
+    setIncludeEsignature(savedIncludesEsignature);
     setSavedAt(null);
     setLocked(false);
   }
@@ -50,6 +73,7 @@ export function EmailSignatureCard({
     api.users.update(user.id, {
       emailSignature: body,
       emailSignatureImages: images,
+      emailSignatureIncludesEsignature: includeEsignature,
     });
     setSavedAt(new Date().toISOString());
     setLocked(true);
@@ -59,6 +83,7 @@ export function EmailSignatureCard({
   function cancel() {
     setBody(savedSignature);
     setImages(savedImages);
+    setIncludeEsignature(savedIncludesEsignature);
     setLocked(true);
     setSavedAt(null);
   }
@@ -73,9 +98,8 @@ export function EmailSignatureCard({
     setBody(lines.join("\n"));
   }
 
-  function handleImageFiles(files: FileList | null) {
-    if (!files) return;
-    Array.from(files).forEach((f) => {
+  function handleImageFiles(files: File[]) {
+    files.forEach((f) => {
       const reader = new FileReader();
       reader.onload = () => {
         const dataUrl = String(reader.result);
@@ -86,7 +110,7 @@ export function EmailSignatureCard({
   }
 
   return (
-    <Card>
+    <Card className={className}>
       <CardHeader
         title="Email signature"
         subtitle={
@@ -112,7 +136,7 @@ export function EmailSignatureCard({
             <Mail className="h-3 w-3" /> Signature {locked ? "preview" : "text"}
           </label>
           {locked ? (
-            savedSignature.trim() || savedImages.length > 0 ? (
+            savedSignature.trim() || previewImages.length > 0 || savedIncludesEsignature ? (
               // Rendered preview of how the signature appears at the
               // foot of an outbound email.
               <div className="rounded-md border border-ink-200 bg-ink-50/40 p-3">
@@ -125,16 +149,31 @@ export function EmailSignatureCard({
                     {savedSignature}
                   </div>
                 )}
-                {savedImages.length > 0 && (
+                {previewImages.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-2">
-                    {savedImages.map((img, i) => (
+                    {previewImages.map((img, i) => (
                       <img
                         key={`${img.name}-${i}`}
                         src={img.dataUrl}
                         alt={img.name}
-                        className="max-h-16 max-w-[160px] object-contain rounded border border-ink-100 bg-white p-1"
+                        className="max-h-16 max-w-[160px] object-contain"
                       />
                     ))}
+                  </div>
+                )}
+                {savedIncludesEsignature && savedElectronicSignature?.name && (
+                  <div className="mt-3 border-t border-ink-100 pt-2">
+                    <div className="text-[10px] uppercase tracking-wider text-ink-400 font-semibold mb-1">
+                      Electronic signature
+                    </div>
+                    <div className="max-w-full overflow-x-auto overflow-y-hidden py-1">
+                      <div
+                        className="whitespace-nowrap text-ink-900"
+                        style={electronicSignaturePreviewStyle(savedElectronicSignature)}
+                      >
+                        {savedElectronicSignature.name}
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>
@@ -157,6 +196,43 @@ export function EmailSignatureCard({
         </div>
 
         {!locked && (
+        <>
+          <label
+            className={`flex items-start gap-2 rounded-md border p-3 text-sm ${
+              savedElectronicSignature?.name
+                ? "border-ink-100 bg-ink-50/40"
+                : "border-dashed border-ink-200 bg-white"
+            }`}
+          >
+            <input
+              type="checkbox"
+              checked={includeEsignature}
+              disabled={!savedElectronicSignature?.name}
+              onChange={(e) => {
+                setIncludeEsignature(e.target.checked);
+                setSavedAt(null);
+              }}
+              className="mt-1"
+            />
+            <span>
+              <span className="font-medium text-ink-900">Include my electronic signature</span>
+              <span className="mt-1 block text-xs text-ink-500">
+                {savedElectronicSignature?.name
+                  ? "Adds your saved document e-signature to the bottom of outbound emails."
+                  : "Set your document e-signature in Document review first, then return here to include it."}
+              </span>
+              {savedElectronicSignature?.name && (
+                <span className="mt-2 block max-w-full overflow-x-auto overflow-y-hidden py-1">
+                  <span
+                    className="whitespace-nowrap text-ink-900"
+                    style={electronicSignaturePreviewStyle(savedElectronicSignature)}
+                  >
+                    {savedElectronicSignature.name}
+                  </span>
+                </span>
+              )}
+            </span>
+          </label>
         <div>
           <label className="label flex items-center gap-1.5">
             <ImageIcon className="h-3 w-3" /> Images &amp; logos
@@ -193,28 +269,23 @@ export function EmailSignatureCard({
             </ul>
           )}
           {!locked ? (
-            <label className="block rounded-md border border-dashed border-ink-200 px-4 py-3 text-sm text-center cursor-pointer hover:bg-ink-50">
-              <input
-                type="file"
-                multiple
-                className="hidden"
-                accept="image/*"
-                onChange={(e) => {
-                  handleImageFiles(e.target.files);
-                  e.currentTarget.value = "";
-                }}
-              />
-              <div className="flex items-center justify-center gap-2 text-ink-700">
-                <Plus className="h-4 w-4" />
-                {images.length === 0 ? "Upload a logo or image" : "Add another"}
-              </div>
-              <div className="text-[11px] text-ink-400 mt-1">
-                PNG / JPG / SVG. Stored as data URLs in this demo; a real backend
-                would push to encrypted asset storage.
-              </div>
-            </label>
+            <FileDropZone
+              title={images.length === 0 ? "Upload or paste a logo/image" : "Add another logo/image"}
+              help="PNG, JPG, SVG, or a copied image from your clipboard. Stored as data URLs in this demo."
+              accept="image/*"
+              multiple
+              compact
+              icon="attachment"
+              onFiles={handleImageFiles}
+            />
           ) : null}
+          {!locked && images.length === 0 && agencyFallbackImage && (
+            <div className="mt-2 rounded-md border border-gold-100 bg-gold-50 px-3 py-2 text-xs text-ink-600">
+              No personal signature image selected. The saved agency logo will be added automatically.
+            </div>
+          )}
         </div>
+        </>
         )}
 
         <div className="flex items-center justify-between gap-3 pt-3 border-t border-ink-100 flex-wrap">
@@ -259,25 +330,19 @@ export function EmailSignatureCard({
   );
 }
 
-// Append the staff member's saved signature (text + image markers)
-// to an outgoing email body. SMS / no-signature cases pass through.
-// Two newlines + an em-dash separator so the signature reads as a
-// clear sign-off; images surface as [Image: filename] markers below
-// the text so the audit trail records that they were embedded.
+// Append the staff member's saved signature as a renderable demo token.
+// SMS / no-signature cases pass through.
 export function applyEmailSignature(
   channel: "email" | "sms" | "call" | "note",
   body: string,
   signature?: string | null,
-  images?: { name: string }[] | null
+  images?: { name: string; dataUrl?: string }[] | null
 ): string {
   const trimmed = (signature ?? "").trim();
-  const imageMarkers = (images ?? [])
-    .map((img) => `[Image: ${img.name}]`)
-    .join("\n");
   if (channel !== "email") return body;
-  if (!trimmed && !imageMarkers) return body;
-  const parts = [body.trimEnd(), "—"];
-  if (trimmed) parts.push(trimmed);
-  if (imageMarkers) parts.push(imageMarkers);
-  return parts.join("\n\n");
+  if (!trimmed && (images ?? []).length === 0) return body;
+  return appendEmailSignatureBlock(body, {
+    text: trimmed || undefined,
+    images: images ?? [],
+  });
 }

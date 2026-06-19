@@ -24,7 +24,6 @@ export function CustomerSettingsPage() {
   const [mailingAddress, setMailingAddress] = useState(customer?.mailingAddress ?? "");
   const [garagingAddress, setGaragingAddress] = useState(customer?.garagingAddress ?? "");
   const [optInEmail, setOptInEmail] = useState(customer?.marketingOptInEmail ?? false);
-  const [optInSms, setOptInSms] = useState(customer?.marketingOptInSms ?? false);
   if (!customer) return null;
 
   function cancelEdit() {
@@ -34,7 +33,6 @@ export function CustomerSettingsPage() {
     setMailingAddress(customer!.mailingAddress ?? "");
     setGaragingAddress(customer!.garagingAddress ?? "");
     setOptInEmail(customer!.marketingOptInEmail);
-    setOptInSms(customer!.marketingOptInSms);
     setEditing(false);
   }
 
@@ -47,7 +45,7 @@ export function CustomerSettingsPage() {
       mailingAddress,
       garagingAddress,
       marketingOptInEmail: optInEmail,
-      marketingOptInSms: optInSms,
+      marketingOptInSms: false,
     });
     setSaved(true);
     setEditing(false); // re-lock the form
@@ -155,18 +153,9 @@ export function CustomerSettingsPage() {
                 />
                 Email
               </label>
-              <label className="flex items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={optInSms}
-                  onChange={(e) => setOptInSms(e.target.checked)}
-                  disabled={locked}
-                />
-                SMS
-              </label>
             </div>
             <p className="mt-1 text-xs text-ink-500">
-              You may opt out at any time. All marketing complies with TCPA / CAN-SPAM requirements.
+              You may opt out at any time. All marketing complies with CAN-SPAM requirements.
             </p>
           </div>
           <div className="sm:col-span-2 flex items-center gap-3">

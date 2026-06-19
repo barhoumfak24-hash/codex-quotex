@@ -10,7 +10,7 @@ import { fmt } from "@/lib/format";
 import type { StatusEventSource } from "@/types";
 
 // =====================================================================
-// Full status-update audit log for the agency.
+// Full remarks audit log for the agency.
 //
 // Shows every status event tied to this tenant, newest first, with
 // full timestamps (not the truncated "5m ago" relative view used on
@@ -93,7 +93,7 @@ export function EmployeeStatusUpdatesPage() {
     <div className="space-y-6">
       <div className="flex items-end justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="font-display text-3xl">All status updates</h1>
+          <h1 className="font-display text-3xl">All remarks</h1>
           <p className="text-ink-500 text-sm mt-1">
             Every renewal reminder, file upload, email/SMS, claim inquiry, and manual note across
             the agency. Permanent + timestamped.
@@ -185,7 +185,7 @@ export function EmployeeStatusUpdatesPage() {
           {filtered.length === 0 ? (
             <div className="p-10">
               <EmptyState
-                title="No matching status updates"
+                title="No matching remarks"
                 description="Adjust the filters above to widen the search."
               />
             </div>

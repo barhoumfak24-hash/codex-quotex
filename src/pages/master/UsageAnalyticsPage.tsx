@@ -1,3 +1,4 @@
+import { MasterBackButton } from "@/components/layout/MasterBackButton";
 import { Card, CardHeader, StatCard } from "@/components/ui/Card";
 import { api } from "@/lib/api";
 import { fmt } from "@/lib/format";
@@ -18,6 +19,7 @@ export function UsageAnalyticsPage() {
   });
   return (
     <div className="space-y-6">
+      <MasterBackButton />
       <div>
         <h1 className="font-display text-3xl">Usage analytics</h1>
         <p className="text-ink-500 text-sm mt-1">Prospect, AI, and deposit volume per tenant.</p>

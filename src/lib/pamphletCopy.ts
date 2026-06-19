@@ -7,23 +7,22 @@ import {
   type HighlightsSection,
   type PamphletIconKey,
 } from "./ai";
+import { postServerAi } from "./aiGateway";
 
 // =====================================================================
-// LLM-driven pamphlet copy (Pollinations.ai text endpoint).
+// LLM-driven pamphlet copy.
 //
 // Same provider family as the image generator — no agency-managed API
-// key, no backend, free, no auth. Pollinations runs OpenAI-class
-// models server-side; we ask for JSON-mode output matching our
-// pamphlet schema, then merge the LLM-authored hero / highlights / CTA
+// key is exposed in the browser. The server gateway runs the model and returns
+// validated JSON output matching our
+// pamphlet schema, then merges the authored hero / highlights / CTA
 // onto a base pamphlet built from the existing keyword variant bank.
 //
 // If the network call fails, the JSON doesn't parse, or any field is
 // missing, the base pamphlet is returned unchanged so the manager
 // always sees a usable draft. This keeps the system online even when
-// the LLM endpoint is rate-limited or down.
+// the model endpoint is rate-limited or down.
 // =====================================================================
-
-const POLLINATIONS_TEXT_URL = "https://text.pollinations.ai/";
 
 // Valid icon keys for highlight items — must match PamphletIconKey
 // exactly. We validate every icon the LLM emits against this set and
@@ -66,6 +65,13 @@ const VALID_ICONS: ReadonlySet<PamphletIconKey> = new Set<PamphletIconKey>([
 ]);
 
 const SYSTEM_PROMPT = `You are a senior marketing copywriter for a high-end private-client insurance agency. You write SHORT, advisory, professional pamphlet copy. Your tone is refined and consultative — never salesy, never casual, never breezy. You write the way Brunello Cucinelli or Cartier write to their clientele.
+
+Interpretation rules:
+- The manager may type anything: a rough thought, a half sentence, a niche commercial risk, a seasonal idea, or a fully formed brief.
+- Do not merely repeat the prompt. Extract the audience, the risk, the emotional angle, the immediate reason this matters, and the clean next step.
+- If the prompt is vague, make the strongest reasonable private-client insurance interpretation and keep it editable.
+- The copy and image prompt must be about the same subject. A commercial umbrella prompt must look and read like commercial umbrella liability, not generic insurance paperwork.
+- Never invent carrier approvals, binding status, pricing, savings, legal advice, claim outcomes, or guaranteed coverage.
 
 Style rules (every output MUST follow):
 - Use "Thank you" instead of "Thanks".
@@ -229,44 +235,23 @@ function isValidIcon(value: unknown): boolean {
 async function fetchPamphletCopyFromLLM(
   input: DraftPamphletInput
 ): Promise<LLMPamphletCopy> {
-  const agencyName = input.agencyName ?? "Your Agency";
-  const userPrompt = [
-    `Campaign brief: ${input.prompt.trim()}`,
-    ``,
-    `Agency name: ${agencyName}`,
-    input.accent ? `Theme accent: ${input.accent}` : null,
-    input.tone ? `Tone: ${input.tone}` : null,
-    ``,
-    `Produce the JSON pamphlet copy now.`,
-  ]
-    .filter((line): line is string => line !== null)
-    .join("\n");
-
-  const body = {
-    messages: [
-      { role: "system", content: SYSTEM_PROMPT },
-      { role: "user", content: userPrompt },
-    ],
-    model: "openai",
-    jsonMode: true,
-    private: true,
-    referrer: "quotex-insurance",
-  };
-
-  const res = await fetch(POLLINATIONS_TEXT_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    throw new Error(`Pollinations text returned ${res.status}`);
-  }
-  const text = await res.text();
-  return parseLLMResponse(text);
+  const copy = await postServerAi<LLMPamphletCopy>(
+    "/ai/draft-pamphlet",
+    {
+      prompt: input.prompt,
+      agencyName: input.agencyName,
+      campaignDescription: input.campaignDescription,
+      heroImagePrompt: input.heroImagePrompt,
+      accent: input.accent,
+      tone: input.tone,
+      systemHint: SYSTEM_PROMPT,
+    },
+    { timeoutMs: 24_000 }
+  );
+  if (!copy) throw new Error("Pamphlet AI provider unavailable");
+  return copy;
 }
 
-// Robust JSON extractor — handles the common "model emits a JSON
-// block surrounded by stray text" failure mode.
 export function parseLLMResponse(raw: string): LLMPamphletCopy {
   const trimmed = raw.trim();
   // Strip markdown code fences if present.

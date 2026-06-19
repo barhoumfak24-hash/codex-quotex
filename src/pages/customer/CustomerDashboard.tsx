@@ -153,7 +153,7 @@ export function CustomerDashboard() {
         <div className="space-y-6">
           <Card>
             <CardHeader title="Recent activity" />
-            <Timeline events={events.slice(0, 8)} context="customer" />
+            <Timeline events={events} context="customer" />
           </Card>
         </div>
       </div>

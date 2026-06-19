@@ -1,9 +1,11 @@
+import { MasterBackButton } from "@/components/layout/MasterBackButton";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 
 export function AiRulesPage() {
   return (
     <div className="space-y-6">
+      <MasterBackButton />
       <div>
         <h1 className="font-display text-3xl">AI rules</h1>
         <p className="text-ink-500 text-sm mt-1">Guardrails the AI applies on every customer-facing call.</p>
@@ -16,7 +18,7 @@ export function AiRulesPage() {
         <CardHeader title="Active rules" />
         <ul className="text-sm space-y-2 text-ink-800">
           <li>1. Every AI-generated estimate must include the preliminary disclaimer.</li>
-          <li>2. Carrier recommendations are internal-only by default.</li>
+          <li>2. Carrier-library AI recommendations are internal-only by default.</li>
           <li>3. Marketing outreach respects per-customer opt-out and rate limits.</li>
           <li>4. The AI must not promise coverage, claim payouts, or premium guarantees.</li>
           <li>5. AI calls are server-side only; API keys never reach the browser.</li>
@@ -26,8 +28,10 @@ export function AiRulesPage() {
       <Card>
         <CardHeader title="Provider routing" />
         <p className="text-sm text-ink-600">
-          Configure <code>AI_PROVIDER</code> in <code>server/.env</code> (anthropic | gemini | openai). The
-          provider is swappable per tenant once the server is implemented.
+          Configure <code>AI_PROVIDER</code> in <code>server/.env</code> (openai | anthropic |
+          gemini | stub). Use <code>OPENAI_API_KEY</code> and <code>OPENAI_MODEL</code> for the production
+          OpenAI route. Browser demo mode uses deterministic fallbacks unless <code>VITE_AI_MODE</code> is
+          set to <code>server</code>.
         </p>
       </Card>
     </div>

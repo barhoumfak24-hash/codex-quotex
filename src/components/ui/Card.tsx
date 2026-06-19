@@ -24,18 +24,20 @@ export function CardHeader({
   title,
   subtitle,
   action,
+  hideSubtitle = false,
 }: {
   title: ReactNode;
   subtitle?: ReactNode;
   action?: ReactNode;
+  hideSubtitle?: boolean;
 }) {
   return (
-    <div className="flex items-start justify-between gap-4 mb-4">
-      <div>
+    <div className="card-header mb-4 grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
+      <div className="min-w-0">
         <h3 className="text-lg font-semibold text-ink-900">{title}</h3>
-        {subtitle && <p className="text-sm text-ink-500 mt-0.5">{subtitle}</p>}
+        {!hideSubtitle && subtitle && <p className="text-sm text-ink-500 mt-0.5">{subtitle}</p>}
       </div>
-      {action && <div className="shrink-0">{action}</div>}
+      {action && <div className="card-header-action flex min-w-0 max-w-[14rem] flex-wrap justify-end gap-1.5">{action}</div>}
     </div>
   );
 }
@@ -58,23 +60,27 @@ export function StatCard({
   onClick?: () => void;
 }) {
   const inner = (
-    <div className="flex items-start justify-between gap-3">
-      <div>
+    <>
+      <div className="min-w-0 pr-10">
         <div className="text-xs uppercase tracking-wider text-ink-500">{label}</div>
         <div className="mt-1.5 text-2xl font-semibold text-ink-900">{value}</div>
         {hint && <div className="mt-1 text-xs text-ink-500">{hint}</div>}
       </div>
-      {icon && <div className="text-gold-500">{icon}</div>}
-    </div>
+      {icon && (
+        <div className="pointer-events-none absolute right-5 top-5 flex h-7 w-7 items-start justify-end text-gold-500">
+          {icon}
+        </div>
+      )}
+    </>
   );
   if (!onClick) {
-    return <Card className="!p-5">{inner}</Card>;
+    return <Card className="relative !p-5">{inner}</Card>;
   }
   return (
     <button
       type="button"
       onClick={onClick}
-      className="text-left rounded-lg border border-ink-100 bg-white shadow-luxe p-5 w-full hover:border-gold-300 hover:shadow-md transition-shadow"
+      className="relative w-full rounded-lg border border-ink-100 bg-white p-5 text-left shadow-luxe transition-all duration-150 hover:-translate-y-0.5 hover:border-gold-300 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold-300 focus-visible:ring-offset-2 focus-visible:ring-offset-ink-50 active:translate-y-0"
     >
       {inner}
     </button>

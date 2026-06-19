@@ -8,9 +8,9 @@ const tones: Record<Tone, string> = {
   success: "bg-emerald-50 text-emerald-700",
   warn: "bg-amber-50 text-amber-800",
   error: "bg-alert-soft text-alert",
-  gold: "bg-gold-50 text-gold-700 border border-gold-200",
+  gold: "border border-gold-200 bg-gold-50 text-gold-700",
 };
 
 export function Badge({ children, tone = "neutral" }: { children: ReactNode; tone?: Tone }) {
-  return <span className={`badge ${tones[tone]}`}>{children}</span>;
+  return <span className={`badge shrink-0 whitespace-nowrap ${tones[tone]}`}>{children}</span>;
 }

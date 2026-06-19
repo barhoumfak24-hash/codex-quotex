@@ -1,4 +1,4 @@
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Card, CardHeader, EmptyState } from "@/components/ui/Card";
@@ -7,6 +7,7 @@ import { DocumentList } from "@/components/ui/DocumentList";
 import { PolicyStatusBadge, RenewalStatusBadge } from "@/components/ui/StatusBadge";
 import { Timeline } from "@/components/ui/Timeline";
 import { api } from "@/lib/api";
+import { toSurfaceRoute } from "@/lib/appSurface";
 import { fmt } from "@/lib/format";
 import { useCustomer } from "@/lib/useCustomer";
 
@@ -15,6 +16,7 @@ export function CustomerPolicyPage() {
   const customer = useCustomer();
   // Older builds had a demo-notice modal here; replaced by real
   // outbound carrier claim links via CarrierClaimLink below.
+  const location = useLocation();
   const navigate = useNavigate();
   if (!policyId || !customer) return null;
   const policy = api.policies.get(policyId);
@@ -30,7 +32,7 @@ export function CustomerPolicyPage() {
     <div className="space-y-6">
       <Button
         variant="ghost"
-        onClick={() => navigate(-1)}
+        onClick={() => navigate(toSurfaceRoute("/customer/policies", location.pathname))}
         icon={<ArrowLeft className="h-4 w-4" />}
         className="-ml-2"
       >
@@ -77,7 +79,7 @@ export function CustomerPolicyPage() {
         </Card>
 
         <Card>
-          <CardHeader title="Policy timeline" />
+          <CardHeader title="Policy remarks" />
           <Timeline events={events} context="customer" />
         </Card>
 

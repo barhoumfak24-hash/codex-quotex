@@ -62,6 +62,9 @@ interface Props {
   // its embedded street-field typeahead doesn't recursively render
   // AddressFields again.
   disableModeToggle?: boolean;
+  // Turn this off for production intake so failed real providers do
+  // not generate demo suggestions that look like real addresses.
+  allowMockFallback?: boolean;
 }
 
 export function AddressAutocomplete({
@@ -76,6 +79,7 @@ export function AddressAutocomplete({
   className,
   minQueryLength = 2,
   disableModeToggle = false,
+  allowMockFallback = true,
 }: Props) {
   // Per-browser persisted preference. When the user clicks "Type
   // address manually" they're switched to the structured form for
@@ -123,7 +127,9 @@ export function AddressAutocomplete({
     const handle = window.setTimeout(async () => {
       lastQueryRef.current = q;
       try {
-        const out = await searchAddresses(q, mode, controller.signal, googleSessionToken.current);
+        const out = await searchAddresses(q, mode, controller.signal, googleSessionToken.current, {
+          allowMockFallback,
+        });
         // Drop late responses for stale queries.
         if (lastQueryRef.current !== q) return;
         setPredictions(out);
@@ -293,7 +299,9 @@ export function AddressAutocomplete({
 
       {open && predictions.length === 0 && !loading && value.trim().length >= minQueryLength && (
         <div className="absolute z-30 mt-1 w-full rounded-md border border-ink-200 bg-white shadow-luxe text-xs text-ink-500 px-3 py-2">
-          No matches — keep typing or use the "Type address manually" option.
+          {allowMockFallback
+            ? `No matches — keep typing or use the "Type address manually" option.`
+            : `No verified address matches yet — keep typing or use the "Type address manually" option.`}
         </div>
       )}
     </div>

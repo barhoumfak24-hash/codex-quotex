@@ -1,6 +1,8 @@
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
+import { toSurfaceRoute } from "@/lib/appSurface";
 
 export function PrivateClientPage() {
+  const { pathname } = useLocation();
   return (
     <section className="max-w-4xl mx-auto px-6 py-16">
       <h1 className="font-display text-4xl">The Private Client experience</h1>
@@ -25,8 +27,8 @@ export function PrivateClientPage() {
         ))}
       </ol>
       <div className="mt-10">
-        <Link to="/quote/start" className="btn-gold">
-          Get a Private Quote
+        <Link to={toSurfaceRoute("/quote/start", pathname)} className="btn-gold">
+          Get a Quote
         </Link>
       </div>
     </section>

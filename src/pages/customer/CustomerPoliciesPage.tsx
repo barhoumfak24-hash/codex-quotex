@@ -32,7 +32,7 @@ export function CustomerPoliciesPage() {
   const editingAsset = editingPolicy ? api.assets.get(editingPolicy.assetId) ?? undefined : undefined;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 pb-8">
       <div>
         <h1 className="font-display text-3xl">Policies</h1>
         <p className="text-ink-500 text-sm mt-1">

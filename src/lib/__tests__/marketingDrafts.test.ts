@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 // AI-drafted document request flow.
 //
 // When the customer submits a quote with missing documents, the
-// platform stages email + SMS outreach as "draft" status messages
+// platform stages email outreach as a "draft" status message
 // that the agent or manager reviews before sending.
 // =====================================================================
 
@@ -22,7 +22,7 @@ afterEach(() => {
 });
 
 describe("marketing.draftDocRequest", () => {
-  it("queues exactly one email + one SMS draft, both with status='draft'", async () => {
+  it("queues exactly one email draft with status='draft'", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     const customer = api.customers.list(agency.id)[0];
@@ -34,10 +34,8 @@ describe("marketing.draftDocRequest", () => {
     });
     expect(out).not.toBeNull();
     expect(out!.email.channel).toBe("email");
-    expect(out!.sms.channel).toBe("sms");
     expect(out!.email.deliveryStatus).toBe("draft");
-    expect(out!.sms.deliveryStatus).toBe("draft");
-    expect(api.marketing.listMessages(agency.id).length).toBe(before + 2);
+    expect(api.marketing.listMessages(agency.id).length).toBe(before + 1);
   });
 
   it("returns null when the missing-docs list is empty (no draft, no status event)", async () => {
@@ -72,7 +70,7 @@ describe("marketing.draftDocRequest", () => {
     expect(event.message).toMatch(/Wind mitigation report/);
   });
 
-  it("includes every doc in the email body bullet list and at least the first in the SMS", async () => {
+  it("includes every doc in the email body bullet list", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     const customer = api.customers.list(agency.id)[0];
@@ -84,8 +82,6 @@ describe("marketing.draftDocRequest", () => {
     expect(out!.email.content).toContain("Doc A");
     expect(out!.email.content).toContain("Doc B");
     expect(out!.email.content).toContain("Doc C");
-    // Only mentions the first two in SMS so the body stays short.
-    expect(out!.sms.content).toContain("Doc A");
   });
 });
 

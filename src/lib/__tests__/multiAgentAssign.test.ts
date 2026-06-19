@@ -107,6 +107,49 @@ describe("customers.assignAgents — multi-agent client routing", () => {
         .some((x) => x.id === c.id)
     ).toBe(true);
   });
+
+  it("supports multiple assigned CSRs on a client", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const [agent] = api.users
+      .list(agency.id)
+      .filter((u) => u.role === "agent" || u.role === "manager");
+    const csrA = api.users.create({
+      role: "csr",
+      tenantId: agency.id,
+      email: "csr-a@example.com",
+      name: "CSR A",
+    });
+    const csrB = api.users.create({
+      role: "csr",
+      tenantId: agency.id,
+      email: "csr-b@example.com",
+      name: "CSR B",
+    });
+    const u = api.users.create({
+      role: "customer",
+      tenantId: agency.id,
+      email: "multi-csr@example.com",
+      name: "Multi CSR Client",
+    });
+    const c = api.customers.create({
+      tenantId: agency.id,
+      userId: u.id,
+      name: "Multi CSR Client",
+      email: "multi-csr@example.com",
+      marketingOptInEmail: false,
+      marketingOptInSms: false,
+    });
+
+    const updated = api.customers.assignAgents(c.id, [agent.id], undefined, {
+      csrIds: [csrA.id, csrB.id],
+    })!;
+
+    expect(updated.assignedCsrId).toBe(csrA.id);
+    expect(updated.additionalCsrIds).toEqual([csrB.id]);
+    expect(api.customers.canSee(updated, { id: csrA.id, role: "csr" })).toBe(true);
+    expect(api.customers.canSee(updated, { id: csrB.id, role: "csr" })).toBe(true);
+  });
 });
 
 describe("prospects.assignAgents — multi-agent prospect routing", () => {
@@ -161,6 +204,43 @@ describe("prospects.assignAgents — multi-agent prospect routing", () => {
     const out = api.prospects.convert(p.id);
     expect(out.customer.assignedAgentId).toBe(agentA.id);
     expect(out.customer.additionalAgentIds).toEqual([agentB.id]);
+  });
+
+  it("converting a prospect carries multiple CSRs onto the customer", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const [agent] = api.users
+      .list(agency.id)
+      .filter((u) => u.role === "agent" || u.role === "manager");
+    const csrA = api.users.create({
+      role: "csr",
+      tenantId: agency.id,
+      email: "prospect-csr-a@example.com",
+      name: "Prospect CSR A",
+    });
+    const csrB = api.users.create({
+      role: "csr",
+      tenantId: agency.id,
+      email: "prospect-csr-b@example.com",
+      name: "Prospect CSR B",
+    });
+    const p = api.prospects.create({
+      tenantId: agency.id,
+      name: "CSR Convertable",
+      email: "csr-cv@example.com",
+      assetType: "yacht",
+      aiSummary: "x",
+      lastAction: "x",
+      lastActivityAt: new Date().toISOString(),
+      recommendedFollowUp: "x",
+      marketingStatus: "none",
+      status: "new",
+    });
+    api.prospects.assignAgents(p.id, [agent.id], undefined, { csrIds: [csrA.id, csrB.id] });
+    const out = api.prospects.convert(p.id);
+
+    expect(out.customer.assignedCsrId).toBe(csrA.id);
+    expect(out.customer.additionalCsrIds).toEqual([csrB.id]);
   });
 });
 

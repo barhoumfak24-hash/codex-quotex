@@ -17,6 +17,133 @@ afterEach(() => {
   if (typeof window !== "undefined" && window.localStorage) window.localStorage.clear();
 });
 
+describe("auto routing", () => {
+  it("auto-routes new personal-line prospects evenly across personal-line agents", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const seededPersonalAgent = api.users
+      .list(agency.id)
+      .find((u) => u.role === "agent" && u.lineOfBusiness === "personal")!;
+    const secondPersonalAgent = api.users.create({
+      tenantId: agency.id,
+      role: "agent",
+      email: "personal-two@example.com",
+      name: "Personal Two",
+      lineOfBusiness: "personal",
+    });
+    const commercialAgent = api.users.create({
+      tenantId: agency.id,
+      role: "agent",
+      email: "commercial-only@example.com",
+      name: "Commercial Only",
+      lineOfBusiness: "commercial",
+    });
+
+    const first = api.prospects.create({
+      tenantId: agency.id,
+      name: "Personal Prospect One",
+      email: "personal-one@example.com",
+      lineOfBusiness: "personal",
+      assetType: "luxury_vehicle",
+      aiSummary: "x",
+      lastAction: "x",
+      lastActivityAt: new Date().toISOString(),
+      recommendedFollowUp: "x",
+      marketingStatus: "none",
+      status: "new",
+    });
+    const second = api.prospects.create({
+      tenantId: agency.id,
+      name: "Personal Prospect Two",
+      email: "personal-two-prospect@example.com",
+      lineOfBusiness: "personal",
+      assetType: "coastal_home",
+      aiSummary: "x",
+      lastAction: "x",
+      lastActivityAt: new Date().toISOString(),
+      recommendedFollowUp: "x",
+      marketingStatus: "none",
+      status: "new",
+    });
+
+    expect(new Set([first.assignedAgentId, second.assignedAgentId])).toEqual(
+      new Set([seededPersonalAgent.id, secondPersonalAgent.id])
+    );
+    expect(first.assignedAgentId).not.toBe(commercialAgent.id);
+    expect(second.assignedAgentId).not.toBe(commercialAgent.id);
+    expect(
+      api.tasks
+        .listByTenant(agency.id)
+        .filter((task) => [first.id, second.id].includes(task.prospectId ?? ""))
+        .map((task) => task.assignedToId)
+        .sort()
+    ).toEqual([first.assignedAgentId, second.assignedAgentId].sort());
+  });
+
+  it("auto-routes commercial clients to commercial-line agents and balances the load", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const commercialA = api.users.create({
+      tenantId: agency.id,
+      role: "agent",
+      email: "commercial-a@example.com",
+      name: "Commercial A",
+      lineOfBusiness: "commercial",
+    });
+    const commercialB = api.users.create({
+      tenantId: agency.id,
+      role: "agent",
+      email: "commercial-b@example.com",
+      name: "Commercial B",
+      lineOfBusiness: "commercial",
+    });
+
+    const userA = api.users.create({
+      role: "customer",
+      tenantId: agency.id,
+      email: "commercial-client-a@example.com",
+      name: "Commercial Client A",
+    });
+    const first = api.customers.create({
+      tenantId: agency.id,
+      userId: userA.id,
+      lineOfBusiness: "commercial",
+      businessName: "Commercial Client A LLC",
+      name: "Alex Owner",
+      email: userA.email,
+      marketingOptInEmail: false,
+      marketingOptInSms: false,
+    });
+    const userB = api.users.create({
+      role: "customer",
+      tenantId: agency.id,
+      email: "commercial-client-b@example.com",
+      name: "Commercial Client B",
+    });
+    const second = api.customers.create({
+      tenantId: agency.id,
+      userId: userB.id,
+      lineOfBusiness: "commercial",
+      businessName: "Commercial Client B LLC",
+      name: "Blake Owner",
+      email: userB.email,
+      marketingOptInEmail: false,
+      marketingOptInSms: false,
+    });
+
+    expect(new Set([first.assignedAgentId, second.assignedAgentId])).toEqual(
+      new Set([commercialA.id, commercialB.id])
+    );
+    expect(
+      api.tasks
+        .listByTenant(agency.id)
+        .filter((task) => [first.id, second.id].includes(task.customerId ?? ""))
+        .map((task) => task.assignedToId)
+        .sort()
+    ).toEqual([first.assignedAgentId, second.assignedAgentId].sort());
+  });
+});
+
 describe("prospects.assignAgent — routing surfaces in the Activity Center", () => {
   it("assigning an unrouted prospect spawns a follow-up task on the agent's queue", async () => {
     const { api } = await import("../api");
@@ -132,5 +259,92 @@ describe("customers.assignAgent — same routing flow for clients", () => {
       .filter((t) => t.customerId === c.id && t.assignedToId === agent.id);
     expect(tasks.length).toBe(1);
     expect(tasks[0].title).toMatch(/new client assigned/i);
+  });
+});
+
+describe("contact route requests", () => {
+  it("lets an agent request a client reroute without creating a normal assigned activity", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const u = api.users.create({
+      role: "customer",
+      tenantId: agency.id,
+      email: "reroute-client@example.com",
+      name: "Reroute Client",
+    });
+    const client = api.customers.create({
+      tenantId: agency.id,
+      userId: u.id,
+      name: "Reroute Client",
+      email: "reroute-client@example.com",
+      assignedAgentId: agent.id,
+      marketingOptInEmail: false,
+      marketingOptInSms: false,
+    });
+
+    const request = api.routing.requestContactRoute({
+      tenantId: agency.id,
+      kind: "client",
+      targetId: client.id,
+      mode: "reroute",
+      actorId: agent.id,
+      requestedAgentIds: [manager.id],
+    });
+
+    expect(request.awaitingManagerAssignment).toBe(true);
+    expect(request.assignedToId).toBeUndefined();
+    expect(request.routeRequestKind).toBe("client");
+    expect(request.routeRequestMode).toBe("reroute");
+    expect(request.routeRequestToAgentIds).toEqual([manager.id]);
+    expect(api.routing.findOpenContactRouteRequest("client", client.id)?.id).toBe(request.id);
+
+    const completed = api.routing.completeContactRouteRequest(
+      request.id,
+      [manager.id],
+      manager.id
+    );
+    expect(completed?.completedAt).toBeTruthy();
+    expect(api.customers.get(client.id)?.assignedAgentId).toBe(manager.id);
+    expect(api.routing.findOpenContactRouteRequest("client", client.id)).toBeUndefined();
+  });
+
+  it("routes an unassigned prospect when a manager completes an agent request", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const prospect = api.prospects.create({
+      tenantId: agency.id,
+      name: "Requested Route Prospect",
+      email: "requested-route@example.com",
+      assetType: "coastal_home",
+      aiSummary: "x",
+      lastAction: "x",
+      lastActivityAt: new Date().toISOString(),
+      recommendedFollowUp: "x",
+      marketingStatus: "none",
+      status: "new",
+    });
+
+    const request = api.routing.requestContactRoute({
+      tenantId: agency.id,
+      kind: "prospect",
+      targetId: prospect.id,
+      mode: "route",
+      actorId: agent.id,
+      requestedAgentIds: [agent.id],
+    });
+    api.routing.completeContactRouteRequest(request.id, [agent.id], manager.id);
+
+    const updated = api.prospects.get(prospect.id)!;
+    expect(updated.assignedAgentId).toBe(agent.id);
+    expect(api.routing.findOpenContactRouteRequest("prospect", prospect.id)).toBeUndefined();
+    expect(
+      api.tasks
+        .listByTenant(agency.id)
+        .some((t) => t.prospectId === prospect.id && t.assignedToId === agent.id)
+    ).toBe(true);
   });
 });

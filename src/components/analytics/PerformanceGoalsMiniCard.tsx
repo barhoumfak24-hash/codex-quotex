@@ -5,7 +5,14 @@ import { Card, CardHeader } from "@/components/ui/Card";
 import { Modal } from "@/components/ui/Modal";
 import { api } from "@/lib/api";
 import { fmt } from "@/lib/format";
-import { GOAL_METRICS, coerceGoals, goalActual, goalScopeLabel, periodLabel } from "@/lib/performanceGoals";
+import {
+  coerceGoals,
+  goalActual,
+  goalMetricMeta,
+  goalProgressPercent,
+  goalScopeLabel,
+  periodLabel,
+} from "@/lib/performanceGoals";
 import type { ArchivedPerformanceGoal, PerformanceGoal, PerformanceGoalScope } from "@/types";
 
 // =====================================================================
@@ -19,9 +26,11 @@ import type { ArchivedPerformanceGoal, PerformanceGoal, PerformanceGoalScope } f
 export function PerformanceGoalsMiniCard({
   agencyId,
   isManager,
+  className = "",
 }: {
   agencyId: string;
   isManager: boolean;
+  className?: string;
 }) {
   const agency = api.agencies.get(agencyId);
   const goals = coerceGoals(agency?.performanceGoals);
@@ -31,7 +40,7 @@ export function PerformanceGoalsMiniCard({
   const [detail, setDetail] = useState<PerformanceGoalScope | null>(null);
 
   return (
-    <Card>
+    <Card className={className}>
       <CardHeader
         title={
           <span className="inline-flex items-center gap-1.5">
@@ -43,6 +52,7 @@ export function PerformanceGoalsMiniCard({
           isManager ? (
             <Link
               to="/employee/analytics#performance-goals"
+              state={{ fromDashboard: true }}
               className="btn-outline text-xs inline-flex"
             >
               Manage
@@ -56,7 +66,7 @@ export function PerformanceGoalsMiniCard({
           {isManager ? " Set them on the Analytics page." : ""}
         </div>
       ) : (
-        <div className="space-y-4">
+        <div className="grid gap-4 xl:grid-cols-2">
           <GoalGroup
             title="Company goals"
             accent="border-gold-300 bg-gold-50/40"
@@ -143,17 +153,17 @@ function GoalProgressRow({
   goal: PerformanceGoal;
   showScope: boolean;
 }) {
-  const def = GOAL_METRICS.find((m) => m.key === goal.metric);
+  const def = goalMetricMeta(goal);
   const actual = goalActual(agencyId, goal);
-  const pct = goal.target > 0 ? Math.min(150, Math.round((actual / goal.target) * 100)) : 0;
+  const pct = goalProgressPercent(actual, goal.target);
   const tone =
     pct >= 100 ? "bg-emerald-500" : pct >= 75 ? "bg-gold-500" : pct >= 40 ? "bg-amber-500" : "bg-rose-500";
-  const fmtVal = (n: number) => (def?.format === "money" ? fmt.money(n) : n.toLocaleString());
+  const fmtVal = (n: number) => (def.format === "money" ? fmt.money(n) : n.toLocaleString());
   return (
     <li>
       <div className="flex items-center justify-between gap-2 text-xs">
         <span className="font-medium text-ink-800 truncate">
-          {def?.label ?? goal.metric}
+          {def.label}
           {(showScope || goal.scope === "personal") && (
             <span className="text-[10px] text-ink-400"> · {goalScopeLabel(agencyId, goal)}</span>
           )}
@@ -163,7 +173,7 @@ function GoalProgressRow({
         </span>
       </div>
       <div className="mt-1 h-1.5 rounded-full bg-ink-100 overflow-hidden">
-        <div className={`h-full ${tone}`} style={{ width: `${Math.min(100, pct)}%` }} />
+        <div className={`h-full ${tone}`} style={{ width: `${pct}%` }} />
       </div>
       <div className="text-[10px] text-ink-400 mt-0.5 flex items-center justify-between">
         <span className="font-medium text-ink-500">{pct}% complete</span>
@@ -242,12 +252,12 @@ function ArchivedRows({
   return (
     <ul className="space-y-1.5">
       {rows.map((r, i) => {
-        const def = GOAL_METRICS.find((m) => m.key === r.metric);
-        const fmtVal = (n: number) => (def?.format === "money" ? fmt.money(n) : n.toLocaleString());
+        const def = goalMetricMeta(r);
+        const fmtVal = (n: number) => (def.format === "money" ? fmt.money(n) : n.toLocaleString());
         return (
           <li key={i} className="flex items-center justify-between gap-2 text-xs">
             <span className="text-ink-700 truncate">
-              {def?.label ?? r.metric}
+              {def.label}
               {r.scope === "personal" && (
                 <span className="text-[10px] text-ink-400"> · {goalScopeLabel(agencyId, r)}</span>
               )}{" "}

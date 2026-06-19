@@ -80,6 +80,19 @@ describe("draft + publish renewal update", () => {
     expect(draft.supersedesId).toBe(doc.id);
     expect(draft.policyTermYear).toBe(2027);
     expect(draft.fileName).toMatch(/2027/);
+    expect(draft.publishedAt).toBeFalsy();
+    expect(api.documents.get(doc.id)!.needsRenewalUpdate).toBe(true);
+    expect(
+      api
+        .status
+        .listFor({ policyId: policy.id })
+        .some(
+          (event) =>
+            event.customerId === policy.customerId &&
+            event.documentId === draft.id &&
+            /staged for renewal review/i.test(event.message)
+        )
+    ).toBe(true);
 
     // Drafting again is idempotent.
     const draft2 = api.documents.draftRenewalUpdate(doc.id, renewal.id, u.id)!;
@@ -123,5 +136,33 @@ describe("draft + publish renewal update", () => {
 
     // sanity: customer + policy still in scope
     expect(customer.id).toBe(policy.customerId);
+  });
+
+  it("future renewals flag only the latest published version, not previous-term originals", async () => {
+    const { api, agency, policy, doc, u } = await seedPolicyWithTermBoundDoc();
+    const firstRenewal = api.renewals.create({
+      tenantId: agency.id,
+      policyId: policy.id,
+      renewalDate: new Date("2026-03-20").toISOString(),
+      status: "upcoming",
+    });
+    const firstDraft = api.documents.draftRenewalUpdate(doc.id, firstRenewal.id, u.id)!;
+    const firstPublished = api.documents.publishRenewalUpdate(firstDraft.id, u.id, {
+      fileName: "CHB-HM-558920-Declarations-2026.pdf",
+    })!;
+
+    const secondRenewal = api.renewals.create({
+      tenantId: agency.id,
+      policyId: policy.id,
+      renewalDate: new Date("2027-03-20").toISOString(),
+      status: "upcoming",
+    });
+
+    const original = api.documents.get(doc.id)!;
+    const latest = api.documents.get(firstPublished.id)!;
+    expect(original.needsRenewalUpdate).toBeFalsy();
+    expect(original.renewalForRenewalId).toBeFalsy();
+    expect(latest.needsRenewalUpdate).toBe(true);
+    expect(latest.renewalForRenewalId).toBe(secondRenewal.id);
   });
 });

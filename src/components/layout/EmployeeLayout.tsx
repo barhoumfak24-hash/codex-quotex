@@ -1,32 +1,45 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Archive,
   BarChart3,
   Building2,
+  CalendarDays,
   CalendarClock,
+  Calculator,
   CheckSquare,
   FileSearch,
+  GraduationCap,
+  HeartHandshake,
   LayoutDashboard,
+  LifeBuoy,
   MessageCircle,
   Megaphone,
+  ReceiptText,
   ShieldCheck,
-  Sparkles,
+  SlidersHorizontal,
+  UserCog,
   UserSearch,
   Users,
 } from "lucide-react";
 import { PortalShell } from "./PortalShell";
 import { PortalAssistant } from "@/components/help/PortalAssistant";
+import { ErrorBoundary } from "@/components/ui/ErrorBoundary";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
 import { subscribeToDbChanges } from "@/lib/db";
+import {
+  isRoutingManagerRole,
+  isStaffRole,
+  type StaffRole,
+} from "@/lib/roles";
 
 // Per-route alert counts shown as red badges next to each nav item.
 // Computed cheaply from the local DB on every render (the localStorage
 // store is in-memory after first load) — no caching needed.
-function computeEmployeeBadges(
+export function computeEmployeeBadges(
   tenantId: string,
-  viewer: { id: string; role: "agent" | "manager" } | undefined
+  viewer: { id: string; role: StaffRole } | undefined
 ) {
   const customers = api.customers.list(tenantId);
   const prospects = api.prospects.listByTenant(tenantId);
@@ -35,13 +48,13 @@ function computeEmployeeBadges(
   const renewals = api.renewals.listByTenant(tenantId);
   const docs = api.documents.listByTenant(tenantId);
   const messages = api.marketing.listMessages(tenantId);
+  const tasks = api.tasks.listByTenant(tenantId);
 
-  // For agents, every per-client signal is filtered to clients
-  // assigned to them. Managers see all signals in the tenant.
+  // Notification badges use ownership scope: managers can still
+  // access broader tenant views, but they should not receive alerts
+  // for clients assigned to another staff member.
   const visibleCustomerIds = new Set(
-    viewer?.role === "manager"
-      ? customers.map((c) => c.id)
-      : customers.filter((c) => c.assignedAgentId === viewer?.id).map((c) => c.id)
+    viewer ? api.customers.listOwned(tenantId, viewer).map((c) => c.id) : []
   );
   const visibleFilter = <T extends { customerId?: string | null }>(rows: T[]) =>
     rows.filter((r) => !r.customerId || visibleCustomerIds.has(r.customerId));
@@ -62,7 +75,15 @@ function computeEmployeeBadges(
     api.communications.listPendingForTenant(tenantId)
   ).length;
   const unassignedTotal =
-    viewer?.role === "manager" ? customers.filter((c) => !c.assignedAgentId).length : 0;
+    viewer && isRoutingManagerRole(viewer.role)
+      ? customers.filter(
+          (c) =>
+            !c.assignedAgentId &&
+            !(c.additionalAgentIds ?? []).length &&
+            !c.assignedCsrId &&
+            !(c.additionalCsrIds ?? []).length
+        ).length
+      : 0;
   const clientsCount = openClaimsTotal + pendingRequestsTotal + unassignedTotal;
 
   // Policies that need agent action (anything between submission and
@@ -101,13 +122,35 @@ function computeEmployeeBadges(
   // they have no assignedToId.
   const tasksCount = viewer
     ? (() => {
-        const notifs = api.aiNotifications.listUnacked(tenantId);
+        const notifs = api.aiNotifications
+          .listUnacked(tenantId)
+          .filter((n) => n.kind !== "goal_request" && n.kind !== "inbound_notice" && n.kind !== "quote_ready");
         const tasks = api.tasks.listOpen(tenantId);
-        const ownItems = [...notifs, ...tasks].filter(
-          (r) => (r.assignedToId ?? "") === viewer.id
-        ).length;
+        const assignedToViewer = (r: {
+          assignedToId?: string;
+          additionalAssignedToIds?: string[];
+        }) =>
+          (r.assignedToId ?? "") === viewer.id ||
+          (r.additionalAssignedToIds ?? []).includes(viewer.id);
+        const isManagerAssignmentFollowUp = (title: unknown) => {
+          const safeTitle = typeof title === "string" ? title : "";
+          return (
+            safeTitle.startsWith("New prospect assigned:") ||
+            safeTitle.startsWith("New client assigned:")
+          );
+        };
+        const ownItems = [
+          ...notifs,
+          ...tasks.filter(
+            (t) =>
+              !(
+                isRoutingManagerRole(viewer.role) &&
+                isManagerAssignmentFollowUp(t.title)
+              )
+          ),
+        ].filter(assignedToViewer).length;
         const managerBroadcasts =
-          viewer.role === "manager"
+          isRoutingManagerRole(viewer.role)
             ? notifs.filter(
                 (n) => n.kind === "override_request" && !n.assignedToId
               ).length
@@ -119,6 +162,35 @@ function computeEmployeeBadges(
   const messagesCount = viewer
     ? api.internalMessages.unreadCountForUser(tenantId, viewer.id)
     : 0;
+  const calendarCount = viewer
+    ? (() => {
+        const today = localDateKey(new Date().toISOString());
+        const reminderCount = api.reminders
+          .listForUser(tenantId, viewer.id)
+          .filter((reminder) => localDateKey(reminder.remindAt) === today).length;
+        const eventCount = api.calendarEvents
+          .listForUser(tenantId, viewer.id)
+          .filter((event) => localDateKey(event.startsAt) === today).length;
+        const meetingRequestCount = api.calendarEvents.pendingRequestCount(tenantId, viewer.id);
+        const dueTaskCount = tasks.filter(
+          (task) =>
+            !task.completedAt &&
+            !!task.dueAt &&
+            localDateKey(task.dueAt) === today &&
+            ((task.assignedToId ?? "") === viewer.id ||
+              (task.additionalAssignedToIds ?? []).includes(viewer.id))
+        ).length;
+        return reminderCount + eventCount + dueTaskCount + meetingRequestCount;
+      })()
+    : 0;
+  const accountingCount = viewer
+    ? viewer.role === "manager"
+      ? api.timesheets.pendingManagerCount(tenantId)
+      : api.timesheets.needsSubmissionToday(tenantId, viewer.id)
+        ? 1
+        : 0
+    : 0;
+  const hrCount = viewer?.role === "manager" ? api.hr.newCount(tenantId) : 0;
 
   return {
     prospects: prospectsCount,
@@ -129,7 +201,17 @@ function computeEmployeeBadges(
     marketing: marketingCount,
     tasks: tasksCount,
     messages: messagesCount,
+    calendar: calendarCount,
+    accounting: accountingCount,
+    hr: hrCount,
   };
+}
+
+function localDateKey(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const offsetMs = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 10);
 }
 
 export function EmployeeLayout() {
@@ -142,40 +224,160 @@ export function EmployeeLayout() {
   const [, setRev] = useState(0);
   useEffect(() => subscribeToDbChanges(() => setRev((r) => r + 1)), []);
 
-  const role = user?.role === "manager" || user?.role === "agent" ? user.role : undefined;
+  const role = isStaffRole(user?.role) ? user.role : undefined;
   const viewer = role && user ? { id: user.id, role } : undefined;
-  const badges = agency
-    ? computeEmployeeBadges(agency.id, viewer)
-    : { prospects: 0, clients: 0, policies: 0, renewals: 0, documents: 0, marketing: 0, tasks: 0, messages: 0 };
+  const badges =
+    agency
+      ? (() => {
+          try {
+            return computeEmployeeBadges(agency.id, viewer);
+          } catch (err) {
+            console.error("[quotex] Employee badge calculation failed", err);
+            return {
+              prospects: 0,
+              clients: 0,
+              policies: 0,
+              renewals: 0,
+              documents: 0,
+              marketing: 0,
+              tasks: 0,
+              messages: 0,
+              calendar: 0,
+              accounting: 0,
+              hr: 0,
+            };
+          }
+        })()
+      : {
+        prospects: 0,
+        clients: 0,
+        policies: 0,
+        renewals: 0,
+        documents: 0,
+        marketing: 0,
+        tasks: 0,
+        messages: 0,
+        calendar: 0,
+        accounting: 0,
+        hr: 0,
+      };
+
+  const rawNavItems: Array<{
+    to: string;
+    label: string;
+    icon: ReactNode;
+    end?: boolean;
+    allowedRoles?: StaffRole[];
+  }> = [
+    // Per spec: the Activity Center is the single source of
+    // truth for alerts. Other categories no longer carry red
+    // badges in the rail; their work shows up as activities.
+    { to: "/employee", label: "Dashboard", icon: <LayoutDashboard />, end: true },
+    {
+      to: "/employee/tasks",
+      label: "Activity Center",
+      icon: <CheckSquare />,
+      allowedRoles: ["agent", "manager", "csr"],
+    },
+    { to: "/employee/calendar", label: "Calendar", icon: <CalendarDays /> },
+    { to: "/employee/messages", label: "Messages", icon: <MessageCircle /> },
+    {
+      to: "/employee/prospects",
+      label: "Prospects",
+      icon: <UserSearch />,
+      allowedRoles: ["agent", "manager", "csr"],
+    },
+    {
+      to: "/employee/clients",
+      label: "Clients",
+      icon: <Users />,
+      allowedRoles: ["agent", "manager", "csr"],
+    },
+    {
+      to: "/employee/policies",
+      label: "Policies",
+      icon: <ShieldCheck />,
+      allowedRoles: ["agent", "manager", "csr"],
+    },
+    {
+      to: "/employee/claims",
+      label: "Claims",
+      icon: <LifeBuoy />,
+      allowedRoles: ["agent", "manager", "csr"],
+    },
+    {
+      to: "/employee/billing",
+      label: "Billing",
+      icon: <ReceiptText />,
+      allowedRoles: ["agent", "manager", "csr"],
+    },
+    {
+      to: "/employee/renewals",
+      label: "Renewals",
+      icon: <CalendarClock />,
+      allowedRoles: ["agent", "manager", "csr"],
+    },
+    {
+      to: "/employee/documents",
+      label: "Document review",
+      icon: <FileSearch />,
+      allowedRoles: ["agent", "manager", "csr"],
+    },
+    {
+      to: "/employee/marketing",
+      label: "AI marketing",
+      icon: <Megaphone />,
+      allowedRoles: ["agent", "manager", "csr"],
+    },
+    {
+      to: "/employee/carriers",
+      label: "Carrier library",
+      icon: <Building2 />,
+      allowedRoles: ["agent", "manager", "csr"],
+    },
+    {
+      to: "/employee/analytics",
+      label: "Analytics",
+      icon: <BarChart3 />,
+      allowedRoles: ["agent", "manager", "csr"],
+    },
+    {
+      to: "/employee/accounting",
+      label: "Accounting",
+      icon: <Calculator />,
+      allowedRoles: ["agent", "manager", "csr"],
+    },
+    { to: "/employee/hr", label: "HR", icon: <HeartHandshake /> },
+    {
+      to: "/employee/archive",
+      label: "Archive",
+      icon: <Archive />,
+      allowedRoles: ["agent", "manager", "csr"],
+    },
+    { to: "/employee/training", label: "Training videos", icon: <GraduationCap /> },
+    {
+      to: "/employee/settings",
+      label: "Agency setup",
+      icon: <SlidersHorizontal />,
+      allowedRoles: ["agent", "manager", "csr"],
+    },
+    { to: "/employee/account-settings", label: "Account settings", icon: <UserCog /> },
+  ];
+  const navItems = rawNavItems.filter(
+    (item) => !role || !item.allowedRoles || item.allowedRoles.includes(role)
+  );
 
   return (
     <>
     <PortalShell
+      showAccountFooter={false}
+      compactSidebar
       subtitle={agency ? `Agency portal · ${agency.name}` : "Agency portal"}
-      nav={[
-        // Per spec: the Activity Center is the single source of
-        // truth for alerts. Other categories no longer carry red
-        // badges in the rail; their work shows up as activities.
-        { to: "/employee", label: "Dashboard", icon: <LayoutDashboard />, end: true },
-        { to: "/employee/tasks", label: "Activity Center", icon: <CheckSquare />, badge: badges.tasks },
-        { to: "/employee/messages", label: "Messages", icon: <MessageCircle />, badge: badges.messages },
-        { to: "/employee/prospects", label: "Prospects", icon: <UserSearch /> },
-        { to: "/employee/clients", label: "Clients", icon: <Users /> },
-        { to: "/employee/policies", label: "Policies", icon: <ShieldCheck /> },
-        { to: "/employee/renewals", label: "Renewals", icon: <CalendarClock /> },
-        { to: "/employee/documents", label: "Document review", icon: <FileSearch /> },
-        { to: "/employee/marketing", label: "AI marketing", icon: <Megaphone /> },
-        { to: "/employee/carriers", label: "Carrier recommendations", icon: <Building2 /> },
-        // Analytics is manager-only — agents don't get a tile in
-        // their rail. The route guard mirrors this for direct nav.
-        ...(role === "manager"
-          ? [{ to: "/employee/analytics", label: "Analytics", icon: <BarChart3 /> }]
-          : []),
-        { to: "/employee/archive", label: "Archive", icon: <Archive /> },
-        { to: "/employee/settings", label: "Agency settings", icon: <Sparkles /> },
-      ]}
+      nav={navItems}
     />
-    <PortalAssistant />
+    <ErrorBoundary compact>
+      <PortalAssistant />
+    </ErrorBoundary>
     </>
   );
 }

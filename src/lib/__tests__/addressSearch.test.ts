@@ -200,6 +200,19 @@ describe("searchAddresses (Nominatim default)", () => {
     const telemetry = _getAddressSearchTelemetry();
     expect(telemetry.errors.at(-1)?.message).toMatch(/network down/);
   });
+
+  it("does not generate demo addresses when verified-only mode is requested", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => ({}),
+    });
+    const { searchAddresses } = await import("../addressSearch");
+    const out = await searchAddresses("123 Main", "address", undefined, undefined, {
+      allowMockFallback: false,
+    });
+    expect(out).toEqual([]);
+  });
 });
 
 describe("searchAddresses (Mapbox when token configured)", () => {

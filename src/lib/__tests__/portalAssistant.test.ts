@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   askPortalAssistant,
+  askPortalAssistantSmart,
   assistantStarters,
+  executePortalAssistantAction,
   listAssistantTopics,
+  parseAssistantLLMResponse,
 } from "../portalAssistant";
 
 // =====================================================================
@@ -20,6 +23,8 @@ beforeEach(async () => {
 });
 afterEach(() => {
   if (typeof window !== "undefined" && window.localStorage) window.localStorage.clear();
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
 });
 
 describe("askPortalAssistant", () => {
@@ -29,7 +34,7 @@ describe("askPortalAssistant", () => {
     expect(a.text.toLowerCase()).toContain("activity center");
   });
 
-  it("routes resolve-gate phrasing to the resolve answer", () => {
+  it("routes resolve closeout phrasing to the resolve answer", () => {
     const a = askPortalAssistant("why can't I mark this resolved");
     expect(a.topicId).toBe("resolve-gate");
   });
@@ -74,6 +79,38 @@ describe("askPortalAssistant", () => {
     expect(listAssistantTopics().length).toBeGreaterThan(5);
   });
 
+  it("links manager workflow questions to the exact training chapter", () => {
+    const a = askPortalAssistant(
+      "how do I reassign an activity to multiple users",
+      "manager"
+    );
+    const links = [a.action, ...(a.actions ?? [])].map((action) => action?.to);
+    expect(a.text).toContain("Training video:");
+    expect(links).toContain(
+      "/employee/training?video=manager-activity-routing&chapter=multi-user-reassignment&section=multi-user-reassignment&autoplay=1"
+    );
+  });
+
+  it("links agent document-send questions to the exact training chapter", () => {
+    const a = askPortalAssistant("how do I send selected PDFs to holders", "agent");
+    const links = [a.action, ...(a.actions ?? [])].map((action) => action?.to);
+    expect(a.text).toContain("Training video:");
+    expect(links).toContain(
+      "/employee/training?video=agent-messages-documents-esign&chapter=send-selected-pdfs&section=send-selected-pdfs&autoplay=1"
+    );
+  });
+
+  it("can answer directly from training videos when no KB topic is stronger", () => {
+    const a = askPortalAssistant(
+      "how do I complete a calendar event without deleting it",
+      "agent"
+    );
+    expect(a.topicId).toBe("video-agent-calendar-activities-complete-or-reschedule");
+    expect(a.action?.to).toBe(
+      "/employee/training?video=agent-calendar-activities&chapter=complete-or-reschedule&section=complete-or-reschedule&autoplay=1"
+    );
+  });
+
   it("answers 'how many assets does <client> have' from live data", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
@@ -94,32 +131,48 @@ describe("askPortalAssistant", () => {
     expect(a.text).toContain(String(expected));
     // It also includes the how-to so the answer is actionable.
     expect(a.text.toLowerCase()).toContain("assets card");
+    if (expected === 1) {
+      expect(a.action?.to).toContain(`/employee/clients/${customer.id}/assets/`);
+    } else {
+      expect(a.action).toEqual({ label: "View assets", to: `/employee/clients/${customer.id}` });
+    }
   });
 
   it("answers policy + claim counts for a known client", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
-    const customer = api.customers.list(agency.id)[0];
+    const customers = api.customers.list(agency.id);
+    const policyCustomer =
+      customers.find((c) => api.policies.listByCustomer(c.id).length > 0) ?? customers[0];
+    const claimCustomer =
+      customers.find((c) => api.claims.listByCustomer(c.id).length > 0) ?? customers[0];
     const ctx = {
       tenantId: agency.id,
       viewer: { id: manager.id, role: "manager" as const },
     };
     const pol = askPortalAssistant(
-      `how many policies does ${customer.name} have`,
+      `how many policies does ${policyCustomer.name} have`,
       "manager",
       ctx
     );
     expect(pol.topicId).toBe("data-policies");
     expect(pol.text).toContain(
-      String(api.policies.listByCustomer(customer.id).length)
+      String(api.policies.listByCustomer(policyCustomer.id).length)
     );
+    expect(pol.action?.label).toBe("View policy");
+    expect(pol.action?.to).toMatch(/^\/employee\/policies\//);
     const clm = askPortalAssistant(
-      `how many claims does ${customer.name} have`,
+      `how many claims does ${claimCustomer.name} have`,
       "manager",
       ctx
     );
     expect(clm.topicId).toBe("data-claims");
+    expect(clm.text).toContain(String(api.claims.listByCustomer(claimCustomer.id).length));
+    if (api.claims.listByCustomer(claimCustomer.id).length > 0) {
+      expect(clm.action?.label).toBe("View claim");
+      expect(clm.action?.to).toMatch(/^\/employee\/claims\?claim=/);
+    }
   });
 
   it("gives a deep profile when a known client is named without a metric", async () => {
@@ -135,6 +188,7 @@ describe("askPortalAssistant", () => {
     expect(a.topicId).toBe("data-profile");
     expect(a.text).toContain(customer.name);
     expect(a.text.toLowerCase()).toContain("premium under management");
+    expect(a.action).toEqual({ label: "View client", to: `/employee/clients/${customer.id}` });
   });
 
   it("answers premium, agent, contact, and renewal-date questions", async () => {
@@ -177,6 +231,63 @@ describe("askPortalAssistant", () => {
     expect(askPortalAssistant("how many open activities are there", "manager", ctx).topicId).toBe(
       "agg-activities"
     );
+  });
+
+  it("lets managers ask about a specific agent's performance", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: manager.id, role: "manager" as const },
+    };
+
+    const a = askPortalAssistant(`how is ${agent.name} performing`, "manager", ctx);
+
+    expect(a.topicId).toBe("data-agent-stats");
+    expect(a.text).toContain(agent.name);
+    expect(a.text).toContain("Premium under management");
+    expect(a.text).toContain("Assigned clients");
+    expect(a.action).toEqual({
+      label: `View ${agent.name} performance`,
+      to: `/employee/analytics?agent=${encodeURIComponent(agent.id)}`,
+    });
+  });
+
+  it("ranks agents for manager leaderboard questions and links to the top drill-down", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: manager.id, role: "manager" as const },
+    };
+
+    const a = askPortalAssistant("which agent has the most premium under management", "manager", ctx);
+
+    expect(a.topicId).toBe("data-agent-leaderboard");
+    expect(a.text).toContain("Premium under management leaderboard");
+    expect(a.action?.label).toMatch(/^View .+ performance$/);
+    expect(a.action?.to).toMatch(/^\/employee\/analytics\?agent=/);
+  });
+
+  it("does not expose staff performance drill-downs to agents", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const viewer = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const other = api.users
+      .list(agency.id)
+      .find((u) => (u.role === "agent" || u.role === "manager") && u.id !== viewer.id)!;
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: viewer.id, role: "agent" as const },
+    };
+
+    const a = askPortalAssistant(`how is ${other.name} performing`, "agent", ctx);
+
+    expect(a.topicId).not.toBe("data-agent-stats");
+    expect(a.action?.to ?? "").not.toContain("/employee/analytics?agent=");
   });
 
   it("does not let a how-to question with a stray name token hijack data lookup", async () => {
@@ -281,5 +392,393 @@ describe("askPortalAssistant — niche feature coverage", () => {
   it("answers the download client information question", () => {
     const a = askPortalAssistant("how do I download client information");
     expect(a.topicId).toBe("download-dossier");
+  });
+});
+
+describe("askPortalAssistant actionable confirmations", () => {
+  it("turns portal navigation commands into confirmation-gated actions", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: manager.id, role: manager.role },
+    };
+
+    const answer = askPortalAssistant("take me to the activity center", "manager", ctx);
+
+    expect(answer.pendingAction?.kind).toBe("navigate");
+    expect(answer.pendingAction?.confirmation).toMatch(/activity center/i);
+    expect(answer.text).not.toContain("Training video:");
+    expect((answer.actions ?? []).some((action) => action.label.startsWith("Watch:"))).toBe(false);
+    const result = executePortalAssistantAction(answer.pendingAction!, ctx);
+    expect(result.success).toBe(true);
+    expect(result.action?.to).toBe("/employee/tasks");
+  });
+
+  it("keeps how-to phrasing in training mode instead of converting it to an app action", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: manager.id, role: manager.role },
+    };
+
+    const answer = askPortalAssistant(
+      "can you show me how to reassign an activity to multiple users",
+      "manager",
+      ctx
+    );
+
+    expect(answer.pendingAction).toBeUndefined();
+    expect(answer.text).toContain("Training video:");
+    expect([answer.action, ...(answer.actions ?? [])].some((action) => action?.label.startsWith("Watch:"))).toBe(true);
+  });
+
+  it("keeps direct app commands in action mode instead of answering with training", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const customer = api.customers.list(agency.id)[0];
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: manager.id, role: manager.role },
+      currentPath: `/employee/clients/${customer.id}`,
+    };
+
+    const answer = askPortalAssistant("send selected PDFs to holders", "manager", ctx);
+
+    expect(answer.topicId).toBe("action-proposal");
+    expect(answer.pendingAction?.kind).toBe("navigate");
+    expect(answer.text).not.toContain("Training video:");
+    if (answer.pendingAction?.kind !== "navigate") throw new Error("Expected navigation action");
+    expect(answer.pendingAction.to).toBe(`/employee/clients/${customer.id}#documents`);
+  });
+
+  it("starts an activity only through the confirmed action executor", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const task = api.tasks.create({
+      tenantId: agency.id,
+      title: "Assistant actionable test",
+      assignedToId: manager.id,
+      createdById: manager.id,
+    });
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: manager.id, role: manager.role },
+      currentPath: `/employee/tasks?focus=${task.id}`,
+    };
+
+    const answer = askPortalAssistant("start this activity", "manager", ctx);
+
+    expect(api.tasks.statusOf(task)).toBe("open");
+    expect(answer.pendingAction?.kind).toBe("task.markInProgress");
+    const result = executePortalAssistantAction(answer.pendingAction!, ctx);
+    expect(result.success).toBe(true);
+    expect(api.tasks.statusOf(api.tasks.get(task.id)!)).toBe("in_progress");
+  });
+
+  it("opens the exact billing record for a named client after confirmation", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const customer = api.customers.list(agency.id)[0];
+    const policy = api.policies.listByCustomer(customer.id)[0];
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: manager.id, role: manager.role },
+    };
+
+    const answer = askPortalAssistant(`open ${customer.name} billing`, "manager", ctx);
+
+    expect(answer.pendingAction?.kind).toBe("navigate");
+    if (answer.pendingAction?.kind !== "navigate") throw new Error("Expected navigation action");
+    expect(answer.pendingAction.to).toBe(`/employee/billing/${policy.id}`);
+    const result = executePortalAssistantAction(answer.pendingAction!, ctx);
+    expect(result.action?.to).toBe(`/employee/billing/${policy.id}`);
+  });
+
+  it("creates a timestamped client remark only after confirmation", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const customer = api.customers.list(agency.id)[0];
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: manager.id, role: manager.role },
+      currentPath: `/employee/clients/${customer.id}`,
+    };
+
+    const before = api.notes.listByCustomer(customer.id).length;
+    const answer = askPortalAssistant(
+      "add a note that client called about the renewal packet",
+      "manager",
+      ctx
+    );
+
+    expect(answer.pendingAction?.kind).toBe("note.create");
+    expect(api.notes.listByCustomer(customer.id)).toHaveLength(before);
+    const result = executePortalAssistantAction(answer.pendingAction!, ctx);
+    expect(result.success).toBe(true);
+    const notes = api.notes.listByCustomer(customer.id);
+    expect(notes).toHaveLength(before + 1);
+    expect(notes[notes.length - 1].body.toLowerCase()).toContain("client called about the renewal packet");
+  });
+
+  it("creates a client activity with a due date only after confirmation", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const customer = api.customers.list(agency.id)[0];
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: manager.id, role: manager.role },
+      currentPath: `/employee/clients/${customer.id}`,
+    };
+
+    const answer = askPortalAssistant(
+      "create activity for this client to call about renewal tomorrow",
+      "manager",
+      ctx
+    );
+
+    expect(answer.pendingAction?.kind).toBe("task.create");
+    const result = executePortalAssistantAction(answer.pendingAction!, ctx);
+    expect(result.success).toBe(true);
+    expect(result.action?.to).toMatch(/^\/employee\/tasks\?focus=/);
+    const taskId = decodeURIComponent(result.action!.to.split("focus=")[1]);
+    const task = api.tasks.get(taskId)!;
+    expect(task.customerId).toBe(customer.id);
+    expect(task.dueAt).toBeTruthy();
+  });
+
+  it("creates a personal calendar event through the confirmed executor", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: manager.id, role: manager.role },
+    };
+    const before = api.calendarEvents.listForUser(agency.id, manager.id).length;
+
+    const answer = askPortalAssistant("schedule renewal review tomorrow", "manager", ctx);
+
+    expect(answer.pendingAction?.kind).toBe("calendar.create");
+    const result = executePortalAssistantAction(answer.pendingAction!, ctx);
+    expect(result.success).toBe(true);
+    expect(api.calendarEvents.listForUser(agency.id, manager.id)).toHaveLength(before + 1);
+  });
+
+  it("creates a personal reminder with an exact parsed time only after confirmation", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: manager.id, role: manager.role },
+    };
+    const before = api.reminders.listForUser(agency.id, manager.id).length;
+
+    const answer = askPortalAssistant(
+      "remind me to call Chubb tomorrow at 3pm",
+      "manager",
+      ctx
+    );
+
+    expect(answer.pendingAction?.kind).toBe("reminder.create");
+    if (answer.pendingAction?.kind !== "reminder.create") {
+      throw new Error("Expected reminder action");
+    }
+    expect(answer.pendingAction.title).toMatch(/^3 PM call Chubb - /);
+    expect(answer.pendingAction.confirmation).toContain("3 PM call Chubb");
+    const result = executePortalAssistantAction(answer.pendingAction, ctx);
+    expect(result.success).toBe(true);
+    expect(result.action?.to).toBe("/employee/calendar");
+    const reminders = api.reminders.listForUser(agency.id, manager.id);
+    expect(reminders).toHaveLength(before + 1);
+    expect(reminders.some((reminder) => /^3 PM call Chubb - /.test(reminder.title ?? ""))).toBe(true);
+  });
+
+  it("asks for an exact reminder time instead of guessing", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: manager.id, role: manager.role },
+    };
+
+    const answer = askPortalAssistant("remind me to call Chubb tomorrow", "manager", ctx);
+
+    expect(answer.pendingAction).toBeUndefined();
+    expect(answer.text.toLowerCase()).toContain("exact time");
+  });
+
+  it("asks for reminder subject when only a time is provided", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: manager.id, role: manager.role },
+    };
+
+    const answer = askPortalAssistant("set a reminder tomorrow at 3pm", "manager", ctx);
+
+    expect(answer.pendingAction).toBeUndefined();
+    expect(answer.text.toLowerCase()).toContain("what you want");
+  });
+
+  it("creates company reminders as recipient reminder rows, not calendar-only events", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const staff = api.users
+      .list(agency.id)
+      .filter((u) => ["agent", "manager", "csr"].includes(u.role) && u.active !== false);
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: manager.id, role: manager.role },
+    };
+    const beforeByUser = new Map(
+      staff.map((u) => [u.id, api.reminders.listForUser(agency.id, u.id).length])
+    );
+
+    const answer = askPortalAssistant(
+      "create a company reminder to review renewal pipeline tomorrow at 3pm",
+      "manager",
+      ctx
+    );
+
+    expect(answer.pendingAction?.kind).toBe("reminder.createCompany");
+    if (answer.pendingAction?.kind !== "reminder.createCompany") {
+      throw new Error("Expected company reminder action");
+    }
+    expect(answer.pendingAction.recipientIds).toHaveLength(staff.length);
+    expect(answer.pendingAction.title).toMatch(/^3 PM review renewal pipeline - /);
+    const result = executePortalAssistantAction(answer.pendingAction, ctx);
+    expect(result.success).toBe(true);
+    expect(result.action?.to).toBe("/employee");
+    for (const user of staff) {
+      const reminders = api.reminders.listForUser(agency.id, user.id);
+      expect(reminders).toHaveLength((beforeByUser.get(user.id) ?? 0) + 1);
+      expect(
+        reminders.some(
+          (reminder) =>
+            /^3 PM review renewal pipeline - /.test(reminder.title ?? "") &&
+            reminder.scope === "company"
+        )
+      ).toBe(true);
+    }
+  });
+
+  it("uses audience phrases only for routing and keeps company reminder titles clean", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: manager.id, role: manager.role },
+    };
+
+    const answer = askPortalAssistant(
+      "create a reminder for personal lines only regarding sales meeting tomorrow at 11am",
+      "manager",
+      ctx
+    );
+
+    expect(answer.pendingAction?.kind).toBe("reminder.createCompany");
+    if (answer.pendingAction?.kind !== "reminder.createCompany") {
+      throw new Error("Expected company reminder action");
+    }
+    expect(answer.pendingAction.title).toMatch(/^11 AM sales meeting - /);
+    expect(answer.pendingAction.title.toLowerCase()).not.toContain("personal lines");
+    const recipients = answer.pendingAction.recipientIds.map((id) => api.users.get(id)!);
+    expect(recipients.length).toBeGreaterThan(0);
+    expect(recipients.every((user) => user.role !== "manager")).toBe(true);
+    expect(recipients.every((user) => user.lineOfBusiness === "personal")).toBe(true);
+  });
+
+  it("treats company reminder calendar phrasing as a company reminder", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: manager.id, role: manager.role },
+    };
+
+    const answer = askPortalAssistant(
+      "add a company reminder tomorrow at 4pm to review carrier follow ups on the calendar",
+      "manager",
+      ctx
+    );
+
+    expect(answer.pendingAction?.kind).toBe("reminder.createCompany");
+    if (answer.pendingAction?.kind !== "reminder.createCompany") {
+      throw new Error("Expected company reminder action");
+    }
+    expect(answer.pendingAction.title).toMatch(/^4 PM review carrier follow ups - /);
+  });
+});
+
+describe("askPortalAssistantSmart", () => {
+  it("parses fenced JSON model answers", () => {
+    const parsed = parseAssistantLLMResponse(
+      '```json\n{"text":"Open Activity Center, move the card to In progress, then resolve it.","related":["How do I mark an activity resolved?"]}\n```'
+    );
+    expect(parsed.text).toContain("Activity Center");
+    expect(parsed.related).toEqual(["How do I mark an activity resolved?"]);
+  });
+
+  it("uses AI synthesis when the model is available", async () => {
+    vi.stubEnv("VITE_AI_MODE", "server");
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({
+          text: "Open the Activity Center, choose the activity, mark it in progress, then resolve it. Add a resolution note so context lands on the client timeline.",
+          related: ["How do I mark an activity resolved?"],
+        }),
+        { status: 200 }
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const a = await askPortalAssistantSmart(
+      "walk me through how to resolve an activity step by step",
+      "manager"
+    );
+
+    expect(fetchMock).toHaveBeenCalled();
+    expect(a.topicId).toBe("resolve-gate");
+    expect(a.text).toContain("resolution note");
+    expect(a.related).toContain("How do I mark an activity resolved?");
+  });
+
+  it("falls back to the grounded local answer when the model fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("offline");
+      })
+    );
+
+    const local = askPortalAssistant("what is the activity center?", "agent");
+    const smart = await askPortalAssistantSmart("what is the activity center?", "agent");
+    expect(smart).toEqual(local);
+  });
+
+  it("combines closely related local topics for workflow-style prompts", () => {
+    const a = askPortalAssistant(
+      "walk me through the activity center and reminders step by step",
+      "manager"
+    );
+    expect(a.text).toContain("1.");
+    expect(a.text).toContain("Activity Center");
+    expect(a.text).toContain("reminder");
   });
 });

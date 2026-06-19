@@ -4,7 +4,7 @@ import { aiDraftPamphlet } from "../ai";
 import { buildHeroImagePrompt, heroImageUrl, nextHeroImageSeed } from "../pamphletImage";
 
 // =====================================================================
-// AI-generated pamphlet imagery — Pollinations.ai integration.
+// AI-generated pamphlet imagery through the server image gateway.
 // Verify the prompt builder pulls in the accent-specific scene + the
 // hero headline, the URL is deterministic per seed, and seed cycling
 // produces different values so "Regenerate image" actually changes
@@ -61,17 +61,14 @@ describe("buildHeroImagePrompt", () => {
 });
 
 describe("heroImageUrl", () => {
-  it("emits a Pollinations URL with the seed + size params", () => {
+  it("emits a deterministic local image URL in frontend-only demo mode", () => {
     const p = aiDraftPamphlet({
       prompt: "Storm season is here — review coastal coverage.",
       agencyName: "Palm Coast",
     });
     const url = heroImageUrl(p);
-    expect(url).toMatch(/^https:\/\/image\.pollinations\.ai\/prompt\//);
-    expect(url).toMatch(/seed=\d+/);
-    expect(url).toMatch(/model=flux/);
-    expect(url).toMatch(/width=720/);
-    expect(url).toMatch(/height=900/);
+    expect(url).toMatch(/^data:image\/svg\+xml/);
+    expect(decodeURIComponent(url)).toContain("AI image pending");
   });
 
   it("is deterministic for the same pamphlet (same URL across calls)", () => {

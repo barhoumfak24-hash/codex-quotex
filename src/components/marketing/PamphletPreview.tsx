@@ -544,6 +544,7 @@ function HeroRender({
             }}
           />
           <img
+            key={aiImageUrl}
             src={aiImageUrl}
             alt=""
             loading="lazy"
@@ -1079,7 +1080,7 @@ export function openPamphletPrint(pamphlet: DraftedPamphlet): void {
   // Wait for the hero image to come back from the provider before
   // firing the print dialog — otherwise the PDF saves the SVG
   // placeholder instead of the AI photograph. We give it up to 12s
-  // (Pollinations cold-start can take a few seconds), then print no
+  // (image generation can take a few seconds), then print no
   // matter what so a stalled image doesn't block the export.
   const triggerPrint = () => {
     try {

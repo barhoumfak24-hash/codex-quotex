@@ -146,4 +146,60 @@ describe("documents.suggestMissingForCustomer", () => {
     );
     expect(api.documents.suggestMissingForCustomer(tc.id)).toEqual([]);
   });
+
+  it("does not count previous-term policy documents as current-term documents", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const carrier = api.carriers.listForTenant(agency.id)[0];
+    const newUser = api.users.create({
+      role: "customer",
+      tenantId: agency.id,
+      email: "term-check@example.com",
+      name: "Term Check",
+    });
+    const customer = api.customers.create({
+      tenantId: agency.id,
+      userId: newUser.id,
+      name: "Term Check",
+      email: "term-check@example.com",
+      marketingOptInEmail: false,
+      marketingOptInSms: false,
+    });
+    const asset = api.assets.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      type: "coastal_home",
+      label: "Term Check Home",
+      estimatedValue: 1_000_000,
+      details: {},
+      status: "insured",
+    });
+    const policy = api.policies.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      assetId: asset.id,
+      carrierId: carrier.id,
+      policyNumber: "TERM-2026",
+      status: "bound",
+      renewalStatus: "not_due",
+      effectiveDate: new Date("2026-01-01").toISOString(),
+    });
+    const oldDec = api.documents.create({
+      tenantId: agency.id,
+      uploadedById: "user_agent_pc",
+      fileName: "Old-Dec-2025.pdf",
+      fileType: "application/pdf",
+      type: "declarations_page",
+      visibility: "customer_visible",
+      customerId: customer.id,
+      assetId: asset.id,
+      policyId: policy.id,
+    });
+    api.documents.update(oldDec.id, { policyTermYear: 2025 });
+
+    const suggestions = api.documents.suggestMissingForCustomer(customer.id);
+    const homeSuggestion = suggestions.find((row) => row.assetId === asset.id);
+    expect(homeSuggestion?.policyId).toBe(policy.id);
+    expect(homeSuggestion?.missing.map((row) => row.type)).toContain("declarations_page");
+  });
 });

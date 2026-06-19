@@ -1,19 +1,22 @@
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { useState } from "react";
 import { ArrowLeft, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Card, CardHeader, EmptyState } from "@/components/ui/Card";
 import { DocumentList } from "@/components/ui/DocumentList";
+import { isAddressLikeKey, MapLink } from "@/components/ui/MapLink";
 import { PolicyStatusBadge } from "@/components/ui/StatusBadge";
 import { Timeline } from "@/components/ui/Timeline";
 import { PolicyEditWizard } from "@/components/policies/PolicyEditWizard";
 import { api } from "@/lib/api";
+import { toSurfaceRoute } from "@/lib/appSurface";
 import { fmt } from "@/lib/format";
 import { useCustomer } from "@/lib/useCustomer";
 
 export function CustomerAssetPage() {
   const { assetId } = useParams();
   const customer = useCustomer();
+  const location = useLocation();
   const navigate = useNavigate();
   const [wizardOpen, setWizardOpen] = useState(false);
   const [editBanner, setEditBanner] = useState<string | null>(null);
@@ -37,7 +40,7 @@ export function CustomerAssetPage() {
     <div className="space-y-6">
       <Button
         variant="ghost"
-        onClick={() => navigate(-1)}
+        onClick={() => navigate(toSurfaceRoute("/customer/assets", location.pathname))}
         icon={<ArrowLeft className="h-4 w-4" />}
         className="-ml-2"
       >
@@ -70,12 +73,21 @@ export function CustomerAssetPage() {
         <Card>
           <CardHeader title="Asset details" />
           <dl className="text-sm space-y-2">
-            {Object.entries(asset.details as Record<string, unknown>).map(([k, v]) => (
-              <div key={k} className="flex justify-between gap-3 text-ink-700">
-                <dt className="text-ink-500 capitalize">{k.replace(/([A-Z])/g, " $1").toLowerCase()}</dt>
-                <dd className="text-ink-900 text-right max-w-[60%] truncate">{String(v)}</dd>
-              </div>
-            ))}
+            {Object.entries(asset.details as Record<string, unknown>).map(([k, v]) => {
+              const shouldMap = isAddressLikeKey(k) && typeof v === "string";
+              return (
+                <div key={k} className="flex justify-between gap-3 text-ink-700">
+                  <dt className="text-ink-500 capitalize">{k.replace(/([A-Z])/g, " $1").toLowerCase()}</dt>
+                  <dd className="min-w-0 max-w-[62%] text-right text-ink-900">
+                    {shouldMap ? (
+                      <MapLink address={v} className="max-w-full justify-end text-right" />
+                    ) : (
+                      <span className="block truncate">{String(v)}</span>
+                    )}
+                  </dd>
+                </div>
+              );
+            })}
           </dl>
         </Card>
 

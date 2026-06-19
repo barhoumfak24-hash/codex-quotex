@@ -1,9 +1,11 @@
+import { MasterBackButton } from "@/components/layout/MasterBackButton";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 
 export function PlatformSettingsPage() {
   return (
     <div className="space-y-6">
+      <MasterBackButton />
       <div>
         <h1 className="font-display text-3xl">Platform settings</h1>
         <p className="text-ink-500 text-sm mt-1">Founder-controlled global settings.</p>

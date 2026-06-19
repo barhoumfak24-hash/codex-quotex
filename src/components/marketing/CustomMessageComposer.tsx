@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { CalendarClock, FileUp, Mail, MessageSquare, Send, Trash2, Users, X } from "lucide-react";
+import { CalendarClock, Mail, Send, Trash2, Users, X } from "lucide-react";
 import { Disclaimer } from "@/components/ui/Disclaimer";
+import { FileDropZone } from "@/components/ui/FileDropZone";
 import { Modal } from "@/components/ui/Modal";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
@@ -49,7 +50,7 @@ export function CustomMessageComposer({
   // Optional pre-population for deep links (e.g. "Reply to customer"
   // from the client detail page). When supplied, audience opens
   // pre-locked to "selected" with the customer id checked, the
-  // channel + subject + body are seeded, and onSent fires after a
+  // subject + body are seeded, and onSent fires after a
   // successful submit so the caller can chain side effects (mark a
   // pending request resolved, clear URL params, etc.).
   initialCustomerIds,
@@ -62,7 +63,7 @@ export function CustomMessageComposer({
   onClose: () => void;
   onSubmitted: () => void;
   initialCustomerIds?: string[];
-  initialChannel?: "email" | "sms";
+  initialChannel?: "email";
   initialSubject?: string;
   initialBody?: string;
   onSent?: () => void;
@@ -70,7 +71,7 @@ export function CustomMessageComposer({
   const { agency } = useTenant();
   const { user } = useAuth();
 
-  const [channel, setChannel] = useState<"email" | "sms">(initialChannel ?? "email");
+  const channel = "email" as const;
   const [subject, setSubject] = useState(initialSubject ?? "");
   const [body, setBody] = useState(initialBody ?? "");
   const [attachments, setAttachments] = useState<CustomMessageAttachment[]>([]);
@@ -93,7 +94,6 @@ export function CustomMessageComposer({
   // selection / draft.
   useEffect(() => {
     if (!open) return;
-    setChannel(initialChannel ?? "email");
     setSubject(initialSubject ?? "");
     setBody(initialBody ?? "");
     if (initialCustomerIds && initialCustomerIds.length > 0) {
@@ -137,9 +137,9 @@ export function CustomMessageComposer({
 
   if (!agency || !user) return null;
 
-  function handleFiles(files: FileList | null) {
-    if (!files || files.length === 0) return;
-    const newOnes: CustomMessageAttachment[] = Array.from(files).map((f) => ({
+  function handleFiles(files: File[]) {
+    if (files.length === 0) return;
+    const newOnes: CustomMessageAttachment[] = files.map((f) => ({
       fileName: f.name,
       fileType: f.type || "application/octet-stream",
       sizeBytes: f.size,
@@ -151,7 +151,6 @@ export function CustomMessageComposer({
   }
 
   function reset() {
-    setChannel("email");
     setSubject("");
     setBody("");
     setAttachments([]);
@@ -173,7 +172,7 @@ export function CustomMessageComposer({
       tenantId: agency!.id,
       createdById: user!.id,
       channel,
-      subject: channel === "email" ? subject.trim() || undefined : undefined,
+      subject: subject.trim() || undefined,
       body: body.trim(),
       attachments,
       audience,
@@ -208,35 +207,20 @@ export function CustomMessageComposer({
 
         <div>
           <div className="label">Channel</div>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => setChannel("email")}
-              className={`btn ${channel === "email" ? "btn-primary" : "btn-outline"}`}
-            >
-              <Mail className="h-4 w-4" /> Email
-            </button>
-            <button
-              type="button"
-              onClick={() => setChannel("sms")}
-              className={`btn ${channel === "sms" ? "btn-primary" : "btn-outline"}`}
-            >
-              <MessageSquare className="h-4 w-4" /> SMS
-            </button>
+          <div className="inline-flex h-11 items-center gap-2 rounded-md border border-gold-300 bg-gold-50 px-3 text-sm font-semibold text-gold-900">
+            <Mail className="h-4 w-4" /> Email
           </div>
         </div>
 
-        {channel === "email" && (
-          <div>
-            <label className="label">Subject</label>
-            <input
-              className="input"
-              value={subject}
-              onChange={(e) => setSubject(e.target.value)}
-              placeholder="What's this email about?"
-            />
-          </div>
-        )}
+        <div>
+          <label className="label">Subject</label>
+          <input
+            className="input"
+            value={subject}
+            onChange={(e) => setSubject(e.target.value)}
+            placeholder="What's this email about?"
+          />
+        </div>
 
         <div>
           <label className="label">Message body (sent verbatim)</label>
@@ -255,18 +239,14 @@ export function CustomMessageComposer({
         {/* Attachments */}
         <div>
           <div className="label">Attachments</div>
-          <label className="inline-flex items-center gap-2 rounded-md border border-ink-200 px-3 py-2 text-sm font-medium bg-white hover:bg-ink-50 cursor-pointer">
-            <input
-              type="file"
-              multiple
-              className="hidden"
-              onChange={(e) => {
-                handleFiles(e.target.files);
-                e.currentTarget.value = "";
-              }}
-            />
-            <FileUp className="h-4 w-4" /> Attach files
-          </label>
+          <FileDropZone
+            title="Attach files"
+            help="Drop files or paste a copied image/screenshot. Attachments stay metadata-only in demo."
+            multiple
+            compact
+            icon="attachment"
+            onFiles={handleFiles}
+          />
           {attachments.length > 0 && (
             <ul className="mt-3 space-y-1 text-sm">
               {attachments.map((a, i) => (
@@ -636,8 +616,8 @@ export function CustomMessageList({
             <div className="flex items-center justify-between gap-3">
               <div className="min-w-0">
                 <div className="text-sm font-medium truncate">
-                  {m.channel === "email" ? <Mail className="inline h-3.5 w-3.5 mr-1 text-ink-400" /> : <MessageSquare className="inline h-3.5 w-3.5 mr-1 text-ink-400" />}
-                  {m.subject ?? (m.channel === "sms" ? "SMS message" : "Email")}
+                  <Mail className="inline h-3.5 w-3.5 mr-1 text-ink-400" />
+                  {m.subject ?? "Email"}
                 </div>
                 <div className="text-xs text-ink-500 mt-0.5">
                   {audienceLabel} · {m.recipientCount} recipient{m.recipientCount === 1 ? "" : "s"} · {scheduleLabel}

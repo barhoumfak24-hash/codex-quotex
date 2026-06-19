@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { CheckCircle2, Loader2, Sparkles, Upload, X } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
 import { Disclaimer } from "@/components/ui/Disclaimer";
+import { FileDropZone } from "@/components/ui/FileDropZone";
 import { api } from "@/lib/api";
 import { aiExtractPolicyFromFile } from "@/lib/ai";
 import { useAuth } from "@/lib/auth";
@@ -44,6 +45,7 @@ const ALL_STATUSES: { value: PolicyStatus; label: string }[] = [
   { value: "approved", label: "Approved" },
   { value: "bound", label: "Bound" },
   { value: "declined", label: "Declined" },
+  { value: "closed", label: "Closed" },
 ];
 
 const ASSET_TYPES: AssetType[] = [
@@ -165,8 +167,8 @@ export function AddPolicyModal({
     !!status &&
     (addingAsset ? !!newAssetLabel.trim() : !!assetId);
 
-  async function handleAiFile(files: FileList | null) {
-    const file = files?.[0];
+  async function handleAiFile(files: File[]) {
+    const file = files[0];
     if (!file || !agency) return;
     setAiBusy(true);
     setAiFileName(file.name);
@@ -334,13 +336,24 @@ export function AddPolicyModal({
             flow. Drop a declarations page / carrier PDF and the AI
             reads the policy fields + attaches the file to the policy. */}
         {!aiFileName ? (
-          <label className="block border-2 border-dashed border-ink-200 rounded-lg p-4 text-center cursor-pointer hover:border-gold-300 hover:bg-ink-50/40">
+          <>
+            <FileDropZone
+              title="Insert from policy document"
+              help="Drop a declarations page, carrier PDF, image, or pasted screenshot. AI fills the fields below and attaches the file to this policy."
+              accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.txt"
+              busy={aiBusy}
+              busyLabel="Reading the policy document..."
+              icon="ai"
+              onFiles={handleAiFile}
+            />
+            {false && (
+          <label className="hidden">
             <input
               type="file"
               className="hidden"
               accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.txt"
               onChange={(e) => {
-                handleAiFile(e.target.files);
+                handleAiFile(Array.from(e.target.files ?? []));
                 e.currentTarget.value = "";
               }}
               disabled={aiBusy}
@@ -363,6 +376,8 @@ export function AddPolicyModal({
               </>
             )}
           </label>
+            )}
+          </>
         ) : (
           <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
             <div className="flex items-start justify-between gap-2">

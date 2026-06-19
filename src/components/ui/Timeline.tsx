@@ -1,10 +1,20 @@
 import { useMemo, useState } from "react";
-import { Bot, Building2, Cog, Mail, MessageSquare, Search, User } from "lucide-react";
-import type { Communication, MarketingMessage, StatusEvent } from "@/types";
+import { Link } from "react-router-dom";
+import { ArrowUpRight, Bot, Building2, ChevronDown, ChevronUp, Cog, FileText, Image as ImageIcon, Mail, Paperclip, Search, User } from "lucide-react";
+import type {
+  Communication,
+  CommunicationAttachment,
+  Document,
+  MarketingMessage,
+  NoteAttachment,
+  StatusEvent,
+  StatusEventSource,
+} from "@/types";
 import { fmt } from "@/lib/format";
 import { api } from "@/lib/api";
 import { Modal } from "./Modal";
 import { Badge } from "./Badge";
+import { DocumentViewerModal } from "./DocumentViewerModal";
 
 const sourceIcons = {
   customer: User,
@@ -33,55 +43,173 @@ interface TimelineProps {
   clickable?: boolean;
   // What deep-link to use for "Open related…" inside the modal.
   // "employee" → routes to /employee/clients/:id, etc.
-  // "customer" → routes to /customer/policies/:id, etc.
+  // "customer" → routes to /agency/customer/policies/:id, etc.
   context?: "employee" | "customer";
-  // When true, renders a search box that filters by message text,
-  // facilitating staff name, and source.
+  // Renders search, sort, and filter controls. Defaults to true so
+  // every timeline / remarks feed has the same discovery tools.
   searchable?: boolean;
+  // Legacy escape hatch for compact cards that intentionally scroll.
+  // The default timeline behavior is a 10-row collapsed expansion.
+  maxVisibleEvents?: number;
+  // Render this many events first, then attach a collapsed expansion
+  // bar for the remaining older entries. Defaults to 10 throughout
+  // the app so every timeline behaves consistently.
+  collapseAfterEvents?: number;
 }
+
+type TimelineSourceFilter = "all" | StatusEventSource | "remarks" | "attachments";
+type TimelineSortOrder = "newest" | "oldest";
+
+const SOURCE_FILTERS: Array<{ id: TimelineSourceFilter; label: string }> = [
+  { id: "all", label: "All" },
+  { id: "customer", label: "Client" },
+  { id: "agent", label: "Staff" },
+  { id: "ai", label: "AI" },
+  { id: "system", label: "System" },
+  { id: "remarks", label: "Remarks" },
+  { id: "attachments", label: "Uploads" },
+];
 
 export function Timeline({
   events,
   clickable = true,
   context = "employee",
-  searchable = false,
+  searchable = true,
+  maxVisibleEvents,
+  collapseAfterEvents = 10,
 }: TimelineProps) {
   const [active, setActive] = useState<StatusEvent | null>(null);
   const [query, setQuery] = useState("");
+  const [sourceFilter, setSourceFilter] = useState<TimelineSourceFilter>("all");
+  const [sortOrder, setSortOrder] = useState<TimelineSortOrder>("newest");
+  const [expanded, setExpanded] = useState(false);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return events;
-    return events.filter((e) => {
-      const actor = eventActorName(e) ?? "";
-      return (
-        e.message.toLowerCase().includes(q) ||
-        e.source.toLowerCase().includes(q) ||
-        actor.toLowerCase().includes(q)
+    return events
+      .filter((e) => {
+        if (sourceFilter !== "all") {
+          if (sourceFilter === "remarks") {
+            if (!isRemarkEvent(e)) return false;
+          } else if (sourceFilter === "attachments") {
+            if (!hasEventAttachments(e)) return false;
+          } else if (e.source !== sourceFilter) {
+            return false;
+          }
+        }
+        return true;
+      })
+      .filter((e) => {
+        if (!q) return true;
+        const actor = eventActorName(e) ?? "";
+        const attachmentText = (e.attachments ?? [])
+          .map((attachment) => `${attachment.fileName} ${attachment.aiSummary}`)
+          .join(" ");
+        return (
+          e.message.toLowerCase().includes(q) ||
+          e.source.toLowerCase().includes(q) ||
+          actor.toLowerCase().includes(q) ||
+          attachmentText.toLowerCase().includes(q)
+        );
+      })
+      .sort((a, b) =>
+        sortOrder === "newest"
+          ? new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+          : new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
       );
-    });
-  }, [events, query]);
+  }, [events, query, sourceFilter, sortOrder]);
+
+  const controlsActive =
+    !!query.trim() ||
+    sourceFilter !== "all" ||
+    sortOrder !== "newest";
+
+  const shouldScroll =
+    !collapseAfterEvents &&
+    maxVisibleEvents != null &&
+    maxVisibleEvents > 0 &&
+    filtered.length > maxVisibleEvents;
+  const hasCollapsedExpansion =
+    collapseAfterEvents != null &&
+    collapseAfterEvents > 0 &&
+    filtered.length > collapseAfterEvents;
+  const visibleEvents = hasCollapsedExpansion && !expanded
+    ? filtered.slice(0, collapseAfterEvents)
+    : filtered;
+  const hiddenCount = hasCollapsedExpansion
+    ? Math.max(filtered.length - collapseAfterEvents, 0)
+    : 0;
 
   return (
     <>
       {searchable && events.length > 0 && (
-        <div className="relative mb-3">
+        <div className="mb-4 space-y-2">
+          <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-ink-400" />
           <input
             className="input pl-9 text-sm"
-            placeholder="Search the timeline (service, agent, remark…)"
+            placeholder="Search remarks (service, agent, document...)"
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => {
+              setQuery(e.target.value);
+              setExpanded(false);
+            }}
           />
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {SOURCE_FILTERS.map((filter) => (
+              <button
+                key={filter.id}
+                type="button"
+                onClick={() => {
+                  setSourceFilter(filter.id);
+                  setExpanded(false);
+                }}
+                className={`btn-outline text-xs ${
+                  sourceFilter === filter.id ? "!border-ink-900 !bg-ink-900 !text-white" : ""
+                }`}
+              >
+                {filter.label}
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={() => {
+                setSortOrder((current) => (current === "newest" ? "oldest" : "newest"));
+                setExpanded(false);
+              }}
+              className="btn-outline text-xs"
+            >
+              {sortOrder === "newest" ? "Newest first" : "Oldest first"}
+            </button>
+            {controlsActive && (
+              <button
+                type="button"
+                className="btn-ghost text-xs"
+                onClick={() => {
+                  setQuery("");
+                  setSourceFilter("all");
+                  setSortOrder("newest");
+                  setExpanded(false);
+                }}
+              >
+                Clear
+              </button>
+            )}
+          </div>
         </div>
       )}
       {filtered.length === 0 ? (
         <div className="text-sm text-ink-400">
-          {events.length === 0 ? "No activity yet." : `No entries match "${query}".`}
+          {events.length === 0 ? "No remarks yet." : `No remarks match "${query}".`}
         </div>
       ) : (
+      <div
+        className={shouldScroll ? "dropdown-scroll-y" : ""}
+        style={shouldScroll ? { maxHeight: `${maxVisibleEvents * 4}rem` } : undefined}
+      >
       <ol className="relative ml-3 border-l border-ink-100">
-        {filtered.map((e) => {
+        {visibleEvents.map((e) => {
           const Icon = sourceIcons[e.source] ?? Cog;
           // Inline the policy reference when an event carries one so
           // the customer / agent / manager can see at a glance which
@@ -107,7 +235,7 @@ export function Timeline({
                     <span className="text-ink-600 font-mono">{fmt.policyRef(policy)}</span>
                   </>
                 )}
-                {e.visibility === "internal" && (
+                {false && e.visibility === "internal" && (
                   <>
                     <span>·</span>
                     <span className="text-ink-500">Internal</span>
@@ -137,18 +265,47 @@ export function Timeline({
           );
         })}
       </ol>
+      {hasCollapsedExpansion && (
+        <button
+          type="button"
+          className="mt-3 flex w-full items-center justify-between rounded-md border border-ink-100 bg-ink-50/60 px-3 py-2 text-left text-xs font-semibold text-ink-700 transition hover:border-gold-200 hover:bg-gold-50"
+          onClick={() => setExpanded((open) => !open)}
+        >
+          <span>
+            {expanded ? "Hide older remarks" : `Show ${hiddenCount} older remark${hiddenCount === 1 ? "" : "s"}`}
+          </span>
+          {expanded ? (
+            <ChevronUp className="h-3.5 w-3.5 text-ink-500" />
+          ) : (
+            <ChevronDown className="h-3.5 w-3.5 text-ink-500" />
+          )}
+        </button>
+      )}
+      </div>
       )}
 
       <Modal
         open={!!active}
         onClose={() => setActive(null)}
-        title="Status update"
+        title="Remark"
         size="md"
       >
         {active && <StatusDetail event={active} context={context} />}
       </Modal>
     </>
   );
+}
+
+function isRemarkEvent(event: StatusEvent): boolean {
+  return (
+    event.message.toLowerCase().startsWith("note by ") ||
+    event.message.toLowerCase().includes("remark") ||
+    hasEventAttachments(event)
+  );
+}
+
+function hasEventAttachments(event: StatusEvent): boolean {
+  return (event.attachments ?? []).length > 0;
 }
 
 function StatusDetail({
@@ -186,6 +343,8 @@ function StatusDetail({
     ? { kind: "marketing", row: marketingMsg }
     : null;
   const [showMessage, setShowMessage] = useState(false);
+  const attachments = event.attachments ?? [];
+  const relatedTarget = relatedRemarkTarget(event, context, messageRow);
 
   return (
     <div className="space-y-4">
@@ -193,11 +352,6 @@ function StatusDetail({
 
       <dl className="grid grid-cols-2 gap-3 text-xs">
         <Field label="Source"><span className="capitalize">{event.source}</span></Field>
-        <Field label="Visibility">
-          <Badge tone={event.visibility === "customer_visible" ? "info" : "neutral"}>
-            {event.visibility === "customer_visible" ? "Customer visible" : "Internal"}
-          </Badge>
-        </Field>
         <Field label="When">{fmt.dateTime(event.createdAt)}</Field>
         <Field label="Facilitated by">{eventActorName(event) ?? "—"}</Field>
         {customer && <Field label="Customer">{customer.name}</Field>}
@@ -205,6 +359,30 @@ function StatusDetail({
         {asset && <Field label="Asset">{asset.label}</Field>}
         {policy && <Field label="Policy">{fmt.policyRef(policy)}</Field>}
       </dl>
+
+      {relatedTarget && (
+        <Link
+          to={relatedTarget.to}
+          className="btn-outline inline-flex text-sm"
+        >
+          <ArrowUpRight className="h-3.5 w-3.5" />
+          {relatedTarget.label}
+        </Link>
+      )}
+
+      {attachments.length > 0 && (
+        <div className="pt-3 border-t border-ink-100 space-y-2">
+          <div className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-ink-500">
+            <Paperclip className="h-3.5 w-3.5" />
+            Uploads analyzed for this note
+          </div>
+          <div className="grid gap-2">
+            {attachments.map((attachment) => (
+              <NoteAttachmentPreview key={attachment.id} attachment={attachment} />
+            ))}
+          </div>
+        </div>
+      )}
 
       {messageRow && context === "employee" && (
         <div className="pt-3 border-t border-ink-100 space-y-2">
@@ -214,11 +392,7 @@ function StatusDetail({
               className="btn-outline text-sm"
               onClick={() => setShowMessage(true)}
             >
-              {messageRow.kind === "comm" && messageRow.row.channel === "sms" ? (
-                <MessageSquare className="h-3.5 w-3.5" />
-              ) : (
-                <Mail className="h-3.5 w-3.5" />
-              )}
+              <Mail className="h-3.5 w-3.5" />
               View message
             </button>
           ) : (
@@ -231,6 +405,113 @@ function StatusDetail({
       )}
     </div>
   );
+}
+
+type MessageRow =
+  | { kind: "comm"; row: Communication }
+  | { kind: "marketing"; row: MarketingMessage };
+
+type RelatedRemarkTarget = {
+  to: string;
+  label: string;
+};
+
+function relatedRemarkTarget(
+  event: StatusEvent,
+  context: "employee" | "customer",
+  messageRow: MessageRow | null
+): RelatedRemarkTarget | null {
+  if (context === "customer") {
+    if (event.claimId) return { to: "/agency/customer/claims", label: "Open related claim" };
+    if (event.documentId) return { to: `/agency/customer/documents?document=${encodeURIComponent(event.documentId)}`, label: "Open related document" };
+    if (event.policyId) return { to: `/agency/customer/policies/${event.policyId}`, label: "Open related policy" };
+    if (event.assetId) return { to: `/agency/customer/assets/${event.assetId}`, label: "Open related asset" };
+    return null;
+  }
+
+  const messageTarget = messageRouteForRemark(messageRow);
+  if (messageTarget) return messageTarget;
+
+  const quoteSessionId = event.quoteSessionId ?? event.quoteRequestId;
+  if (quoteSessionId) {
+    if (event.customerId) {
+      return {
+        to: `/employee/clients/${event.customerId}#ai-quoting-workspace`,
+        label: "Open related quote workspace",
+      };
+    }
+    if (event.prospectId) {
+      return {
+        to: `/employee/prospects/${event.prospectId}#ai-quoting-workspace`,
+        label: "Open related quote workspace",
+      };
+    }
+  }
+
+  if (event.claimId) {
+    return { to: `/employee/claims?claim=${encodeURIComponent(event.claimId)}`, label: "Open related claim" };
+  }
+  if (event.documentId) {
+    return { to: `/employee/documents?document=${encodeURIComponent(event.documentId)}`, label: "Open related document" };
+  }
+  if (event.depositId || /billing|payment|invoice|premium/i.test(event.message)) {
+    if (event.policyId) return { to: `/employee/billing/${event.policyId}`, label: "Open related billing" };
+    return { to: "/employee/billing", label: "Open related billing" };
+  }
+  if (event.renewalId) {
+    return { to: "/employee/renewals", label: "Open related renewal" };
+  }
+  if (event.policyId) {
+    return { to: `/employee/policies/${event.policyId}`, label: "Open related policy" };
+  }
+  if (event.assetId && event.customerId) {
+    return {
+      to: `/employee/clients/${event.customerId}/assets/${event.assetId}`,
+      label: "Open related asset",
+    };
+  }
+  if (event.customerId) {
+    return { to: `/employee/clients/${event.customerId}#client-remarks`, label: "Open related client" };
+  }
+  if (event.prospectId) {
+    return { to: `/employee/prospects/${event.prospectId}`, label: "Open related prospect" };
+  }
+  return null;
+}
+
+function messageRouteForRemark(messageRow: MessageRow | null): RelatedRemarkTarget | null {
+  if (!messageRow) return null;
+  if (messageRow.kind === "marketing") {
+    if (messageRow.row.customerId) {
+      return {
+        to: `/employee/messages?contact=client:${messageRow.row.customerId}`,
+        label: "Open related message",
+      };
+    }
+    if (messageRow.row.prospectId) {
+      return {
+        to: `/employee/messages?contact=prospect:${messageRow.row.prospectId}`,
+        label: "Open related message",
+      };
+    }
+    return null;
+  }
+
+  const row = messageRow.row;
+  if (row.customerId) {
+    return { to: `/employee/messages?contact=client:${row.customerId}`, label: "Open related message" };
+  }
+  if (row.prospectId) {
+    return { to: `/employee/messages?contact=prospect:${row.prospectId}`, label: "Open related message" };
+  }
+  if (row.carrierContactId) {
+    return { to: `/employee/messages?contact=carrier:${row.carrierContactId}`, label: "Open related message" };
+  }
+  const holderId = row.externalRecipientEmail?.trim().toLowerCase();
+  if (holderId) {
+    return { to: `/employee/messages?contact=holder:${encodeURIComponent(holderId)}`, label: "Open related message" };
+  }
+  return null;
 }
 
 // Inline preview of the Communication or MarketingMessage the
@@ -258,6 +539,9 @@ function InlineMessagePreview({
   const at = isComm
     ? messageRow.row.createdAt
     : messageRow.row.sentAt ?? messageRow.row.createdAt;
+  const communication = isComm ? messageRow.row : null;
+  const attachments = communication?.attachments ?? [];
+  const [previewDocument, setPreviewDocument] = useState<Document | null>(null);
 
   return (
     <div className="rounded-md border border-ink-100 bg-ink-50/40 p-3 space-y-2">
@@ -282,8 +566,144 @@ function InlineMessagePreview({
       <div className="max-h-[280px] overflow-y-auto rounded-md border border-ink-100 bg-white p-3 text-sm text-ink-800 whitespace-pre-wrap leading-snug">
         {body}
       </div>
+      {attachments.length > 0 && (
+        <div className="space-y-1.5 rounded-md border border-ink-100 bg-white p-2">
+          <div className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-ink-500">
+            <Paperclip className="h-3.5 w-3.5" />
+            Attachments
+          </div>
+          {attachments.map((attachment) => (
+            <div
+              key={attachment.id}
+              className="flex items-center justify-between gap-2 rounded-md border border-ink-100 bg-ink-50/60 px-2.5 py-2 text-xs"
+            >
+              <div className="flex min-w-0 items-center gap-2">
+                <FileText className="h-4 w-4 shrink-0 text-gold-700" />
+                <div className="min-w-0">
+                  <div className="truncate font-semibold text-ink-900">{attachment.fileName}</div>
+                  <div className="text-[11px] text-ink-500">
+                    {attachment.fileType || "Attachment"}
+                    {attachment.sizeBytes ? ` Â· ${formatAttachmentSize(attachment.sizeBytes)}` : ""}
+                    {typeof attachment.filledFieldCount === "number"
+                      ? ` Â· ${attachment.filledFieldCount} mapped fields`
+                      : ""}
+                  </div>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn-outline shrink-0 text-[11px] !px-2.5 !py-1"
+                onClick={() =>
+                  communication &&
+                  setPreviewDocument(
+                    communicationAttachmentPreviewDocument(attachment, communication)
+                  )
+                }
+              >
+                Preview
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <DocumentViewerModal
+        document={previewDocument}
+        open={!!previewDocument}
+        onClose={() => setPreviewDocument(null)}
+      />
     </div>
   );
+}
+
+function communicationAttachmentPreviewDocument(
+  attachment: CommunicationAttachment,
+  message: Communication
+): Document {
+  const linkedDocument = attachment.documentId
+    ? api.documents.get(attachment.documentId)
+    : undefined;
+  if (linkedDocument) return linkedDocument;
+
+  return {
+    id: attachment.documentId ?? `timeline_email_attachment_${attachment.id}`,
+    tenantId: message.tenantId,
+    uploadedById: message.createdById ?? "system",
+    fileName: attachment.fileName,
+    fileType: attachment.fileType || "application/pdf",
+    documentName: attachment.description ?? "Email attachment",
+    templateFields: {
+      "Email attachment": attachment.fileName,
+      ...(attachment.description ? { Description: attachment.description } : {}),
+      ...(typeof attachment.filledFieldCount === "number"
+        ? { "Mapped field count": String(attachment.filledFieldCount) }
+        : {}),
+      ...(attachment.filledFields ?? {}),
+    },
+    type: "email_attachment",
+    visibility: "employee_only",
+    status: "approved",
+    storagePath:
+      attachment.storagePath ??
+      `s3://placeholder/${message.tenantId}/timeline-email-attachments/${attachment.id}/${attachment.fileName}`,
+    downloadUrl: attachment.dataUrl,
+    uploadedAt: message.createdAt,
+    lastChangeAction: "uploaded",
+    lastChangeAt: message.createdAt,
+  };
+}
+
+function NoteAttachmentPreview({ attachment }: { attachment: NoteAttachment }) {
+  const isImage = attachment.fileType?.startsWith("image/");
+  return (
+    <div className="rounded-md border border-ink-100 bg-ink-50/40 p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 font-semibold text-ink-900 text-sm">
+            {isImage ? (
+              <ImageIcon className="h-4 w-4 shrink-0 text-gold-700" />
+            ) : (
+              <FileText className="h-4 w-4 shrink-0 text-gold-700" />
+            )}
+            <span className="break-words">{attachment.fileName}</span>
+          </div>
+          <div className="mt-1 text-xs text-ink-500">
+            {attachment.fileType || "Uploaded file"}
+            {attachment.sizeBytes ? ` · ${formatAttachmentSize(attachment.sizeBytes)}` : ""}
+          </div>
+        </div>
+        {attachment.dataUrl && (
+          <a
+            className="btn-outline text-[11px] !px-2.5 !py-1 shrink-0"
+            href={attachment.dataUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            download={attachment.fileName}
+          >
+            Open
+          </a>
+        )}
+      </div>
+      <div className="mt-2 text-xs text-ink-700">{attachment.aiSummary}</div>
+      {isImage && attachment.dataUrl && (
+        <img
+          src={attachment.dataUrl}
+          alt={attachment.fileName}
+          className="mt-3 max-h-56 w-full rounded-md border border-ink-100 bg-white object-contain p-2"
+        />
+      )}
+      {attachment.textPreview && (
+        <pre className="mt-3 max-h-40 overflow-y-auto rounded-md border border-ink-100 bg-white p-2 text-[11px] leading-relaxed text-ink-700 whitespace-pre-wrap">
+          {attachment.textPreview}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+function formatAttachmentSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {

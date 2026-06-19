@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { ChevronUp, ExternalLink } from "lucide-react";
+import { isAddressLikeKey, MapLink } from "@/components/ui/MapLink";
 import { api } from "@/lib/api";
 import { fmt } from "@/lib/format";
 import type { CustomerProfile, Policy, Prospect, Renewal } from "@/types";
@@ -69,7 +70,13 @@ export function DetailGrid({
         r.value == null || r.value === "" ? null : (
           <div key={i} className="flex justify-between gap-3 text-ink-700">
             <dt className="text-ink-500">{r.label}</dt>
-            <dd className="text-ink-900 text-right">{r.value}</dd>
+            <dd className="text-ink-900 text-right">
+              {isAddressLikeKey(r.label) && typeof r.value === "string" ? (
+                <MapLink address={r.value} className="justify-end text-right" />
+              ) : (
+                r.value
+              )}
+            </dd>
           </div>
         )
       )}

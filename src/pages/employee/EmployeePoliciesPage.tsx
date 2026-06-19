@@ -3,12 +3,28 @@ import { Plus, Search, X } from "lucide-react";
 import { AddPolicyModal } from "@/components/policies/AddPolicyModal";
 import { PolicyActions } from "@/components/policies/PolicyActions";
 import { Card } from "@/components/ui/Card";
+import { AiCustomFilterChip } from "@/components/ui/AiCustomFilterChip";
 import { PolicyStatusBadge } from "@/components/ui/StatusBadge";
+import { EmployeeBackButton } from "@/components/layout/EmployeeBackButton";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
+import { matchesAiCustomFilter } from "@/lib/aiCustomFilters";
 import { fmt } from "@/lib/format";
 import type { PolicyStatus } from "@/types";
+
+type PolicyFilter = "all" | "bound" | "pending" | "renewals" | "claims" | "personal" | "commercial" | "declined";
+
+const POLICY_FILTERS: Array<{ id: PolicyFilter; label: string }> = [
+  { id: "all", label: "All" },
+  { id: "bound", label: "Bound" },
+  { id: "pending", label: "Pending" },
+  { id: "renewals", label: "Renewals" },
+  { id: "claims", label: "Claims" },
+  { id: "personal", label: "Personal" },
+  { id: "commercial", label: "Commercial" },
+  { id: "declined", label: "Declined" },
+];
 
 // Policies in any of these stages drive the red Policies sidebar
 // badge — they're waiting on agent action.
@@ -35,6 +51,7 @@ const ALL_STATUSES: PolicyStatus[] = [
   "renewed",
   "claim_opened",
   "claim_closed",
+  "closed",
 ];
 
 export function EmployeePoliciesPage() {
@@ -44,6 +61,8 @@ export function EmployeePoliciesPage() {
   const refresh = () => setRev((r) => r + 1);
   const [addOpen, setAddOpen] = useState(false);
   const [query, setQuery] = useState("");
+  const [policyFilter, setPolicyFilter] = useState<PolicyFilter>("all");
+  const [customFilter, setCustomFilter] = useState("");
   if (!agency || !user) return null;
   const visibleIds = new Set(
     api.customers
@@ -66,8 +85,18 @@ export function EmployeePoliciesPage() {
   // number, and status — case-insensitive substring.
   const policies = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return allPolicies;
-    return allPolicies.filter((p) => {
+    const filteredByChip = allPolicies.filter((p) => {
+      if (policyFilter === "bound") return p.status === "bound";
+      if (policyFilter === "pending") return PENDING_STATES.includes(p.status);
+      if (policyFilter === "renewals") return p.renewalStatus !== "not_due" || p.status === "renewal_upcoming";
+      if (policyFilter === "claims") return p.status === "claim_opened" || p.status === "claim_closed";
+      if (policyFilter === "personal") return (p.department ?? "personal") === "personal";
+      if (policyFilter === "commercial") return p.department === "commercial";
+      if (policyFilter === "declined") return p.status === "declined";
+      return true;
+    });
+    const searched = q
+      ? filteredByChip.filter((p) => {
       const customer = api.customers.get(p.customerId);
       const asset = api.assets.get(p.assetId);
       const carrier = api.carriers.get(p.carrierId);
@@ -77,6 +106,7 @@ export function EmployeePoliciesPage() {
         asset?.label,
         carrier?.name,
         p.policyNumber,
+        fmt.policyRef(p),
         p.status,
         fmt.titleCase(p.status.replace(/_/g, " ")),
       ]
@@ -84,11 +114,50 @@ export function EmployeePoliciesPage() {
         .join(" ")
         .toLowerCase();
       return haystack.includes(q);
+    })
+      : filteredByChip;
+    if (!customFilter.trim()) return searched;
+    return searched.filter((p) => {
+      const customer = api.customers.get(p.customerId);
+      const asset = api.assets.get(p.assetId);
+      const carrier = api.carriers.get(p.carrierId);
+      return matchesAiCustomFilter(customFilter, {
+        text: [
+          customer?.name,
+          customer?.email,
+          asset?.label,
+          asset?.type,
+          asset ? api.helpers.assetTypeLabel(asset.type) : undefined,
+          carrier?.name,
+          p.policyNumber,
+          fmt.policyRef(p),
+          p.status,
+          fmt.titleCase(p.status.replace(/_/g, " ")),
+          p.renewalStatus,
+          api.helpers.departmentLabel(p),
+        ],
+        flags: {
+          active: p.status === "bound" || PENDING_STATES.includes(p.status),
+          bound: p.status === "bound",
+          renewal: p.renewalStatus !== "not_due" || p.status === "renewal_upcoming",
+          claim: p.status === "claim_opened" || p.status === "claim_closed",
+          openClaim: p.status === "claim_opened",
+          closedClaim: p.status === "claim_closed",
+          pending: PENDING_STATES.includes(p.status),
+          quote: p.status === "quote_started",
+          approved: p.status === "approved",
+          declined: p.status === "declined",
+          personal: (p.department ?? "personal") === "personal",
+          commercial: p.department === "commercial",
+        },
+        numbers: [p.finalPremium, p.premiumEstimate],
+      });
     });
-  }, [allPolicies, query]);
+  }, [allPolicies, policyFilter, query, customFilter]);
 
   return (
     <div className="space-y-6">
+      <EmployeeBackButton />
       <div className="flex items-end justify-between gap-4 flex-wrap">
         <div>
           <h1 className="font-display text-3xl">Policies</h1>
@@ -119,19 +188,50 @@ export function EmployeePoliciesPage() {
           </button>
         )}
       </div>
+      <div className="flex flex-wrap gap-1.5">
+        {POLICY_FILTERS.map((item) => (
+          <button
+            type="button"
+            key={item.id}
+            onClick={() => setPolicyFilter(item.id)}
+            className={`min-h-8 rounded-md border px-3 py-1.5 text-xs font-semibold transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold-300 focus-visible:ring-offset-2 focus-visible:ring-offset-ink-50 ${
+              policyFilter === item.id
+                ? "border-ink-900 bg-ink-900 text-white shadow-sm"
+                : "border-ink-200 bg-white text-ink-700 shadow-sm hover:border-ink-300 hover:bg-ink-50 hover:text-ink-900 hover:shadow-md"
+            }`}
+          >
+            {item.label}
+          </button>
+        ))}
+        <AiCustomFilterChip
+          value={customFilter}
+          onChange={setCustomFilter}
+          placeholder="ex: pending, Chubb, renewal, commercial, premium over 5k"
+        />
+      </div>
 
-      <Card padded={false}>
-        <table className="w-full text-sm">
+      <Card padded={false} className="overflow-hidden">
+        <table className="w-full table-fixed text-sm">
+          <colgroup>
+            <col className="w-[12%]" />
+            <col className="w-[16%]" />
+            <col className="w-[14%]" />
+            <col className="w-[10%]" />
+            <col className="w-[10%]" />
+            <col className="w-[9%]" />
+            <col className="w-[12%]" />
+            <col className="w-[17%]" />
+          </colgroup>
           <thead>
             <tr className="text-left text-xs uppercase tracking-wider text-ink-500 border-b border-ink-100">
-              <th className="px-6 py-3">Client</th>
-              <th className="px-6 py-3">Asset</th>
-              <th className="px-6 py-3">Carrier</th>
-              <th className="px-6 py-3">Premium</th>
-              <th className="px-6 py-3">Renewal</th>
-              <th className="px-6 py-3">Status</th>
-              <th className="px-6 py-3 text-right">Advance</th>
-              <th className="px-6 py-3 text-right">Actions</th>
+              <th className="px-4 py-4">Client</th>
+              <th className="px-4 py-4">Policy</th>
+              <th className="px-4 py-4">Carrier</th>
+              <th className="px-4 py-4">Premium</th>
+              <th className="px-4 py-4">Renewal</th>
+              <th className="px-4 py-4">Status</th>
+              <th className="px-4 py-4 text-right">Advance</th>
+              <th className="px-4 py-4 text-right">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-ink-100">
@@ -139,31 +239,27 @@ export function EmployeePoliciesPage() {
               const customer = api.customers.get(p.customerId);
               const asset = api.assets.get(p.assetId);
               const carrier = api.carriers.get(p.carrierId);
-              const pending = PENDING_STATES.includes(p.status);
               return (
-                <tr key={p.id} className={pending ? "bg-alert-soft/60 hover:bg-alert-soft" : "hover:bg-ink-50/60"}>
-                  <td className="px-6 py-4 font-medium">
-                    <div className="flex items-center gap-1.5">
-                      {pending && (
-                        <span
-                          className="inline-block h-2 w-2 rounded-full bg-alert"
-                          title="Pending agent action"
-                        />
-                      )}
+                <tr key={p.id} className="hover:bg-ink-50/60">
+                  <td className="px-4 py-5 align-middle">
+                    <div className="flex items-center gap-1.5 break-words text-sm font-semibold leading-snug text-ink-900">
                       {customer?.name ?? "—"}
                     </div>
                   </td>
-                  <td className="px-6 py-4">
-                    <div>{asset?.label ?? "—"}</div>
+                  <td className="px-4 py-5 align-middle">
+                    <div className="font-mono text-sm font-semibold text-ink-900">{fmt.policyRef(p)}</div>
+                    <div className="line-clamp-2">{asset?.label ?? "—"}</div>
                     <div className="text-[11px] text-ink-400">{api.helpers.departmentLabel(p)}</div>
                   </td>
-                  <td className="px-6 py-4">{carrier?.name ?? "—"}</td>
-                  <td className="px-6 py-4">{p.finalPremium ? fmt.money(p.finalPremium) : p.premiumEstimate ? fmt.money(p.premiumEstimate) : "—"}</td>
-                  <td className="px-6 py-4">{fmt.date(p.renewalDate)}</td>
-                  <td className="px-6 py-4"><PolicyStatusBadge status={p.status} /></td>
-                  <td className="px-6 py-4 text-right">
+                  <td className="px-4 py-5 align-middle">
+                    <div className="line-clamp-2">{carrier?.name ?? "—"}</div>
+                  </td>
+                  <td className="px-4 py-5 align-middle tabular-nums">{p.finalPremium ? fmt.money(p.finalPremium) : p.premiumEstimate ? fmt.money(p.premiumEstimate) : "—"}</td>
+                  <td className="px-4 py-5 align-middle">{fmt.date(p.renewalDate)}</td>
+                  <td className="px-4 py-5 align-middle"><PolicyStatusBadge status={p.status} /></td>
+                  <td className="px-4 py-5 align-middle text-right">
                     <select
-                      className="input !py-1 !text-xs"
+                      className="input !w-full !py-1 !text-xs"
                       value={p.status}
                       onChange={(e) => {
                         api.policies.setStatus(p.id, e.target.value as PolicyStatus);
@@ -177,7 +273,7 @@ export function EmployeePoliciesPage() {
                       ))}
                     </select>
                   </td>
-                  <td className="px-6 py-4">
+                  <td className="px-4 py-5 align-middle">
                     <PolicyActions policy={p} size="xs" />
                   </td>
                 </tr>

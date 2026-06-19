@@ -4,10 +4,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 // =====================================================================
 // Manager-only "compose new AI campaign" launcher.
 //
-// Promotional campaign blasts are fire-and-forget: the campaign + a
-// launch status event are recorded, but NO per-recipient message rows
-// are written (so they never clutter a contact's Messages thread).
-// Campaigns can target email + SMS at once and any combination of all
+// Promotional campaign blasts record a campaign, a launch event, and
+// per-recipient receipt rows used by client "campaigns received" logs.
+// Campaigns target email and any combination of all
 // clients / all prospects / hand-picked recipients.
 // =====================================================================
 
@@ -21,7 +20,7 @@ afterEach(() => {
 });
 
 describe("marketing.composeAiCampaign", () => {
-  it("records a campaign but writes NO per-recipient messages", async () => {
+  it("records a campaign and writes per-recipient receipt messages", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     const beforeCampaigns = api.marketing.listCampaigns(agency.id).length;
@@ -31,21 +30,20 @@ describe("marketing.composeAiCampaign", () => {
     const out = api.marketing.composeAiCampaign({
       tenantId: agency.id,
       name: "Spring portfolio review",
-      channels: ["email", "sms"],
+      channels: ["email"],
       brief: "Reminder that our annual portfolio review window opens next month.",
       includeAllClients: true,
     });
 
     expect(out.campaign.name).toBe("Spring portfolio review");
-    expect(out.campaign.channels).toEqual(["email", "sms"]);
+    expect(out.campaign.channels).toEqual(["email"]);
     expect(out.campaign.status).toBe("active");
     expect(api.marketing.listCampaigns(agency.id).length).toBe(beforeCampaigns + 1);
     expect(out.messageCount).toBe(clientCount);
-    // The whole point: no message rows are created for the blast.
-    expect(api.marketing.listMessages(agency.id).length).toBe(beforeMessages);
+    expect(api.marketing.listMessages(agency.id).length).toBe(beforeMessages + clientCount);
     expect(
       api.marketing.listMessages(agency.id).filter((m) => m.campaignId === out.campaign.id).length
-    ).toBe(0);
+    ).toBe(clientCount);
   });
 
   it("combines all clients + all prospects in the recipient count", async () => {
@@ -59,7 +57,7 @@ describe("marketing.composeAiCampaign", () => {
     const out = api.marketing.composeAiCampaign({
       tenantId: agency.id,
       name: "Everyone blast",
-      channels: ["sms"],
+      channels: ["email"],
       brief: "Big news for the whole book.",
       includeAllClients: true,
       includeAllProspects: true,
@@ -85,23 +83,23 @@ describe("marketing.composeAiCampaign", () => {
     expect(out.messageCount).toBe(expected);
   });
 
-  it("scheduling for the future marks the campaign scheduled (still no messages)", async () => {
+  it("scheduling for the future marks the campaign scheduled with queued receipts", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     const future = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
     const out = api.marketing.composeAiCampaign({
       tenantId: agency.id,
       name: "Hurricane prep checklist",
-      channels: ["email", "sms"],
+      channels: ["email"],
       brief: "Pre-storm checklist for coastal homeowners.",
       includeAllClients: true,
       scheduledFor: future,
     });
     expect(out.campaign.status).toBe("scheduled");
     expect(out.campaign.scheduledFor).toBe(future);
-    expect(
-      api.marketing.listMessages(agency.id).filter((m) => m.campaignId === out.campaign.id).length
-    ).toBe(0);
+    const receipts = api.marketing.listMessages(agency.id).filter((m) => m.campaignId === out.campaign.id);
+    expect(receipts.length).toBeGreaterThan(0);
+    expect(receipts.every((m) => m.deliveryStatus === "queued")).toBe(true);
   });
 
   it("recurrence is persisted on the campaign row", async () => {
@@ -110,7 +108,7 @@ describe("marketing.composeAiCampaign", () => {
     const out = api.marketing.composeAiCampaign({
       tenantId: agency.id,
       name: "Weekly market digest",
-      channels: ["sms"],
+      channels: ["email"],
       brief: "Weekly insurance market roundup.",
       includeAllClients: true,
       recurrence: "weekly",
@@ -119,14 +117,14 @@ describe("marketing.composeAiCampaign", () => {
     expect(out.campaign.status).toBe("active");
   });
 
-  it("writes one launch status event noting channels + that sends aren't logged", async () => {
+  it("writes one launch status event noting channels + receipt logging", async () => {
     const { api } = await import("../api");
     const { db } = await import("../db");
     const agency = api.agencies.list()[0];
     const out = api.marketing.composeAiCampaign({
       tenantId: agency.id,
       name: "Inspection reminder",
-      channels: ["email", "sms"],
+      channels: ["email"],
       brief: "Wind mitigation re-inspection due.",
       includeAllClients: true,
       attachments: [
@@ -144,8 +142,61 @@ describe("marketing.composeAiCampaign", () => {
           e.marketingCampaignId === out.campaign.id && e.message.startsWith("AI campaign")
       );
     expect(launchEvent).toBeTruthy();
-    expect(launchEvent!.message).toContain("EMAIL + SMS");
+    expect(launchEvent!.message).toContain("EMAIL");
     expect(launchEvent!.message).toContain("1 attachment");
-    expect(launchEvent!.message).toMatch(/not individually logged/i);
+    expect(launchEvent!.message).toMatch(/receipts were recorded/i);
+  });
+
+  it("stores a personalized full pamphlet message with a smart contact CTA", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const firstName = customer?.name.split(/\s+/)[0] ?? "";
+
+    const out = api.marketing.composeAiCampaign({
+      tenantId: agency.id,
+      name: "Coastal home readiness",
+      channels: ["email"],
+      brief: "Audit copy for the campaign record.",
+      emailSubject: "Review your coastal home protection",
+      emailBody: "Hi {first_name},\n\nWe prepared a short coastal home coverage check-in.\n\nBest,\nPalm Coast Private Client",
+      heroImageUrl: "https://images.unsplash.com/photo-1600585154340-be6161a56a0c?w=1800",
+      heroImageAlt: "Coastal home",
+      pamphlet: {
+        eyebrow: "Private client renewal",
+        headline: "A clearer renewal before terms are finalized",
+        subheadline: "Review the home details before the carrier sets final terms.",
+        intro: "This pamphlet organizes the renewal decisions that matter most before pricing is finalized.",
+        highlightsTitle: "What we will check",
+        highlights: [
+          "Confirm the dwelling limit still matches the property profile.",
+          "Review wind, flood, and roof details before underwriting.",
+          "Prepare the file before carrier terms become urgent.",
+        ],
+      },
+      includeAllClients: false,
+      selectedCustomerIds: customer ? [customer.id] : [],
+      appOrigin: "https://agency.example",
+    });
+
+    const message = api.marketing
+      .listMessages(agency.id)
+      .find((row) => row.campaignId === out.campaign.id && row.customerId === customer?.id);
+
+    expect(message?.subject).toBe("Review your coastal home protection");
+    expect(message?.content).toContain(`Hi ${firstName},`);
+    expect(message?.content).not.toContain("{first_name}");
+    const emailBodyIndex = message?.content.indexOf("[[quotex:marketing-email-body]]") ?? -1;
+    const pamphletIndex = message?.content.indexOf("[[quotex:marketing-pamphlet]]") ?? -1;
+    expect(emailBodyIndex).toBeGreaterThanOrEqual(0);
+    expect(pamphletIndex).toBeGreaterThan(emailBodyIndex);
+    expect(message?.content).toContain("![Coastal home](https://images.unsplash.com");
+    expect(message?.content).toContain("# A clearer renewal before terms are finalized");
+    expect(message?.content).toContain("This pamphlet organizes the renewal decisions");
+    expect(message?.content).toContain("- Confirm the dwelling limit still matches the property profile.");
+    expect(message?.content).not.toContain("Advisor note");
+    expect(message?.content).toContain("[Get in touch](https://agency.example/marketing/contact?");
+    expect(message?.content).toContain(`customer=${encodeURIComponent(customer?.id ?? "")}`);
+    expect(message?.content).toContain("Best,\nPalm Coast Private Client");
   });
 });

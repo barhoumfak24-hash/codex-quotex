@@ -19,7 +19,32 @@ afterEach(() => {
 });
 
 describe("documents.listTemplates + applyTemplate", () => {
-  it("listTemplates returns only tenant-wide agency_template docs (no customerId)", async () => {
+  it("seeds ACORD templates with bundled PDF assets", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const templates = api.documents.listTemplates(agency.id);
+    const acordTemplates = templates.filter((template) =>
+      /acord/i.test(`${template.fileName} ${template.documentName ?? ""}`)
+    );
+    const fileNames = acordTemplates.map((template) => template.fileName);
+    const acord25 = templates.find((template) => template.documentName?.startsWith("ACORD 25"));
+    const acord125 = templates.find((template) => template.documentName?.startsWith("ACORD 125"));
+
+    expect(acordTemplates).toHaveLength(41);
+    expect(fileNames).toContain("ACORD-810-Fillable.pdf");
+    expect(fileNames).toContain("ACORD-Untitled-document-11.pdf");
+    expect(fileNames).not.toContain("ACORD-81.pdf");
+    expect(fileNames).not.toContain("ACORD-82.pdf");
+    expect(fileNames).not.toContain("ACORD-90.pdf");
+    expect(acord25?.fileName).toBe("ACORD-025-Certificate-of-Liability.pdf");
+    expect(acord125?.fileName).toBe("ACORD-125.pdf");
+    expect(acord25?.storagePath).toBe("/acord/ACORD-025-Certificate-of-Liability.pdf");
+    expect(acord25?.downloadUrl).toBe("/acord/ACORD-025-Certificate-of-Liability.pdf");
+    expect(acord25?.templateFields?.["Bundled PDF"]).toContain("Yes");
+    expect(acord25?.templateFields?.["Source file"]).toBe("acord-coi-form.pdf");
+  });
+
+  it("listTemplates returns only reusable agency-library docs", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     api.documents.create({
@@ -38,6 +63,27 @@ describe("documents.listTemplates + applyTemplate", () => {
       type: "agency_template",
       visibility: "employee_only",
     });
+    api.documents.create({
+      tenantId: agency.id,
+      uploadedById: "user_manager_pc",
+      fileName: "Signed-Service-Agreement-Blank.pdf",
+      fileType: "application/pdf",
+      documentName: "Signed service agreement blank",
+      type: "other",
+      visibility: "employee_only",
+      agencyId: agency.id,
+    });
+    api.documents.create({
+      tenantId: agency.id,
+      uploadedById: "user_manager_pc",
+      fileName: "Personal-Lines-App.pdf",
+      fileType: "application/pdf",
+      documentName: "Personal lines application",
+      type: "agency_template",
+      visibility: "employee_only",
+      agencyId: agency.id,
+      lineOfBusiness: "personal",
+    });
     // Customer-tied doc should NOT appear in templates.
     const customer = api.customers.list(agency.id)[0];
     api.documents.create({
@@ -49,10 +95,23 @@ describe("documents.listTemplates + applyTemplate", () => {
       visibility: "employee_only",
       customerId: customer.id,
     });
+    api.documents.create({
+      tenantId: agency.id,
+      uploadedById: "user_manager_pc",
+      fileName: "Carrier-Supplemental.pdf",
+      fileType: "application/pdf",
+      type: "carrier_supplemental",
+      visibility: "employee_only",
+      carrierId: "carrier_chubb",
+      lineOfBusiness: "commercial",
+    });
     const tpls = api.documents.listTemplates(agency.id);
     expect(tpls.map((t) => t.fileName)).toContain("Auto-Change-Form.pdf");
     expect(tpls.map((t) => t.fileName)).toContain("Wind-Mitigation-Checklist.pdf");
+    expect(tpls.map((t) => t.fileName)).toContain("Signed-Service-Agreement-Blank.pdf");
+    expect(tpls.map((t) => t.fileName)).toContain("Personal-Lines-App.pdf");
     expect(tpls.map((t) => t.fileName)).not.toContain("Customer-Specific.pdf");
+    expect(tpls.map((t) => t.fileName)).not.toContain("Carrier-Supplemental.pdf");
   });
 
   it("applyTemplate clones a template into the client's docs with the chosen type", async () => {
@@ -68,6 +127,8 @@ describe("documents.listTemplates + applyTemplate", () => {
       fileType: "application/pdf",
       type: "agency_template",
       visibility: "employee_only",
+      customerEsignRequired: true,
+      agentEsignRequired: true,
     });
 
     const applied = api.documents.applyTemplate(tpl.id, {
@@ -84,6 +145,8 @@ describe("documents.listTemplates + applyTemplate", () => {
     expect(applied!.type).toBe("wind_mitigation");
     expect(applied!.fileName).toBe("Wind-Mitigation-Template.pdf");
     expect(applied!.visibility).toBe("customer_visible");
+    expect(applied!.customerEsignRequired).toBe(true);
+    expect(applied!.agentEsignRequired).toBe(true);
     // Original template untouched.
     const origin = api.documents.get(tpl.id)!;
     expect(origin.customerId).toBeUndefined();

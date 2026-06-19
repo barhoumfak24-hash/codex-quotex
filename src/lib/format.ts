@@ -83,6 +83,7 @@ export const policyStatusLabel: Record<PolicyStatus, string> = {
   renewed: "Renewed",
   claim_opened: "Claim Opened",
   claim_closed: "Claim Closed",
+  closed: "Closed",
 };
 
 export const prospectStatusLabel: Record<ProspectStatus, string> = {
@@ -111,6 +112,7 @@ export function policyStatusTone(s: PolicyStatus): "neutral" | "info" | "success
   if (s === "bound" || s === "approved" || s === "renewed") return "success";
   if (s === "declined" || s === "deposit_refunded") return "error";
   if (s === "renewal_upcoming" || s === "documents_needed") return "warn";
+  if (s === "closed") return "neutral";
   if (s === "quote_started") return "neutral";
   return "info";
 }

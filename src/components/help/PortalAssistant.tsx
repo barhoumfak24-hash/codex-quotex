@@ -1,14 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import { Bot, Send, Sparkles, X } from "lucide-react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Bot, CheckCircle2, Send, Sparkles, X } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import {
-  askPortalAssistant,
+  askPortalAssistantSmart,
   assistantStarters,
+  executePortalAssistantAction,
   type AssistantAnswer,
   type AssistantContext,
+  type AssistantExecutableAction,
   type AssistantHistoryItem,
 } from "@/lib/portalAssistant";
+import { isStaffRole } from "@/lib/roles";
 
 // =====================================================================
 // Floating portal help assistant for agents + managers.
@@ -26,6 +30,9 @@ interface ChatMessage {
   from: "user" | "assistant";
   text: string;
   related?: string[];
+  action?: AssistantAnswer["action"];
+  actions?: AssistantAnswer["actions"];
+  pendingAction?: AssistantExecutableAction;
   // Set on assistant messages so follow-up questions can be resolved
   // against the previously-discussed topic.
   topicId?: string;
@@ -40,6 +47,8 @@ function nextId() {
 export function PortalAssistant() {
   const { user } = useAuth();
   const { agency } = useTenant();
+  const location = useLocation();
+  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState("");
   const [thinking, setThinking] = useState(false);
@@ -56,7 +65,7 @@ export function PortalAssistant() {
         {
           id: nextId(),
           from: "assistant",
-          text: "Hi! I'm your portal assistant. Ask me how anything in the agency portal works — or tap a question below to get started.",
+          text: "Hi! I'm your portal assistant. Ask me anything about the portal, ask me to find a record, or tell me to prepare an action. I will show you exactly what I am about to do and ask for confirmation before changing anything.",
           related: assistantStarters(),
         },
       ]);
@@ -88,28 +97,86 @@ export function PortalAssistant() {
     // Small delay so the reply feels considered (and mirrors the
     // async shape of the production fetch).
     window.setTimeout(() => {
-      const ctx: AssistantContext | undefined =
-        agency && user
-          ? { tenantId: agency.id, viewer: { id: user.id, role: user.role } }
-          : undefined;
-      const answer: AssistantAnswer = askPortalAssistant(text, role, ctx, historySnapshot);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: nextId(),
-          from: "assistant",
-          text: answer.text,
-          related: answer.related,
-          topicId: answer.topicId,
-        },
-      ]);
-      setThinking(false);
+      void (async () => {
+        const ctx: AssistantContext | undefined =
+          agency && user
+            ? {
+                tenantId: agency.id,
+                viewer: { id: user.id, role: user.role },
+                currentPath: `${location.pathname}${location.search}${location.hash}`,
+              }
+            : undefined;
+        const answer: AssistantAnswer = await askPortalAssistantSmart(
+          text,
+          role,
+          ctx,
+          historySnapshot
+        );
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: nextId(),
+            from: "assistant",
+            text: answer.text,
+            related: answer.related,
+            action: answer.action,
+            actions: answer.actions,
+            pendingAction: answer.pendingAction,
+            topicId: answer.topicId,
+          },
+        ]);
+        setThinking(false);
+      })();
     }, 400);
+  }
+
+  function context(): AssistantContext | null {
+    if (!agency || !user) return null;
+    return {
+      tenantId: agency.id,
+      viewer: { id: user.id, role: user.role },
+      currentPath: `${location.pathname}${location.search}${location.hash}`,
+    };
+  }
+
+  function confirmAction(action: AssistantExecutableAction) {
+    const ctx = context();
+    if (!ctx) return;
+    const result = executePortalAssistantAction(action, ctx);
+    const resultMessage: ChatMessage = {
+      id: nextId(),
+      from: "assistant",
+      text: result.text,
+      action: result.action,
+    };
+    setMessages((prev) => [
+      ...prev.map((m) =>
+        m.pendingAction === action ? { ...m, pendingAction: undefined } : m
+      ),
+      resultMessage,
+    ]);
+    if (result.success && result.action && action.kind === "navigate") {
+      navigate(result.action.to);
+      setOpen(false);
+    }
+  }
+
+  function cancelAction(action: AssistantExecutableAction) {
+    setMessages((prev) => [
+      ...prev.map((m) =>
+        m.pendingAction === action ? { ...m, pendingAction: undefined } : m
+      ),
+      {
+        id: nextId(),
+        from: "assistant",
+        text: "Canceled. I did not change anything.",
+      },
+    ]);
   }
 
   // Only staff get the assistant. Customers/master never render it
   // (the layout decides, but guard here too).
-  if (!user || (user.role !== "agent" && user.role !== "manager")) return null;
+  if (!user || !isStaffRole(user.role)) return null;
 
   return (
     <>
@@ -138,7 +205,7 @@ export function PortalAssistant() {
               <div className="min-w-0">
                 <div className="text-sm font-semibold leading-tight">Portal assistant</div>
                 <div className="text-[11px] text-white/60 leading-tight">
-                  How-tos for the agency portal
+                  Answers, record lookup, and confirmed actions
                 </div>
               </div>
             </div>
@@ -169,9 +236,55 @@ export function PortalAssistant() {
                     {m.text}
                   </div>
                 </div>
-                {m.from === "assistant" && m.related && m.related.length > 0 && (
+                {m.from === "assistant" &&
+                  (m.pendingAction ||
+                    m.action ||
+                    (m.actions && m.actions.length > 0) ||
+                    (m.related && m.related.length > 0)) && (
                   <div className="flex flex-wrap gap-1.5">
-                    {m.related.map((r) => (
+                    {m.pendingAction && (
+                      <div className="w-full rounded-lg border border-gold-200 bg-gold-50 px-3 py-2 text-xs text-ink-800 shadow-sm">
+                        <div className="font-semibold text-ink-900 flex items-center gap-1.5">
+                          <CheckCircle2 className="h-3.5 w-3.5 text-gold-700" />
+                          Confirm action
+                        </div>
+                        <div className="mt-1 text-ink-700">{m.pendingAction.confirmation}</div>
+                        <div className="mt-2 flex items-center gap-2">
+                          <button
+                            type="button"
+                            className="btn-primary text-xs"
+                            onClick={() => confirmAction(m.pendingAction!)}
+                          >
+                            Confirm
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-outline text-xs"
+                            onClick={() => cancelAction(m.pendingAction!)}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {Array.from(
+                      new Map(
+                        [
+                          ...(m.action ? [m.action] : []),
+                          ...(m.actions ?? []),
+                        ].map((action) => [action.to, action])
+                      ).values()
+                    ).map((action) => (
+                      <Link
+                        key={action.to}
+                        to={action.to}
+                        onClick={() => setOpen(false)}
+                        className="inline-flex items-center gap-1 rounded-md border border-ink-900 bg-ink-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-ink-700 transition-colors"
+                      >
+                        {action.label}
+                      </Link>
+                    ))}
+                    {(m.related ?? []).map((r) => (
                       <button
                         key={r}
                         type="button"
@@ -210,7 +323,7 @@ export function PortalAssistant() {
             <input
               ref={inputRef}
               className="input text-sm"
-              placeholder="Ask about the portal…"
+              placeholder="Ask or tell me what to do..."
               value={input}
               onChange={(e) => setInput(e.target.value)}
             />
@@ -224,7 +337,7 @@ export function PortalAssistant() {
             </button>
           </form>
           <div className="px-3 pb-2 text-[10px] text-ink-400 text-center">
-            AI assistant for portal how-tos. Not financial, legal, or coverage advice.
+            Confirmed portal actions only. Not financial, legal, or coverage advice.
           </div>
         </div>
       )}
