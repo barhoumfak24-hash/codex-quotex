@@ -95,6 +95,7 @@ websiteRoutes.post("/prospects", async (req, res) => {
   const subject = websiteLeadSubject(lead);
   const html = websiteLeadHtml(lead);
   const text = websiteLeadText(lead);
+  const fallback = websiteLeadFallback(recipients, subject, text);
   const results = await Promise.all(
     recipients.map((to) =>
       sendEmail({
@@ -116,6 +117,7 @@ websiteRoutes.post("/prospects", async (req, res) => {
       error: "website_lead_email_failed",
       recipients,
       results,
+      fallback,
     });
   }
 
@@ -127,6 +129,7 @@ websiteRoutes.post("/prospects", async (req, res) => {
       provider: results[0]?.provider ?? "unconfigured",
       ids: results.map((result) => result.id),
     },
+    fallback,
   });
 });
 
@@ -291,6 +294,17 @@ function websiteLeadText(lead: z.infer<typeof websiteProspectSchema>) {
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+function websiteLeadFallback(recipients: string[], subject: string, body: string) {
+  const to = recipients.join(",");
+  return {
+    to,
+    recipients,
+    subject,
+    body,
+    href: `mailto:${recipients.map(encodeURIComponent).join(",")}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`,
+  };
 }
 
 function escapeHtml(value: string) {

@@ -11,7 +11,7 @@ import {
   QUOTEX_SUPPORT_EMAIL,
   QUOTEX_SUPPORT_EMAIL_HREF,
 } from "@/lib/quotexContact";
-import { submitWebsiteLead } from "@/lib/websiteApi";
+import { submitWebsiteLead, type WebsiteLeadFallback } from "@/lib/websiteApi";
 
 type ContactPageMode = "sales" | "support";
 
@@ -84,6 +84,7 @@ export function QuotexContactPage({ mode = "sales" }: { mode?: ContactPageMode }
   const [submitted, setSubmitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const [fallback, setFallback] = useState<WebsiteLeadFallback | null>(null);
   const copy = PAGE_COPY[mode];
   const contactMethods = CONTACT_METHODS_BY_MODE[mode];
   const targetEmail = mode === "support" ? QUOTEX_SUPPORT_EMAIL : QUOTEX_CONTACT_EMAIL;
@@ -92,8 +93,9 @@ export function QuotexContactPage({ mode = "sales" }: { mode?: ContactPageMode }
     event.preventDefault();
     setSubmitting(true);
     setError("");
+    setFallback(null);
     const form = new FormData(event.currentTarget);
-    const delivered = await submitWebsiteLead({
+    const result = await submitWebsiteLead({
       source: "contact",
       name: String(form.get("name") ?? ""),
       email: String(form.get("email") ?? ""),
@@ -107,9 +109,10 @@ export function QuotexContactPage({ mode = "sales" }: { mode?: ContactPageMode }
         .join("\n\n"),
     });
     setSubmitting(false);
-    if (!delivered) {
+    if (!result.ok) {
+      setFallback(result.fallback);
       setError(
-        `The message could not be delivered automatically. Please email ${targetEmail} directly.`
+        `Automatic delivery is not configured yet. Open your email app to send this to ${targetEmail}.`
       );
       return;
     }
@@ -211,6 +214,7 @@ export function QuotexContactPage({ mode = "sales" }: { mode?: ContactPageMode }
                   onClick={() => {
                     setSubmitted(false);
                     setError("");
+                    setFallback(null);
                   }}
                   className="btn border-white/15 bg-white text-ink-900 hover:bg-white/90 mt-6"
                 >
@@ -279,7 +283,15 @@ export function QuotexContactPage({ mode = "sales" }: { mode?: ContactPageMode }
               </div>
               {error && (
                 <div className="rounded-md border border-red-400/35 bg-red-500/10 px-3 py-2 text-sm leading-relaxed text-red-100">
-                  {error}
+                  <div>{error}</div>
+                  {fallback?.href && (
+                    <a
+                      href={fallback.href}
+                      className="mt-2 inline-flex rounded-md bg-white px-3 py-2 text-sm font-semibold text-ink-900 hover:bg-white/90"
+                    >
+                      Open email app
+                    </a>
+                  )}
                 </div>
               )}
               <button type="submit" className="btn-gold w-full py-3 text-base" disabled={submitting}>

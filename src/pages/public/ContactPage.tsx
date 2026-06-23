@@ -11,6 +11,8 @@ import { submitWebsiteLead } from "@/lib/websiteApi";
 
 export function ContactPage() {
   const [sent, setSent] = useState(false);
+  const [sendError, setSendError] = useState("");
+  const [fallbackHref, setFallbackHref] = useState("");
   const { agency } = useTenant();
   const customer = useCustomer();
   const isAppSurface = getAppSurface() === "agencyApp";
@@ -31,16 +33,23 @@ export function ContactPage() {
   const emailHref = `mailto:${contactEmail}`;
   const mapsHref = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(contactAddress)}`;
 
-  function handleContactSubmit(e: FormEvent<HTMLFormElement>) {
+  async function handleContactSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    setSendError("");
+    setFallbackHref("");
     const data = new FormData(e.currentTarget);
-    submitWebsiteLead({
+    const result = await submitWebsiteLead({
       agencyId: agency?.id,
       source: "contact",
       name: String(data.get("name") ?? ""),
       email: String(data.get("email") ?? ""),
       message: String(data.get("message") ?? ""),
     });
+    if (!result.ok) {
+      setFallbackHref(result.fallback.href);
+      setSendError("Automatic delivery is temporarily unavailable. Open your email app to send the message.");
+      return;
+    }
     setSent(true);
   }
 
@@ -255,6 +264,16 @@ export function ContactPage() {
                   <label className="label">How can we help?</label>
                   <textarea name="message" className="input min-h-[120px]" required />
                 </div>
+                {sendError && (
+                  <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+                    <div>{sendError}</div>
+                    {fallbackHref && (
+                      <a href={fallbackHref} className="mt-2 inline-flex font-semibold underline">
+                        Open email app
+                      </a>
+                    )}
+                  </div>
+                )}
                 <button type="submit" className="btn-primary">
                   <Send className="h-4 w-4" /> Send message
                 </button>
