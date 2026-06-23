@@ -2,6 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { Role, User } from "@/types";
 import { api } from "./api";
 import { subscribeToDbChanges } from "./db";
+import { isLockingMasterAccount } from "./masterAccount";
 import { isStaffRole, type StaffRole } from "./roles";
 
 interface AuthContextValue {
@@ -261,7 +262,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         .users
         .list(null)
         .find((row) => row.role === "master_admin" && row.email.toLowerCase() === normalized);
-      if (!u || u.role !== "master_admin" || !u.active) return null;
+      if (!u || !isLockingMasterAccount(u)) return null;
       if (!u.generatedPassword && !allowsPasswordlessLocalFallback()) return null;
       if (u.generatedPassword && u.generatedPassword !== password) return null;
       return persistIfAllowed(u);
@@ -271,7 +272,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const createMasterAccount = useCallback(
     (input: { name: string; email: string; password: string }) => {
-      if (api.users.list(null).some((row) => row.role === "master_admin")) {
+      if (api.users.list(null).some(isLockingMasterAccount)) {
         return { ok: false as const, reason: "exists" as const };
       }
       const name = input.name.trim();

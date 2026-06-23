@@ -77,6 +77,7 @@ import {
   prepareCarrierPolicyBinding,
   runCarrierPolicyBinding,
 } from "./carrierBindingProviders";
+import { isLockingMasterAccount } from "./masterAccount";
 import { TIER_LIMITS } from "./tiers";
 import {
   buildDocumentTemplateFields,
@@ -645,7 +646,7 @@ function assertCanUseMasterAdminRole(role: Role, currentUserId?: string) {
   if (role !== "master_admin") return;
   const existingMaster = db
     .list("users")
-    .find((user) => user.role === "master_admin" && user.id !== currentUserId);
+    .find((user) => isLockingMasterAccount(user) && user.id !== currentUserId);
   if (existingMaster) {
     throw new Error("master_admin_limit_reached");
   }

@@ -20,6 +20,7 @@ import {
 } from "./agencyContract";
 import { ensureWebsiteConnection } from "./websiteConnection";
 import { inferMailProvider } from "./mailProvider";
+import { isStaleMasterAccount } from "./masterAccount";
 import type {
   Agency,
   AccountingSettings,
@@ -247,17 +248,8 @@ function withAgencyCodes(data: DbShape): DbShape {
   return data;
 }
 
-function withoutLegacySeededMasterAccount(data: DbShape): DbShape {
-  data.users = (data.users ?? []).filter((user) => {
-    const isLegacyPlaceholder =
-      user.id === "user_master" &&
-      user.role === "master_admin" &&
-      user.tenantId === null &&
-      user.email.toLowerCase() === "founder@quotexinsurance.com" &&
-      user.name === "Quotex Founder" &&
-      !user.generatedPassword;
-    return !isLegacyPlaceholder;
-  });
+function withoutStaleMasterAccounts(data: DbShape): DbShape {
+  data.users = (data.users ?? []).filter((user) => !isStaleMasterAccount(user));
   return data;
 }
 
@@ -903,7 +895,7 @@ function withStaffAdministrationDefaults(data: DbShape): DbShape {
 }
 
 function withDefaultMigrations(data: DbShape): DbShape {
-  return withoutLegacySeededMasterAccount(
+  return withoutStaleMasterAccounts(
     withCarrierRunnerMigrations(
       withMailboxConnectionDefaults(
         withStaffAdministrationDefaults(

@@ -4,6 +4,7 @@ import { LockKeyhole, ShieldCheck, UserPlus } from "lucide-react";
 import { AuthShell } from "./AuthShell";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { isLockingMasterAccount } from "@/lib/masterAccount";
 
 type Mode = "sign-in" | "create";
 
@@ -11,7 +12,7 @@ export function MasterLoginPage() {
   const { createMasterAccount, signInMaster } = useAuth();
   const nav = useNavigate();
   const masterExists = useMemo(
-    () => api.users.list().some((user) => user.role === "master_admin"),
+    () => api.users.list().some(isLockingMasterAccount),
     []
   );
   const [mode, setMode] = useState<Mode>(() => (masterExists ? "sign-in" : "create"));
