@@ -1,10 +1,11 @@
 import { MasterBackButton } from "@/components/layout/MasterBackButton";
 import { Card, CardHeader, StatCard } from "@/components/ui/Card";
 import { api } from "@/lib/api";
+import { isLivePlatformAgency } from "@/lib/demoData";
 import { fmt } from "@/lib/format";
 
 export function UsageAnalyticsPage() {
-  const agencies = api.agencies.list();
+  const agencies = api.agencies.list().filter(isLivePlatformAgency);
   let totalProspects = 0;
   let totalMessages = 0;
   let totalDeposits = 0;

@@ -6,6 +6,7 @@ import { Card, CardHeader } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { api } from "@/lib/api";
+import { isLivePlatformAgency } from "@/lib/demoData";
 import { fmt } from "@/lib/format";
 import {
   SOFTWARE_USER_MONTHLY_PRICE_USD,
@@ -26,7 +27,7 @@ export function BillingPage() {
   const [priceOverrideError, setPriceOverrideError] = useState("");
 
   const refresh = () => setRev((r) => r + 1);
-  const agencies = api.agencies.list();
+  const agencies = api.agencies.list().filter(isLivePlatformAgency);
   const activeAgencies = agencies.filter((agency) => agency.active);
   const softwareSales = api.softwareSales.list();
   const openSales = softwareSales.filter((sale) => sale.status !== "closed");
@@ -251,7 +252,11 @@ export function BillingPage() {
             <div className="text-right">Price control</div>
           </div>
           <div className="divide-y divide-ink-100">
-            {agencies.map((agency) => {
+            {agencies.length === 0 ? (
+              <div className="px-4 py-8 text-center text-sm text-ink-500">
+                No live agencies have been created yet.
+              </div>
+            ) : agencies.map((agency) => {
               const standardMonthly = standardAgencyMonthlyPriceUsd(agency);
               const billedMonthly = agencyMonthlyPriceUsd(agency);
               const hasOverride = typeof agency.monthlyPriceOverrideUsd === "number";

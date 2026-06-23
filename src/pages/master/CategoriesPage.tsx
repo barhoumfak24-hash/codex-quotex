@@ -4,6 +4,7 @@ import { Plus, Search } from "lucide-react";
 import { MasterBackButton } from "@/components/layout/MasterBackButton";
 import { Modal } from "@/components/ui/Modal";
 import { api } from "@/lib/api";
+import { isLivePlatformAgency, isPresentationDemoAgencyId } from "@/lib/demoData";
 import type { AssetType, CategoryAgencyLink, InsuranceCategory, InsuranceLineOfBusiness } from "@/types";
 
 // =====================================================================
@@ -120,8 +121,11 @@ export function CategoriesPage() {
   const [query, setQuery] = useState("");
   const refresh = () => setRev((r) => r + 1);
   const cats = api.categories.list();
-  const allLinks = api.categories.links();
-  const agencyCount = api.agencies.list().length;
+  const allLinks = api
+    .categories
+    .links()
+    .filter((link) => !isPresentationDemoAgencyId(link.tenantId));
+  const agencyCount = api.agencies.list().filter(isLivePlatformAgency).length;
   const normalizedQuery = query.trim().toLowerCase();
   const filteredCats = normalizedQuery
     ? cats.filter((c) =>

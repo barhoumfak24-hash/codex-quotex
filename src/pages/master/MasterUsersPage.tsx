@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { MasterBackButton } from "@/components/layout/MasterBackButton";
 import { api } from "@/lib/api";
+import { isLivePlatformAgency, isPresentationDemoAgencyId } from "@/lib/demoData";
 import { fmt } from "@/lib/format";
 import { ADD_ON_USER_SLOT_MONTHLY_PRICE_USD, extraUserSlotsForAgency } from "@/lib/tiers";
 import type { User } from "@/types";
@@ -15,8 +16,11 @@ export function MasterUsersPage() {
   const [query, setQuery] = useState("");
   const refresh = () => setRev((r) => r + 1);
 
-  const agencies = api.agencies.list();
-  const allUsers = api.users.list().filter((u) => u.role !== "customer");
+  const agencies = api.agencies.list().filter(isLivePlatformAgency);
+  const allUsers = api
+    .users
+    .list()
+    .filter((u) => u.role !== "customer" && !isPresentationDemoAgencyId(u.tenantId));
 
   const groups = useMemo(() => {
     const q = query.trim().toLowerCase();

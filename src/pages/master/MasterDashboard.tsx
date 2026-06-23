@@ -1,9 +1,10 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useState } from "react";
-import { ArrowRight, BadgeDollarSign, Building2, MonitorPlay, ShieldCheck, Sparkles, Users, Wallet } from "lucide-react";
-import { Card, CardHeader, StatCard } from "@/components/ui/Card";
+import { BadgeDollarSign, Building2, ShieldCheck, Sparkles, Users, Wallet } from "lucide-react";
+import { Card, CardHeader, EmptyState, StatCard } from "@/components/ui/Card";
 import { Modal } from "@/components/ui/Modal";
 import { api } from "@/lib/api";
+import { isLivePlatformAgency } from "@/lib/demoData";
 import { fmt } from "@/lib/format";
 import { agencyMonthlyPriceUsd, softwareSaleMonthlyTotalForSeats } from "@/lib/tiers";
 
@@ -19,7 +20,7 @@ type AgencyRow = {
 export function MasterDashboard() {
   const navigate = useNavigate();
   const [drilldown, setDrilldown] = useState<Drilldown>(null);
-  const agencies = api.agencies.list();
+  const agencies = api.agencies.list().filter(isLivePlatformAgency);
   const carriers = api.carriers.list();
   const softwareSales = api.softwareSales.list();
   const openSoftwareSales = softwareSales.filter((sale) => sale.status !== "closed");
@@ -96,26 +97,6 @@ export function MasterDashboard() {
         />
       </div>
 
-      <Card className="border-gold-200 bg-gold-50/40">
-        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-          <div className="flex items-start gap-3">
-            <div className="grid h-11 w-11 shrink-0 place-items-center rounded-lg border border-gold-200 bg-white text-gold-700">
-              <MonitorPlay className="h-5 w-5" />
-            </div>
-            <div>
-              <h2 className="text-lg font-semibold text-ink-950">Presentation demos</h2>
-              <p className="mt-1 max-w-3xl text-sm leading-relaxed text-ink-600">
-                Open the software workspace, agency website, or client app with fake Palm Coast simulation data.
-              </p>
-            </div>
-          </div>
-          <button type="button" className="btn-primary shrink-0" onClick={() => navigate("/master/demos")}>
-            Open demos
-            <ArrowRight className="h-4 w-4" />
-          </button>
-        </div>
-      </Card>
-
       <MasterMetricModal
         open={drilldown != null}
         mode={drilldown}
@@ -126,27 +107,34 @@ export function MasterDashboard() {
       <div className="grid gap-6">
         <Card>
           <CardHeader title="Agencies" />
-          <ul className="divide-y divide-ink-100">
-            {agencyRows.map(({ agency, deposits, monthlyRevenue }) => (
-              <li key={agency.id} className="py-3 flex items-center justify-between gap-4">
-                <div>
-                  <Link
-                    to={`/master/agencies/${agency.id}`}
-                    className="text-sm font-semibold text-ink-900 hover:text-gold-700"
-                  >
-                    {agency.name}
-                  </Link>
-                  <div className="text-xs text-ink-500 mt-0.5 capitalize">
-                    {agency.tier} tier - {agency.serviceAreas.join(", ")}
+          {agencyRows.length === 0 ? (
+            <EmptyState
+              title="No agencies yet"
+              description="Live agencies will appear here only after they are created or provisioned."
+            />
+          ) : (
+            <ul className="divide-y divide-ink-100">
+              {agencyRows.map(({ agency, deposits, monthlyRevenue }) => (
+                <li key={agency.id} className="py-3 flex items-center justify-between gap-4">
+                  <div>
+                    <Link
+                      to={`/master/agencies/${agency.id}`}
+                      className="text-sm font-semibold text-ink-900 hover:text-gold-700"
+                    >
+                      {agency.name}
+                    </Link>
+                    <div className="text-xs text-ink-500 mt-0.5 capitalize">
+                      {agency.tier} tier - {agency.serviceAreas.join(", ")}
+                    </div>
                   </div>
-                </div>
-                <div className="text-sm text-right">
-                  <div className="text-ink-900">{fmt.money(monthlyRevenue)}/mo</div>
-                  <div className="text-xs text-ink-500">Deposits paid: {fmt.money(deposits)}</div>
-                </div>
-              </li>
-            ))}
-          </ul>
+                  <div className="text-sm text-right">
+                    <div className="text-ink-900">{fmt.money(monthlyRevenue)}/mo</div>
+                    <div className="text-xs text-ink-500">Deposits paid: {fmt.money(deposits)}</div>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
         </Card>
       </div>
     </div>

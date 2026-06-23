@@ -13,6 +13,7 @@ import { MasterBackButton } from "@/components/layout/MasterBackButton";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardHeader, EmptyState, StatCard } from "@/components/ui/Card";
 import { api } from "@/lib/api";
+import { isLivePlatformAgency, isPresentationDemoAgencyId } from "@/lib/demoData";
 import { fmt } from "@/lib/format";
 import type { MasterAgencyActivity, MasterAgencyActivityKind } from "@/types";
 
@@ -88,8 +89,15 @@ export function MasterActivitiesPage() {
   const [agencyId, setAgencyId] = useState("all");
   const [action, setAction] = useState<ActivityFilter>("all");
 
-  const agencies = api.agencies.list().sort((a, b) => a.name.localeCompare(b.name));
-  const activities = api.masterAgencyActivities.list();
+  const agencies = api
+    .agencies
+    .list()
+    .filter(isLivePlatformAgency)
+    .sort((a, b) => a.name.localeCompare(b.name));
+  const activities = api
+    .masterAgencyActivities
+    .list()
+    .filter((activity) => !isPresentationDemoAgencyId(activity.agencyId));
   const filtered = useMemo(
     () =>
       activities.filter((activity) => {

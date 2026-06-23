@@ -3,6 +3,7 @@ import { useState } from "react";
 import { ArrowLeft, Plus, Save, Trash2, X } from "lucide-react";
 import { Card, CardHeader, EmptyState } from "@/components/ui/Card";
 import { api } from "@/lib/api";
+import { isLivePlatformAgency } from "@/lib/demoData";
 import type { AssetType, CategoryQuestion, InsuranceCategory, InsuranceLineOfBusiness } from "@/types";
 
 const ASSET_TYPE_OPTIONS: { value: AssetType; label: string }[] = [
@@ -44,7 +45,7 @@ export function CategoryDetailPage() {
   const cat = api.categories.get(categoryId);
   if (!cat) return <EmptyState title="Category not found" />;
   const refresh = () => setRev((r) => r + 1);
-  const allAgencies = api.agencies.list();
+  const allAgencies = api.agencies.list().filter(isLivePlatformAgency);
   const allLinks = api.categories.links().filter((l) => l.categoryId === categoryId);
 
   function setQ(i: number, patch: Partial<CategoryQuestion>) {
