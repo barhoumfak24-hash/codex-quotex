@@ -4,6 +4,8 @@ import {
   QUOTEX_CONTACT_EMAIL_HREF,
   QUOTEX_CONTACT_PHONE,
   QUOTEX_CONTACT_PHONE_HREF,
+  QUOTEX_SUPPORT_EMAIL,
+  QUOTEX_SUPPORT_EMAIL_HREF,
 } from "@/lib/quotexContact";
 import { QuotexMark } from "./Logo";
 
@@ -70,6 +72,11 @@ export function QuotexSiteFooter() {
             <li>
               <a className="hover:text-white" href={QUOTEX_CONTACT_EMAIL_HREF}>
                 {QUOTEX_CONTACT_EMAIL}
+              </a>
+            </li>
+            <li>
+              <a className="hover:text-white" href={QUOTEX_SUPPORT_EMAIL_HREF}>
+                Support: {QUOTEX_SUPPORT_EMAIL}
               </a>
             </li>
             <li>

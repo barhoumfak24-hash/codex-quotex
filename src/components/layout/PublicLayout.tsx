@@ -2,7 +2,12 @@ import { Link, Outlet, useLocation } from "react-router-dom";
 import { Logo } from "./Logo";
 import { buildAgencyWebsiteProfile } from "@/lib/agencyWebsite";
 import { getAppSurface, toSurfaceRoute } from "@/lib/appSurface";
-import { QUOTEX_CONTACT_EMAIL, QUOTEX_CONTACT_PHONE } from "@/lib/quotexContact";
+import {
+  QUOTEX_CONTACT_EMAIL,
+  QUOTEX_CONTACT_PHONE,
+  QUOTEX_SUPPORT_EMAIL,
+  QUOTEX_SUPPORT_EMAIL_HREF,
+} from "@/lib/quotexContact";
 import { useTenant } from "@/lib/tenant";
 
 export function PublicLayout() {
@@ -88,9 +93,14 @@ export function PublicLayout() {
           </div>
           <div>
             <div className="text-xs uppercase tracking-wider text-ink-500 font-semibold mb-2">
-              Client support
+              Client support: {QUOTEX_SUPPORT_EMAIL}
             </div>
             <ul className="space-y-1.5 text-ink-700">
+              <li>
+                <a className="hover:text-ink-900" href={QUOTEX_SUPPORT_EMAIL_HREF}>
+                  {QUOTEX_SUPPORT_EMAIL}
+                </a>
+              </li>
               <li>{profile?.contactEmail ?? QUOTEX_CONTACT_EMAIL}</li>
               <li>{profile?.phone ?? QUOTEX_CONTACT_PHONE}</li>
               <li><Link className="hover:text-ink-900" to={route("/customer")}>Client dashboard</Link></li>

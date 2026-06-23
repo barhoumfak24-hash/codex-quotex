@@ -8,6 +8,8 @@ import {
   QUOTEX_CONTACT_EMAIL_HREF,
   QUOTEX_CONTACT_PHONE,
   QUOTEX_CONTACT_PHONE_HREF,
+  QUOTEX_SUPPORT_EMAIL,
+  QUOTEX_SUPPORT_EMAIL_HREF,
 } from "@/lib/quotexContact";
 import { submitWebsiteLead } from "@/lib/websiteApi";
 
@@ -19,9 +21,15 @@ const CONTACT_METHODS: Array<{
 }> = [
   {
     icon: <Mail className="h-5 w-5" />,
-    label: "Email",
+    label: "Sales",
     value: QUOTEX_CONTACT_EMAIL,
     href: QUOTEX_CONTACT_EMAIL_HREF,
+  },
+  {
+    icon: <Mail className="h-5 w-5" />,
+    label: "Support",
+    value: QUOTEX_SUPPORT_EMAIL,
+    href: QUOTEX_SUPPORT_EMAIL_HREF,
   },
   {
     icon: <Phone className="h-5 w-5" />,
@@ -140,7 +148,7 @@ export function QuotexContactPage() {
                 </div>
                 <h2 className="mt-5 text-3xl text-white">Message received</h2>
                 <p className="mt-3 max-w-sm text-sm leading-relaxed text-white/58">
-                  Your request was recorded for follow-up. The team will respond from the configured support inbox.
+                  Your request was recorded for follow-up. The team will respond from {QUOTEX_SUPPORT_EMAIL}.
                 </p>
                 <button
                   type="button"
