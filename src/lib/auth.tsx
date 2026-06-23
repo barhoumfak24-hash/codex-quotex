@@ -257,11 +257,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const signInMaster = useCallback(
     (email: string, password: string) => {
-      const normalized = email.trim().toLowerCase();
-      const u = api
-        .users
-        .list(null)
-        .find((row) => row.role === "master_admin" && row.email.toLowerCase() === normalized);
+      const u = api.users.masterByEmail(email);
       if (!u || !isLockingMasterAccount(u)) return null;
       if (!u.generatedPassword && !allowsPasswordlessLocalFallback()) return null;
       if (u.generatedPassword && u.generatedPassword !== password) return null;
@@ -272,7 +268,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const createMasterAccount = useCallback(
     (input: { name: string; email: string; password: string }) => {
-      if (api.users.list(null).some(isLockingMasterAccount)) {
+      if (api.users.masterAccountExists()) {
         return { ok: false as const, reason: "exists" as const };
       }
       const name = input.name.trim();

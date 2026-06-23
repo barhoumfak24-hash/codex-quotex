@@ -110,6 +110,24 @@ describe("softwareSales", () => {
     expect(updated?.name).toBe("Founder Updated");
   });
 
+  it("finds the master account even when the browser is scoped to an agency user", () => {
+    const firstMaster = api.users.create({
+      role: "master_admin",
+      tenantId: null,
+      email: "founder@example.com",
+      name: "Founder",
+      generatedPassword: "correct horse battery staple",
+      profileCompleted: true,
+    });
+    const agencyUser = db.list("users").find((user) => user.tenantId && user.role === "manager");
+    expect(agencyUser).toBeTruthy();
+    window.localStorage.setItem("quotex.auth.userId.v1", agencyUser!.id);
+
+    expect(api.users.list(null).some((user) => user.id === firstMaster.id)).toBe(false);
+    expect(api.users.masterAccountExists()).toBe(true);
+    expect(api.users.masterByEmail(" founder@example.com ")?.id).toBe(firstMaster.id);
+  });
+
   it("applies website and Quotex app bundle savings without user-volume discounting", () => {
     expect(softwareUserMonthlyDiscount(9)).toBe(0);
     expect(softwareUserMonthlyDiscount(10)).toBe(0);

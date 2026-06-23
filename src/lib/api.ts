@@ -5677,6 +5677,15 @@ export const api = {
     list(tenantId?: string | null): User[] {
       return tenantFilter(db.list("users"), tenantId);
     },
+    masterAccountExists(): boolean {
+      return db.list("users").some(isLockingMasterAccount);
+    },
+    masterByEmail(email: string): User | undefined {
+      const normalized = email.trim().toLowerCase();
+      return db
+        .list("users")
+        .find((row) => row.role === "master_admin" && row.email.toLowerCase() === normalized);
+    },
     get(id: string): User | undefined {
       return db.list("users").find((u) => u.id === id);
     },
