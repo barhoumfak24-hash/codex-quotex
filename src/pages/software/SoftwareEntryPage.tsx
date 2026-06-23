@@ -1,17 +1,14 @@
 import { Link } from "react-router-dom";
 import { ArrowRight, BriefcaseBusiness, LockKeyhole, MonitorSmartphone, ShieldCheck } from "lucide-react";
 import { Logo } from "@/components/layout/Logo";
-import { DemoBanner, DemoModeBadge } from "@/components/ui/DemoBanner";
 
 export function SoftwareEntryPage() {
   return (
     <div className="min-h-screen bg-ink-50 text-ink-900">
-      <DemoBanner />
       <header className="border-b border-ink-100 bg-white">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-5 py-4">
           <div className="flex items-center gap-3">
             <Logo subtitle="Software portal" />
-            <DemoModeBadge />
           </div>
           <div className="hidden items-center gap-2 text-xs text-ink-500 sm:flex">
             <LockKeyhole className="h-4 w-4 text-gold-700" />

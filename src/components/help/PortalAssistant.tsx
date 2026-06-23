@@ -65,7 +65,7 @@ export function PortalAssistant() {
         {
           id: nextId(),
           from: "assistant",
-          text: "Hi! I'm your portal assistant. Ask me anything about the portal, ask me to find a record, or tell me to prepare an action. I will show you exactly what I am about to do and ask for confirmation before changing anything.",
+          text: "Hi! I'm your portal assistant. I can read the current portal page, summarize the visible record, find live agency data, and prepare actions for confirmation before anything changes.",
           related: assistantStarters(),
         },
       ]);
@@ -195,7 +195,7 @@ export function PortalAssistant() {
 
       {/* Chat panel */}
       {open && (
-        <div className="fixed bottom-5 right-5 z-40 w-[min(380px,calc(100vw-2.5rem))] h-[min(560px,calc(100vh-2.5rem))] flex flex-col rounded-xl border border-ink-200 bg-white shadow-luxe overflow-hidden">
+        <div className="fixed bottom-5 right-5 z-40 w-[min(460px,calc(100vw-2.5rem))] h-[min(620px,calc(100vh-2.5rem))] flex flex-col rounded-xl border border-ink-200 bg-white shadow-luxe overflow-hidden">
           {/* Header */}
           <div className="flex items-center justify-between gap-2 px-4 py-3 border-b border-ink-100 bg-ink-900 text-white">
             <div className="flex items-center gap-2 min-w-0">
@@ -205,7 +205,7 @@ export function PortalAssistant() {
               <div className="min-w-0">
                 <div className="text-sm font-semibold leading-tight">Portal assistant</div>
                 <div className="text-[11px] text-white/60 leading-tight">
-                  Answers, record lookup, and confirmed actions
+                  Current-page context, record lookup, and confirmed actions
                 </div>
               </div>
             </div>

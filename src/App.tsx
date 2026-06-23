@@ -1,6 +1,7 @@
-import { Suspense, lazy } from "react";
-import { ArrowLeft } from "lucide-react";
-import { getDemoExitHref } from "./lib/demoExit";
+import { Suspense, lazy, useEffect, useState } from "react";
+import { RefreshCw } from "lucide-react";
+import { QuotexMark } from "./components/layout/Logo";
+import { ErrorBoundary } from "./components/ui/ErrorBoundary";
 import { useExternalLinkTargets } from "./lib/externalLinks";
 import type { AppSurface } from "./lib/appSurface";
 
@@ -32,58 +33,78 @@ const SurfaceApp =
         ? lazy(() => import("./apps/CheckoutApp").then((m) => ({ default: m.CheckoutApp })))
         : lazy(() => import("./apps/UnifiedApp").then((m) => ({ default: m.UnifiedApp })));
 
-function LoadingSurface() {
+function reloadPage() {
+  window.location.reload();
+}
+
+function LoadingBrand({ showRefresh = false }: { showRefresh?: boolean }) {
   return (
-    <div className="min-h-screen bg-ink-50 text-ink-900 flex items-center justify-center p-6">
-      <div className="flex items-center gap-4 rounded-lg border border-ink-100 bg-white px-5 py-4 shadow-soft">
-        <div className="flex h-11 w-11 items-center justify-center rounded-md bg-ink-900 font-display text-xl text-white">
-          Q
+    <div
+      role="status"
+      aria-live="polite"
+      aria-busy={showRefresh ? "false" : "true"}
+      aria-label="Loading Quotex"
+      className="min-h-screen bg-ink-50 text-ink-900 flex items-center justify-center p-6"
+    >
+      <div className="flex flex-col items-center gap-5">
+        <div className="flex items-center gap-3">
+          <QuotexMark className="h-12 w-12 shadow-soft" letterClassName="text-[30px]" />
+          <div className="font-display text-3xl leading-none text-ink-950">Quotex</div>
         </div>
-        <div>
-          <p className="font-semibold">Loading Quotex</p>
-          <p className="text-sm text-ink-500">Opening the software workspace...</p>
-        </div>
+        {showRefresh && (
+          <button type="button" className="btn-outline" onClick={reloadPage}>
+            <RefreshCw className="h-4 w-4" />
+            Refresh
+          </button>
+        )}
       </div>
     </div>
   );
 }
 
-function DemoExitButton() {
-  return (
-    <a
-      href={getDemoExitHref()}
-      className="fixed left-5 top-5 z-[200] inline-flex items-center gap-2 rounded-full border border-gold-200 bg-gold-300 px-5 py-3 text-sm font-bold text-ink-950 shadow-[0_16px_40px_rgba(0,0,0,0.32)] transition hover:bg-gold-200"
-    >
-      <ArrowLeft className="h-4 w-4" />
-      Exit demo
-    </a>
+function LoadingSurface() {
+  const [showRefresh, setShowRefresh] = useState(
+    () => typeof navigator !== "undefined" && navigator.onLine === false
   );
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => setShowRefresh(true), 8000);
+    const showOfflineRefresh = () => setShowRefresh(true);
+
+    window.addEventListener("offline", showOfflineRefresh);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("offline", showOfflineRefresh);
+    };
+  }, []);
+
+  return <LoadingBrand showRefresh={showRefresh} />;
+}
+
+function LoadingFailureSurface() {
+  return <LoadingBrand showRefresh />;
 }
 
 export default function App() {
   useExternalLinkTargets();
 
-  if (surface === "website") {
-    return (
-      <>
-        <DemoExitButton />
-        <div className="min-h-screen bg-[#090807] px-4 pb-5 pt-20 md:px-8 md:pb-8 md:pt-24">
-          <div className="mx-auto min-h-[calc(100vh-8rem)] max-w-[1500px] overflow-hidden rounded-[30px] border border-white/15 bg-white shadow-[0_28px_90px_rgba(0,0,0,0.48)]">
-            <Suspense fallback={<LoadingSurface />}>
-              <SurfaceApp />
-            </Suspense>
-          </div>
-        </div>
-      </>
-    );
-  }
-
-  return (
-    <>
-      {surface === "agencyApp" && <DemoExitButton />}
+  const content = (
+    <ErrorBoundary fallback={<LoadingFailureSurface />}>
       <Suspense fallback={<LoadingSurface />}>
         <SurfaceApp />
       </Suspense>
-    </>
+    </ErrorBoundary>
   );
+
+  if (surface === "website") {
+    return (
+      <div className="min-h-screen bg-[#090807] px-4 py-5 md:px-8 md:py-8">
+        <div className="mx-auto min-h-[calc(100vh-2.5rem)] max-w-[1500px] overflow-hidden rounded-[30px] border border-white/15 bg-white shadow-[0_28px_90px_rgba(0,0,0,0.48)] md:min-h-[calc(100vh-4rem)]">
+          {content}
+        </div>
+      </div>
+    );
+  }
+
+  return content;
 }

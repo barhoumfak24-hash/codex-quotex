@@ -1,7 +1,9 @@
-﻿import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { DependencyList, RefObject } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { Bot, Reply, Zap } from "lucide-react";
+import { Bot, ExternalLink, FileText, Paperclip, Reply, Zap } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
+import { DocumentViewerModal } from "@/components/ui/DocumentViewerModal";
 import {
   MessageComposer,
   type ComposedMessage,
@@ -9,12 +11,81 @@ import {
 } from "@/components/messages/MessageComposer";
 import { RichMessageBody } from "@/components/messages/RichMessageBody";
 import { api } from "@/lib/api";
+import { subscribeToDbChanges } from "@/lib/db";
 import { fmt } from "@/lib/format";
-import type { Communication, MarketingMessage } from "@/types";
+import { inferMailProvider, mailboxThreadUrl, mailProviderShortLabel } from "@/lib/mailProvider";
+import type { Communication, CommunicationAttachment, Document, MarketingMessage, User } from "@/types";
 
-// Build a reply target from a clicked message â€” inherit its thread
-// (or seed one from the message id) and normalize the subject to
-// "Re: â€¦".
+const MESSAGE_SCROLL_PANE_CLASS = "message-scroll-pane flex-1 overflow-y-auto overflow-x-hidden p-3";
+
+type Row =
+  | { kind: "comm"; row: Communication }
+  | { kind: "out"; row: MarketingMessage };
+
+type ConnectedMailbox = {
+  address: string;
+  provider: NonNullable<User["mailProvider"]>;
+  providerName: string;
+};
+
+type ContactSummary = {
+  kind: "client" | "prospect";
+  id: string;
+  name: string;
+  email?: string;
+  phone?: string;
+};
+
+function useAnchoredMessageScroll(
+  scrollRef: RefObject<HTMLDivElement | null>,
+  contentRef: RefObject<HTMLDivElement | null>,
+  deps: DependencyList
+) {
+  const stickToBottomRef = useRef(true);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const updateStickiness = () => {
+      stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 72;
+    };
+    updateStickiness();
+    el.addEventListener("scroll", updateStickiness, { passive: true });
+    return () => el.removeEventListener("scroll", updateStickiness);
+  }, [scrollRef]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const frame = window.requestAnimationFrame(() => {
+      el.scrollTop = el.scrollHeight;
+      stickToBottomRef.current = true;
+    });
+    return () => window.cancelAnimationFrame(frame);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    const content = contentRef.current;
+    if (!el || !content || typeof ResizeObserver === "undefined") return;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (!stickToBottomRef.current) return;
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        el.scrollTop = el.scrollHeight;
+      });
+    });
+    observer.observe(content);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scrollRef, contentRef, ...deps]);
+}
+
 function replyTargetFor(row: Communication | MarketingMessage): ReplyTarget {
   const threadId = (row as Communication).threadId ?? `thread_msg_${row.id}`;
   const rawSubject = row.subject?.trim() || "your message";
@@ -22,23 +93,127 @@ function replyTargetFor(row: Communication | MarketingMessage): ReplyTarget {
   return { threadId, subject, replyToId: row.id, toSummary: rawSubject };
 }
 
-// =====================================================================
-// Inline iPhone-style message thread between an agent / manager and
-// one client or prospect. Merges every channel into one chronological
-// email feed:
-//
-//   â€¢ Communications (inbound replies, agent outbound notes)
-//   â€¢ MarketingMessages (AI sends + custom message sends)
-//
-// Composer at the bottom lets the agent reply by email. Used on the
-// client + prospect detail pages so the user doesn't have to leave the
-// record to read or respond.
-// =====================================================================
+function attachmentPreviewDocument(
+  attachment: CommunicationAttachment,
+  context: {
+    tenantId: string;
+    uploadedById?: string;
+    uploadedAt: string;
+  }
+): Document {
+  const linkedDocument = attachment.documentId ? api.documents.get(attachment.documentId) : undefined;
+  if (linkedDocument) return linkedDocument;
 
-type Row =
-  | { kind: "comm"; row: Communication }
-  | { kind: "out"; row: MarketingMessage };
+  return {
+    id: attachment.documentId ?? `email_attachment_${attachment.id}`,
+    tenantId: context.tenantId,
+    uploadedById: context.uploadedById ?? "system",
+    fileName: attachment.fileName,
+    fileType: attachment.fileType || "application/pdf",
+    documentName: attachment.description ?? "Email attachment",
+    templateFields: {
+      "Email attachment": attachment.fileName,
+      ...(attachment.description ? { Description: attachment.description } : {}),
+      ...(typeof attachment.filledFieldCount === "number"
+        ? { "Mapped field count": String(attachment.filledFieldCount) }
+        : {}),
+      ...(attachment.filledFields ?? {}),
+    },
+    type: "email_attachment",
+    visibility: "employee_only",
+    status: "approved",
+    storagePath:
+      attachment.storagePath ??
+      `s3://placeholder/${context.tenantId}/email-attachments/${attachment.id}/${attachment.fileName}`,
+    downloadUrl: attachment.dataUrl,
+    uploadedAt: context.uploadedAt,
+    lastChangeAction: "uploaded",
+    lastChangeAt: context.uploadedAt,
+  };
+}
 
+function contactSummary(contactKind: "client" | "prospect", contactId: string): ContactSummary {
+  if (contactKind === "client") {
+    const customer = api.customers.get(contactId);
+    return {
+      kind: "client",
+      id: contactId,
+      name: customer?.name ?? "Client",
+      email: customer?.email,
+      phone: customer?.phone,
+    };
+  }
+  const prospect = api.prospects.get(contactId);
+  return {
+    kind: "prospect",
+    id: contactId,
+    name: prospect?.name ?? "Prospect",
+    email: prospect?.email,
+    phone: prospect?.phone,
+  };
+}
+
+function mailboxForUser(userId: string): ConnectedMailbox {
+  const user = api.users.get(userId);
+  const staffMailbox = api.mailboxes.staff(userId);
+  const address = staffMailbox?.address ?? user?.businessEmail ?? user?.email ?? "mailbox@example.com";
+  const provider = staffMailbox?.provider ?? user?.mailProvider ?? inferMailProvider(address);
+  return {
+    address,
+    provider,
+    providerName: mailProviderShortLabel(provider),
+  };
+}
+
+function mailboxUrlForContact(
+  mailbox: ConnectedMailbox,
+  contact: ContactSummary,
+  row?: Communication | MarketingMessage
+): string {
+  const comm = row && "mailboxOrigin" in row ? row : undefined;
+  return mailboxThreadUrl({
+    mailbox: mailbox.address,
+    provider: mailbox.provider,
+    contactEmail: contact.email,
+    subject: row?.subject,
+    threadId: comm?.threadId,
+    externalThreadId: comm?.externalThreadId,
+    externalUrl: comm?.externalUrl,
+  });
+}
+
+function rowsForContact(tenantId: string, contactKind: "client" | "prospect", contactId: string): Row[] {
+  const comms = api.communications
+    .listByTenant(tenantId)
+    .filter((communication) => communication.channel === "email")
+    .filter((communication) =>
+      contactKind === "client"
+        ? communication.customerId === contactId
+        : communication.prospectId === contactId
+    );
+  const outbound = api.marketing
+    .listMessages(tenantId)
+    .filter((message) => message.channel === "email")
+    .filter((message) =>
+      contactKind === "client"
+        ? message.customerId === contactId
+        : message.prospectId === contactId
+    );
+
+  return [
+    ...comms.map((row) => ({ kind: "comm" as const, row })),
+    ...outbound.map((row) => ({ kind: "out" as const, row })),
+  ].sort((a, b) => {
+    const aAt = a.kind === "comm" ? a.row.createdAt : a.row.sentAt ?? a.row.createdAt;
+    const bAt = b.kind === "comm" ? b.row.createdAt : b.row.sentAt ?? b.row.createdAt;
+    return aAt < bAt ? -1 : 1;
+  });
+}
+
+// Inline client/prospect message thread. It intentionally mirrors the
+// external-contact pane in /employee/messages so a client profile shows
+// the same email history, attachment previews, and provider links as
+// the full Messages category.
 export function ContactMessageThread({
   tenantId,
   userId,
@@ -52,34 +227,34 @@ export function ContactMessageThread({
   contactKind: "client" | "prospect";
   contactId: string;
   onChanged?: () => void;
-  // When true the thread fills its parent's height (used inside the
-  // expand-to-full-screen card) instead of the default capped height.
   fillHeight?: boolean;
 }) {
-  const channel = "email" as const;
   const [busy, setBusy] = useState(false);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
-  // Deep-link target: `?msg=<communicationId|marketingMessageId>`
-  // from the timeline detail modal. Scrolls the matching bubble
-  // into view and applies a short-lived gold ring highlight so the
-  // user can spot it.
+  const [previewDocument, setPreviewDocument] = useState<Document | null>(null);
+  const [, setRev] = useState(0);
   const [searchParams, setSearchParams] = useSearchParams();
   const targetMessageId = searchParams.get("msg");
   const messageRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const scrollContentRef = useRef<HTMLDivElement | null>(null);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  const contact = contactSummary(contactKind, contactId);
+  const mailbox = mailboxForUser(userId);
+  const visibleRows = rowsForContact(tenantId, contactKind, contactId);
+  const latestEmailRow = visibleRows.length ? visibleRows[visibleRows.length - 1].row : undefined;
+  const threadUrl = mailboxUrlForContact(mailbox, contact, latestEmailRow);
+
+  useEffect(() => subscribeToDbChanges(() => setRev((r) => r + 1)), []);
+  useAnchoredMessageScroll(scrollRef, scrollContentRef, [contactId, fillHeight, visibleRows.length]);
 
   useEffect(() => {
     if (!targetMessageId) return;
     const el = messageRefs.current[targetMessageId];
     if (!el) return;
-    // Wait a tick so the page settles after any hash-scroll on the
-    // parent card, then scroll the message into view + flash it.
     const t = window.setTimeout(() => {
       el.scrollIntoView({ behavior: "smooth", block: "center" });
       setHighlightedId(targetMessageId);
-      // Auto-fade the highlight + drop the search param so the
-      // ring doesn't return on every re-render.
       window.setTimeout(() => {
         setHighlightedId(null);
         const next = new URLSearchParams(searchParams);
@@ -89,50 +264,11 @@ export function ContactMessageThread({
     }, 200);
     return () => window.clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [targetMessageId, contactId]);
-
-  const comms = api.communications
-    .listByTenant(tenantId)
-    .filter((c) =>
-      contactKind === "client"
-        ? c.customerId === contactId
-        : c.prospectId === contactId
-    );
-  const outbound = api.marketing
-    .listMessages(tenantId)
-    .filter((m) =>
-      contactKind === "client"
-        ? m.customerId === contactId
-        : m.prospectId === contactId
-    );
-  const merged: Row[] = [
-    ...comms.map((c) => ({ kind: "comm" as const, row: c })),
-    ...outbound.map((m) => ({ kind: "out" as const, row: m })),
-  ].sort((a, b) => {
-    const aAt =
-      a.kind === "comm" ? a.row.createdAt : a.row.sentAt ?? a.row.createdAt;
-    const bAt =
-      b.kind === "comm" ? b.row.createdAt : b.row.sentAt ?? b.row.createdAt;
-    return aAt < bAt ? -1 : 1;
-  });
-  // Messages is email-only; non-email rows are hidden from this view.
-  // The composer always sends email.
-  const visibleRows = merged.filter((r) => r.row.channel === channel);
-
-  // Land on the most recent message whenever the thread is opened,
-  // the card is expanded, or a new message lands.
-  // (Skip when a ?msg= deep-link wants a specific bubble instead.)
-  useEffect(() => {
-    if (targetMessageId) return;
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [contactId, channel, fillHeight, visibleRows.length, targetMessageId]);
+  }, [targetMessageId, contactId, visibleRows.length]);
 
   function send(msg: ComposedMessage) {
     setBusy(true);
     try {
-      // Signature is auto-appended inside api.communications.create
-      // based on the sender's saved emailSignature + images.
       api.communications.create({
         tenantId,
         customerId: contactKind === "client" ? contactId : undefined,
@@ -147,6 +283,7 @@ export function ContactMessageThread({
         createdById: userId,
       });
       setReplyTarget(null);
+      setRev((r) => r + 1);
       onChanged?.();
     } finally {
       setBusy(false);
@@ -154,112 +291,180 @@ export function ContactMessageThread({
   }
 
   return (
-    <div
-      className={`min-w-0 overflow-hidden rounded-md border border-ink-100 flex flex-col ${
-        fillHeight ? "h-full" : "max-h-[480px]"
-      }`}
-    >
-      <div ref={scrollRef} className="message-scroll-pane flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-2.5 min-h-[200px]">
-        {visibleRows.length === 0 ? (
-          <div className="text-sm text-ink-400 text-center py-6">
-            No email messages yet - send the first one below.
+    <>
+      <div
+        className={`min-w-0 overflow-hidden rounded-md border border-ink-100 flex flex-col ${
+          fillHeight ? "h-full" : "max-h-[520px]"
+        }`}
+      >
+        <div className="px-3 py-2 border-b border-ink-100 flex items-center justify-between gap-2 shrink-0">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold truncate">{contact.name}</div>
+            <div className="text-[11px] text-ink-500 truncate">
+              {contact.email ?? contact.phone ?? "-"}{" "}
+              <Badge tone={contact.kind === "client" ? "info" : "neutral"}>{contact.kind}</Badge>
+            </div>
           </div>
-        ) : (
-          visibleRows.map((r, i) => {
-            const isInbound = r.kind === "comm" && r.row.direction === "inbound";
-            const isOutboundComm =
-              r.kind === "comm" && r.row.direction === "outbound";
-            const isAi = r.kind === "out";
-            const at =
-              r.kind === "comm"
-                ? r.row.createdAt
-                : r.row.sentAt ?? r.row.createdAt;
-            const text = r.kind === "comm" ? r.row.body : r.row.content;
-            const channelChip =
-              r.kind === "comm" ? String(r.row.channel) : r.row.channel;
-            const messageId = r.row.id;
-            const isHighlighted = highlightedId === messageId;
-            const isMarketingPamphlet = isAi && text.includes("[[quotex:marketing-pamphlet");
-            const aiTaskId = r.kind === "comm" ? r.row.aiActivityTaskId : undefined;
-            return (
-              <div
-                key={i}
-                className={`flex ${isInbound ? "justify-start" : "justify-end"}`}
-              >
-                <div
-                  ref={(el) => {
-                    messageRefs.current[messageId] = el;
-                  }}
-                  className={`${
-                    isMarketingPamphlet
-                      ? "w-[min(96%,980px)] max-w-full rounded-lg bg-transparent px-0 py-0 text-sm text-ink-900"
-                      : `w-[min(85%,600px)] max-w-full rounded-lg px-3 py-2 text-sm ${
-                          isInbound
-                            ? "bg-ink-100 text-ink-900"
-                            : isOutboundComm
-                            ? "bg-gold-100 text-ink-900"
-                            : "bg-violet-100 text-violet-900"
-                        }`
-                  } transition-shadow duration-300 ${aiTaskId ? "ring-2 ring-violet-300" : ""} ${
-                    isHighlighted
-                      ? "ring-4 ring-gold-300 ring-offset-2 ring-offset-white shadow-lg"
-                      : ""
-                  }`}
-                >
-                  <div className="text-[10px] text-ink-500 mb-0.5 flex flex-wrap items-center gap-1">
-                    {isAi && <Bot className="h-3 w-3 text-violet-600" />}
-                    {isInbound ? "Inbound" : isOutboundComm ? "You" : "AI send"}
-                    {" Â· "}
-                    {channelChip.toUpperCase()}
-                    {" Â· "}
-                    {fmt.dateTime(at)}
-                    {r.kind === "out" && (
-                      <Badge
-                        tone={r.row.deliveryStatus === "opened" ? "success" : "info"}
-                      >
-                        {fmt.titleCase(r.row.deliveryStatus)}
-                      </Badge>
-                    )}
-                  </div>
-                  {r.row.subject && (
-                    <div className="font-medium mb-0.5">{r.row.subject}</div>
-                  )}
-                  <RichMessageBody body={text} tenantId={tenantId} />
-                  {/* Reply to this specific email â†’ threads the
-                      response under it. */}
-                  <button
-                    type="button"
-                    onClick={() => setReplyTarget(replyTargetFor(r.row))}
-                    className="mt-1 inline-flex items-center gap-1 text-[10px] text-ink-500 hover:text-ink-800"
-                  >
-                    <Reply className="h-3 w-3" /> Reply
-                  </button>
-                  {aiTaskId && (
-                    <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-violet-300 bg-violet-50 px-2 py-1.5 text-[11px] text-violet-800">
-                      <span className="inline-flex items-center gap-1 min-w-0">
-                        <Zap className="h-3.5 w-3.5 shrink-0 text-violet-600" />
-                        <span className="truncate">AI opened an activity for this</span>
-                      </span>
-                      <Link
-                        to={`/employee/tasks?focus=${aiTaskId}`}
-                        className="shrink-0 inline-flex items-center gap-1 font-medium text-violet-700 hover:text-violet-900"
-                      >
-                        Go to activity â†’
-                      </Link>
-                    </div>
-                  )}
-                </div>
+          <a
+            href={threadUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="btn-outline text-xs inline-flex shrink-0"
+            title={`Open this thread in ${mailbox.providerName} (${mailbox.address})`}
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+            Open in {mailbox.providerName}
+          </a>
+        </div>
+        <div ref={scrollRef} className={MESSAGE_SCROLL_PANE_CLASS}>
+          <div ref={scrollContentRef} className="space-y-2.5">
+            {visibleRows.length === 0 ? (
+              <div className="text-sm text-ink-400 text-center py-6">
+                No email messages yet - send the first one below.
               </div>
-            );
-          })
-        )}
+            ) : (
+              visibleRows.map((item) => {
+                const row = item.row;
+                const commRow = item.kind === "comm" ? item.row : undefined;
+                const marketingRow = item.kind === "out" ? item.row : undefined;
+                const isInbound = commRow?.direction === "inbound";
+                const isOutboundComm = commRow?.direction === "outbound";
+                const isAi = item.kind === "out";
+                const at = commRow ? commRow.createdAt : marketingRow?.sentAt ?? marketingRow?.createdAt ?? row.createdAt;
+                const body = commRow ? commRow.body : marketingRow?.content ?? "";
+                const attachments = commRow?.attachments ?? [];
+                const channelChip = item.kind === "comm" ? row.channel : row.channel;
+                const isMarketingPamphlet = isAi && body.includes("[[quotex:marketing-pamphlet");
+                const aiTaskId = commRow?.aiActivityTaskId;
+                const aiNoticeId = commRow?.aiActivityNotificationId;
+                const messageId = row.id;
+                const isHighlighted = highlightedId === messageId;
+                return (
+                  <div key={`${item.kind}:${row.id}`} className={`flex ${isInbound ? "justify-start" : "justify-end"}`}>
+                    <div
+                      ref={(el) => {
+                        messageRefs.current[messageId] = el;
+                      }}
+                      className={`${
+                        isMarketingPamphlet
+                          ? "w-[min(96%,980px)] rounded-lg bg-transparent px-0 py-0 text-sm text-ink-900"
+                          : `w-[min(85%,600px)] rounded-lg px-3 py-2 text-sm ${
+                              isInbound
+                                ? "bg-ink-100 text-ink-900"
+                                : isOutboundComm
+                                ? "bg-gold-100 text-ink-900"
+                                : "bg-violet-100 text-violet-900"
+                            }`
+                      } transition-shadow duration-300 ${
+                        aiTaskId ? "ring-2 ring-violet-300" : aiNoticeId ? "ring-2 ring-blue-200" : ""
+                      } ${
+                        isHighlighted ? "ring-4 ring-gold-300 ring-offset-2 ring-offset-white shadow-lg" : ""
+                      }`}
+                    >
+                      <div className="text-[10px] text-ink-500 mb-0.5 flex flex-wrap items-center gap-1">
+                        {isAi && <Bot className="h-3 w-3 text-violet-600" />}
+                        {isInbound ? "Inbound" : isOutboundComm ? "You" : "AI send"}
+                        {" - "}
+                        {String(channelChip).toUpperCase()}
+                        {" - "}
+                        {fmt.dateTime(at)}
+                        {marketingRow && (
+                          <Badge tone={marketingRow.deliveryStatus === "opened" ? "success" : "info"}>
+                            {fmt.titleCase(marketingRow.deliveryStatus)}
+                          </Badge>
+                        )}
+                      </div>
+                      {row.subject && <div className="font-medium mb-0.5">{row.subject}</div>}
+                      <RichMessageBody body={body} tenantId={tenantId} />
+                      {attachments.length > 0 && (
+                        <div className="mt-2 space-y-1.5">
+                          {attachments.map((attachment) => (
+                            <button
+                              key={attachment.id}
+                              type="button"
+                              className="inline-flex max-w-full items-center gap-1.5 rounded-md border border-ink-200 bg-white/80 px-2 py-1 text-left text-[11px] text-ink-700 transition hover:border-gold-300 hover:bg-white hover:text-ink-950 focus:outline-none focus:ring-2 focus:ring-gold-200"
+                              title={`Preview ${attachment.fileName}`}
+                              aria-label={`Preview ${attachment.fileName}`}
+                              onClick={() =>
+                                setPreviewDocument(
+                                  attachmentPreviewDocument(attachment, {
+                                    tenantId,
+                                    uploadedById: commRow?.createdById,
+                                    uploadedAt: at,
+                                  })
+                                )
+                              }
+                            >
+                              <Paperclip className="h-3 w-3 shrink-0 text-ink-500" />
+                              <FileText className="h-3 w-3 shrink-0 text-gold-700" />
+                              <span className="min-w-0 truncate">{attachment.fileName}</span>
+                              <span className="shrink-0 rounded-full bg-ink-100 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-ink-500">
+                                {attachment.fileType === "application/pdf" || /\.pdf$/i.test(attachment.fileName)
+                                  ? "PDF"
+                                  : "File"}
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      <div className="mt-1 flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setReplyTarget(replyTargetFor(row))}
+                          className="inline-flex items-center gap-1 text-[10px] text-ink-500 hover:text-ink-800"
+                        >
+                          <Reply className="h-3 w-3" /> Reply
+                        </button>
+                        <a
+                          href={mailboxUrlForContact(mailbox, contact, row)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1 text-[10px] text-ink-500 hover:text-ink-800"
+                          title={`Open this message in ${mailbox.providerName}`}
+                        >
+                          <ExternalLink className="h-3 w-3" /> Open in {mailbox.providerName}
+                        </a>
+                      </div>
+                      {aiTaskId && (
+                        <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-violet-300 bg-violet-50 px-2 py-1.5 text-[11px] text-violet-800">
+                          <span className="inline-flex items-center gap-1 min-w-0">
+                            <Zap className="h-3.5 w-3.5 shrink-0 text-violet-600" />
+                            <span className="truncate">AI opened an activity for this</span>
+                          </span>
+                          <Link
+                            to={`/employee/tasks?focus=${aiTaskId}`}
+                            className="shrink-0 inline-flex items-center gap-1 font-medium text-violet-700 hover:text-violet-900"
+                          >
+                            Go to activity
+                          </Link>
+                        </div>
+                      )}
+                      {!aiTaskId && aiNoticeId && (
+                        <div className="mt-2 flex items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-2 py-1.5 text-[11px] text-blue-800">
+                          <Zap className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+                          <span className="truncate">AI logged a notification for this</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </div>
+        <MessageComposer
+          replyTarget={replyTarget}
+          onCancelReply={() => setReplyTarget(null)}
+          onSend={send}
+          busy={busy}
+          contactName={contact.name}
+        />
       </div>
-      <MessageComposer
-        replyTarget={replyTarget}
-        onCancelReply={() => setReplyTarget(null)}
-        onSend={send}
-        busy={busy}
+      <DocumentViewerModal
+        document={previewDocument}
+        open={!!previewDocument}
+        onClose={() => setPreviewDocument(null)}
       />
-    </div>
+    </>
   );
 }

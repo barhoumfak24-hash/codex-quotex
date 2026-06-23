@@ -96,11 +96,13 @@ describe("carrier portal runner", () => {
       { selectedCommercialCarrierIds: [recommendation!.carrierId] }
     );
 
-    const submission = submitted?.commercialCarrierSubmissions?.[0];
+    const submission = submitted?.commercialCarrierSubmissions?.find(
+      (row) => row.carrierId === recommendation!.carrierId
+    );
+    expect(submission).toBeTruthy();
     expect(submission?.submissionMethod).toBe("carrier_portal_automation");
     expect(submission?.automationJobId).toBe(submission?.automationTrace?.jobId);
     expect(submission?.automationTrace?.fieldMappings.some((field) => field.carrierField === "Legal Business Name")).toBe(true);
     expect(submission?.automationTrace?.fieldMappings.some((field) => field.carrierField === "FEIN")).toBe(true);
   });
 });
-

@@ -51,7 +51,7 @@ describe("api.customers.fullHistory", () => {
       estimatedValue: prospect.estimatedValue,
       lineOfBusiness: "personal",
     });
-    api.quoting.sendPortalLink(session.id, "https://demo.example/questionnaire/history");
+    api.quoting.sendPortalLink(session.id, "https://harbor.example/questionnaire/history");
 
     const converted = api.prospects.convert(prospect.id, { actorId: manager.id });
     const historyText = api.customers

@@ -1,5 +1,5 @@
 type QuoteApiStatus = "connected" | "simulated" | "no_api";
-type ProviderKind = "ezlynx_qas" | "carrier_direct" | "demo_adapter";
+type ProviderKind = "ezlynx_qas" | "carrier_direct" | "configuration_only";
 
 export interface ServerCarrierQuoteRequest {
   carrier: {
@@ -33,7 +33,7 @@ export interface ServerCarrierQuoteResponse {
   providerTrace: {
     provider: ProviderKind;
     providerLabel: string;
-    transport: "soap" | "rest" | "demo";
+    transport: "soap" | "rest" | "manual";
     requestId: string;
     executionId?: string;
     liveReady: boolean;
@@ -47,14 +47,14 @@ function providerFor(input: ServerCarrierQuoteRequest["carrier"]): ProviderKind 
   const value = `${input.quotingApi?.provider ?? ""} ${input.quotingApi?.endpoint ?? ""}`.toLowerCase();
   if (value.includes("ezlynx") || value.includes("qas")) return "ezlynx_qas";
   if (input.quotingApi?.endpoint) return "carrier_direct";
-  return "demo_adapter";
+  return "configuration_only";
 }
 
 function providerLabel(kind: ProviderKind, input: ServerCarrierQuoteRequest["carrier"]) {
   if (input.quotingApi?.provider?.trim()) return input.quotingApi.provider.trim();
   if (kind === "ezlynx_qas") return "EZLynx QAS";
   if (kind === "carrier_direct") return "Carrier direct API";
-  return "Demo carrier adapter";
+  return "Configuration-only carrier workflow";
 }
 
 function stableHash(input: string): number {
@@ -152,7 +152,7 @@ export async function runServerCarrierQuoteProvider(
   const baseTrace = {
     provider: kind,
     providerLabel: label,
-    transport: kind === "ezlynx_qas" ? "soap" : kind === "carrier_direct" ? "rest" : "demo",
+    transport: kind === "ezlynx_qas" ? "soap" : kind === "carrier_direct" ? "rest" : "manual",
     requestId,
     executionId,
     liveReady: readiness.value,
@@ -219,4 +219,3 @@ export async function runServerCarrierQuoteProvider(
     },
   };
 }
-

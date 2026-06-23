@@ -346,7 +346,7 @@ function wrap(input: {
     <header>
       <h1>${esc(input.heading)}</h1>
       <div class="sub">${esc(input.sub)}</div>
-      <div class="gen">Generated ${esc(generated)} · Quotex (demo)</div>
+      <div class="gen">Generated ${esc(generated)} · Quotex</div>
     </header>
     ${input.body}
   </body></html>`;

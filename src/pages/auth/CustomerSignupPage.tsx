@@ -23,6 +23,7 @@ export function CustomerSignupPage() {
   );
   const [selectedBranchId, setSelectedBranchId] = useState("");
   const [identityConfirmed, setIdentityConfirmed] = useState(false);
+  const [ageConfirmed, setAgeConfirmed] = useState(false);
   const [consent, setConsent] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -59,8 +60,8 @@ export function CustomerSignupPage() {
     >
       <div className="mb-4">
         <Disclaimer>
-          Demo environment — please use a fake name and a non-personal email. Do not enter real
-          phone, address, or identity information.
+          Use your legal name and current contact information. Your agency uses this information to
+          verify portal access, route requests, and prepare insurance documents.
         </Disclaimer>
       </div>
       <form
@@ -76,6 +77,10 @@ export function CustomerSignupPage() {
             setError(
               "Identity confirmation is required before opening the Quotex client app."
             );
+            return;
+          }
+          if (!ageConfirmed) {
+            setError("Age confirmation is required before creating a client portal account.");
             return;
           }
           if (!consent) {
@@ -208,8 +213,22 @@ export function CustomerSignupPage() {
           />
           <span className="text-xs text-ink-700 leading-relaxed">
             I confirm this account is for me and my identity information matches the
-            agency records I am trying to access. Production can replace this demo
-            confirmation with camera ID scan, one-time code, or staff approval.
+            agency records I am trying to access. Quotex may require a one-time code,
+            staff approval, or identity verification before protected records are shown.
+          </span>
+        </label>
+
+        <label className="flex items-start gap-3 rounded-md border border-ink-200 p-3 mt-2 cursor-pointer hover:bg-ink-50/40 transition-colors">
+          <input
+            type="checkbox"
+            className="mt-0.5 h-4 w-4 shrink-0 accent-gold-500"
+            checked={ageConfirmed}
+            onChange={(e) => setAgeConfirmed(e.target.checked)}
+            aria-describedby="age-confirmation-text"
+          />
+          <span id="age-confirmation-text" className="text-xs text-ink-700 leading-relaxed">
+            I confirm I am at least 18 years old and authorized to request insurance
+            information for this account or household.
           </span>
         </label>
 
@@ -225,7 +244,20 @@ export function CustomerSignupPage() {
           />
           <span id="consent-text" className="text-xs text-ink-700 leading-relaxed">
             By checking this box I agree to the{" "}
-            <strong className="text-ink-900">Terms and Conditions</strong> and consent to
+            <Link
+              className="font-semibold text-ink-900 underline underline-offset-2"
+              to={toSurfaceRoute("/terms", location.pathname)}
+            >
+              Terms and Conditions
+            </Link>{" "}
+            and acknowledge the{" "}
+            <Link
+              className="font-semibold text-ink-900 underline underline-offset-2"
+              to={toSurfaceRoute("/privacy", location.pathname)}
+            >
+              Privacy Policy
+            </Link>{" "}
+            and consent to
             receive <strong className="text-ink-900">emails</strong> from {agencyName} regarding my
             quote and ongoing communications. I can use the unsubscribe link in any email to opt out at any time.
           </span>
@@ -239,12 +271,12 @@ export function CustomerSignupPage() {
         <button
           className="btn-primary w-full"
           type="submit"
-          disabled={!identityConfirmed || !consent}
-          aria-disabled={!identityConfirmed || !consent}
+          disabled={!identityConfirmed || !ageConfirmed || !consent}
+          aria-disabled={!identityConfirmed || !ageConfirmed || !consent}
           title={
-            identityConfirmed && consent
+            identityConfirmed && ageConfirmed && consent
               ? undefined
-              : "Identity confirmation and communications consent are required to continue."
+              : "Identity, age, and communications consent are required to continue."
           }
         >
           Create account

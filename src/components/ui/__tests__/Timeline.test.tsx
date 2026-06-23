@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
+import { MemoryRouter } from "react-router-dom";
 import type { StatusEvent } from "@/types";
 import { Timeline } from "../Timeline";
 
@@ -60,5 +61,62 @@ describe("Timeline", () => {
     expect(container.textContent).toContain("Timeline update 1");
     expect(container.textContent).toContain("Timeline update 2");
     expect(container.textContent).toContain("Hide older remarks");
+  });
+
+  it("opens quote activity remarks to the AI quoting workspace", () => {
+    const event: StatusEvent = {
+      ...makeEvent(1),
+      message: "Activity resolved: 2345 quote options ready.",
+      customerId: "customer_2345",
+      quoteSessionId: "quote_session_1",
+    };
+
+    act(() => {
+      root.render(
+        <MemoryRouter initialEntries={["/employee/clients/customer_2345#client-remarks"]}>
+          <Timeline events={[event]} />
+        </MemoryRouter>
+      );
+    });
+
+    const timelineButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Activity resolved: 2345 quote options ready.")
+    ) as HTMLButtonElement;
+    expect(timelineButton).toBeTruthy();
+
+    act(() => {
+      timelineButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const link = container.querySelector("a") as HTMLAnchorElement;
+    expect(link?.textContent).toContain("Open to AI quoting workspace");
+    expect(link?.getAttribute("href")).toBe("/employee/clients/customer_2345#ai-quoting-workspace");
+  });
+
+  it("hides the same-page client fallback so the modal does not show a dead button", () => {
+    const event: StatusEvent = {
+      ...makeEvent(1),
+      message: "Activity resolved: profile reviewed.",
+      customerId: "customer_2345",
+    };
+
+    act(() => {
+      root.render(
+        <MemoryRouter initialEntries={["/employee/clients/customer_2345#client-remarks"]}>
+          <Timeline events={[event]} />
+        </MemoryRouter>
+      );
+    });
+
+    const timelineButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Activity resolved: profile reviewed.")
+    ) as HTMLButtonElement;
+    expect(timelineButton).toBeTruthy();
+
+    act(() => {
+      timelineButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(container.textContent).not.toContain("Open to client");
   });
 });

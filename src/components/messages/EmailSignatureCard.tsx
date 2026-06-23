@@ -18,7 +18,7 @@ import type { User } from "@/types";
 // it.
 //
 // Supports embedded images / logos uploaded as data URLs; rendered
-// inline in the editor and preserved in outbound demo messages as a
+// inline in the editor and preserved in outbound messages as a
 // renderable signature payload.
 // =====================================================================
 
@@ -271,7 +271,7 @@ export function EmailSignatureCard({
           {!locked ? (
             <FileDropZone
               title={images.length === 0 ? "Upload or paste a logo/image" : "Add another logo/image"}
-              help="PNG, JPG, SVG, or a copied image from your clipboard. Stored as data URLs in this demo."
+              help="PNG, JPG, SVG, or a copied image from your clipboard. Stored with your encrypted signature settings."
               accept="image/*"
               multiple
               compact
@@ -330,7 +330,7 @@ export function EmailSignatureCard({
   );
 }
 
-// Append the staff member's saved signature as a renderable demo token.
+// Append the staff member's saved signature as a renderable message token.
 // SMS / no-signature cases pass through.
 export function applyEmailSignature(
   channel: "email" | "sms" | "call" | "note",

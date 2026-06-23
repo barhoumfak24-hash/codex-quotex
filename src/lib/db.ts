@@ -5,6 +5,7 @@
 // =====================================================================
 
 import * as seed from "./seed";
+import { apiBaseUrl, envValue } from "./apiBase";
 import {
   generateAgencyCode,
   normalizeAgencyCode,
@@ -53,7 +54,10 @@ import type {
   Policy,
   InternalMessage,
   InternalThread,
+  MailboxOutboxJob,
+  MessageBlock,
   MessagePin,
+  MessageReport,
   MessageMute,
   MasterAgencyActivity,
   Prospect,
@@ -61,6 +65,8 @@ import type {
   QuotingSession,
   Reminder,
   Renewal,
+  SecurityBan,
+  SecurityIncident,
   SoftwareSale,
   StatusEvent,
   Task,
@@ -70,8 +76,8 @@ import type {
 
 // Bump this whenever DbShape gets a new table that older localStorage caches
 // won't have, so visitors automatically get the fresh seed.
-const STORAGE_KEY = "quotex.db.v30";
-const LEGACY_KEYS = ["quotex.db.v1", "quotex.db.v2", "quotex.db.v3", "quotex.db.v4", "quotex.db.v5", "quotex.db.v6", "quotex.db.v7", "quotex.db.v8", "quotex.db.v9", "quotex.db.v10", "quotex.db.v11", "quotex.db.v12", "quotex.db.v13", "quotex.db.v14", "quotex.db.v15", "quotex.db.v16", "quotex.db.v17", "quotex.db.v18", "quotex.db.v19", "quotex.db.v20", "quotex.db.v21", "quotex.db.v22", "quotex.db.v23", "quotex.db.v24", "quotex.db.v25", "quotex.db.v26", "quotex.db.v27", "quotex.db.v28", "quotex.db.v29"];
+const STORAGE_KEY = "quotex.db.v31";
+const LEGACY_KEYS = ["quotex.db.v1", "quotex.db.v2", "quotex.db.v3", "quotex.db.v4", "quotex.db.v5", "quotex.db.v6", "quotex.db.v7", "quotex.db.v8", "quotex.db.v9", "quotex.db.v10", "quotex.db.v11", "quotex.db.v12", "quotex.db.v13", "quotex.db.v14", "quotex.db.v15", "quotex.db.v16", "quotex.db.v17", "quotex.db.v18", "quotex.db.v19", "quotex.db.v20", "quotex.db.v21", "quotex.db.v22", "quotex.db.v23", "quotex.db.v24", "quotex.db.v25", "quotex.db.v26", "quotex.db.v27", "quotex.db.v28", "quotex.db.v29", "quotex.db.v30"];
 
 const CARRIER_AGENT_SIGN_IN_URLS: Record<string, string> = {
   carrier_chubb: "https://www.chubb.com/us-en/agents-brokers.html",
@@ -143,6 +149,7 @@ interface DbShape {
   notes: Note[];
   communications: Communication[];
   connectedMailboxes: ConnectedMailbox[];
+  mailboxOutbox: MailboxOutboxJob[];
   audit: AuditLog[];
   categories: InsuranceCategory[];
   categoryLinks: CategoryAgencyLink[];
@@ -156,6 +163,10 @@ interface DbShape {
   internalMessages: InternalMessage[];
   messagePins: MessagePin[];
   messageMutes: MessageMute[];
+  messageReports: MessageReport[];
+  messageBlocks: MessageBlock[];
+  securityIncidents: SecurityIncident[];
+  securityBans: SecurityBan[];
   quotingSessions: QuotingSession[];
   demoLeads: DemoLead[];
   softwareSales: SoftwareSale[];
@@ -192,6 +203,7 @@ function freshSeed(): DbShape {
     notes: structuredClone(seed.SEED_NOTES),
     communications: structuredClone(seed.SEED_COMMUNICATIONS),
     connectedMailboxes: [],
+    mailboxOutbox: [],
     audit: [],
     categories: structuredClone(seed.SEED_CATEGORIES),
     categoryLinks: structuredClone(seed.SEED_CATEGORY_LINKS),
@@ -205,6 +217,10 @@ function freshSeed(): DbShape {
     internalMessages: [],
     messagePins: [],
     messageMutes: [],
+    messageReports: [],
+    messageBlocks: [],
+    securityIncidents: [],
+    securityBans: [],
     quotingSessions: [],
     demoLeads: [],
     softwareSales: [],
@@ -482,18 +498,21 @@ function withMailboxConnectionDefaults(data: DbShape): DbShape {
           address,
           provider,
           displayName: user.name,
-          status: "connected",
-          authMode: "demo",
-          scopes: ["send", "read", "sync"],
-          connectedAt: now,
+          status: "needs_auth",
+          authMode: "oauth",
+          scopes: [],
           updatedAt: now,
         });
         return;
       }
-      if (current.authMode === "demo" && (current.address !== address || current.provider !== provider)) {
+      if (current.authMode === "demo" || current.status === "connected" && !current.tokenVaultRef) {
         current.address = address;
         current.provider = provider;
         current.displayName = user.name;
+        current.status = "needs_auth";
+        current.authMode = "oauth";
+        current.scopes = [];
+        delete current.connectedAt;
         current.updatedAt = now;
       }
     });
@@ -513,18 +532,21 @@ function withMailboxConnectionDefaults(data: DbShape): DbShape {
         address,
         provider,
         displayName: `${agency.name} Marketing`,
-        status: "connected",
-        authMode: "demo",
-        scopes: ["send"],
-        connectedAt: now,
+        status: "needs_auth",
+        authMode: "oauth",
+        scopes: [],
         updatedAt: now,
       });
       return;
     }
-    if (current.authMode === "demo" && (current.address !== address || current.provider !== provider)) {
+    if (current.authMode === "demo" || current.status === "connected" && !current.tokenVaultRef) {
       current.address = address;
       current.provider = provider;
       current.displayName = `${agency.name} Marketing`;
+      current.status = "needs_auth";
+      current.authMode = "oauth";
+      current.scopes = [];
+      delete current.connectedAt;
       current.updatedAt = now;
     }
   });
@@ -923,21 +945,12 @@ const DB_CHANGE_CHANNEL = `${STORAGE_KEY}.changes`;
 const DB_INSTANCE_ID = Math.random().toString(36).slice(2);
 const REMOTE_LIVE_SYNC_INTERVAL_MS = 2500;
 
-function envValue(key: string): string {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return String((import.meta as any)?.env?.[key] ?? "");
-  } catch {
-    return "";
-  }
-}
-
 function remoteSyncEnabled(): boolean {
   return envValue("VITE_STATE_SYNC_MODE") === "supabase";
 }
 
 function remoteApiBase(): string {
-  return (envValue("VITE_API_BASE_URL") || "/api").replace(/\/+$/, "");
+  return apiBaseUrl();
 }
 
 function remoteStateId(): string {

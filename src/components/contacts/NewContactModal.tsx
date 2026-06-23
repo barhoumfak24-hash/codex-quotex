@@ -323,15 +323,9 @@ export function NewContactModal({
           {mode === "upload" && !extracted && (
             <div>
               <Disclaimer>
-                Demo only - files are read in this browser session for extraction and are not stored
-                unless you save the profile. Review AI-filled fields before creating the contact.
+                Files are read for extraction and stored only after you save the profile. Review
+                AI-filled fields before creating the contact.
               </Disclaimer>
-              {false && (
-              <Disclaimer>
-                Demo only — files are not uploaded or stored. The AI extraction returns plausible
-                seed values based on the filename so the agent flow can be demonstrated end-to-end.
-              </Disclaimer>
-              )}
               <div className="mt-4">
                 <FileDropZone
                   title="Choose, drop, or paste a file"

@@ -51,8 +51,8 @@ export function DocumentReviewPage() {
         />
 
         <div className="mb-4 rounded-md border border-gold-200 bg-gold-50 px-3 py-2 text-xs leading-relaxed text-gold-900">
-          ACORD templates now use the uploaded PDF set bundled with this demo. View opens the
-          PDF inline and Download returns the actual PDF file.
+          ACORD templates use the agency's uploaded PDF library. View opens the PDF inline and
+          Download returns the actual PDF file.
         </div>
 
         {isManager && (

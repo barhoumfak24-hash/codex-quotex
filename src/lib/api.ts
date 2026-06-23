@@ -1,7 +1,8 @@
 // =====================================================================
 // API client — all data access in the frontend goes through here.
-// Today: backed by the local mock db (`./db`).
-// Production: replace each method body with `fetch(API_BASE + ...).then(r => r.json())`.
+// Today: many demo workflows are backed by the browser-local db (`./db`).
+// Production readiness requires moving each data domain to authenticated
+// server routes before real agency data is imported.
 // Tenant scoping is enforced here for safety (mock) and on server (real).
 // =====================================================================
 
@@ -92,6 +93,11 @@ import {
 } from "./acordQuestionnaires";
 import { fillAcordFromClientDossier } from "./acordAiFillEngine";
 import {
+  aiEvidenceAllowsQuestionnairePrefill,
+  evaluateAiProductionGate,
+  findAiPublicEvidence,
+} from "./aiProductionGuards";
+import {
   activeStaffCount,
   isRoutableStaffRole,
   isRoutingManagerRole,
@@ -148,6 +154,8 @@ import type {
   MarketingAutoMessageRule,
   MasterAgencyActivity,
   MasterAgencyActivityKind,
+  MailboxOutboxJob,
+  MailboxOutboxStatus,
   MailProvider,
   MarketingMessage,
   Note,
@@ -161,7 +169,9 @@ import type {
   MarketingAttachment,
   InternalMessage,
   InternalThread,
+  MessageBlock,
   MessagePin,
+  MessageReport,
   MessageMute,
   Prospect,
   ProspectStatus,
@@ -177,6 +187,11 @@ import type {
   Reminder,
   Renewal,
   Role,
+  SecurityBan,
+  SecurityIncident,
+  SecurityIncidentSeverity,
+  SecurityIncidentStatus,
+  SecuritySubjectKind,
   SoftwareSale,
   SoftwareSaleStatus,
   StatusEvent,
@@ -255,16 +270,16 @@ function questionnaireQuestionLookupKeys(question: QuotingQuestion): string[] {
     .filter(Boolean);
 }
 
-function questionnaireRecordValueFor(
+function questionnaireRecordEntryFor(
   question: QuotingQuestion,
   record?: Record<string, unknown>
-): string | undefined {
+): { key: string; value: string } | undefined {
   if (!record) return undefined;
   const keys = questionnaireQuestionLookupKeys(question);
   for (const key of keys) {
     if (!Object.prototype.hasOwnProperty.call(record, key)) continue;
     const value = cleanQuestionnairePrefillValue(record[key]);
-    if (value) return value;
+    if (value) return { key, value };
   }
 
   const normalizedKeys = new Set(keys.map(normalizeQuestionnaireLookup).filter(Boolean));
@@ -277,7 +292,7 @@ function questionnaireRecordValueFor(
       continue;
     }
     const value = cleanQuestionnairePrefillValue(rawValue);
-    if (value) return value;
+    if (value) return { key: recordKey, value };
   }
   return undefined;
 }
@@ -313,12 +328,23 @@ function knownQuestionnaireAnswerFor(
     estimatedValue?: number;
     assetDetails?: Record<string, string>;
     publicFields: Record<string, unknown>;
+    publicFieldEvidence?: PublicDataEvidenceMap;
   }
 ): string | undefined {
-  const fromAssetDetails = questionnaireRecordValueFor(question, input.assetDetails);
-  if (fromAssetDetails) return fromAssetDetails;
-  const fromPublicFields = questionnaireRecordValueFor(question, input.publicFields);
-  if (fromPublicFields) return fromPublicFields;
+  const fromAssetDetails = questionnaireRecordEntryFor(question, input.assetDetails);
+  if (
+    fromAssetDetails &&
+    aiEvidenceAllowsQuestionnairePrefill(findAiPublicEvidence(input.publicFieldEvidence, fromAssetDetails.key))
+  ) {
+    return fromAssetDetails.value;
+  }
+  const fromPublicFields = questionnaireRecordEntryFor(question, input.publicFields);
+  if (
+    fromPublicFields &&
+    aiEvidenceAllowsQuestionnairePrefill(findAiPublicEvidence(input.publicFieldEvidence, fromPublicFields.key))
+  ) {
+    return fromPublicFields.value;
+  }
   if (input.address && questionCanUseQuoteAddress(question)) return input.address.trim();
   if (
     typeof input.estimatedValue === "number" &&
@@ -337,6 +363,7 @@ function seedKnownQuestionnaireResponses(input: {
   estimatedValue?: number;
   assetDetails?: Record<string, string>;
   publicFields: Record<string, unknown>;
+  publicFieldEvidence?: PublicDataEvidenceMap;
   updatedAt: string;
 }): {
   questionnaireResponses?: Record<string, string>;
@@ -382,6 +409,19 @@ function dedupeQuotingQuestionsByLabel(questions: QuotingQuestion[]): QuotingQue
   return out;
 }
 
+function humanizeQuestionnaireSeedLabel(label: string): string {
+  const trimmed = label.trim();
+  if (!trimmed) return "";
+  if (/\s|\/|[()]/.test(trimmed)) return trimmed;
+  const words = trimmed
+    .replace(/[_-]+/g, " ")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLowerCase()
+    .trim();
+  if (!words) return trimmed;
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
 function completePersonalQuestionnaireQuestions(input: {
   assetType: AssetType;
   category?: InsuranceCategory;
@@ -390,7 +430,7 @@ function completePersonalQuestionnaireQuestions(input: {
   existingQuestions?: QuotingQuestion[];
 }): QuotingQuestion[] {
   const labels = [...Object.keys(input.publicFields), ...input.missingFields]
-    .map((label) => label.trim())
+    .map(humanizeQuestionnaireSeedLabel)
     .filter(Boolean);
   const aiQuestions =
     labels.length > 0
@@ -441,6 +481,7 @@ function ensureCompletePersonalCategoryQuestionnaire(session: QuotingSession): Q
     estimatedValue: session.estimatedValue,
     assetDetails: session.assetDetails,
     publicFields: session.publicFields,
+    publicFieldEvidence: session.publicFieldEvidence,
     updatedAt: session.updatedAt,
   });
   const questionnaireResponses: Record<string, string> = {
@@ -492,14 +533,13 @@ function ensureCompletePersonalCategoryQuestionnaire(session: QuotingSession): Q
     session.missingFields.some((field, index) => field !== missingFields[index]);
 
   if (hasCompleteQuestionSet && !responsesChanged && !missingFieldsChanged) return session;
-  return (
-    db.update("quotingSessions", session.id, {
-      questionnaireQuestions: fullQuestions,
-      questionnaireResponses,
-      questionnaireResponseMeta,
-      missingFields,
-    }) ?? session
-  );
+  return {
+    ...session,
+    questionnaireQuestions: fullQuestions,
+    questionnaireResponses,
+    questionnaireResponseMeta,
+    missingFields,
+  };
 }
 
 const DEFAULT_TIMESHEET_SETTINGS: Pick<
@@ -597,8 +637,57 @@ function isDueTodayOrPast(iso: string, now = new Date()): boolean {
   return new Date(dateOnly(new Date(iso))).getTime() <= new Date(dateOnly(now)).getTime();
 }
 
-const tenantFilter = <T extends { tenantId?: string | null }>(rows: T[], tenantId?: string | null) =>
-  tenantId == null ? rows : rows.filter((r) => r.tenantId === tenantId);
+const AUTH_STORAGE_KEY = "quotex.auth.userId.v1";
+const FORBIDDEN_TENANT_ID = "__quotex_forbidden_tenant__";
+const PLATFORM_ROLES = new Set<Role>(["master_admin"]);
+
+function assertCanUseMasterAdminRole(role: Role, currentUserId?: string) {
+  if (role !== "master_admin") return;
+  const existingMaster = db
+    .list("users")
+    .find((user) => user.role === "master_admin" && user.id !== currentUserId);
+  if (existingMaster) {
+    throw new Error("master_admin_limit_reached");
+  }
+}
+
+function browserTenantLock(): { tenantId: string; userId: string } | null {
+  if (typeof window === "undefined") return null;
+  const userId = window.localStorage.getItem(AUTH_STORAGE_KEY);
+  if (!userId) return null;
+  const user = db.list("users").find((row) => row.id === userId);
+  if (!user || !user.tenantId || PLATFORM_ROLES.has(user.role)) return null;
+  return { tenantId: user.tenantId, userId: user.id };
+}
+
+function scopedTenantForBrowser(tenantId?: string | null): string | null | undefined {
+  const lock = browserTenantLock();
+  if (!lock) return tenantId;
+  if (tenantId == null) return lock.tenantId;
+  return tenantId === lock.tenantId ? tenantId : FORBIDDEN_TENANT_ID;
+}
+
+function browserCanReadAgency(id: string): boolean {
+  const lock = browserTenantLock();
+  return !lock || id === lock.tenantId;
+}
+
+const tenantFilter = <T extends { tenantId?: string | null }>(rows: T[], tenantId?: string | null) => {
+  const scopedTenantId = scopedTenantForBrowser(tenantId);
+  if (scopedTenantId === FORBIDDEN_TENANT_ID) return [];
+  return scopedTenantId == null ? rows : rows.filter((r) => r.tenantId === scopedTenantId);
+};
+
+function normalizeSecurityIpAddress(input?: string): string {
+  return (input ?? "").trim().toLowerCase().replace(/\s+/g, "");
+}
+
+function securitySubjectKindForUser(user?: User): SecuritySubjectKind {
+  if (!user) return "unknown";
+  if (isStaffRole(user.role)) return "staff";
+  if (user.role === "customer") return "customer";
+  return "unknown";
+}
 
 function contactOwnerIds(row: {
   assignedAgentId?: string;
@@ -1055,6 +1144,92 @@ function markMailboxSent(connectionId?: string) {
   db.update("connectedMailboxes", connectionId, { lastSendAt: nowIso(), updatedAt: nowIso() });
 }
 
+function communicationRecipientEmails(row: Communication): string[] {
+  const external = normalizeEmail(row.externalRecipientEmail);
+  if (external) return [external];
+  if (row.customerId) {
+    const customer = db.list("customers").find((c) => c.id === row.customerId);
+    return customer?.email ? [normalizeEmail(customer.email)] : [];
+  }
+  if (row.prospectId) {
+    const prospect = db.list("prospects").find((p) => p.id === row.prospectId);
+    return prospect?.email ? [normalizeEmail(prospect.email)] : [];
+  }
+  if (row.carrierContactId) {
+    const carrierContact = db
+      .list("carrierContacts")
+      .find((contact) => contact.id === row.carrierContactId);
+    return carrierContact?.email ? [normalizeEmail(carrierContact.email)] : [];
+  }
+  return [];
+}
+
+function buildMailboxOutboxJob(row: Communication): MailboxOutboxJob | null {
+  if (row.channel !== "email" || row.direction !== "outbound") return null;
+  if (row.mailboxOrigin === "provider_sync") return null;
+  const to = communicationRecipientEmails(row).filter(Boolean);
+  const createdAt = nowIso();
+  const status: MailboxOutboxStatus = to.length > 0 ? "queued" : "failed";
+  return {
+    id: uid("outbox"),
+    tenantId: row.tenantId,
+    communicationId: row.id,
+    mailboxConnectionId: row.mailboxConnectionId,
+    mailboxAccount: row.mailboxAccount,
+    mailboxProvider: row.mailboxProvider,
+    to,
+    subject: row.subject,
+    body: row.body,
+    bodyFormat: "plain",
+    attachments: row.attachments,
+    idempotencyKey: `communication:${row.tenantId}:${row.id}`,
+    status,
+    attemptCount: 0,
+    lastError: status === "failed" ? "No recipient email address was available." : undefined,
+    createdAt,
+    updatedAt: createdAt,
+    createdById: row.createdById,
+  };
+}
+
+function updateCommunicationDeliveryFromOutbox(
+  job: MailboxOutboxJob,
+  status: Communication["deliveryStatus"],
+  provider?: {
+    externalMessageId?: string;
+    externalThreadId?: string;
+    externalUrl?: string;
+  }
+) {
+  const patch: Partial<Communication> = { deliveryStatus: status };
+  if (provider?.externalMessageId) patch.externalMessageId = provider.externalMessageId;
+  if (provider?.externalThreadId) patch.externalThreadId = provider.externalThreadId;
+  if (provider?.externalUrl) patch.externalUrl = provider.externalUrl;
+  db.update("communications", job.communicationId, patch);
+}
+
+function reconcileOutboxFromProviderMessage(row: Communication) {
+  if (row.direction !== "outbound" || !row.externalMessageId) return;
+  const job = db
+    .list("mailboxOutbox")
+    .find(
+      (entry) =>
+        entry.tenantId === row.tenantId &&
+        entry.status !== "sent" &&
+        ((row.externalMessageId && entry.providerMessageId === row.externalMessageId) ||
+          entry.communicationId === row.id)
+    );
+  if (!job) return;
+  db.update("mailboxOutbox", job.id, {
+    status: "sent",
+    providerMessageId: row.externalMessageId,
+    providerThreadId: row.externalThreadId,
+    providerUrl: row.externalUrl,
+    lastAttemptAt: nowIso(),
+    updatedAt: nowIso(),
+  });
+}
+
 type MarketingCampaignPamphletPayload = {
   eyebrow?: string;
   headline?: string;
@@ -1221,7 +1396,7 @@ function hasMarketingMergeField(value: string): boolean {
   return /\{\{?\s*(first_name|firstName|name|full_name|email)\s*\}?\}/i.test(value);
 }
 
-function upsertDemoStaffMailbox(user: User, byUserId?: string): ConnectedMailbox | null {
+function upsertStaffMailboxAuthorization(user: User, byUserId?: string): ConnectedMailbox | null {
   if (!user.tenantId || !isStaffRole(user.role)) return null;
   const address = (user.businessEmail ?? user.email).trim().toLowerCase();
   if (!address) return null;
@@ -1235,9 +1410,9 @@ function upsertDemoStaffMailbox(user: User, byUserId?: string): ConnectedMailbox
     address,
     provider,
     displayName: user.name,
-    status: "connected",
-    authMode: "demo",
-    scopes: ["send", "read", "sync"],
+    status: "needs_auth",
+    authMode: "oauth",
+    scopes: [],
     updatedAt: nowIso(),
     updatedById: byUserId,
   };
@@ -1245,11 +1420,10 @@ function upsertDemoStaffMailbox(user: User, byUserId?: string): ConnectedMailbox
   return db.insert("connectedMailboxes", {
     ...(patch as Omit<ConnectedMailbox, "id" | "connectedAt">),
     id,
-    connectedAt: nowIso(),
   });
 }
 
-function upsertDemoAgencyMarketingMailbox(agency: Agency, byUserId?: string): ConnectedMailbox | null {
+function upsertAgencyMarketingMailboxAuthorization(agency: Agency, byUserId?: string): ConnectedMailbox | null {
   const address = agency.contactEmail.trim().toLowerCase();
   if (!address) return null;
   const id = `mailbox_agency_marketing_${agency.id}`;
@@ -1261,9 +1435,9 @@ function upsertDemoAgencyMarketingMailbox(agency: Agency, byUserId?: string): Co
     address,
     provider: inferMailProvider(address),
     displayName: `${agency.name} Marketing`,
-    status: "connected",
-    authMode: "demo",
-    scopes: ["send"],
+    status: "needs_auth",
+    authMode: "oauth",
+    scopes: [],
     updatedAt: nowIso(),
     updatedById: byUserId,
   };
@@ -1271,7 +1445,6 @@ function upsertDemoAgencyMarketingMailbox(agency: Agency, byUserId?: string): Co
   return db.insert("connectedMailboxes", {
     ...(patch as Omit<ConnectedMailbox, "id" | "connectedAt">),
     id,
-    connectedAt: nowIso(),
   });
 }
 
@@ -2665,6 +2838,10 @@ function comprehensiveClientHistory(customerId: string): StatusEvent[] {
           prospectId: task.prospectId,
           assetId: task.assetId,
           policyId: task.policyId,
+          claimId: task.claimId,
+          documentId: task.documentId,
+          quoteSessionId: task.quoteSessionId,
+          quoteRequestId: task.quoteRequestId,
           communicationId: task.messageId,
           renewalId: task.renewalId,
           createdAt: task.createdAt,
@@ -2682,6 +2859,10 @@ function comprehensiveClientHistory(customerId: string): StatusEvent[] {
             prospectId: task.prospectId,
             assetId: task.assetId,
             policyId: task.policyId,
+            claimId: task.claimId,
+            documentId: task.documentId,
+            quoteSessionId: task.quoteSessionId,
+            quoteRequestId: task.quoteRequestId,
             createdAt: task.startedAt,
             createdById: task.startedById,
           })
@@ -2700,6 +2881,10 @@ function comprehensiveClientHistory(customerId: string): StatusEvent[] {
             prospectId: task.prospectId,
             assetId: task.assetId,
             policyId: task.policyId,
+            claimId: task.claimId,
+            documentId: task.documentId,
+            quoteSessionId: task.quoteSessionId,
+            quoteRequestId: task.quoteRequestId,
             createdAt: task.completedAt,
             createdById: task.completedById,
           })
@@ -3195,7 +3380,7 @@ function visibleQuotingQuestions(session: QuotingSession): QuotingQuestion[] {
   if (session.commercialSecondRoundSentAt && !session.commercialSupplementalsCompletedAt) {
     return questions.filter((q) => q.round === "second_round");
   }
-  if (!session.commercialApplicationSentAt) {
+  if (!commercialApplicationSentAtForSession(session)) {
     return questions.filter((q) => !q.carrierId && q.round !== "second_round");
   }
   return questions.filter((q) => q.round === "second_round");
@@ -3206,6 +3391,84 @@ function isDocumentOnlyAcordSession(session: QuotingSession): boolean {
     session.lineOfBusiness === "commercial" &&
     session.aiSummary === "ACORD documents initialized from the client Documents card."
   );
+}
+
+function commercialApplicationSentAtForSession(session: QuotingSession): string | undefined {
+  if (session.commercialApplicationSentAt) return session.commercialApplicationSentAt;
+  const submission = (session.commercialCarrierSubmissions ?? []).find(
+    (item) =>
+      (item.applicationMessageIds?.length ?? 0) > 0 ||
+      (item.applicationDocumentIds?.length ?? 0) > 0 ||
+      item.status === "application_sent" ||
+      item.status === "awaiting_response" ||
+      item.status === "accepted" ||
+      item.status === "declined" ||
+      item.status === "needs_client_info" ||
+      item.status === "needs_supplemental" ||
+      item.status === "supplemental_sent"
+  );
+  return (
+    submission?.sentAt ??
+    session.commercialSecondRoundSentAt ??
+    session.commercialSupplementalsCompletedAt
+  );
+}
+
+function ensureQuotingSessionConsistency(session: QuotingSession): QuotingSession {
+  let current =
+    session.lineOfBusiness === "commercial"
+      ? session
+      : ensureCompletePersonalCategoryQuestionnaire(session);
+
+  if (current.lineOfBusiness !== "commercial") {
+    if (current.quotes.length > 0 && current.status !== "complete") {
+      current = {
+        ...current,
+        status: "complete",
+        updatedAt: current.updatedAt,
+      };
+    }
+    return current;
+  }
+
+  const patch: Partial<QuotingSession> = {};
+  const applicationSentAt = commercialApplicationSentAtForSession(current);
+  if (applicationSentAt && !current.commercialApplicationSentAt) {
+    patch.commercialApplicationSentAt = applicationSentAt;
+  }
+  if (applicationSentAt && !current.commercialQuestionnairePreparedAt) {
+    patch.commercialQuestionnairePreparedAt = applicationSentAt;
+  }
+
+  const hasInitialQuestions = (current.questionnaireQuestions ?? []).some(
+    (question) => !question.carrierId && question.round !== "second_round"
+  );
+  if (!current.commercialQuestionnairePreparedAt && hasInitialQuestions) {
+    patch.commercialQuestionnairePreparedAt = current.updatedAt ?? applicationSentAt ?? current.createdAt;
+  }
+  if (
+    current.commercialQuestionnairePreparedAt &&
+    (current.questionnaireQuestions ?? []).length === 0 &&
+    !applicationSentAt
+  ) {
+    patch.questionnaireQuestions = initialCommercialQuestionnaireQuestions(current);
+  }
+
+  if (current.quotes.length > 0 && current.status === "gathering_info") {
+    patch.status =
+      current.commercialSecondRoundSentAt && !current.commercialSupplementalsCompletedAt
+        ? "awaiting_reply"
+        : "complete";
+  }
+  if (
+    current.commercialSupplementalsCompletedAt &&
+    current.quotes.length > 0 &&
+    current.status !== "complete"
+  ) {
+    patch.status = "complete";
+  }
+
+  return Object.keys(patch).length > 0 ? { ...current, ...patch } : current;
 }
 
 function initialCommercialQuestionnaireQuestions(session: QuotingSession): QuotingQuestion[] {
@@ -4120,13 +4383,13 @@ function analyzeCommercialCarrierPipeline(
         ? "carrier_portal_automation"
         : underwriters.length > 0
         ? "underwriter_email"
-        : "demo";
+        : "manual_workflow";
     const connectorLabel =
       submissionMethod === "carrier_portal_automation"
         ? connector?.providerLabel ?? "AI carrier portal runner"
         : submissionMethod === "underwriter_email"
         ? "Underwriter email workflow"
-        : "Demo carrier workflow";
+        : "Manual carrier workflow";
     const automationTrace =
       submissionMethod === "carrier_portal_automation" && carrier
         ? runCarrierPortalRunner({
@@ -4246,7 +4509,7 @@ function analyzeCommercialCarrierPipeline(
     ])
   );
   const normalizedSubmissions =
-    session.commercialApplicationSentAt && session.commercialSecondRoundSentAt
+    commercialApplicationSentAtForSession(session) && session.commercialSecondRoundSentAt
       ? submissions.map((submission) => {
           const prior = priorSubmissionsByCarrier.get(submission.carrierId);
           if (!prior) return submission;
@@ -4620,10 +4883,10 @@ function syncLegacyDemoRequests() {
       role: stringField(source.role),
       staffSize: stringField(source.staffSize),
       phone: stringField(source.phone) || undefined,
-      interest: stringField(source.interest, "Full Quotex software demo"),
+      interest: stringField(source.interest, "Full Quotex software walkthrough"),
       notes: stringField(source.notes) || undefined,
       marketingOptIn: boolField(source.marketingOptIn, true),
-      source: "view_demo",
+      source: "walkthrough_request",
       status: "new",
       createdAt,
       updatedAt: createdAt,
@@ -4718,15 +4981,19 @@ export const api = {
   // ------------ Agencies (master) ------------
   agencies: {
     list(): Agency[] {
-      return db.list("agencies");
+      return db.list("agencies").filter((agency) => browserCanReadAgency(agency.id));
     },
     get(id: string): Agency | undefined {
+      if (!browserCanReadAgency(id)) return undefined;
       return db.list("agencies").find((a) => a.id === id);
     },
     byCode(code: string): Agency | undefined {
       const normalized = normalizeAgencyCode(code);
       if (!normalized) return undefined;
-      return db.list("agencies").find((a) => agencyCodeMatches(a, normalized));
+      return db
+        .list("agencies")
+        .filter((agency) => browserCanReadAgency(agency.id))
+        .find((a) => agencyCodeMatches(a, normalized));
     },
     maskedCode(agency: Agency): string {
       return maskedAgencyCode(agency.agencyCodePreview);
@@ -4776,7 +5043,7 @@ export const api = {
         createdAt: nowIso(),
       });
       db.insert("agencies", row);
-      upsertDemoAgencyMarketingMailbox(row);
+      upsertAgencyMarketingMailboxAuthorization(row);
       logAgencyActivity(
         row,
         "agency_created",
@@ -4795,7 +5062,7 @@ export const api = {
       const updated = db.update("agencies", id, patch);
       if (updated) {
         if (patch.contactEmail !== undefined || patch.name !== undefined) {
-          upsertDemoAgencyMarketingMailbox(updated);
+          upsertAgencyMarketingMailboxAuthorization(updated);
         }
         logAgencyPatchActivity(updated, patch);
       }
@@ -5437,6 +5704,7 @@ export const api = {
         );
     },
     create(input: Omit<User, "id" | "createdAt" | "active"> & { active?: boolean }): User {
+      assertCanUseMasterAdminRole(input.role);
       const row: User = {
         ...input,
         id: uid("user"),
@@ -5445,7 +5713,7 @@ export const api = {
         createdAt: nowIso(),
       };
       db.insert("users", row);
-      upsertDemoStaffMailbox(row);
+      upsertStaffMailboxAuthorization(row);
       if (row.tenantId && isStaffRole(row.role)) {
         const agency = db.list("agencies").find((a) => a.id === row.tenantId);
         if (agency) {
@@ -5461,6 +5729,7 @@ export const api = {
       return row;
     },
     update(id: string, patch: Partial<User>) {
+      if (patch.role === "master_admin") assertCanUseMasterAdminRole("master_admin", id);
       const updated = db.update("users", id, patch);
       if (
         updated &&
@@ -5472,7 +5741,7 @@ export const api = {
           patch.staffAccessStatus !== undefined)
       ) {
         if (updated.active && updated.staffAccessStatus !== "banned" && updated.staffAccessStatus !== "deleted") {
-          upsertDemoStaffMailbox(updated, patch.staffAccessUpdatedById);
+          upsertStaffMailboxAuthorization(updated, patch.staffAccessUpdatedById);
         } else {
           const existing = db
             .list("connectedMailboxes")
@@ -5550,7 +5819,7 @@ export const api = {
       });
       if (updated) {
         if (active) {
-          upsertDemoStaffMailbox(updated, actorId);
+          upsertStaffMailboxAuthorization(updated, actorId);
         } else {
           const existing = db
             .list("connectedMailboxes")
@@ -5692,7 +5961,7 @@ export const api = {
             createdAt: nowIso(),
           };
           db.insert("users", user);
-          upsertDemoStaffMailbox(user);
+          upsertStaffMailboxAuthorization(user);
           made.push(user);
         }
       });
@@ -5756,7 +6025,7 @@ export const api = {
           createdAt: nowIso(),
         };
         db.insert("users", user);
-        upsertDemoStaffMailbox(user);
+        upsertStaffMailboxAuthorization(user);
         made.push(user);
       }
       if (made.length > 0 && agency) {
@@ -5801,13 +6070,13 @@ export const api = {
     resolveAgencyMarketingSender(tenantId: string) {
       return agencyMarketingSender(tenantId);
     },
-    connectStaffDemo(userId: string, byUserId?: string): ConnectedMailbox | null {
+    prepareStaffMailboxAuthorization(userId: string, byUserId?: string): ConnectedMailbox | null {
       const user = db.list("users").find((row) => row.id === userId);
-      return user ? upsertDemoStaffMailbox(user, byUserId) : null;
+      return user ? upsertStaffMailboxAuthorization(user, byUserId) : null;
     },
-    connectAgencyMarketingDemo(tenantId: string, byUserId?: string): ConnectedMailbox | null {
+    prepareAgencyMarketingMailboxAuthorization(tenantId: string, byUserId?: string): ConnectedMailbox | null {
       const agency = db.list("agencies").find((row) => row.id === tenantId);
-      return agency ? upsertDemoAgencyMarketingMailbox(agency, byUserId) : null;
+      return agency ? upsertAgencyMarketingMailboxAuthorization(agency, byUserId) : null;
     },
     setStatus(id: string, status: ConnectedMailboxStatus, byUserId?: string): ConnectedMailbox | null {
       return db.update("connectedMailboxes", id, {
@@ -5822,7 +6091,7 @@ export const api = {
       }
       if (mailbox.authMode === "demo") {
         return [
-          "Replace the demo connection with provider OAuth before production send/sync.",
+          "Reconnect this mailbox through provider OAuth before live send/sync.",
           "Store refresh tokens in the encrypted backend token vault.",
           "Enable provider webhooks or scheduled sync for inbound and sent-mail mirroring.",
         ];
@@ -5835,6 +6104,94 @@ export const api = {
       }
       if (mailbox.status !== "connected") missing.push("Complete provider authorization.");
       return missing;
+    },
+  },
+
+  // ------------ Mailbox outbox ------------
+  mailboxOutbox: {
+    listByTenant(tenantId: string): MailboxOutboxJob[] {
+      return tenantFilter(db.list("mailboxOutbox"), tenantId).sort((a, b) =>
+        a.createdAt < b.createdAt ? 1 : -1
+      );
+    },
+    get(id: string): MailboxOutboxJob | undefined {
+      return db.list("mailboxOutbox").find((job) => job.id === id);
+    },
+    markSending(id: string): MailboxOutboxJob | null {
+      const job = this.get(id);
+      if (!job || job.status === "sent" || job.status === "cancelled") return job ?? null;
+      const updated = db.update("mailboxOutbox", id, {
+        status: "sending",
+        attemptCount: job.attemptCount + 1,
+        lastAttemptAt: nowIso(),
+        lastError: undefined,
+        updatedAt: nowIso(),
+      });
+      if (updated) updateCommunicationDeliveryFromOutbox(updated, "sending");
+      return updated;
+    },
+    markSent(
+      id: string,
+      provider: {
+        externalMessageId?: string;
+        externalThreadId?: string;
+        externalUrl?: string;
+      } = {}
+    ): MailboxOutboxJob | null {
+      const job = this.get(id);
+      if (!job) return null;
+      const updated = db.update("mailboxOutbox", id, {
+        status: "sent",
+        providerMessageId: provider.externalMessageId ?? job.providerMessageId,
+        providerThreadId: provider.externalThreadId ?? job.providerThreadId,
+        providerUrl: provider.externalUrl ?? job.providerUrl,
+        lastAttemptAt: nowIso(),
+        lastError: undefined,
+        updatedAt: nowIso(),
+      });
+      if (updated) {
+        updateCommunicationDeliveryFromOutbox(updated, "sent", provider);
+        markMailboxSent(updated.mailboxConnectionId);
+      }
+      return updated;
+    },
+    markFailed(id: string, error: string, nextAttemptAt?: string): MailboxOutboxJob | null {
+      const job = this.get(id);
+      if (!job) return null;
+      const updated = db.update("mailboxOutbox", id, {
+        status: "failed",
+        lastError: error,
+        nextAttemptAt,
+        lastAttemptAt: nowIso(),
+        updatedAt: nowIso(),
+      });
+      if (updated) {
+        updateCommunicationDeliveryFromOutbox(updated, "failed");
+        if (updated.mailboxConnectionId) {
+          db.update("connectedMailboxes", updated.mailboxConnectionId, {
+            lastError: error,
+            updatedAt: nowIso(),
+          });
+        }
+      }
+      return updated;
+    },
+    retryDue(tenantId: string, at: string = nowIso()): MailboxOutboxJob[] {
+      return this.listByTenant(tenantId).filter(
+        (job) =>
+          (job.status === "queued" || job.status === "failed") &&
+          (!job.nextAttemptAt || job.nextAttemptAt <= at)
+      );
+    },
+    cancel(id: string): MailboxOutboxJob | null {
+      const job = this.get(id);
+      if (!job || job.status === "sent") return job ?? null;
+      const updated = db.update("mailboxOutbox", id, {
+        status: "cancelled",
+        updatedAt: nowIso(),
+      });
+      if (updated) updateCommunicationDeliveryFromOutbox(updated, "failed");
+      return updated;
     },
   },
 
@@ -9010,6 +9367,24 @@ export const api = {
           : undefined;
       const isScheduled = !!sendAt;
       const isRecurring = recurrence !== "none";
+      const productionGate = evaluateAiProductionGate({
+        system: "marketing_ai",
+        action: isScheduled ? "schedule_campaign" : "launch_campaign",
+        tenantScoped: true,
+        humanApproved: !!input.actorId,
+        sendsOutboundMessage: true,
+        writesSystemOfRecord: true,
+        humanReviewed: !!input.actorId,
+        usesOnlyProvidedFacts: true,
+      });
+      if (!productionGate.allowed) {
+        throw new Error(
+          `AI marketing campaign requires an approving staff user before launch (${[
+            ...productionGate.blockedReasons,
+            ...productionGate.warnings,
+          ].join(", ")}).`
+        );
+      }
 
       // Resolve the audience union (dedup by id) for the launch record
       // and the per-recipient campaign receipt rows.
@@ -10319,9 +10694,17 @@ export const api = {
         id: uid("comm"),
         createdAt: nowIso(),
       };
+      const outboxJob = buildMailboxOutboxJob(row);
+      if (outboxJob) {
+        row.outboxJobId = outboxJob.id;
+        row.deliveryStatus = outboxJob.status === "failed" ? "failed" : "queued";
+      } else if (row.channel === "email" && row.mailboxOrigin === "provider_sync") {
+        row.deliveryStatus = row.direction === "inbound" ? "received" : "synced";
+      }
       db.insert("communications", row);
-      if (row.channel === "email" && row.direction === "outbound") {
-        markMailboxSent(row.mailboxConnectionId);
+      if (outboxJob) {
+        db.insert("mailboxOutbox", outboxJob);
+        if (outboxJob.status !== "failed") markMailboxSent(row.mailboxConnectionId);
       }
 
       // Every email / SMS / call to or from a customer gets a
@@ -10392,6 +10775,7 @@ export const api = {
         return db.update("communications", existing.id, {
           subject: input.subject ?? existing.subject,
           body: input.body,
+          deliveryStatus: direction === "inbound" ? "received" : "synced",
           externalThreadId: input.externalThreadId ?? existing.externalThreadId,
           externalUrl: input.externalUrl ?? existing.externalUrl,
         }) ?? existing;
@@ -10419,6 +10803,7 @@ export const api = {
         mailboxAccount,
         mailboxProvider: provider,
         mailboxConnectionId: userMailbox.connectionId,
+        deliveryStatus: direction === "inbound" ? "received" : "synced",
         externalMessageId: input.externalMessageId,
         externalThreadId: input.externalThreadId,
         externalUrl: input.externalUrl,
@@ -10430,6 +10815,10 @@ export const api = {
           lastSyncAt: nowIso(),
           updatedAt: nowIso(),
         });
+      }
+      if (direction === "outbound") {
+        markMailboxSent(userMailbox.connectionId);
+        reconcileOutboxFromProviderMessage(row);
       }
       communicationStatusEvent(row);
       return row;
@@ -12121,11 +12510,11 @@ export const api = {
   quoting: {
     get(id: string): QuotingSession | undefined {
       const session = db.list("quotingSessions").find((s) => s.id === id);
-      return session ? ensureCompletePersonalCategoryQuestionnaire(session) : undefined;
+      return session ? ensureQuotingSessionConsistency(session) : undefined;
     },
     listByTenant(tenantId: string): QuotingSession[] {
       return tenantFilter(db.list("quotingSessions"), tenantId)
-        .map(ensureCompletePersonalCategoryQuestionnaire)
+        .map(ensureQuotingSessionConsistency)
         .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
     },
     getForProspect(prospectId: string): QuotingSession | undefined {
@@ -12133,14 +12522,14 @@ export const api = {
         .list("quotingSessions")
         .filter((s) => s.prospectId === prospectId)
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
-      return session ? ensureCompletePersonalCategoryQuestionnaire(session) : undefined;
+      return session ? ensureQuotingSessionConsistency(session) : undefined;
     },
     getForCustomer(customerId: string): QuotingSession | undefined {
       const session = db
         .list("quotingSessions")
         .filter((s) => s.customerId === customerId && !isDocumentOnlyAcordSession(s))
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
-      return session ? ensureCompletePersonalCategoryQuestionnaire(session) : undefined;
+      return session ? ensureQuotingSessionConsistency(session) : undefined;
     },
     diagnosePersonalLinesCarrierApis(input: {
       tenantId: string;
@@ -12420,6 +12809,7 @@ export const api = {
           estimatedValue: input.estimatedValue,
           assetDetails: input.assetDetails,
           publicFields: prep.publicFields,
+          publicFieldEvidence: prep.publicFieldEvidence,
           updatedAt: createdAt,
         });
         questionnaireResponses = seededQuestionnaire.questionnaireResponses;
@@ -12525,6 +12915,40 @@ export const api = {
           } prepared from ${missingCount} remaining ACORD field${
             missingCount === 1 ? "" : "s"
           } and commercial intake requirements.`,
+          createdAt: preparedAt,
+          createdById: session.createdById,
+        });
+      }
+      return updated;
+    },
+    preparePersonalQuestionnaire(sessionId: string): QuotingSession | null {
+      const session = this.get(sessionId);
+      if (!session || session.lineOfBusiness === "commercial") return session ?? null;
+      if (session.personalQuestionnairePreparedAt) return session;
+
+      const preparedAt = nowIso();
+      const questions = session.questionnaireQuestions ?? [];
+      const responses = session.questionnaireResponses ?? {};
+      const missingFields = questions
+        .filter((question) => question.required && !(responses[question.id] ?? "").trim())
+        .map((question) => question.label);
+      const updated = db.update("quotingSessions", sessionId, {
+        personalQuestionnairePreparedAt: preparedAt,
+        missingFields,
+        status: "gathering_info",
+        updatedAt: preparedAt,
+      });
+      if (updated) {
+        const prefilledCount = questions.filter((question) =>
+          (responses[question.id] ?? "").trim()
+        ).length;
+        logQuotingWorkflowProgress(updated, {
+          message: "AI prepared the personal-lines questionnaire from the mapping review.",
+          detail: `${questions.length} question${
+            questions.length === 1 ? "" : "s"
+          } are ready for staff review; ${prefilledCount} already ${
+            prefilledCount === 1 ? "has" : "have"
+          } a saved value.`,
           createdAt: preparedAt,
           createdById: session.createdById,
         });
@@ -12721,7 +13145,7 @@ export const api = {
         const syncedAcordTemplates = syncCommercialAcordPdfArtifacts(
           updated,
           {},
-          updated.commercialApplicationSentAt && updated.commercialSecondRoundSentAt
+          commercialApplicationSentAtForSession(updated) && updated.commercialSecondRoundSentAt
             ? "supplemental"
             : "application"
         );
@@ -12781,10 +13205,7 @@ export const api = {
       const syncedAcordTemplates = syncCommercialAcordPdfArtifacts(session, responses, kind);
       const sessionForPreview =
         syncedAcordTemplates && syncedAcordTemplates.length > 0
-          ? db.update("quotingSessions", sessionId, {
-              commercialAcordTemplates: syncedAcordTemplates,
-              updatedAt: nowIso(),
-            }) ?? session
+          ? { ...session, commercialAcordTemplates: syncedAcordTemplates }
           : session;
       const targets =
         carrierIds ??
@@ -12930,8 +13351,10 @@ export const api = {
         updatedAt
       );
       if (session.lineOfBusiness === "commercial") {
+        const applicationSentAt = commercialApplicationSentAtForSession(session);
         const sessionWithResponses: QuotingSession = {
           ...session,
+          commercialApplicationSentAt: applicationSentAt,
           questionnaireResponses: mergedResponses,
           questionnaireResponseMeta: responseMeta,
           updatedAt,
@@ -12939,7 +13362,7 @@ export const api = {
         const syncedAcordTemplates = syncCommercialAcordPdfArtifacts(
           sessionWithResponses,
           {},
-          session.commercialApplicationSentAt ? "supplemental" : "application"
+          applicationSentAt ? "supplemental" : "application"
         );
         const commercialContact = session.prospectId
           ? db.list("prospects").find((p) => p.id === session.prospectId)
@@ -12947,9 +13370,12 @@ export const api = {
           ? db.list("customers").find((c) => c.id === session.customerId)
           : null;
         const explicitSelectedCommercialCarrierIds = options?.selectedCommercialCarrierIds;
+        const forceUnderwriterEmailForSelected =
+          !!explicitSelectedCommercialCarrierIds &&
+          (options?.commercialCarrierEmailDrafts?.length ?? 0) > 0;
         const selectedCommercialCarrierIds =
           explicitSelectedCommercialCarrierIds ??
-          (session.commercialApplicationSentAt
+          (applicationSentAt
             ? (session.commercialCarrierSubmissions ?? []).map(
                 (submission) => submission.carrierId
               )
@@ -12963,9 +13389,9 @@ export const api = {
           mergedResponses,
           updatedAt,
           selectedCommercialCarrierIds,
-          !!explicitSelectedCommercialCarrierIds
+          forceUnderwriterEmailForSelected
         );
-        if (!session.commercialApplicationSentAt) {
+        if (!applicationSentAt) {
           const awaitingSubmissions = markCommercialSubmissionsAwaitingResponse(
             pipeline.submissions
           );
@@ -12990,12 +13416,12 @@ export const api = {
           logQuotingWorkflowProgress(session, {
             message: `Commercial application packet sent to ${pipeline.submittedCarrierCount} carrier${
               pipeline.submittedCarrierCount === 1 ? "" : "s"
-            }; awaiting carrier responses.`,
+            }; carrier responses are being processed now.`,
             detail: `${portalAutomationCount} portal automation job${
               portalAutomationCount === 1 ? "" : "s"
             } queued. ${underwriterEmailCount} underwriter email${
               underwriterEmailCount === 1 ? "" : "s"
-            } created. Carrier statuses will update after responses are read.`,
+            } created. Response classification runs immediately; supplemental-only markets still queue the follow-up round.`,
             createdAt: updatedAt,
             createdById: session.createdById,
             communicationId: firstCarrierMessageSubmission
@@ -13005,7 +13431,7 @@ export const api = {
               ? commercialSubmissionDocumentId(firstCarrierMessageSubmission)
               : undefined,
           });
-          return db.update("quotingSessions", sessionId, {
+          const submittedSession = db.update("quotingSessions", sessionId, {
             questionnaireResponses: mergedResponses,
             questionnaireResponseMeta: responseMeta,
             commercialAcordTemplates:
@@ -13015,10 +13441,11 @@ export const api = {
             missingFields: [],
             aiSummary: `AI sent the completed ACORD application packet to ${pipeline.submittedCarrierCount} appetite-matched carrier${
               pipeline.submittedCarrierCount === 1 ? "" : "s"
-            }. Carrier responses are pending.`,
+            } and is processing carrier responses now.`,
             status: "quoting",
             updatedAt,
           });
+          return this.readCommercialCarrierResponses(sessionId) ?? submittedSession;
         }
         const carrierSubmissions = mergeCommercialSubmissionArtifacts(
           session,
@@ -13093,7 +13520,7 @@ export const api = {
             questionnaireSentAt: updatedAt,
             commercialCarrierSubmissions: carrierSubmissions,
             commercialApplicationSentAt:
-              session.commercialApplicationSentAt ?? updatedAt,
+              applicationSentAt ?? updatedAt,
             commercialSecondRoundSentAt: updatedAt,
             missingFields: pipeline.secondRoundQuestions.map((q) => q.label),
             aiSummary: `AI sent the application to ${pipeline.submittedCarrierCount} appetite-matched carriers. ${pipeline.secondRoundQuestions.length} supplemental field${
@@ -13120,9 +13547,9 @@ export const api = {
             .filter((submission) => submission.status === "needs_client_info")
             .map((submission) => submission.carrierId)
         );
-        const completedCarrierSubmissions = session.commercialApplicationSentAt
+        const completedCarrierSubmissions = applicationSentAt
           ? attachCommercialUnderwriterMessages(
-              { ...session, commercialCarrierSubmissions: carrierSubmissions },
+              { ...session, commercialApplicationSentAt: applicationSentAt, commercialCarrierSubmissions: carrierSubmissions },
               carrierSubmissions,
               mergedResponses,
               "supplemental",
@@ -13139,7 +13566,7 @@ export const api = {
           status: "quoting",
           commercialCarrierSubmissions: completedCarrierSubmissions,
           commercialApplicationSentAt:
-            session.commercialApplicationSentAt ?? updatedAt,
+            applicationSentAt ?? updatedAt,
           commercialSupplementalsCompletedAt: updatedAt,
           missingFields: [],
           aiSummary: `AI submitted the commercial application to ${pipeline.submittedCarrierCount} appetite-matched carriers and filtered responses down to ${pipeline.acceptedCarrierIds.length} accepted market${
@@ -13379,7 +13806,7 @@ export const api = {
       policy: Policy;
       carrierPortalUrl?: string;
       carrierReference: string;
-      mode: "live_api" | "demo_adapter";
+      mode: "live_api" | "manual_workflow";
       bindingTrace?: import("@/types").CarrierPolicyBindingTrace;
     } {
       const session = this.get(input.sessionId);
@@ -13484,8 +13911,8 @@ export const api = {
         policy,
         implementedById: input.implementedById,
       });
-      const mode: "live_api" | "demo_adapter" =
-        bindingTrace.status === "bound_on_carrier" ? "live_api" : "demo_adapter";
+      const mode: "live_api" | "manual_workflow" =
+        bindingTrace.status === "bound_on_carrier" ? "live_api" : "manual_workflow";
       policy = db.update("policies", policy.id, {
         carrierBindingStatus: bindingTrace.status,
         carrierBindingReference: bindingTrace.carrierReference,
@@ -13558,7 +13985,7 @@ export const api = {
       policy: Policy;
       carrierPortalUrl?: string;
       carrierReference: string;
-      mode: "live_api" | "demo_adapter";
+      mode: "live_api" | "manual_workflow";
       bindingTrace?: import("@/types").CarrierPolicyBindingTrace;
     }> {
       const initial = this.implementPolicy(input);
@@ -13573,8 +14000,8 @@ export const api = {
         policy: initial.policy,
         implementedById: input.implementedById,
       });
-      const mode: "live_api" | "demo_adapter" =
-        bindingTrace.status === "bound_on_carrier" ? "live_api" : "demo_adapter";
+      const mode: "live_api" | "manual_workflow" =
+        bindingTrace.status === "bound_on_carrier" ? "live_api" : "manual_workflow";
       const policy =
         db.update("policies", initial.policy.id, {
           carrierBindingStatus: bindingTrace.status,
@@ -13769,6 +14196,26 @@ export const api = {
         });
       }
 
+      if (session.personalQuestionnairePreparedAt) {
+        const updated = db.update("quotingSessions", sessionId, {
+          ...common,
+          personalQuestionnairePreparedAt: undefined,
+          status: "gathering_info",
+          aiSummary: "AI moved back to the personal-lines mapping review.",
+        });
+        if (updated) {
+          logQuotingWorkflowProgress(updated, {
+            message: "Personal quote workflow moved back one step.",
+            detail:
+              "The questionnaire review step was reopened so staff can inspect the AI mapping again.",
+            createdAt: updatedAt,
+            createdById: session.createdById,
+            source: "agent",
+          });
+        }
+        return updated;
+      }
+
       return session;
     },
     // Discard the session and let the agent start over.
@@ -13921,6 +14368,397 @@ export const api = {
       } else {
         this.mute(input);
       }
+    },
+  },
+
+  // Per-user report records for message/content review. Production should
+  // store these server-side and route open reports to the agency's manager
+  // or compliance queue.
+  messageReports: {
+    listByTenant(tenantId: string): MessageReport[] {
+      return tenantFilter(db.list("messageReports"), tenantId).sort((a, b) =>
+        a.reportedAt < b.reportedAt ? 1 : -1
+      );
+    },
+    listOpen(tenantId: string): MessageReport[] {
+      return this.listByTenant(tenantId).filter((report) => report.status === "open");
+    },
+    report(input: {
+      tenantId: string;
+      userId: string;
+      kind: MessageReport["kind"];
+      refId: string;
+      reason: string;
+    }): MessageReport {
+      const reason = input.reason.trim() || "Reported from message settings.";
+      const row: MessageReport = {
+        id: uid("msg_report"),
+        tenantId: input.tenantId,
+        userId: input.userId,
+        kind: input.kind,
+        refId: input.refId,
+        reason,
+        status: "open",
+        reportedAt: nowIso(),
+      };
+      db.insert("messageReports", row);
+      db.insert("audit", {
+        id: uid("audit"),
+        tenantId: input.tenantId,
+        actorId: input.userId,
+        action: "message.reported",
+        entityType: `message_${input.kind}`,
+        entityId: input.refId,
+        metadata: { reason },
+        createdAt: row.reportedAt,
+      });
+      return row;
+    },
+    markReviewed(id: string, actorId: string): MessageReport | undefined {
+      const updated = db.update("messageReports", id, { status: "reviewed" });
+      if (updated) {
+        db.insert("audit", {
+          id: uid("audit"),
+          tenantId: updated.tenantId,
+          actorId,
+          action: "message_report.reviewed",
+          entityType: `message_${updated.kind}`,
+          entityId: updated.refId,
+          metadata: { reportId: id },
+          createdAt: nowIso(),
+        });
+      }
+      return updated ?? undefined;
+    },
+  },
+
+  // Per-user block records. Blocking does not delete the conversation; it
+  // silences notifications and leaves the audit trail intact.
+  messageBlocks: {
+    isBlocked(
+      tenantId: string,
+      userId: string,
+      kind: MessageBlock["kind"],
+      refId: string
+    ): MessageBlock | undefined {
+      return db
+        .list("messageBlocks")
+        .find(
+          (block) =>
+            block.tenantId === tenantId &&
+            block.userId === userId &&
+            block.kind === kind &&
+            block.refId === refId
+        );
+    },
+    block(input: {
+      tenantId: string;
+      userId: string;
+      kind: MessageBlock["kind"];
+      refId: string;
+    }): MessageBlock {
+      const existing = this.isBlocked(input.tenantId, input.userId, input.kind, input.refId);
+      if (existing) return existing;
+      const row: MessageBlock = {
+        id: uid("msg_block"),
+        tenantId: input.tenantId,
+        userId: input.userId,
+        kind: input.kind,
+        refId: input.refId,
+        blockedAt: nowIso(),
+      };
+      db.insert("messageBlocks", row);
+      api.messageMutes.mute(input);
+      db.insert("audit", {
+        id: uid("audit"),
+        tenantId: input.tenantId,
+        actorId: input.userId,
+        action: "message.blocked",
+        entityType: `message_${input.kind}`,
+        entityId: input.refId,
+        createdAt: row.blockedAt,
+      });
+      return row;
+    },
+    unblock(
+      tenantId: string,
+      userId: string,
+      kind: MessageBlock["kind"],
+      refId: string
+    ) {
+      const existing = this.isBlocked(tenantId, userId, kind, refId);
+      if (existing) db.remove("messageBlocks", existing.id);
+      db.insert("audit", {
+        id: uid("audit"),
+        tenantId,
+        actorId: userId,
+        action: "message.unblocked",
+        entityType: `message_${kind}`,
+        entityId: refId,
+        createdAt: nowIso(),
+      });
+    },
+    toggle(input: {
+      tenantId: string;
+      userId: string;
+      kind: MessageBlock["kind"];
+      refId: string;
+    }) {
+      if (this.isBlocked(input.tenantId, input.userId, input.kind, input.refId)) {
+        this.unblock(input.tenantId, input.userId, input.kind, input.refId);
+      } else {
+        this.block(input);
+      }
+    },
+  },
+
+  // Suspicious behavior / emergency access control. Production should
+  // enforce IP bans at the edge/API layer using the request IP; the demo
+  // stores and checks the same policy data client-side so the workflow is
+  // visible before the backend is connected.
+  security: {
+    normalizeIpAddress(input?: string): string {
+      return normalizeSecurityIpAddress(input);
+    },
+    listIncidents(tenantId: string): SecurityIncident[] {
+      return tenantFilter(db.list("securityIncidents"), tenantId).sort((a, b) =>
+        a.createdAt < b.createdAt ? 1 : -1
+      );
+    },
+    listOpenIncidents(tenantId: string): SecurityIncident[] {
+      return this.listIncidents(tenantId).filter((incident) => incident.status === "open");
+    },
+    listBans(tenantId: string, activeOnly = false): SecurityBan[] {
+      return tenantFilter(db.list("securityBans"), tenantId)
+        .filter((ban) => !activeOnly || ban.active)
+        .sort((a, b) => a.createdAt < b.createdAt ? 1 : -1);
+    },
+    getActiveBanForUser(tenantId: string, userId: string): SecurityBan | undefined {
+      return db
+        .list("securityBans")
+        .find(
+          (ban) =>
+            ban.tenantId === tenantId &&
+            ban.active &&
+            ban.kind === "user" &&
+            ban.userId === userId
+        );
+    },
+    getActiveBanForIp(tenantId: string, ipAddress?: string): SecurityBan | undefined {
+      const normalized = normalizeSecurityIpAddress(ipAddress);
+      if (!normalized) return undefined;
+      return db
+        .list("securityBans")
+        .find(
+          (ban) =>
+            ban.tenantId === tenantId &&
+            ban.active &&
+            ban.kind === "ip" &&
+            normalizeSecurityIpAddress(ban.ipAddress) === normalized
+        );
+    },
+    accessBlockFor(input: {
+      tenantId?: string | null;
+      userId?: string;
+      ipAddress?: string;
+    }): SecurityBan | undefined {
+      if (!input.tenantId) return undefined;
+      if (input.userId) {
+        const userBan = this.getActiveBanForUser(input.tenantId, input.userId);
+        if (userBan) return userBan;
+      }
+      return this.getActiveBanForIp(input.tenantId, input.ipAddress);
+    },
+    flag(input: {
+      tenantId: string;
+      reportedById: string;
+      subjectKind?: SecuritySubjectKind;
+      subjectUserId?: string;
+      subjectLabel?: string;
+      ipAddress?: string;
+      severity?: SecurityIncidentSeverity;
+      reason: string;
+    }): SecurityIncident {
+      const actor = api.users.get(input.reportedById);
+      const subjectUser = input.subjectUserId ? api.users.get(input.subjectUserId) : undefined;
+      const createdAt = nowIso();
+      const row: SecurityIncident = {
+        id: uid("sec_incident"),
+        tenantId: input.tenantId,
+        reportedById: input.reportedById,
+        reportedByName: actor?.name,
+        subjectKind: input.subjectKind ?? securitySubjectKindForUser(subjectUser),
+        subjectUserId: input.subjectUserId,
+        subjectLabel: input.subjectLabel?.trim() || subjectUser?.name || input.ipAddress?.trim() || "Unknown subject",
+        ipAddress: normalizeSecurityIpAddress(input.ipAddress) || undefined,
+        severity: input.severity ?? "medium",
+        reason: input.reason.trim() || "Suspicious behavior flagged for review.",
+        status: "open",
+        createdAt,
+      };
+      db.insert("securityIncidents", row);
+      db.insert("audit", {
+        id: uid("audit"),
+        tenantId: input.tenantId,
+        actorId: input.reportedById,
+        action: "security.incident_flagged",
+        entityType: "security_incident",
+        entityId: row.id,
+        metadata: {
+          severity: row.severity,
+          subjectKind: row.subjectKind,
+          subjectUserId: row.subjectUserId,
+          ipAddress: row.ipAddress,
+          reason: row.reason,
+        },
+        createdAt,
+      });
+      return row;
+    },
+    updateIncidentStatus(
+      id: string,
+      status: SecurityIncidentStatus,
+      reviewedById: string
+    ): SecurityIncident | undefined {
+      const updated = db.update("securityIncidents", id, {
+        status,
+        reviewedAt: nowIso(),
+        reviewedById,
+      });
+      if (updated) {
+        db.insert("audit", {
+          id: uid("audit"),
+          tenantId: updated.tenantId,
+          actorId: reviewedById,
+          action: `security.incident_${status}`,
+          entityType: "security_incident",
+          entityId: id,
+          createdAt: nowIso(),
+        });
+      }
+      return updated ?? undefined;
+    },
+    banUser(input: {
+      tenantId: string;
+      userId: string;
+      createdById: string;
+      reason: string;
+      incidentId?: string;
+    }): SecurityBan | null {
+      const target = api.users.get(input.userId);
+      if (!target || target.tenantId !== input.tenantId) return null;
+      const existing = this.getActiveBanForUser(input.tenantId, input.userId);
+      if (existing) return existing;
+      const actor = api.users.get(input.createdById);
+      const createdAt = nowIso();
+      const row: SecurityBan = {
+        id: uid("sec_ban"),
+        tenantId: input.tenantId,
+        kind: "user",
+        userId: input.userId,
+        subjectLabel: target.name,
+        reason: input.reason.trim() || "User banned by agency security control.",
+        createdById: input.createdById,
+        createdByName: actor?.name,
+        incidentId: input.incidentId,
+        active: true,
+        createdAt,
+      };
+      db.insert("securityBans", row);
+      api.users.update(input.userId, {
+        active: false,
+        staffAccessStatus: "banned",
+        staffAccessUpdatedAt: createdAt,
+        staffAccessUpdatedById: input.createdById,
+      });
+      if (input.incidentId) {
+        db.update("securityIncidents", input.incidentId, {
+          resultingBanId: row.id,
+          status: "reviewed",
+          reviewedAt: createdAt,
+          reviewedById: input.createdById,
+        });
+      }
+      db.insert("audit", {
+        id: uid("audit"),
+        tenantId: input.tenantId,
+        actorId: input.createdById,
+        action: "security.user_banned",
+        entityType: "user",
+        entityId: input.userId,
+        metadata: { banId: row.id, reason: row.reason, incidentId: input.incidentId },
+        createdAt,
+      });
+      return row;
+    },
+    banIp(input: {
+      tenantId: string;
+      ipAddress: string;
+      createdById: string;
+      reason: string;
+      incidentId?: string;
+    }): SecurityBan | null {
+      const ipAddress = normalizeSecurityIpAddress(input.ipAddress);
+      if (!ipAddress) return null;
+      const existing = this.getActiveBanForIp(input.tenantId, ipAddress);
+      if (existing) return existing;
+      const actor = api.users.get(input.createdById);
+      const createdAt = nowIso();
+      const row: SecurityBan = {
+        id: uid("sec_ban"),
+        tenantId: input.tenantId,
+        kind: "ip",
+        ipAddress,
+        subjectLabel: ipAddress,
+        reason: input.reason.trim() || "IP address banned by agency security control.",
+        createdById: input.createdById,
+        createdByName: actor?.name,
+        incidentId: input.incidentId,
+        active: true,
+        createdAt,
+      };
+      db.insert("securityBans", row);
+      if (input.incidentId) {
+        db.update("securityIncidents", input.incidentId, {
+          resultingBanId: row.id,
+          status: "reviewed",
+          reviewedAt: createdAt,
+          reviewedById: input.createdById,
+        });
+      }
+      db.insert("audit", {
+        id: uid("audit"),
+        tenantId: input.tenantId,
+        actorId: input.createdById,
+        action: "security.ip_banned",
+        entityType: "ip_address",
+        entityId: ipAddress,
+        metadata: { banId: row.id, reason: row.reason, incidentId: input.incidentId },
+        createdAt,
+      });
+      return row;
+    },
+    revokeBan(id: string, revokedById: string): SecurityBan | undefined {
+      const existing = db.list("securityBans").find((ban) => ban.id === id);
+      if (!existing) return undefined;
+      const updated = db.update("securityBans", id, {
+        active: false,
+        revokedAt: nowIso(),
+        revokedById,
+      });
+      if (updated) {
+        db.insert("audit", {
+          id: uid("audit"),
+          tenantId: updated.tenantId,
+          actorId: revokedById,
+          action: "security.ban_revoked",
+          entityType: updated.kind === "user" ? "user" : "ip_address",
+          entityId: updated.userId ?? updated.ipAddress ?? id,
+          metadata: { banId: id, reason: updated.reason },
+          createdAt: nowIso(),
+        });
+      }
+      return updated ?? undefined;
     },
   },
 

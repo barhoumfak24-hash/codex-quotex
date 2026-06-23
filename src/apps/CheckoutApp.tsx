@@ -4,6 +4,7 @@ import { useExternalLinkTargets } from "@/lib/externalLinks";
 import { NotFoundPage } from "@/pages/public/NotFoundPage";
 import { QuotexContactPage } from "@/pages/public/QuotexContactPage";
 import { QuotexHomePage } from "@/pages/public/QuotexHomePage";
+import { PrivacyPage, TermsPage } from "@/pages/public/LegalPages";
 
 const TransactionSitePage = lazy(() =>
   import("@/pages/transactions/TransactionSitePage").then((m) => ({ default: m.TransactionSitePage }))
@@ -45,6 +46,8 @@ export function CheckoutApp() {
         }
       />
       <Route path="/contact" element={<QuotexContactPage />} />
+      <Route path="/privacy" element={<PrivacyPage />} />
+      <Route path="/terms" element={<TermsPage />} />
       <Route path="/404" element={<NotFoundPage />} />
       <Route path="*" element={<Navigate to="/404" replace />} />
     </Routes>

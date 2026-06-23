@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { assertBodyTenantMatchesAuth } from "../middleware/auth.js";
 import { runServerCarrierBindingProvider } from "../services/carrierBindingProviders.js";
 import { runServerCarrierQuoteProvider } from "../services/quoteProviders.js";
 
@@ -69,7 +70,7 @@ const carrierBindingSchema = z.object({
     premium: z.number(),
     providerTrace: z
       .object({
-        provider: z.enum(["ezlynx_qas", "carrier_direct", "demo_adapter"]),
+        provider: z.enum(["ezlynx_qas", "carrier_direct", "configuration_only"]),
         requestId: z.string(),
         executionId: z.string().optional(),
         providerLabel: z.string(),
@@ -107,6 +108,7 @@ const routeMap = [
 quotesRoutes.get("/", (_req, res) => res.json({ resource: "quotes", endpoints: routeMap }));
 
 quotesRoutes.post("/carrier/run", async (req, res) => {
+  if (!assertBodyTenantMatchesAuth(req, res)) return;
   const parsed = carrierQuoteSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({
@@ -126,6 +128,7 @@ quotesRoutes.post("/carrier/run", async (req, res) => {
 });
 
 quotesRoutes.post("/carrier/bind", async (req, res) => {
+  if (!assertBodyTenantMatchesAuth(req, res)) return;
   const parsed = carrierBindingSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({

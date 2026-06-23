@@ -39,6 +39,10 @@ import {
   summarizeQuoteAssetDetails,
 } from "@/lib/quoteAssetIntake";
 import {
+  aiEvidenceAllowsDocumentAutofill,
+  publicFieldIsSafeForDocument,
+} from "@/lib/aiProductionGuards";
+import {
   campaignPromptTopic,
   createCampaignDraft,
   promptAwareCampaignImagePrompt,
@@ -1261,6 +1265,15 @@ function markEvidence(
   evidence[fieldKey] = publicFieldEvidence(fieldKey, sourceKind, sourceLabel, options);
 }
 
+function publicFieldIsDocumentReady(
+  publicFields: Record<string, string>,
+  evidence: PublicDataEvidenceMap,
+  label: string
+): boolean {
+  if (!normalizeLookupText(publicFields[label])) return false;
+  return publicFieldIsSafeForDocument(publicFields, evidence, label);
+}
+
 function geocoderEvidenceSource(geo: GeocodeResult): {
   sourceKind: PublicDataFieldSourceKind;
   sourceLabel: string;
@@ -1594,7 +1607,7 @@ async function enrichCoastalHome(seed: Record<string, unknown>): Promise<AiAsset
 
   Object.keys(synth.fields).forEach((fieldKey) => {
     if (fieldKey === "address") return;
-    markEvidence(evidence, fieldKey, "model_estimate", "AI property estimator (demo)", {
+    markEvidence(evidence, fieldKey, "model_estimate", "AI property estimator", {
       confidence: 0.48,
       verified: false,
       allowDocumentAutofill: false,
@@ -1660,7 +1673,7 @@ function synthesizeCoastalHomeFields(geo: GeocodeResult): {
   };
   return {
     fields,
-    sources: ["AI property estimator (demo)"],
+    sources: ["AI property estimator"],
   };
 }
 
@@ -2656,21 +2669,21 @@ export async function aiPreparePublicFields(input: {
     applyEnrichmentToQuotePrep(input.assetType, labels, enrichment, setPublicField);
   }
 
-  const missingLabels = labels.filter((l) => !(l in publicFields));
+  const missingLabels = labels.filter(
+    (label) => !publicFieldIsDocumentReady(publicFields, publicFieldEvidence, label)
+  );
   const intakeQs = (QUESTIONNAIRE_BY_ASSET[input.assetType] ?? []).filter(
     (label) => !quoteAssetQuestionAnswered(input.assetType, label, input.assetDetails)
   );
   const missingFields = [...missingLabels, ...intakeQs];
   const providedDetails = summarizeQuoteAssetDetails(input.assetType, input.assetDetails);
-  const documentReadyCount = Object.values(publicFieldEvidence).filter(
-    (item) => item.allowDocumentAutofill
-  ).length;
+  const documentReadyCount = Object.values(publicFieldEvidence).filter(aiEvidenceAllowsDocumentAutofill).length;
   const estimateOnlyCount = Object.values(publicFieldEvidence).filter(
     (item) => item.sourceKind === "model_estimate"
   ).length;
-  const summary = `Prepared ${documentReadyCount} document-ready field${
+  const summary = `Prepared ${documentReadyCount} verified document-ready field${
     documentReadyCount === 1 ? "" : "s"
-  } and ${estimateOnlyCount} estimate-only signal${estimateOnlyCount === 1 ? "" : "s"} for the ${input.assetType.replace(/_/g, " ")}${
+  } and kept ${estimateOnlyCount} estimate-only signal${estimateOnlyCount === 1 ? "" : "s"} out of document autofill for the ${input.assetType.replace(/_/g, " ")}${
     providedDetails.length > 0
       ? `, using ${providedDetails.length} agent-provided lookup detail${providedDetails.length === 1 ? "" : "s"}`
       : ""

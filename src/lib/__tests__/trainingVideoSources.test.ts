@@ -41,7 +41,7 @@ describe("training video source slots", () => {
     expect(providerForTrainingVideoUrl("https://www.loom.com/share/abc123")).toBe("loom");
     expect(providerForTrainingVideoUrl("https://fast.wistia.com/embed/medias/abc123")).toBe("wistia");
     expect(isDirectTrainingVideoUrl("https://cdn.example.com/video.webm")).toBe(true);
-    expect(isDirectTrainingVideoUrl("/training/quotex-complete-demo-walkthrough.webm")).toBe(true);
+    expect(isDirectTrainingVideoUrl("/training/quotex-complete-product-walkthrough.webm")).toBe(true);
     expect(providerLabel("generic")).toBe("External embed");
   });
 
@@ -57,12 +57,12 @@ describe("training video source slots", () => {
   });
 
   it("ships a bundled complete walkthrough for agent and manager libraries", () => {
-    const source = getTrainingVideoSource("agent-complete-demo-walkthrough");
+    const source = getTrainingVideoSource("agent-complete-product-walkthrough");
 
     expect(source?.bundled).toBe(true);
-    expect(source?.url).toBe("/training/quotex-complete-demo-walkthrough.webm");
+    expect(source?.url).toBe("/training/quotex-complete-product-walkthrough.webm");
     expect(trainingVideoEmbedUrl(source!, "1:04")).toBe(
-      "/training/quotex-complete-demo-walkthrough.webm#t=64"
+      "/training/quotex-complete-product-walkthrough.webm#t=64"
     );
   });
 

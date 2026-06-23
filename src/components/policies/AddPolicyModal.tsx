@@ -327,9 +327,7 @@ export function AddPolicyModal({
     <Modal open={open} onClose={onClose} title={editing ? "Edit policy" : "Add policy"} size="md">
       <div className="space-y-4">
         <Disclaimer>
-          Demo only — {editing ? "updates" : "adds"} a policy row in the local database. In
-          production this would orchestrate carrier policy issuance, document attachments, and
-          accounting hooks.
+          {editing ? "Updates" : "Adds"} the policy record and links carrier documents, participants, billing, and accounting hooks.
         </Disclaimer>
 
         {/* AI insert from a policy document — same UX as the new-client

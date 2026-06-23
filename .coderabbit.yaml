@@ -1,0 +1,67 @@
+language: en-US
+tone_instructions: Be direct, precise, and prioritize production risk, data safety, security, tenant isolation, test coverage, and deployment safety.
+early_access: false
+enable_free_tier: true
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: true
+  high_level_summary: true
+  high_level_summary_placeholder: "@coderabbitai summary"
+  review_status: true
+  collapse_walkthrough: false
+  changed_files_summary: true
+  sequence_diagrams: true
+  estimate_code_review_effort: true
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+      - master
+      - develop
+  path_filters:
+    - "!dist/**"
+    - "!dist-*"
+    - "!dist-*/**"
+    - "!node_modules/**"
+    - "!server/node_modules/**"
+    - "!*.log"
+    - "!*.png"
+    - "!*.jpg"
+    - "!*.jpeg"
+    - "!*.wav"
+    - "!tsconfig.tsbuildinfo"
+  path_instructions:
+    - path: "src/**"
+      instructions: Review frontend changes for React state bugs, stale closures, unsafe browser-side secrets, broken routing, missing tests, and visual regressions in customer, prospect, agency, and staff workflows.
+    - path: "server/**"
+      instructions: Review backend changes for auth, tenant isolation, rate limiting, input validation, secret handling, database migration safety, and audit logging.
+    - path: "api/**"
+      instructions: Review API route changes for request validation, rate limiting, environment-variable handling, external API failures, and safe error responses.
+    - path: ".github/**"
+      instructions: Review CI changes for required checks, least-privilege permissions, secure secrets handling, and merge-blocking behavior.
+  tools:
+    github-checks:
+      enabled: true
+      timeout_ms: 900000
+    gitleaks:
+      enabled: true
+    osvScanner:
+      enabled: true
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
+    title:
+      mode: "warning"
+    description:
+      mode: "warning"
+    issue_assessment:
+      mode: "warning"
+
+chat:
+  auto_reply: true

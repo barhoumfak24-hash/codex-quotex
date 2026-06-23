@@ -1,0 +1,700 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Agency {
+  id                           String   @id @db.Text
+  name                         String   @db.Text
+  logoUrl                      String?  @map("logo_url") @db.Text
+  brandColor                   String?  @map("brand_color") @db.Text
+  contactEmail                 String   @map("contact_email") @db.Text
+  phone                        String?  @db.Text
+  address                      String?  @db.Text
+  website                      String?  @db.Text
+  websiteSlug                  String?  @map("website_slug") @db.Text
+  websiteEnabled               Boolean  @default(false) @map("website_enabled")
+  websiteSettings              Json     @default("{}") @map("website_settings")
+  carrierRunnerSettings        Json     @default("{}") @map("carrier_runner_settings")
+  serviceAreas                 Json     @default("[]") @map("service_areas")
+  agencyCodeHash               String?  @map("agency_code_hash") @db.Text
+  agencyCodePreview            String?  @map("agency_code_preview") @db.Text
+  tier                         String   @default("starter") @db.Text
+  active                       Boolean  @default(true)
+  allowedUsers                 Int      @default(3) @map("allowed_users")
+  allowedProspectsPerMonth     Int      @default(100) @map("allowed_prospects_per_month")
+  allowedAiMessagesPerMonth    Int      @default(500) @map("allowed_ai_messages_per_month")
+  allowedCarriers              Int      @default(10) @map("allowed_carriers")
+  stripeCustomerId             String?  @map("stripe_customer_id") @db.Text
+  stripeSubscriptionId         String?  @map("stripe_subscription_id") @db.Text
+  billingSettings              Json     @default("{}") @map("billing_settings")
+  performanceSettings          Json     @default("{}") @map("performance_settings")
+  createdAt                    DateTime @default(now()) @map("created_at")
+  updatedAt                    DateTime @updatedAt @map("updated_at")
+
+  branches                     Branch[]
+  users                        User[]
+  customers                    CustomerProfile[]
+  assets                       Asset[]
+  policies                     Policy[]
+  documents                    Document[]
+  communications               Communication[]
+  tasks                        Task[]
+  aiNotifications              AiNotification[]
+  quoteSessions                QuotingSession[]
+  carriers                     Carrier[]
+  carrierLinks                 CarrierAgencyLink[]
+  carrierCredentials           CarrierCredential[]
+  mailboxConnections           MailboxConnection[]
+  mailboxTokenVaults           MailboxTokenVault[]
+  mailboxOauthStates           MailboxOauthState[]
+  claims                       Claim[]
+  notes                        Note[]
+  payments                     Payment[]
+  deposits                     Deposit[]
+  auditLogs                    AuditLog[]
+
+  @@index([active])
+  @@index([websiteSlug])
+  @@map("agencies")
+}
+
+model Branch {
+  id        String   @id @db.Text
+  tenantId  String   @map("tenant_id") @db.Text
+  name      String   @db.Text
+  address   String?  @db.Text
+  city      String?  @db.Text
+  state     String?  @db.Text
+  zip       String?  @db.Text
+  phone     String?  @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  agency    Agency   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  users     User[]
+  customers CustomerProfile[]
+
+  @@index([tenantId])
+  @@map("branches")
+}
+
+model User {
+  id                  String    @id @db.Text
+  tenantId            String    @map("tenant_id") @db.Text
+  branchId            String?   @map("branch_id") @db.Text
+  name                String    @db.Text
+  email               String    @db.Text
+  phone               String?   @db.Text
+  role                String    @db.Text
+  status              String    @default("active") @db.Text
+  passwordHash        String?   @map("password_hash") @db.Text
+  passwordChangedAt   DateTime? @map("password_changed_at")
+  mfaEnabled          Boolean   @default(false) @map("mfa_enabled")
+  lastLoginAt         DateTime? @map("last_login_at")
+  profile             Json      @default("{}")
+  permissions         Json      @default("{}")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  agency              Agency    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch              Branch?   @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  mailboxConnections  MailboxConnection[]
+  mailboxOauthStates  MailboxOauthState[]
+
+  @@index([tenantId])
+  @@index([tenantId, role])
+  @@index([tenantId, status])
+  @@map("users")
+}
+
+model CustomerProfile {
+  id                   String    @id @db.Text
+  tenantId             String    @map("tenant_id") @db.Text
+  userId               String?   @map("user_id") @db.Text
+  clientCode           String?   @map("client_code") @db.Text
+  lineOfBusiness       String?   @map("line_of_business") @db.Text
+  businessName         String?   @map("business_name") @db.Text
+  operationsDescription String?  @map("operations_description") @db.Text
+  branchId             String?   @map("branch_id") @db.Text
+  name                 String    @db.Text
+  email                String    @db.Text
+  phone                String?   @db.Text
+  mailingAddress       String?   @map("mailing_address") @db.Text
+  additionalContacts   Json      @default("[]") @map("additional_contacts")
+  marketingOptInEmail  Boolean   @default(false) @map("marketing_opt_in_email")
+  marketingOptInSms    Boolean   @default(false) @map("marketing_opt_in_sms")
+  consentTrail         Json      @default("{}") @map("consent_trail")
+  assignedAgentId      String?   @map("assigned_agent_id") @db.Text
+  assignedCsrId        String?   @map("assigned_csr_id") @db.Text
+  additionalAgentIds   Json      @default("[]") @map("additional_agent_ids")
+  additionalCsrIds     Json      @default("[]") @map("additional_csr_ids")
+  archived             Boolean   @default(false)
+  archivedAt           DateTime? @map("archived_at")
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  agency               Agency    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  branch               Branch?   @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  assets               Asset[]
+  policies             Policy[]
+  documents            Document[]
+  communications       Communication[]
+  tasks                Task[]
+  aiNotifications      AiNotification[]
+  quoteSessions        QuotingSession[]
+  claims               Claim[]
+  notes                Note[]
+
+  @@index([tenantId])
+  @@index([tenantId, branchId])
+  @@index([tenantId, assignedAgentId])
+  @@index([tenantId, assignedCsrId])
+  @@index([tenantId, archived])
+  @@map("customer_profiles")
+}
+
+model Asset {
+  id             String    @id @db.Text
+  tenantId       String    @map("tenant_id") @db.Text
+  customerId     String    @map("customer_id") @db.Text
+  type           String    @db.Text
+  label          String    @db.Text
+  estimatedValue Decimal   @default(0) @map("estimated_value") @db.Decimal(14, 2)
+  details        Json      @default("{}")
+  status         String    @default("pending") @db.Text
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  agency         Agency    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer       CustomerProfile @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  policies       Policy[]
+  documents      Document[]
+
+  @@index([tenantId])
+  @@index([tenantId, customerId])
+  @@index([tenantId, type])
+  @@map("assets")
+}
+
+model Policy {
+  id                   String    @id @db.Text
+  tenantId             String    @map("tenant_id") @db.Text
+  customerId           String    @map("customer_id") @db.Text
+  assetId              String?   @map("asset_id") @db.Text
+  carrierId            String?   @map("carrier_id") @db.Text
+  policyNumber         String?   @map("policy_number") @db.Text
+  premiumEstimate      Decimal?  @map("premium_estimate") @db.Decimal(14, 2)
+  finalPremium         Decimal?  @map("final_premium") @db.Decimal(14, 2)
+  effectiveDate        DateTime? @map("effective_date")
+  renewalDate          DateTime? @map("renewal_date")
+  status               String    @db.Text
+  renewalStatus        String?   @map("renewal_status") @db.Text
+  agentId              String?   @map("agent_id") @db.Text
+  department           String?   @db.Text
+  billing              Json      @default("{}")
+  coverages            Json      @default("[]")
+  endorsements         Json      @default("[]")
+  exclusions           Json      @default("[]")
+  parties              Json      @default("{}")
+  premiumBreakdown     Json      @default("{}") @map("premium_breakdown")
+  carrierBinding       Json      @default("{}") @map("carrier_binding")
+  closedAt             DateTime? @map("closed_at")
+  closedById           String?   @map("closed_by_id") @db.Text
+  createdAt            DateTime  @default(now()) @map("created_at")
+  updatedAt            DateTime  @updatedAt @map("updated_at")
+
+  agency               Agency    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer             CustomerProfile @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  asset                Asset?    @relation(fields: [assetId], references: [id], onDelete: SetNull)
+  associatedAddresses  PolicyAssociatedAddress[]
+  documents            Document[]
+  claims               Claim[]
+  notes                Note[]
+
+  @@index([tenantId])
+  @@index([tenantId, customerId])
+  @@index([tenantId, assetId])
+  @@index([tenantId, carrierId])
+  @@index([tenantId, renewalDate])
+  @@map("policies")
+}
+
+model PolicyAssociatedAddress {
+  id          String   @id @db.Text
+  tenantId    String   @map("tenant_id") @db.Text
+  policyId    String   @map("policy_id") @db.Text
+  kind        String   @db.Text
+  label       String?  @db.Text
+  address     String   @db.Text
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  policy      Policy   @relation(fields: [policyId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, policyId])
+  @@map("policy_associated_addresses")
+}
+
+model Carrier {
+  id           String   @id @db.Text
+  tenantId     String?  @map("tenant_id") @db.Text
+  name         String   @db.Text
+  type         String?  @db.Text
+  state        String?  @db.Text
+  appetite     Json     @default("{}")
+  settings     Json     @default("{}")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  agency       Agency?  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  links        CarrierAgencyLink[]
+  credentials  CarrierCredential[]
+
+  @@index([tenantId])
+  @@index([name])
+  @@map("carriers")
+}
+
+model CarrierAgencyLink {
+  id          String   @id @db.Text
+  tenantId    String   @map("tenant_id") @db.Text
+  carrierId   String   @map("carrier_id") @db.Text
+  active      Boolean  @default(true)
+  lines       Json     @default("[]")
+  settings    Json     @default("{}")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  agency      Agency   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  carrier     Carrier  @relation(fields: [carrierId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, active])
+  @@index([carrierId])
+  @@map("carrier_agency_links")
+}
+
+model CarrierCredential {
+  id                 String    @id @db.Text
+  tenantId           String    @map("tenant_id") @db.Text
+  carrierId          String?   @map("carrier_id") @db.Text
+  name               String    @db.Text
+  usernamePreview    String?   @map("username_preview") @db.Text
+  encryptedPayload   Json      @map("encrypted_payload")
+  encryptionKeyRef   String?   @map("encryption_key_ref") @db.Text
+  mfaMode            String?   @map("mfa_mode") @db.Text
+  authorizedUserIds  Json      @default("[]") @map("authorized_user_ids")
+  lastVerifiedAt     DateTime? @map("last_verified_at")
+  createdById        String?   @map("created_by_id") @db.Text
+  createdAt          DateTime  @default(now()) @map("created_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  agency             Agency    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  carrier            Carrier?  @relation(fields: [carrierId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([tenantId, carrierId])
+  @@map("carrier_credentials")
+}
+
+model MailboxConnection {
+  id                String    @id @db.Text
+  tenantId          String    @map("tenant_id") @db.Text
+  userId            String?   @map("user_id") @db.Text
+  ownerType         String    @default("staff") @map("owner_type") @db.Text
+  provider          String    @db.Text
+  address           String    @db.Text
+  displayName       String?   @map("display_name") @db.Text
+  status            String    @default("needs_auth") @db.Text
+  authMode          String    @default("oauth") @map("auth_mode") @db.Text
+  scopes            Json      @default("[]")
+  tokenVaultRef     String?   @map("token_vault_ref") @db.Text
+  externalAccountId String?   @map("external_account_id") @db.Text
+  connectedAt       DateTime? @map("connected_at")
+  lastSyncAt        DateTime? @map("last_sync_at")
+  lastSendAt        DateTime? @map("last_send_at")
+  lastError         String?   @map("last_error") @db.Text
+  updatedById       String?   @map("updated_by_id") @db.Text
+  createdAt         DateTime  @default(now()) @map("created_at")
+  updatedAt         DateTime  @updatedAt @map("updated_at")
+
+  agency            Agency    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user              User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  tokenVault        MailboxTokenVault?
+
+  @@unique([tenantId, userId, provider])
+  @@index([tenantId])
+  @@index([tenantId, userId])
+  @@map("mailbox_connections")
+}
+
+model MailboxTokenVault {
+  id                String            @id @db.Text
+  tenantId          String            @map("tenant_id") @db.Text
+  connectionId      String            @unique @map("connection_id") @db.Text
+  provider          String            @db.Text
+  encryptedPayload  Json              @map("encrypted_payload")
+  encryptionKeyRef  String?           @map("encryption_key_ref") @db.Text
+  createdAt         DateTime          @default(now()) @map("created_at")
+  updatedAt         DateTime          @updatedAt @map("updated_at")
+
+  agency            Agency            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  connection        MailboxConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("mailbox_token_vault")
+}
+
+model MailboxOauthState {
+  state         String   @id @db.Text
+  tenantId      String   @map("tenant_id") @db.Text
+  userId        String   @map("user_id") @db.Text
+  provider      String   @db.Text
+  redirectAfter String?  @map("redirect_after") @db.Text
+  codeVerifier  String   @map("code_verifier") @db.Text
+  expiresAt     DateTime @map("expires_at")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  agency        Agency   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, userId])
+  @@index([expiresAt])
+  @@map("mailbox_oauth_states")
+}
+
+model Document {
+  id                 String    @id @db.Text
+  tenantId           String    @map("tenant_id") @db.Text
+  uploadedById       String    @map("uploaded_by_id") @db.Text
+  fileName           String    @map("file_name") @db.Text
+  fileType           String    @map("file_type") @db.Text
+  documentName       String?   @map("document_name") @db.Text
+  type               String    @db.Text
+  visibility         String    @db.Text
+  status             String    @default("pending") @db.Text
+  storagePath        String    @map("storage_path") @db.Text
+  downloadUrl        String?   @map("download_url") @db.Text
+  lineOfBusiness     String?   @map("line_of_business") @db.Text
+  required           Boolean   @default(false)
+  templateFields     Json      @default("{}") @map("template_fields")
+  templateFieldLayout Json     @default("[]") @map("template_field_layout")
+  fillableDetection  Json      @default("{}") @map("fillable_detection")
+  customerId         String?   @map("customer_id") @db.Text
+  assetId            String?   @map("asset_id") @db.Text
+  policyId           String?   @map("policy_id") @db.Text
+  claimId            String?   @map("claim_id") @db.Text
+  carrierId          String?   @map("carrier_id") @db.Text
+  quoteRequestId     String?   @map("quote_request_id") @db.Text
+  esign              Json      @default("{}")
+  renewal            Json      @default("{}")
+  uploadedAt         DateTime  @default(now()) @map("uploaded_at")
+  updatedAt          DateTime  @updatedAt @map("updated_at")
+
+  agency             Agency    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer           CustomerProfile? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  asset              Asset?    @relation(fields: [assetId], references: [id], onDelete: SetNull)
+  policy             Policy?   @relation(fields: [policyId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([tenantId, customerId])
+  @@index([tenantId, policyId])
+  @@index([tenantId, type])
+  @@index([tenantId, visibility])
+  @@map("documents")
+}
+
+model Communication {
+  id                     String   @id @db.Text
+  tenantId               String   @map("tenant_id") @db.Text
+  customerId             String?  @map("customer_id") @db.Text
+  prospectId             String?  @map("prospect_id") @db.Text
+  carrierContactId       String?  @map("carrier_contact_id") @db.Text
+  externalRecipientName  String?  @map("external_recipient_name") @db.Text
+  externalRecipientEmail String?  @map("external_recipient_email") @db.Text
+  externalRecipientRole  String?  @map("external_recipient_role") @db.Text
+  channel                String   @db.Text
+  direction              String   @db.Text
+  subject                String?  @db.Text
+  threadId               String?  @map("thread_id") @db.Text
+  replyToId              String?  @map("reply_to_id") @db.Text
+  mailbox                Json     @default("{}")
+  attachments            Json     @default("[]")
+  body                   String   @db.Text
+  resolution             Json     @default("{}")
+  sentAt                 DateTime? @map("sent_at")
+  createdAt              DateTime @default(now()) @map("created_at")
+  updatedAt              DateTime @updatedAt @map("updated_at")
+
+  agency                 Agency   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer               CustomerProfile? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([tenantId, customerId])
+  @@index([tenantId, prospectId])
+  @@index([tenantId, threadId])
+  @@index([tenantId, createdAt])
+  @@map("communications")
+}
+
+model QuotingSession {
+  id                         String   @id @db.Text
+  tenantId                   String   @map("tenant_id") @db.Text
+  quoteRequestId             String?  @map("quote_request_id") @db.Text
+  categoryId                 String?  @map("category_id") @db.Text
+  categoryLabel              String?  @map("category_label") @db.Text
+  prospectId                 String?  @map("prospect_id") @db.Text
+  customerId                 String?  @map("customer_id") @db.Text
+  assetId                    String?  @map("asset_id") @db.Text
+  assetType                  String   @map("asset_type") @db.Text
+  estimatedValue             Decimal  @default(0) @map("estimated_value") @db.Decimal(14, 2)
+  assetDetails               Json     @default("{}") @map("asset_details")
+  state                      String?  @db.Text
+  lineOfBusiness             String?  @map("line_of_business") @db.Text
+  commercialAcordTemplates   Json     @default("[]") @map("commercial_acord_templates")
+  questionnaireQuestions     Json     @default("[]") @map("questionnaire_questions")
+  questionnaireResponses     Json     @default("{}") @map("questionnaire_responses")
+  questionnaireResponseMeta  Json     @default("{}") @map("questionnaire_response_meta")
+  carrierSubmissions         Json     @default("[]") @map("carrier_submissions")
+  createdById                String   @map("created_by_id") @db.Text
+  status                     String   @db.Text
+  publicFields               Json     @default("{}") @map("public_fields")
+  publicFieldEvidence        Json     @default("{}") @map("public_field_evidence")
+  missingFields              Json     @default("[]") @map("missing_fields")
+  questionnaireMessageId     String?  @map("questionnaire_message_id") @db.Text
+  questionnaireDraft         String?  @map("questionnaire_draft") @db.Text
+  questionnaireSentAt        DateTime? @map("questionnaire_sent_at")
+  replyReceivedAt            DateTime? @map("reply_received_at")
+  quotes                     Json     @default("[]")
+  aiSummary                  String?  @map("ai_summary") @db.Text
+  createdAt                  DateTime @default(now()) @map("created_at")
+  updatedAt                  DateTime @updatedAt @map("updated_at")
+
+  agency                     Agency   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer                   CustomerProfile? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([tenantId, customerId])
+  @@index([tenantId, status])
+  @@index([tenantId, createdAt])
+  @@map("quoting_sessions")
+}
+
+model AiNotification {
+  id                    String    @id @db.Text
+  tenantId              String    @map("tenant_id") @db.Text
+  kind                  String    @db.Text
+  title                 String    @db.Text
+  summary               String    @db.Text
+  customerId            String?   @map("customer_id") @db.Text
+  prospectId            String?   @map("prospect_id") @db.Text
+  assetId               String?   @map("asset_id") @db.Text
+  policyId              String?   @map("policy_id") @db.Text
+  quoteSessionId        String?   @map("quote_session_id") @db.Text
+  quoteRequestId        String?   @map("quote_request_id") @db.Text
+  documentId            String?   @map("document_id") @db.Text
+  messageId             String?   @map("message_id") @db.Text
+  communicationId       String?   @map("communication_id") @db.Text
+  payload               Json      @default("{}")
+  assignedToId          String?   @map("assigned_to_id") @db.Text
+  acknowledgedAt        DateTime? @map("acknowledged_at")
+  acknowledgedById      String?   @map("acknowledged_by_id") @db.Text
+  taskId                String?   @map("task_id") @db.Text
+  createdAt             DateTime  @default(now()) @map("created_at")
+  updatedAt             DateTime  @updatedAt @map("updated_at")
+
+  agency                Agency    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer              CustomerProfile? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([tenantId, assignedToId])
+  @@index([tenantId, acknowledgedAt])
+  @@map("ai_notifications")
+}
+
+model Task {
+  id                      String    @id @db.Text
+  tenantId                String    @map("tenant_id") @db.Text
+  title                   String    @db.Text
+  description             String?   @db.Text
+  quoteSessionId          String?   @map("quote_session_id") @db.Text
+  quoteRequestId          String?   @map("quote_request_id") @db.Text
+  customerId              String?   @map("customer_id") @db.Text
+  prospectId              String?   @map("prospect_id") @db.Text
+  assetId                 String?   @map("asset_id") @db.Text
+  policyId                String?   @map("policy_id") @db.Text
+  claimId                 String?   @map("claim_id") @db.Text
+  documentId              String?   @map("document_id") @db.Text
+  messageId               String?   @map("message_id") @db.Text
+  source                  String    @db.Text
+  activityKey             String?   @map("activity_key") @db.Text
+  sourceNotificationId    String?   @map("source_notification_id") @db.Text
+  topic                   String?   @db.Text
+  aiSummary               String?   @map("ai_summary") @db.Text
+  originalMessageContent  String?   @map("original_message_content") @db.Text
+  originalMessageId       String?   @map("original_message_id") @db.Text
+  aiReplyBody             String?   @map("ai_reply_body") @db.Text
+  aiReplySubject          String?   @map("ai_reply_subject") @db.Text
+  severity                String?   @db.Text
+  severityReason          String?   @map("severity_reason") @db.Text
+  status                  String    @default("open") @db.Text
+  assignedToId            String?   @map("assigned_to_id") @db.Text
+  additionalAssignedToIds Json      @default("[]") @map("additional_assigned_to_ids")
+  dueAt                   DateTime? @map("due_at")
+  snoozedUntil            DateTime? @map("snoozed_until")
+  createdById             String?   @map("created_by_id") @db.Text
+  startedAt               DateTime? @map("started_at")
+  startedById             String?   @map("started_by_id") @db.Text
+  completedAt             DateTime? @map("completed_at")
+  completedById           String?   @map("completed_by_id") @db.Text
+  resolution              Json      @default("{}")
+  routing                 Json      @default("{}")
+  priorityRank            Int?      @map("priority_rank")
+  queuePosition           Decimal?  @map("queue_position") @db.Decimal(14, 6)
+  createdAt               DateTime  @default(now()) @map("created_at")
+  updatedAt               DateTime  @updatedAt @map("updated_at")
+
+  agency                  Agency    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer                CustomerProfile? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, assignedToId])
+  @@index([tenantId, dueAt])
+  @@index([tenantId, queuePosition])
+  @@map("tasks")
+}
+
+model Claim {
+  id                  String    @id @db.Text
+  tenantId            String    @map("tenant_id") @db.Text
+  customerId          String    @map("customer_id") @db.Text
+  policyId            String?   @map("policy_id") @db.Text
+  carrierId           String?   @map("carrier_id") @db.Text
+  externalClaimNumber String?   @map("external_claim_number") @db.Text
+  lossDescription     String?   @map("loss_description") @db.Text
+  lossAmountUsd       Decimal?  @map("loss_amount_usd") @db.Decimal(14, 2)
+  status              String    @db.Text
+  openedAt            DateTime  @map("opened_at")
+  closedAt            DateTime? @map("closed_at")
+  metadata            Json      @default("{}")
+  createdAt           DateTime  @default(now()) @map("created_at")
+  updatedAt           DateTime  @updatedAt @map("updated_at")
+
+  agency              Agency    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer            CustomerProfile @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  policy              Policy?   @relation(fields: [policyId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([tenantId, customerId])
+  @@index([tenantId, policyId])
+  @@map("claims")
+}
+
+model Note {
+  id          String   @id @db.Text
+  tenantId    String   @map("tenant_id") @db.Text
+  authorId    String   @map("author_id") @db.Text
+  customerId  String?  @map("customer_id") @db.Text
+  prospectId  String?  @map("prospect_id") @db.Text
+  policyId    String?  @map("policy_id") @db.Text
+  body        String   @db.Text
+  visibility  String   @db.Text
+  attachments Json     @default("[]")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  agency      Agency   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  customer    CustomerProfile? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  policy      Policy?  @relation(fields: [policyId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([tenantId, customerId])
+  @@index([tenantId, policyId])
+  @@map("notes")
+}
+
+model Deposit {
+  id          String   @id @db.Text
+  tenantId    String   @map("tenant_id") @db.Text
+  customerId  String?  @map("customer_id") @db.Text
+  policyId    String?  @map("policy_id") @db.Text
+  amount      Decimal  @db.Decimal(14, 2)
+  status      String   @db.Text
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  agency      Agency   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, customerId])
+  @@map("deposits")
+}
+
+model Payment {
+  id          String   @id @db.Text
+  tenantId    String   @map("tenant_id") @db.Text
+  customerId  String?  @map("customer_id") @db.Text
+  policyId    String?  @map("policy_id") @db.Text
+  amount      Decimal  @db.Decimal(14, 2)
+  status      String   @db.Text
+  provider    String?  @db.Text
+  providerRef String?  @map("provider_ref") @db.Text
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  agency      Agency   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, customerId])
+  @@index([tenantId, status])
+  @@map("payments")
+}
+
+model AuditLog {
+  id          String   @id @db.Text
+  tenantId    String?  @map("tenant_id") @db.Text
+  actorId     String   @map("actor_id") @db.Text
+  action      String   @db.Text
+  entityType  String   @map("entity_type") @db.Text
+  entityId    String   @map("entity_id") @db.Text
+  metadata    Json     @default("{}")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  agency      Agency?  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([tenantId, entityType, entityId])
+  @@index([actorId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model AppStateSnapshot {
+  id        String   @id @db.Text
+  snapshot  Json
+  updatedAt DateTime @default(now()) @map("updated_at")
+
+  @@map("quotex_app_state")
+}
+
+model RateLimitCounter {
+  key       String   @id @db.Text
+  count     Int      @default(0)
+  resetAt   DateTime @map("reset_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([resetAt])
+  @@map("rate_limit_counters")
+}

@@ -1712,7 +1712,7 @@ function CarrierDownloadRunnerCard({
             tabIndex={locked ? -1 : 0}
             value={errorAlertEmails}
             onChange={(event) => setErrorAlertEmails(event.target.value)}
-            placeholder={"downloads@agency.com\nops@quotex.example"}
+            placeholder={"downloads@agency.com\nops@quotexinsurance.com"}
           />
         </div>
         <div>

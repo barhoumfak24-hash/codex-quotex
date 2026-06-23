@@ -20,6 +20,21 @@ afterEach(() => {
 });
 
 describe("marketing.composeAiCampaign", () => {
+  it("blocks AI campaign launch without an approving staff user", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+
+    expect(() =>
+      api.marketing.composeAiCampaign({
+        tenantId: agency.id,
+        name: "Anonymous launch",
+        channels: ["email"],
+        brief: "This should not launch without approval.",
+        includeAllClients: true,
+      })
+    ).toThrow(/approving staff user/i);
+  });
+
   it("records a campaign and writes per-recipient receipt messages", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
@@ -33,6 +48,7 @@ describe("marketing.composeAiCampaign", () => {
       channels: ["email"],
       brief: "Reminder that our annual portfolio review window opens next month.",
       includeAllClients: true,
+      actorId: "user_manager_pc",
     });
 
     expect(out.campaign.name).toBe("Spring portfolio review");
@@ -61,6 +77,7 @@ describe("marketing.composeAiCampaign", () => {
       brief: "Big news for the whole book.",
       includeAllClients: true,
       includeAllProspects: true,
+      actorId: "user_manager_pc",
     });
     expect(out.messageCount).toBe(clientCount + prospectCount);
   });
@@ -78,6 +95,7 @@ describe("marketing.composeAiCampaign", () => {
       brief: "Specific touch.",
       selectedCustomerIds: customer ? [customer.id, customer.id] : [],
       selectedProspectIds: prospect ? [prospect.id] : [],
+      actorId: "user_manager_pc",
     });
     const expected = (customer ? 1 : 0) + (prospect ? 1 : 0);
     expect(out.messageCount).toBe(expected);
@@ -94,6 +112,7 @@ describe("marketing.composeAiCampaign", () => {
       brief: "Pre-storm checklist for coastal homeowners.",
       includeAllClients: true,
       scheduledFor: future,
+      actorId: "user_manager_pc",
     });
     expect(out.campaign.status).toBe("scheduled");
     expect(out.campaign.scheduledFor).toBe(future);
@@ -112,6 +131,7 @@ describe("marketing.composeAiCampaign", () => {
       brief: "Weekly insurance market roundup.",
       includeAllClients: true,
       recurrence: "weekly",
+      actorId: "user_manager_pc",
     });
     expect(out.campaign.recurrence).toBe("weekly");
     expect(out.campaign.status).toBe("active");
@@ -127,6 +147,7 @@ describe("marketing.composeAiCampaign", () => {
       channels: ["email"],
       brief: "Wind mitigation re-inspection due.",
       includeAllClients: true,
+      actorId: "user_manager_pc",
       attachments: [
         {
           fileName: "Inspection-Checklist.pdf",
@@ -177,6 +198,7 @@ describe("marketing.composeAiCampaign", () => {
       includeAllClients: false,
       selectedCustomerIds: customer ? [customer.id] : [],
       appOrigin: "https://agency.example",
+      actorId: "user_manager_pc",
     });
 
     const message = api.marketing

@@ -1,4 +1,4 @@
-type BindingProvider = "ezlynx_bind" | "carrier_direct" | "manual_required" | "demo_adapter";
+type BindingProvider = "ezlynx_bind" | "carrier_direct" | "manual_required" | "configuration_only";
 
 export interface ServerCarrierBindingRequest {
   carrier: {
@@ -33,7 +33,7 @@ export interface ServerCarrierBindingRequest {
     carrierId: string;
     premium: number;
     providerTrace?: {
-      provider: "ezlynx_qas" | "carrier_direct" | "demo_adapter";
+      provider: "ezlynx_qas" | "carrier_direct" | "configuration_only";
       requestId: string;
       executionId?: string;
       providerLabel: string;
@@ -56,7 +56,7 @@ export interface ServerCarrierBindingRequest {
 export interface ServerCarrierBindingTrace {
   provider: BindingProvider;
   providerLabel: string;
-  transport: "soap" | "rest" | "manual" | "demo";
+  transport: "soap" | "rest" | "manual";
   requestId: string;
   executionId?: string;
   liveReady: boolean;
@@ -99,7 +99,7 @@ function providerFor(input: ServerCarrierBindingRequest): BindingProvider {
   if (input.quote.providerTrace?.provider === "ezlynx_qas" || input.quote.providerTrace?.provider === "carrier_direct") {
     return "manual_required";
   }
-  return "demo_adapter";
+  return "configuration_only";
 }
 
 function providerLabel(kind: BindingProvider, input: ServerCarrierBindingRequest): string {
@@ -111,14 +111,14 @@ function providerLabel(kind: BindingProvider, input: ServerCarrierBindingRequest
       ? `${input.quote.providerTrace.providerLabel} manual bind`
       : "Manual carrier bind";
   }
-  return "Demo carrier adapter";
+  return "Configuration-only carrier workflow";
 }
 
 function transportFor(kind: BindingProvider): ServerCarrierBindingTrace["transport"] {
   if (kind === "ezlynx_bind") return "soap";
   if (kind === "carrier_direct") return "rest";
   if (kind === "manual_required") return "manual";
-  return "demo";
+  return "manual";
 }
 
 function requestId(input: ServerCarrierBindingRequest) {
@@ -145,7 +145,7 @@ function readiness(input: ServerCarrierBindingRequest, kind: BindingProvider): {
   if (kind === "manual_required") {
     blockingReasons.push("carrier or rater requires manual bind / issue confirmation");
   }
-  if (kind === "demo_adapter") {
+  if (kind === "configuration_only") {
     blockingReasons.push("no carrier binding API configured");
   }
   if (kind === "carrier_direct" || kind === "ezlynx_bind") {

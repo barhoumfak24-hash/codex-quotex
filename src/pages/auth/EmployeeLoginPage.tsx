@@ -14,7 +14,7 @@ const STAFF_LOGIN_ROLES: StaffRole[] = [
 ];
 
 export function EmployeeLoginPage() {
-  const { signInDemo, signInStaff, registerStaff } = useAuth();
+  const { signInStaff, registerStaff } = useAuth();
   const { setAgencyId } = useTenant();
   const nav = useNavigate();
   const location = useLocation();
@@ -32,19 +32,6 @@ export function EmployeeLoginPage() {
   const registrationBranches = registrationAgency
     ? api.branches.listByAgency(registrationAgency.id)
     : [];
-
-  const demoQuickSignIn = (role: StaffRole) => {
-    const seeded = api.users
-      .list()
-      .find((u) => u.role === role && (!requestedAgency || u.tenantId === requestedAgency.id));
-    if (seeded) {
-      signInDemo(role, seeded.tenantId);
-      if (seeded.tenantId) setAgencyId(seeded.tenantId);
-    } else {
-      signInDemo(role, null);
-    }
-    nav(postLoginPath);
-  };
 
   function registrationError(reason: string): string {
     if (reason === "agency_not_found") return "Agency code wasn't recognized.";
@@ -281,24 +268,6 @@ export function EmployeeLoginPage() {
         </button>
       </form>
 
-      <div className="mt-5 pt-5 border-t border-ink-100 text-xs text-ink-500">
-        <div className="font-medium text-ink-700 mb-1">Demo quick-sign-in</div>
-        <div className="flex flex-wrap gap-2">
-          {STAFF_LOGIN_ROLES.map((role) => (
-            <button
-              key={role}
-              className="btn-ghost text-xs"
-              type="button"
-              onClick={() => demoQuickSignIn(role)}
-            >
-              {staffRoleLabel(role)}
-            </button>
-          ))}
-        </div>
-        <p className="mt-2 text-[11px] text-ink-400">
-          New staff can create their own account with the agency code.
-        </p>
-      </div>
     </AuthShell>
   );
 }

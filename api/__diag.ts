@@ -1,32 +1,12 @@
-// =====================================================================
-// Vercel Serverless Function — GET /api/__diag
+import { applyRateLimit } from "./_rateLimit";
+
+// GET /api/__diag
 //
-// Read-only health probe. Returns presence/absence of the env vars
-// the property-records lookup depends on, plus the Vercel deployment
-// metadata so we can verify the latest code is actually live.
+// Read-only health probe for deployment triage. It reports only whether
+// sensitive environment variables are present, never their values.
 //
-// SAFE TO EXPOSE: never echoes the env-var VALUES, only whether they
-// are set. Useful when triaging "lookup isn't working" — open
-// https://<your-domain>/api/__diag in any browser and screenshot.
-//
-// Sample healthy response:
-//   {
-//     "ok": true,
-//     "env": {
-//       "SMARTY_AUTH_ID": true,
-//       "SMARTY_AUTH_TOKEN": true
-//     },
-//     "vercel": {
-//       "region": "iad1",
-//       "deploymentId": "dpl_…",
-//       "gitCommitSha": "2c4b241…",
-//       "gitBranch": "claude/quotex-insurance-platform-dfSjs",
-//       "env": "production"
-//     },
-//     "runtime": { "node": "v20.…" },
-//     "now": "2026-05-13T…"
-//   }
-// =====================================================================
+// In production this endpoint requires DIAG_TOKEN, because deployment
+// metadata and integration presence are still useful to attackers.
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export default async function handler(req: any, res: any) {
@@ -34,6 +14,12 @@ export default async function handler(req: any, res: any) {
     res.status(405).json({ error: "method_not_allowed" });
     return;
   }
+  if (!(await applyRateLimit(req, res, "diag", { windowMs: 60_000, limit: 30 }))) return;
+  if (!canReadDiagnostics(req)) {
+    res.status(404).json({ error: "not_found" });
+    return;
+  }
+
   res.status(200).json({
     ok: true,
     env: {
@@ -53,4 +39,22 @@ export default async function handler(req: any, res: any) {
     runtime: { node: process.version },
     now: new Date().toISOString(),
   });
+}
+
+function canReadDiagnostics(req: any): boolean {
+  if (process.env.VERCEL_ENV !== "production") return true;
+  const expected = process.env.DIAG_TOKEN;
+  if (!expected) return false;
+  return bearerToken(req) === expected || queryToken(req) === expected;
+}
+
+function bearerToken(req: any): string | null {
+  const header = String(req.headers?.authorization ?? "");
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  return match?.[1]?.trim() || null;
+}
+
+function queryToken(req: any): string | null {
+  const token = req.query?.token;
+  return Array.isArray(token) ? token[0] ?? null : token ?? null;
 }

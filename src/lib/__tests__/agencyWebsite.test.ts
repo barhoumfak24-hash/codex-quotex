@@ -8,15 +8,15 @@ import {
 import { protectAgencyCode } from "../credentials";
 
 const agency: Agency = {
-  id: "agency_demo",
-  name: "Demo Private Risk",
+  id: "agency_fixture",
+  name: "Harbor Private Risk",
   logoUrl: "",
   brandColor: "#123456",
-  contactEmail: "hello@demo.example",
+  contactEmail: "hello@harbor.example",
   phone: "+1 (555) 000-1111",
   address: "1 Main St",
-  website: "https://www.demo.example/site",
-  websiteSlug: "demo-risk",
+  website: "https://www.harbor.example/site",
+  websiteSlug: "harbor-risk",
   serviceAreas: ["FL"],
   ...protectAgencyCode("DMORISK1"),
   tier: "mid",
@@ -30,29 +30,29 @@ const agency: Agency = {
 
 describe("agency website helpers", () => {
   it("normalizes hostnames consistently", () => {
-    expect(normalizeWebsiteHost("https://www.demo.example/site")).toBe("demo.example");
-    expect(normalizeWebsiteHost("demo.example")).toBe("demo.example");
+    expect(normalizeWebsiteHost("https://www.harbor.example/site")).toBe("harbor.example");
+    expect(normalizeWebsiteHost("harbor.example")).toBe("harbor.example");
   });
 
   it("resolves agencies by id, slug, or website host", () => {
     const agencies = [agency];
-    expect(resolveAgencyByKey(agencies, "agency_demo")?.id).toBe("agency_demo");
-    expect(resolveAgencyByKey(agencies, "demo-risk")?.id).toBe("agency_demo");
-    expect(resolveAgencyByKey(agencies, "www.demo.example")?.id).toBe("agency_demo");
+    expect(resolveAgencyByKey(agencies, "agency_fixture")?.id).toBe("agency_fixture");
+    expect(resolveAgencyByKey(agencies, "harbor-risk")?.id).toBe("agency_fixture");
+    expect(resolveAgencyByKey(agencies, "www.harbor.example")?.id).toBe("agency_fixture");
   });
 
   it("builds staff portal links with agency handoff query params", () => {
     const profile = buildAgencyWebsiteProfile(agency);
-    expect(profile.employeeLoginUrl).toBe("/employee/login?agency=agency_demo");
-    expect(profile.masterLoginUrl).toBe("/master/login?agency=agency_demo");
+    expect(profile.employeeLoginUrl).toBe("/employee/login?agency=agency_fixture");
+    expect(profile.masterLoginUrl).toBe("/master/login?agency=agency_fixture");
   });
 
   it("includes customer portal connection settings when present", () => {
     const profile = buildAgencyWebsiteProfile({
       ...agency,
-      customerPortalUrl: "https://demo.example/client-portal",
-      quoteStartUrl: "https://demo.example/start-quote",
-      websiteAllowedDomains: ["demo.example", "www.demo.example"],
+      customerPortalUrl: "https://harbor.example/client-portal",
+      quoteStartUrl: "https://harbor.example/start-quote",
+      websiteAllowedDomains: ["harbor.example", "www.harbor.example"],
       websitePortalModules: {
         policies: true,
         documents: true,
@@ -64,10 +64,10 @@ describe("agency website helpers", () => {
       },
     });
 
-    expect(profile.customerPortalUrl).toBe("https://demo.example/client-portal");
-    expect(profile.customerLoginUrl).toBe("https://demo.example/client-portal");
-    expect(profile.quoteStartUrl).toBe("https://demo.example/start-quote");
-    expect(profile.allowedDomains).toEqual(["demo.example"]);
+    expect(profile.customerPortalUrl).toBe("https://harbor.example/client-portal");
+    expect(profile.customerLoginUrl).toBe("https://harbor.example/client-portal");
+    expect(profile.quoteStartUrl).toBe("https://harbor.example/start-quote");
+    expect(profile.allowedDomains).toEqual(["harbor.example"]);
     expect(profile.portalModules?.messages).toBe(false);
   });
 });

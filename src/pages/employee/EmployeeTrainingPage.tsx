@@ -374,7 +374,7 @@ export function EmployeeTrainingPage() {
                       </div>
                       <div className="mt-2 flex items-center gap-2 text-sm text-ink-600">
                         <MonitorPlay className="h-4 w-4 text-gold-600" />
-                        Demo route: {activeScene?.route ?? "/employee"}
+                        Training route: {activeScene?.route ?? "/employee"}
                       </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
@@ -850,7 +850,7 @@ function SoftwareTrainingFrame({
               {!compact && <div className="mt-1 text-[11px] text-stone-500">{subtitle}</div>}
             </div>
             <span className="shrink-0 rounded-md bg-gold-100 px-2 py-1 text-[9px] font-semibold text-gold-800">
-              Demo data
+              Sample data
             </span>
           </div>
           <TrainingRouteBody route={route} compact={compact} />

@@ -1,0 +1,12 @@
+packages:
+  - .
+  - server
+
+overrides:
+  vite: 6.4.3
+
+allowBuilds:
+  '@prisma/client': true
+  '@prisma/engines': true
+  esbuild: true
+  prisma: true

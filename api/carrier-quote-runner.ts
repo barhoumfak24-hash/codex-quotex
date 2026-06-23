@@ -1,3 +1,5 @@
+import { applyRateLimit } from "./_rateLimit";
+
 // =====================================================================
 // Vercel Serverless Function — POST /api/carrier-quote-runner
 //
@@ -125,6 +127,7 @@ function validatePayload(payload: RunnerJobPayload): string[] {
 
 function sanitizedForwardPayload(payload: RunnerJobPayload) {
   return {
+    jobKind: "quote",
     jobId: payload.jobId ?? payload.requestId,
     requestId: payload.requestId,
     tenantId: payload.tenantId,
@@ -152,6 +155,7 @@ export default async function handler(req: any, res: any) {
     res.status(405).json({ error: "method_not_allowed" });
     return;
   }
+  if (!(await applyRateLimit(req, res, "carrier-quote-runner", { windowMs: 60_000, limit: 20 }))) return;
 
   const payload: RunnerJobPayload =
     typeof req.body === "string" ? safeJsonParse(req.body) : (req.body ?? {});

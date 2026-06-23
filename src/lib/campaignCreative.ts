@@ -1,6 +1,6 @@
 import type { DraftCampaignAudience, DraftedCampaign } from "./ai";
 
-type CampaignChannel = "email";
+type CampaignChannel = "email" | "sms";
 
 type CreativeIntent =
   | "storm"
@@ -84,7 +84,9 @@ export function createCampaignDraft(input: {
   const senderName = input.senderName ?? "the team";
   const signOff = input.signOff ?? "Warm regards,";
   const subject = subjectForBrief(brief);
-  const body = emailForBrief(brief, { agencyName, senderName, signOff });
+  const body = brief.channels.length === 1 && brief.channels[0] === "sms"
+    ? smsForBrief(brief, { agencyName })
+    : emailForBrief(brief, { agencyName, senderName, signOff });
 
   return {
     name: `${brief.title} Pamphlet`,
@@ -212,7 +214,11 @@ function inferAudience(text: string): DraftCampaignAudience[] {
   return audience;
 }
 
-function inferChannels(_text: string): CampaignChannel[] {
+function inferChannels(text: string): CampaignChannel[] {
+  const wantsSms = /\b(sms|text|texts|texting)\b/.test(text);
+  const wantsEmail = /\b(email|emails)\b/.test(text);
+  if (wantsSms && wantsEmail) return ["email", "sms"];
+  if (wantsSms) return ["sms"];
   return ["email"];
 }
 
@@ -391,6 +397,16 @@ function emailForBrief(
   ].join("\n");
 }
 
+function smsForBrief(
+  brief: CreativeBrief,
+  input: { agencyName: string }
+): string {
+  return [
+    `${input.agencyName}: ${brief.promise} ${brief.nextStep}`,
+    "Reply STOP to opt out.",
+  ].join(" ");
+}
+
 export function cleanClosingBlock(input: { agencyName: string; senderName: string; signOff: string }): string {
   const lines = input.signOff
     .split(/\r?\n/)
@@ -403,6 +419,15 @@ export function cleanClosingBlock(input: { agencyName: string; senderName: strin
   const nameLine = input.senderName.trim() || input.agencyName.trim();
   if (!nameLine) return base;
   if (closingLineMatches(base, nameLine) || closingLineMatches(base, input.agencyName)) return base;
+  const agencyLine = input.agencyName.trim();
+  if (
+    agencyLine &&
+    !closingLineMatches(nameLine, agencyLine) &&
+    !closingLineIncludes(nameLine, agencyLine) &&
+    !closingLineIncludes(agencyLine, nameLine)
+  ) {
+    return `${base}\n${nameLine}\n${agencyLine}`;
+  }
   return `${base}\n${nameLine}`;
 }
 
@@ -419,6 +444,12 @@ function dedupeClosingLines(lines: string[]): string[] {
 
 function closingLineMatches(a: string, b: string): boolean {
   return normalizeClosingLine(a) === normalizeClosingLine(b);
+}
+
+function closingLineIncludes(a: string, b: string): boolean {
+  const left = normalizeClosingLine(a);
+  const right = normalizeClosingLine(b);
+  return !!left && !!right && left.includes(right);
 }
 
 function normalizeClosingLine(value: string): string {

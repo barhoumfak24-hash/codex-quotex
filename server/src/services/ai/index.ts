@@ -1472,6 +1472,45 @@ Rules:
   };
 }
 
+export async function aiSortIntent(input: { query: string; context?: string }) {
+  const query = input.query.trim().slice(0, 500);
+  const system = domainSystem(
+    "Normalize a natural-language Quotex list filter into concise deterministic filter terms."
+  );
+  const user = `The Quotex UI already has deterministic filter logic. Convert the user's wording into a short filter phrase using only terms the deterministic matcher understands.
+
+Supported ideas include: active, inactive, assigned, unassigned, bound, renewals, open claims, closed claims, no policies, missing info, missing email, missing account, email opt in, sms opt in, opted out, needs follow up, needs review, new, contacted, quote, abandoned, nurturing, converted, lost, paused, pending, due soon, past due, direct bill, agency bill, premium finance, carrier autopay, mortgagee escrow, unreconciled, waiting, submitted, approved, declined, personal, commercial, mortgagee, lienholder, certificate holder, additional insured, named insured, beneficiary, high value, and money filters like "over 1m".
+
+Rules:
+- Preserve proper names, carrier names, asset names, and numbers.
+- Do not invent a filter condition the user did not ask for.
+- If the original query is already clear, return it cleaned up.
+- Return a short phrase, not an explanation.
+
+Context: ${input.context ?? "general Quotex list"}
+User filter: "${query}"`;
+  const json = await provider.completeJson({
+    system,
+    user,
+    schemaName: "sort_intent",
+    schema: objectSchema({
+      normalizedQuery: { type: "string" },
+      confidence: { type: "number" },
+    }),
+    quality: "fast",
+    maxOutputTokens: 400,
+  });
+  const record = isRecord(json) ? json : {};
+  const normalized = asString(record.normalizedQuery, query)
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 240);
+  return {
+    normalizedQuery: normalized || query,
+    confidence: clamp(asNumber(record.confidence, normalized ? 0.75 : 0.4), 0, 0.99),
+  };
+}
+
 function fallbackCarrier(
   assetType: string,
   carriers: { id: string; name: string; preferredAssetTypes: string[]; appetiteNotes?: string }[]

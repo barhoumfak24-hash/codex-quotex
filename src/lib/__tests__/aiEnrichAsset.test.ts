@@ -143,7 +143,7 @@ describe("aiEnrichAsset — coastal home", () => {
     expect(out.sources).toEqual(
       expect.arrayContaining([
         "FEMA National Flood Hazard Layer (NFHL)",
-        "AI property estimator (demo)",
+        "AI property estimator",
       ])
     );
     expect(out.notes).toMatch(/FEMA NFHL/);
@@ -201,6 +201,51 @@ describe("aiEnrichAsset — coastal home", () => {
     // records" chip — we couldn't attempt the lookup so don't pretend
     // we got a definitive "no" from the database.
     expect(out.unavailableFields).toEqual([]);
+  });
+});
+
+describe("aiPreparePublicFields - evidence gate", () => {
+  it("keeps estimate-only property facts queued for confirmation instead of treating them as complete", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation((u: string) => {
+      const url = String(u);
+      if (url === "/api/smarty-validate") {
+        return Promise.resolve({ ok: false, status: 404, json: async () => ({}) });
+      }
+      if (url.includes("geocoding.geo.census.gov")) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            result: {
+              addressMatches: [
+                {
+                  matchedAddress: "901 MCDONALD DR, NORTHVILLE, MI, 48167",
+                  coordinates: { x: -83.483, y: 42.4314 },
+                },
+              ],
+            },
+          }),
+        });
+      }
+      if (url.includes("hazards.fema.gov")) {
+        return Promise.resolve({ ok: true, json: async () => FEMA_FLOOD_ZONE_AE });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+
+    const { aiPreparePublicFields } = await import("../ai");
+    const out = await aiPreparePublicFields({
+      assetType: "coastal_home",
+      prospectName: "Alexandra Whitford",
+      address: "901 McDonald Drive, Northville, MI 48167",
+      estimatedValue: 1_500_000,
+    });
+
+    expect(out.publicFields["Year built"]).toBeTruthy();
+    expect(out.publicFieldEvidence["Year built"]?.sourceKind).toBe("model_estimate");
+    expect(out.publicFieldEvidence["Year built"]?.allowDocumentAutofill).toBe(false);
+    expect(out.missingFields).toContain("Year built");
+    expect(out.summary).toContain("kept");
+    expect(out.summary).toContain("out of document autofill");
   });
 });
 

@@ -15,6 +15,7 @@ import {
   FileCheck2,
   FileQuestion,
   FileText,
+  GripVertical,
   Loader2,
   Mail,
   Paperclip,
@@ -30,7 +31,10 @@ import {
   X,
 } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
-import { CompletedAcordDocumentPreview } from "@/components/ui/DocumentViewerModal";
+import {
+  CompletedAcordDocumentPreview,
+  DocumentViewerModal,
+} from "@/components/ui/DocumentViewerModal";
 import { DocumentTemplateFieldOverlay } from "@/components/ui/DocumentTemplateFields";
 import { Modal } from "@/components/ui/Modal";
 import { api } from "@/lib/api";
@@ -68,6 +72,7 @@ function preserveWindowScroll<T>(action: () => T): T {
   const left = window.scrollX;
   const top = window.scrollY;
   const restore = () => {
+    if (document.querySelector('[role="dialog"]')) return;
     if (anchor && typeof anchorTop === "number") {
       const delta = anchor.getBoundingClientRect().top - anchorTop;
       if (Math.abs(delta) > 1) {
@@ -83,10 +88,7 @@ function preserveWindowScroll<T>(action: () => T): T {
     }
   };
   const scheduleRestore = () => {
-    window.requestAnimationFrame(() => window.requestAnimationFrame(restore));
-    window.setTimeout(restore, 0);
-    window.setTimeout(restore, 80);
-    window.setTimeout(restore, 180);
+    window.requestAnimationFrame(restore);
   };
 
   try {
@@ -211,18 +213,6 @@ export function AiQuotingWorkspace({
     .filter((template) => selectedAcordTemplateIds.includes(template.id))
     .map((template) => template.documentName || template.fileName);
 
-  function scrollToAcordDocumentSection() {
-    window.setTimeout(() => {
-      const target =
-        document.getElementById("commercial-acord-workspace") ??
-        document.getElementById("ai-quoting-workspace");
-      target?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
-    }, 80);
-  }
-
   async function start() {
     if (
       needsPolicyLineSelection ||
@@ -252,7 +242,6 @@ export function AiQuotingWorkspace({
       });
       setWorkspaceCollapsed(false);
       onChanged?.();
-      scrollToAcordDocumentSection();
     } finally {
       setBusy(null);
     }
@@ -359,7 +348,9 @@ export function AiQuotingWorkspace({
           <button
             type="button"
             className="btn-primary text-sm"
-            onClick={start}
+            onClick={() => {
+              void preserveWindowScroll(start);
+            }}
             disabled={
               !!busy ||
               needsPolicyLineSelection ||
@@ -400,9 +391,10 @@ export function AiQuotingWorkspace({
     session.lineOfBusiness === "commercial" ||
     session.status !== "gathering_info" ||
     session.quotes.length > 0 ||
+    !!session.personalQuestionnairePreparedAt ||
     !!session.questionnaireSentAt ||
     !!session.commercialQuestionnairePreparedAt ||
-    !!session.commercialApplicationSentAt ||
+    !!commercialApplicationSentAt(session) ||
     !!session.commercialSecondRoundSentAt ||
     !!session.commercialSupplementalsCompletedAt ||
     (session.commercialCarrierSubmissions ?? []).length > 0;
@@ -743,7 +735,7 @@ function quoteStatusSteps(session: QuotingSession): StatusStep[] {
   }
 
   const submissions = session.commercialCarrierSubmissions ?? [];
-  const sentToCarriers = !!session.commercialApplicationSentAt;
+  const sentToCarriers = !!commercialApplicationSentAt(session);
   const carrierRepliesRead = submissions.some(
     (s) =>
       !!s.responseAt ||
@@ -871,6 +863,23 @@ type CommercialFlowPage = {
   title: string;
 };
 
+function commercialApplicationSentAt(session: QuotingSession): string | undefined {
+  if (session.commercialApplicationSentAt) return session.commercialApplicationSentAt;
+  const applicationSubmission = (session.commercialCarrierSubmissions ?? []).find(
+    (submission) =>
+      (submission.applicationMessageIds?.length ?? 0) > 0 ||
+      (submission.applicationDocumentIds?.length ?? 0) > 0 ||
+      submission.status === "application_sent" ||
+      submission.status === "awaiting_response" ||
+      submission.status === "accepted" ||
+      submission.status === "declined" ||
+      submission.status === "needs_client_info" ||
+      submission.status === "needs_supplemental" ||
+      submission.status === "supplemental_sent"
+  );
+  return applicationSubmission?.sentAt;
+}
+
 const COMMERCIAL_WORKFLOW_STEPS: WorkflowStepDefinition[] = [
   { number: 1, label: "Setup", icon: ClipboardList },
   { number: 2, label: "AI mapping", icon: WandSparkles },
@@ -889,6 +898,7 @@ const PERSONAL_WORKFLOW_STEPS: WorkflowStepDefinition[] = [
 
 function commercialFlowPage(session: QuotingSession): CommercialFlowPage {
   const submissions = session.commercialCarrierSubmissions ?? [];
+  const applicationSentAt = commercialApplicationSentAt(session);
   const awaitingResponse = submissions.filter(
     (s) => s.status === "awaiting_response" || s.status === "application_sent"
   );
@@ -901,7 +911,7 @@ function commercialFlowPage(session: QuotingSession): CommercialFlowPage {
       s.status === "supplemental_sent" ||
       s.status === "needs_supplemental"
   );
-  if (!session.commercialQuestionnairePreparedAt) {
+  if (!session.commercialQuestionnairePreparedAt && !applicationSentAt) {
     return {
       key: "ai_mapping",
       step: 2,
@@ -910,7 +920,7 @@ function commercialFlowPage(session: QuotingSession): CommercialFlowPage {
       title: "Map known data onto the selected ACORD document",
     };
   }
-  if (!session.commercialApplicationSentAt) {
+  if (!applicationSentAt) {
     return {
       key: "field_review",
       step: 3,
@@ -928,15 +938,6 @@ function commercialFlowPage(session: QuotingSession): CommercialFlowPage {
       title: "Applications are out to carriers",
     };
   }
-  if (session.commercialSecondRoundSentAt && !session.commercialSupplementalsCompletedAt) {
-    return {
-      key: "supplemental_round",
-      step: 5,
-      total: 6,
-      eyebrow: "Supplemental round",
-      title: "Collect only the carrier follow-up fields",
-    };
-  }
   if (session.quotes.length > 0 || session.status === "complete") {
     return {
       key: "accepted_ranking",
@@ -944,6 +945,15 @@ function commercialFlowPage(session: QuotingSession): CommercialFlowPage {
       total: 6,
       eyebrow: "Accepted ranking",
       title: "Review accepted markets and ranked quotes",
+    };
+  }
+  if (session.commercialSecondRoundSentAt && !session.commercialSupplementalsCompletedAt) {
+    return {
+      key: "supplemental_round",
+      step: 5,
+      total: 6,
+      eyebrow: "Supplemental round",
+      title: "Collect only the carrier follow-up fields",
     };
   }
   return {
@@ -976,7 +986,8 @@ function WorkflowStepIcons({
       aria-label={`Workflow progress: step ${currentStep} of ${total}`}
     >
       {visibleSteps.map((step, index) => {
-        const done = step.number < currentStep || completed.has(step.number);
+        const done =
+          step.number < currentStep || (completed.has(step.number) && step.number !== currentStep);
         const active = step.number === currentStep && !done;
         const Icon = step.icon;
         return (
@@ -1011,9 +1022,21 @@ function WorkflowStepIcons({
 }
 
 function workflowCompletedStepNumbers(session: QuotingSession): number[] {
-  const rankedQuotesReady = session.status === "complete" || session.quotes.length > 0;
-  if (!rankedQuotesReady) return [];
-  return [session.lineOfBusiness === "commercial" ? 6 : 4];
+  if (session.lineOfBusiness === "commercial") {
+    const completed = new Set<number>();
+    const applicationSentAt = commercialApplicationSentAt(session);
+    if (session.commercialQuestionnairePreparedAt || applicationSentAt || session.quotes.length > 0) {
+      completed.add(2);
+    }
+    if (applicationSentAt) {
+      completed.add(3);
+      completed.add(4);
+    }
+    if (session.commercialSupplementalsCompletedAt) completed.add(5);
+    if (commercialFlowPage(session).key === "accepted_ranking") completed.add(6);
+    return Array.from(completed);
+  }
+  return session.status === "complete" || session.quotes.length > 0 ? [4] : [];
 }
 
 function CollapsedWorkflowProgress({
@@ -1030,7 +1053,12 @@ function CollapsedWorkflowProgress({
   onExpand: () => void;
 }) {
   return (
-    <div className="flex items-center justify-between gap-3 rounded-md border border-ink-100 bg-white px-3 py-2">
+    <div
+      className="flex cursor-pointer items-center justify-between gap-3 rounded-md border border-ink-100 bg-white px-3 py-2 transition hover:border-gold-300 hover:shadow-sm"
+      onClick={onExpand}
+      title="Expand AI quoting workspace"
+      aria-label="Expand AI quoting workspace"
+    >
       <div className="min-w-0 flex-1">
         <WorkflowStepIcons
           steps={steps}
@@ -1046,7 +1074,10 @@ function CollapsedWorkflowProgress({
         <button
           type="button"
           className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-ink-200 bg-white text-ink-600 transition hover:border-gold-300 hover:text-ink-900"
-          onClick={onExpand}
+          onClick={(event) => {
+            event.stopPropagation();
+            onExpand();
+          }}
           title="Expand AI quoting workspace"
           aria-label="Expand AI quoting workspace"
         >
@@ -1250,7 +1281,7 @@ function visibleQuestionnaireQuestions(session: QuotingSession): QuotingQuestion
   if (session.commercialSecondRoundSentAt && !session.commercialSupplementalsCompletedAt) {
     return questions.filter((q) => q.round === "second_round");
   }
-  if (!session.commercialApplicationSentAt) {
+  if (!commercialApplicationSentAt(session)) {
     return questions.filter((q) => !q.carrierId && q.round !== "second_round");
   }
   return questions.filter((q) => q.round === "second_round");
@@ -1787,18 +1818,26 @@ function QuoteNextAction({
     session.lineOfBusiness === "commercial" && requiredMissing.length > 0;
   const needsCommercialQuestionnaire =
     session.lineOfBusiness === "commercial" &&
-    !session.commercialApplicationSentAt &&
+    !commercialApplicationSentAt(session) &&
     !session.commercialQuestionnairePreparedAt &&
     questions.length === 0;
+  const needsPersonalQuestionnaireReview =
+    session.lineOfBusiness !== "commercial" &&
+    session.status === "gathering_info" &&
+    questions.length > 0 &&
+    !session.personalQuestionnairePreparedAt &&
+    !session.questionnaireSentAt;
   const hasPendingCarrierResponses =
     session.lineOfBusiness === "commercial" &&
-    !!session.commercialApplicationSentAt &&
+    !!commercialApplicationSentAt(session) &&
     (session.commercialCarrierSubmissions ?? []).some(
       (submission) =>
         submission.status === "awaiting_response" ||
         submission.status === "application_sent"
     );
   const [incompleteWarningOpen, setIncompleteWarningOpen] = useState(false);
+  const [personalManualQuestionnaireOpen, setPersonalManualQuestionnaireOpen] =
+    useState(false);
   const [carrierSelectOpen, setCarrierSelectOpen] = useState(false);
   const [carrierDraftReview, setCarrierDraftReview] = useState<{
     kind: "application" | "supplemental";
@@ -1812,10 +1851,18 @@ function QuoteNextAction({
     role: editor?.role === "manager" ? "manager" : "agent",
   } as const;
   const personalRequiredMissing =
-    session.lineOfBusiness !== "commercial" && requiredMissing.length > 0;
-  const nextDisabled = !!busy || personalRequiredMissing;
+    session.lineOfBusiness !== "commercial" &&
+    !needsPersonalQuestionnaireReview &&
+    requiredMissing.length > 0;
+  const nextDisabled = !!busy;
 
-  if (session.status === "complete") return null;
+  if (
+    session.status === "complete" ||
+    (session.lineOfBusiness === "commercial" &&
+      commercialFlowPage(session).key === "accepted_ranking")
+  ) {
+    return null;
+  }
 
   function saveCurrentResponses() {
     api.quoting.saveQuestionnaireResponses(session.id, responses, actor);
@@ -1824,7 +1871,7 @@ function QuoteNextAction({
 
   function continueCommercialSubmission() {
     onCommercialMissingFieldsRevealed?.([]);
-    if (session.lineOfBusiness === "commercial" && !session.commercialApplicationSentAt) {
+    if (session.lineOfBusiness === "commercial" && !commercialApplicationSentAt(session)) {
       saveCurrentResponses();
       setCarrierSelectOpen(true);
       return;
@@ -1861,6 +1908,16 @@ function QuoteNextAction({
 
   async function next() {
     if (session.status === "complete") return;
+    if (needsPersonalQuestionnaireReview) {
+      setBusy("next");
+      try {
+        api.quoting.preparePersonalQuestionnaire(session.id);
+        onChanged?.();
+      } finally {
+        setBusy(null);
+      }
+      return;
+    }
     if (needsCommercialQuestionnaire) {
       setBusy("next");
       try {
@@ -1878,6 +1935,7 @@ function QuoteNextAction({
       return;
     }
     if (personalRequiredMissing) {
+      setPersonalManualQuestionnaireOpen(true);
       return;
     }
     continueCommercialSubmission();
@@ -1904,21 +1962,39 @@ function QuoteNextAction({
         responses={responses}
         onClose={() => setCarrierSelectOpen(false)}
         onConfirm={(selectedCarrierIds) => {
-          setCarrierDraftReview({
-            kind: "application",
-            selectedCarrierIds,
-            drafts: api.quoting.previewCommercialCarrierEmails(
-              session.id,
-              responses,
-              "application",
-              selectedCarrierIds
-            ),
+          const drafts = api.quoting.previewCommercialCarrierEmails(
+            session.id,
+            responses,
+            "application",
+            selectedCarrierIds
+          );
+          if (drafts.length > 0) {
+            setCarrierDraftReview({
+              kind: "application",
+              selectedCarrierIds,
+              drafts,
+            });
+            return;
+          }
+          preserveWindowScroll(() => {
+            setBusy("next");
+            try {
+              api.quoting.submitQuestionnaireResponses(session.id, responses, actor, {
+                selectedCommercialCarrierIds: selectedCarrierIds,
+              });
+              onChanged?.();
+              setCarrierSelectOpen(false);
+            } finally {
+              setBusy(null);
+            }
           });
         }}
       />
       <CommercialEmailDraftReviewModal
         open={!!carrierDraftReview}
         kind={carrierDraftReview?.kind ?? "application"}
+        tenantId={session.tenantId}
+        uploadedById={session.createdById}
         drafts={carrierDraftReview?.drafts ?? []}
         busy={busy === "next"}
         onClose={() => setCarrierDraftReview(null)}
@@ -1936,24 +2012,26 @@ function QuoteNextAction({
         }}
         onSubmit={() => {
           if (!carrierDraftReview) return;
-          setBusy("next");
-          try {
-            api.quoting.submitQuestionnaireResponses(session.id, responses, actor, {
-              selectedCommercialCarrierIds: carrierDraftReview.selectedCarrierIds,
-              commercialCarrierEmailDrafts: carrierDraftReview.drafts,
-            });
-            onChanged?.();
-            setCarrierSelectOpen(false);
-            setCarrierDraftReview(null);
-          } finally {
-            setBusy(null);
-          }
+          preserveWindowScroll(() => {
+            setBusy("next");
+            try {
+              api.quoting.submitQuestionnaireResponses(session.id, responses, actor, {
+                selectedCommercialCarrierIds: carrierDraftReview.selectedCarrierIds,
+                commercialCarrierEmailDrafts: carrierDraftReview.drafts,
+              });
+              onChanged?.();
+              setCarrierSelectOpen(false);
+              setCarrierDraftReview(null);
+            } finally {
+              setBusy(null);
+            }
+          });
         }}
       />
       <IncompleteCommercialWarningModal
         open={incompleteWarningOpen}
         title={
-          session.commercialApplicationSentAt
+          commercialApplicationSentAt(session)
             ? "Send incomplete supplemental?"
             : "Send incomplete application?"
         }
@@ -1964,6 +2042,15 @@ function QuoteNextAction({
           continueCommercialSubmission();
         }}
       />
+      {session.lineOfBusiness !== "commercial" && (
+        <ManualQuestionnaireModal
+          open={personalManualQuestionnaireOpen}
+          session={session}
+          userId={userId}
+          onClose={() => setPersonalManualQuestionnaireOpen(false)}
+          onChanged={onChanged}
+        />
+      )}
     </>
   );
 }
@@ -2032,6 +2119,7 @@ function ManualQuestionnaireModal({
   const missingQuestionIds = new Set(requiredMissing.map((question) => question.id));
   const isCommercialIncomplete =
     session.lineOfBusiness === "commercial" && requiredMissing.length > 0;
+  const showMissingFieldHighlights = requiredMissing.length > 0;
   const showIncompleteFieldWarnings = incompleteFieldsRevealed && isCommercialIncomplete;
   const saveDraftLabel =
     busy === "save" ? "Saving..." : savedAt && !draftDirty ? "Saved" : "Save draft";
@@ -2065,7 +2153,7 @@ function ManualQuestionnaireModal({
   }
 
   function continueCommercialSubmission() {
-    if (session.lineOfBusiness === "commercial" && !session.commercialApplicationSentAt) {
+    if (session.lineOfBusiness === "commercial" && !commercialApplicationSentAt(session)) {
       saveCurrentResponses();
       setCarrierSelectOpen(true);
       return;
@@ -2142,7 +2230,7 @@ function ManualQuestionnaireModal({
               )}
               {busy === "submit"
                 ? "Submitting..."
-                : session.lineOfBusiness === "commercial" && !session.commercialApplicationSentAt
+                : session.lineOfBusiness === "commercial" && !commercialApplicationSentAt(session)
                 ? "Review carrier send list"
                 : session.lineOfBusiness === "commercial"
                 ? "View email draft"
@@ -2193,7 +2281,7 @@ function ManualQuestionnaireModal({
               </div>
               <div className="grid gap-3">
                 {sectionQuestions.map((q) => {
-                  const isMissing = showIncompleteFieldWarnings && missingQuestionIds.has(q.id);
+                  const isMissing = showMissingFieldHighlights && missingQuestionIds.has(q.id);
                   const fieldClass = `input text-sm ${
                     isMissing ? "border-amber-400 bg-amber-50 focus:border-amber-500 focus:ring-amber-200" : ""
                   }`;
@@ -2260,21 +2348,40 @@ function ManualQuestionnaireModal({
       responses={responses}
       onClose={() => setCarrierSelectOpen(false)}
       onConfirm={(selectedCarrierIds) => {
-        setCarrierDraftReview({
-          kind: "application",
-          selectedCarrierIds,
-          drafts: api.quoting.previewCommercialCarrierEmails(
-            session.id,
-            responses,
-            "application",
-            selectedCarrierIds
-          ),
+        const drafts = api.quoting.previewCommercialCarrierEmails(
+          session.id,
+          responses,
+          "application",
+          selectedCarrierIds
+        );
+        if (drafts.length > 0) {
+          setCarrierDraftReview({
+            kind: "application",
+            selectedCarrierIds,
+            drafts,
+          });
+          return;
+        }
+        preserveWindowScroll(() => {
+          setBusy("submit");
+          try {
+            api.quoting.submitQuestionnaireResponses(session.id, responses, actor, {
+              selectedCommercialCarrierIds: selectedCarrierIds,
+            });
+            onChanged?.();
+            setCarrierSelectOpen(false);
+            onClose();
+          } finally {
+            setBusy(null);
+          }
         });
       }}
     />
     <CommercialEmailDraftReviewModal
       open={!!carrierDraftReview}
       kind={carrierDraftReview?.kind ?? "application"}
+      tenantId={session.tenantId}
+      uploadedById={session.createdById}
       drafts={carrierDraftReview?.drafts ?? []}
       busy={busy === "submit"}
       onClose={() => setCarrierDraftReview(null)}
@@ -2292,25 +2399,27 @@ function ManualQuestionnaireModal({
       }}
       onSubmit={() => {
         if (!carrierDraftReview) return;
-        setBusy("submit");
-        try {
-          api.quoting.submitQuestionnaireResponses(session.id, responses, actor, {
-            selectedCommercialCarrierIds: carrierDraftReview.selectedCarrierIds,
-            commercialCarrierEmailDrafts: carrierDraftReview.drafts,
-          });
-          onChanged?.();
-          setCarrierSelectOpen(false);
-          setCarrierDraftReview(null);
-          onClose();
-        } finally {
-          setBusy(null);
-        }
+        preserveWindowScroll(() => {
+          setBusy("submit");
+          try {
+            api.quoting.submitQuestionnaireResponses(session.id, responses, actor, {
+              selectedCommercialCarrierIds: carrierDraftReview.selectedCarrierIds,
+              commercialCarrierEmailDrafts: carrierDraftReview.drafts,
+            });
+            onChanged?.();
+            setCarrierSelectOpen(false);
+            setCarrierDraftReview(null);
+            onClose();
+          } finally {
+            setBusy(null);
+          }
+        });
       }}
     />
     <IncompleteCommercialWarningModal
       open={incompleteWarningOpen}
       title={
-        session.commercialApplicationSentAt
+        commercialApplicationSentAt(session)
           ? "Send incomplete supplemental?"
           : "Send incomplete application?"
       }
@@ -2328,6 +2437,71 @@ function ManualQuestionnaireModal({
 type CommercialEmailDraft = ReturnType<
   typeof api.quoting.previewCommercialCarrierEmails
 >[number];
+
+function emailDraftAttachmentPreviewDocument(
+  attachment: CommunicationAttachment,
+  context: {
+    tenantId: string;
+    uploadedById?: string;
+    uploadedAt: string;
+    completedKind?: "application" | "supplemental";
+  }
+): Document {
+  const linkedDocument = attachment.documentId
+    ? api.documents.get(attachment.documentId)
+    : undefined;
+  const isCompletedAcord = Boolean(attachment.sourceDocumentId && attachment.filledFields);
+  if (linkedDocument && (!isCompletedAcord || String(linkedDocument.type).startsWith("completed_acord"))) {
+    return linkedDocument;
+  }
+
+  const sourceDocument = attachment.sourceDocumentId
+    ? api.documents.get(attachment.sourceDocumentId)
+    : undefined;
+  const type = isCompletedAcord
+    ? context.completedKind === "supplemental"
+      ? "completed_acord_supplemental"
+      : "completed_acord_application"
+    : "email_attachment";
+
+  return {
+    id: attachment.documentId ?? `draft_attachment_${attachment.id}`,
+    tenantId: context.tenantId,
+    uploadedById: context.uploadedById ?? "system",
+    fileName: attachment.fileName,
+    fileType: attachment.fileType || sourceDocument?.fileType || "application/pdf",
+    documentName:
+      attachment.description ??
+      (isCompletedAcord
+        ? `Completed ${sourceDocument?.documentName ?? sourceDocument?.fileName ?? "ACORD attachment"}`
+        : "Email attachment"),
+    templateFields: {
+      ...(!isCompletedAcord
+        ? {
+            "Email attachment": attachment.fileName,
+            ...(attachment.description ? { Description: attachment.description } : {}),
+          }
+        : {}),
+      ...(typeof attachment.filledFieldCount === "number"
+        ? { "Mapped field count": String(attachment.filledFieldCount) }
+        : {}),
+      ...(attachment.filledFields ?? {}),
+    },
+    templateFieldLayout: linkedDocument?.templateFieldLayout ?? sourceDocument?.templateFieldLayout,
+    fillableDetection: linkedDocument?.fillableDetection ?? sourceDocument?.fillableDetection,
+    type,
+    visibility: "employee_only",
+    status: "approved",
+    storagePath:
+      attachment.storagePath ??
+      sourceDocument?.storagePath ??
+      `draft://email-attachments/${context.tenantId}/${attachment.id}/${attachment.fileName}`,
+    downloadUrl: attachment.dataUrl ?? linkedDocument?.downloadUrl ?? sourceDocument?.downloadUrl,
+    uploadedAt: context.uploadedAt,
+    lastChangeAction: "uploaded",
+    lastChangeAt: context.uploadedAt,
+  };
+}
 
 function IncompleteCommercialWarningModal({
   open,
@@ -2412,7 +2586,12 @@ function CommercialCarrierSelectionModal({
     () =>
       api.quoting
         .recommendCommercialCarriers(session.id, responses)
-        .filter((row) => row.underwriterContacts.some((contact) => !!contact.email)),
+        .filter(
+          (row) =>
+            !row.disabledReason &&
+            (row.automationAvailable ||
+              row.underwriterContacts.some((contact) => !!contact.email))
+        ),
     [session.id, session.updatedAt, responseKey]
   );
   const readyCarrierIds = recommendations
@@ -2435,6 +2614,7 @@ function CommercialCarrierSelectionModal({
     (sum, row) => sum + row.underwriterContacts.length,
     0
   );
+  const automationCount = selectedRecommendations.filter((row) => row.automationAvailable).length;
 
   function toggleCarrier(row: CommercialCarrierRecommendation) {
     setSelected((current) =>
@@ -2463,15 +2643,16 @@ function CommercialCarrierSelectionModal({
             Select all that apply
           </label>
           <div className="text-xs text-ink-500">
-            {selected.length} carrier{selected.length === 1 ? "" : "s"} - {underwriterCount} underwriter email
-            {underwriterCount === 1 ? "" : "s"}
+            {selected.length} carrier{selected.length === 1 ? "" : "s"} - {underwriterCount} email
+            {underwriterCount === 1 ? "" : "s"} / {automationCount} portal runner
+            {automationCount === 1 ? "" : "s"}
           </div>
         </div>
 
         <div className="max-h-[460px] space-y-2 overflow-y-auto pr-1">
           {recommendations.length === 0 ? (
             <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
-              No carrier underwriter emails on file.
+              No send-ready carriers on file.
             </div>
           ) : (
             recommendations.map((row) => {
@@ -2509,7 +2690,12 @@ function CommercialCarrierSelectionModal({
                             {row.commercialDocumentCount} doc{row.commercialDocumentCount === 1 ? "" : "s"}
                           </Badge>
                         )}
-                        <Badge tone="gold">Underwriter email ready</Badge>
+                        {row.underwriterContacts.some((contact) => !!contact.email) && (
+                          <Badge tone="gold">Underwriter email ready</Badge>
+                        )}
+                        {row.automationAvailable && (
+                          <Badge tone="info">{row.connectorLabel ?? "AI portal runner ready"}</Badge>
+                        )}
                       </div>
                       <p className="mt-1 text-xs text-ink-600">{row.aiRationale}</p>
                       <p className="mt-1 text-[11px] text-ink-500">{row.fitReason}</p>
@@ -2548,7 +2734,7 @@ function CommercialCarrierSelectionModal({
             onClick={() => onConfirm(selected)}
           >
             <Send className="h-3.5 w-3.5" />
-            View email draft
+            {underwriterCount > 0 ? "View email draft" : "Send selected carriers"}
           </button>
         </div>
       </div>
@@ -2559,6 +2745,8 @@ function CommercialCarrierSelectionModal({
 function CommercialEmailDraftReviewModal({
   open,
   kind,
+  tenantId,
+  uploadedById,
   drafts,
   busy,
   onClose,
@@ -2567,6 +2755,8 @@ function CommercialEmailDraftReviewModal({
 }: {
   open: boolean;
   kind: "application" | "supplemental";
+  tenantId: string;
+  uploadedById?: string;
   drafts: CommercialEmailDraft[];
   busy: boolean;
   onClose: () => void;
@@ -2578,13 +2768,19 @@ function CommercialEmailDraftReviewModal({
 }) {
   const [activeIndex, setActiveIndex] = useState(0);
   const [attaching, setAttaching] = useState(false);
+  const [previewDocument, setPreviewDocument] = useState<Document | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (open) setActiveIndex(0);
   }, [open, drafts.length]);
 
+  useEffect(() => {
+    if (!open) setPreviewDocument(null);
+  }, [open]);
+
   const activeDraft = drafts[activeIndex] ?? drafts[0];
+  const previewUploadedAt = useMemo(() => new Date().toISOString(), [open]);
   const title =
     kind === "application"
       ? "Review carrier application email"
@@ -2623,8 +2819,9 @@ function CommercialEmailDraftReviewModal({
   }
 
   return (
-    <Modal open={open} onClose={onClose} title={title} size="xl">
-      <div className="space-y-4">
+    <>
+      <Modal open={open} onClose={onClose} title={title} size="xl">
+        <div className="space-y-4">
         {drafts.length === 0 || !activeDraft ? (
           <div className="rounded-md border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
             No carrier underwriter email draft is available.
@@ -2711,18 +2908,34 @@ function CommercialEmailDraftReviewModal({
                           className="inline-flex max-w-full items-center gap-1 rounded-full border border-gold-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-gold-900"
                           title={attachment.description}
                         >
-                          <FileText className="h-3 w-3 shrink-0" />
-                          <span className="truncate">{attachment.fileName}</span>
-                          {typeof attachment.filledFieldCount === "number" && (
-                            <span className="shrink-0 text-[10px] text-ink-500">
-                              {attachment.filledFieldCount} mapped
-                            </span>
-                          )}
-                          {attachment.sizeBytes ? (
-                            <span className="shrink-0 text-[10px] text-ink-500">
-                              {formatAttachmentSize(attachment.sizeBytes)}
-                            </span>
-                          ) : null}
+                          <button
+                            type="button"
+                            className="inline-flex min-w-0 items-center gap-1 text-left hover:text-black"
+                            onClick={() =>
+                              setPreviewDocument(
+                                emailDraftAttachmentPreviewDocument(attachment, {
+                                  tenantId,
+                                  uploadedById,
+                                  uploadedAt: previewUploadedAt,
+                                  completedKind: kind,
+                                })
+                              )
+                            }
+                            title={`Preview ${attachment.fileName}`}
+                          >
+                            <FileText className="h-3 w-3 shrink-0" />
+                            <span className="truncate">{attachment.fileName}</span>
+                            {typeof attachment.filledFieldCount === "number" && (
+                              <span className="shrink-0 text-[10px] text-ink-500">
+                                {attachment.filledFieldCount} mapped
+                              </span>
+                            )}
+                            {attachment.sizeBytes ? (
+                              <span className="shrink-0 text-[10px] text-ink-500">
+                                {formatAttachmentSize(attachment.sizeBytes)}
+                              </span>
+                            ) : null}
+                          </button>
                           {attachment.id.startsWith("manual_") && (
                             <button
                               type="button"
@@ -2773,7 +2986,13 @@ function CommercialEmailDraftReviewModal({
           </button>
         </div>
       </div>
-    </Modal>
+      </Modal>
+      <DocumentViewerModal
+        document={previewDocument}
+        open={!!previewDocument}
+        onClose={() => setPreviewDocument(null)}
+      />
+    </>
   );
 }
 
@@ -2791,6 +3010,7 @@ function CommercialFlowPanel({
   highlightMissingQuestions?: QuotingQuestion[];
 }) {
   const submissions = session.commercialCarrierSubmissions ?? [];
+  const applicationSentAt = commercialApplicationSentAt(session);
   const accepted = submissions.filter(
     (s) => s.status === "accepted" || s.status === "supplemental_sent"
   );
@@ -2806,8 +3026,8 @@ function CommercialFlowPanel({
           <Building2 className="h-3 w-3" /> Commercial carrier automation
         </div>
         <div className="flex items-center gap-1.5 flex-wrap">
-          {session.commercialApplicationSentAt && (
-            <Badge tone="info">Applications sent {fmt.dateTime(session.commercialApplicationSentAt)}</Badge>
+          {applicationSentAt && (
+            <Badge tone="info">Applications sent {fmt.dateTime(applicationSentAt)}</Badge>
           )}
           {session.commercialSecondRoundSentAt && session.status !== "complete" && (
             <Badge tone="warn">Second round sent</Badge>
@@ -2970,7 +3190,11 @@ function personalFlowPage(session: QuotingSession): {
       title: "Run carrier ranking for the selected asset",
     };
   }
-  if (session.status === "awaiting_reply" || visibleQuestionnaireQuestions(session).length > 0) {
+  if (
+    session.status === "awaiting_reply" ||
+    !!session.questionnaireSentAt ||
+    !!session.personalQuestionnairePreparedAt
+  ) {
     return {
       key: "questionnaire",
       step: 3,
@@ -3028,9 +3252,49 @@ function PersonalFlowPanel({
 
       <SessionLineOfBusinessField session={session} />
       <PublicFields session={session} />
-      {questionnaireCard}
-      {showQuoteRanking && (
+      {page.key === "ai_mapping" && <PersonalAiMappingSummary session={session} />}
+      {page.key === "questionnaire" && questionnaireCard}
+      {page.key === "carrier_ranking" && showQuoteRanking && (
         <QuotesTable session={session} userId={userId} onChanged={onChanged} />
+      )}
+    </div>
+  );
+}
+
+function PersonalAiMappingSummary({ session }: { session: QuotingSession }) {
+  const questions = visibleQuestionnaireQuestions(session);
+  const responses = session.questionnaireResponses ?? {};
+  const mappedAnswerCount = questions.filter((question) =>
+    (responses[question.id] ?? "").trim()
+  ).length;
+  const requiredMissingCount = questions.filter(
+    (question) => question.required && !(responses[question.id] ?? "").trim()
+  ).length;
+  const optionalCount = questions.filter((question) => !question.required).length;
+
+  return (
+    <div className="rounded-md border border-ink-100 bg-white p-3">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-violet-800 font-semibold">
+            Mapping status
+          </div>
+        </div>
+        <Badge tone={requiredMissingCount > 0 ? "warn" : "success"}>
+          {requiredMissingCount > 0
+            ? `${requiredMissingCount} required left`
+            : "Ready for questionnaire"}
+        </Badge>
+      </div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-3">
+        <Metric label="Mapped answers" value={mappedAnswerCount} />
+        <Metric label="Questionnaire fields" value={questions.length} />
+        <Metric label="Optional fields" value={optionalCount} />
+      </div>
+      {session.aiSummary && (
+        <div className="mt-3 rounded-md border border-ink-100 bg-ink-50/60 px-3 py-2 text-xs text-ink-700">
+          {session.aiSummary}
+        </div>
       )}
     </div>
   );
@@ -3779,6 +4043,9 @@ function QuotesTable({
 }) {
   const [quickView, setQuickView] = useState<CarrierQuote | null>(null);
   const [downloadSelectionMode, setDownloadSelectionMode] = useState(false);
+  const [sendSelectionMode, setSendSelectionMode] = useState(false);
+  const [compareSelectionMode, setCompareSelectionMode] = useState(false);
+  const [compareOpen, setCompareOpen] = useState(false);
   const [selectedQuoteIds, setSelectedQuoteIds] = useState<Set<string>>(() => new Set());
   const [sendDraftOpen, setSendDraftOpen] = useState(false);
   const [sendDraft, setSendDraft] = useState<QuoteRecommendationDraft | null>(null);
@@ -3804,6 +4071,7 @@ function QuotesTable({
   }
   const selectedQuotes = session.quotes.filter((quote) => selectedQuoteIds.has(quote.carrierId));
   const allSelected = selectedQuotes.length === session.quotes.length;
+  const selectionMode = downloadSelectionMode || sendSelectionMode || compareSelectionMode;
   const contact = session.prospectId
     ? api.prospects.get(session.prospectId)
     : session.customerId
@@ -3841,6 +4109,8 @@ function QuotesTable({
 
   function handleQuoteListDownload() {
     if (!downloadSelectionMode) {
+      setCompareSelectionMode(false);
+      setSendSelectionMode(false);
       setDownloadSelectionMode(true);
       return;
     }
@@ -3853,7 +4123,31 @@ function QuotesTable({
 
   function cancelQuoteListDownload() {
     setDownloadSelectionMode(false);
+    setSendSelectionMode(false);
+    setCompareSelectionMode(false);
     setSelectedQuoteIds(new Set());
+  }
+
+  function handleQuoteCompare() {
+    if (!compareSelectionMode) {
+      setDownloadSelectionMode(false);
+      setSendSelectionMode(false);
+      setCompareSelectionMode(true);
+      return;
+    }
+    if (selectedQuotes.length >= 2) {
+      setCompareOpen(true);
+    }
+  }
+
+  function handleQuoteSendSelection() {
+    if (!sendSelectionMode) {
+      setDownloadSelectionMode(false);
+      setCompareSelectionMode(false);
+      setSendSelectionMode(true);
+      return;
+    }
+    openSelectedQuotesDraft();
   }
 
   function buildSelectedQuotesDraft(quotes: CarrierQuote[]): QuoteRecommendationDraft | null {
@@ -3920,6 +4214,8 @@ function QuotesTable({
       setSentSelectedAt(new Date().toISOString());
       setSendDraftOpen(false);
       setDownloadSelectionMode(false);
+      setSendSelectionMode(false);
+      setCompareSelectionMode(false);
       setSelectedQuoteIds(new Set());
     } finally {
       setSendBusy(false);
@@ -3936,55 +4232,81 @@ function QuotesTable({
             : "AI-ranked carrier quotes"}
         </div>
         <div className="flex items-center justify-end gap-2 flex-wrap">
-          {downloadSelectionMode && (
+          {selectionMode && (
             <label className="inline-flex items-center gap-1.5 rounded-md border border-ink-200 bg-white px-2.5 py-1.5 text-xs font-medium text-ink-700">
               <input
                 type="checkbox"
                 className="h-3.5 w-3.5 accent-gold-700"
                 checked={allSelected}
                 onChange={(event) => toggleAllQuotes(event.target.checked)}
-                aria-label="Select all quotes for PDF"
+                aria-label="Select all quotes"
               />
               Select all
             </label>
           )}
-          {downloadSelectionMode && (
+          {selectionMode && (
             <button
               type="button"
               className="btn-outline text-xs"
               onClick={cancelQuoteListDownload}
-              title="Cancel quote PDF selection"
+              title="Cancel quote selection"
             >
               <X className="h-3.5 w-3.5" />
               Cancel
             </button>
           )}
-          {downloadSelectionMode && contact && (
+          {contact && (sendSelectionMode || !selectionMode) && (
             <button
               type="button"
               className="btn-primary text-xs"
-              disabled={selectedQuotes.length === 0 || sendBusy}
-              onClick={openSelectedQuotesDraft}
-              title="Review and send selected quote PDF to the client"
+              disabled={sendSelectionMode && (selectedQuotes.length === 0 || sendBusy)}
+              onClick={handleQuoteSendSelection}
+              title={
+                sendSelectionMode
+                  ? "Review the selected quote PDF before sending it to the client"
+                  : "Select quote PDFs to review and send to the client"
+              }
             >
               {sendBusy ? (
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
               ) : (
                 <Send className="h-3.5 w-3.5" />
               )}
-              Send{selectedQuotes.length ? ` (${selectedQuotes.length})` : ""}
+              View send{sendSelectionMode && selectedQuotes.length ? ` (${selectedQuotes.length})` : ""}
             </button>
           )}
-          <button
-            type="button"
-            className="btn-outline text-xs"
-            disabled={downloadSelectionMode && selectedQuotes.length === 0}
-            onClick={handleQuoteListDownload}
-            title={downloadSelectionMode ? "Download selected quote PDF" : "Select quotes to download"}
-          >
-            <FileText className="h-3.5 w-3.5" />
-            Download{downloadSelectionMode && selectedQuotes.length ? ` (${selectedQuotes.length})` : ""}
-          </button>
+          {(!selectionMode || compareSelectionMode) && (
+            <button
+              type="button"
+              className="btn-outline text-xs"
+              disabled={compareSelectionMode && selectedQuotes.length < 2}
+              onClick={handleQuoteCompare}
+              title={
+                compareSelectionMode
+                  ? "Compare at least two selected quote options"
+                  : "Select quote options to compare"
+              }
+            >
+              <ClipboardList className="h-3.5 w-3.5" />
+              Compare policies{compareSelectionMode && selectedQuotes.length ? ` (${selectedQuotes.length})` : ""}
+            </button>
+          )}
+          {(!selectionMode || downloadSelectionMode) && (
+            <button
+              type="button"
+              className="btn-outline text-xs"
+              disabled={downloadSelectionMode && selectedQuotes.length === 0}
+              onClick={handleQuoteListDownload}
+              title={
+                downloadSelectionMode
+                  ? "Download selected quote PDF to this computer"
+                  : "Select quote PDFs to download to this computer"
+              }
+            >
+              <FileText className="h-3.5 w-3.5" />
+              Download{downloadSelectionMode && selectedQuotes.length ? ` (${selectedQuotes.length})` : ""}
+            </button>
+          )}
         </div>
       </div>
       {session.aiSummary && (
@@ -4005,13 +4327,13 @@ function QuotesTable({
               className="rounded-md border border-ink-100 bg-white p-3 flex items-center justify-between gap-3 flex-wrap"
             >
               <div className="min-w-0 flex items-center gap-2">
-                {downloadSelectionMode && (
+                {selectionMode && (
                   <input
                     type="checkbox"
                     className="h-4 w-4 shrink-0 accent-gold-700"
                     checked={selectedQuoteIds.has(q.carrierId)}
                     onChange={(event) => toggleQuoteSelection(q.carrierId, event.target.checked)}
-                    aria-label={`Select ${carrier?.name ?? "carrier quote"} for PDF`}
+                    aria-label={`Select ${carrier?.name ?? "carrier quote"}`}
                   />
                 )}
                 <span
@@ -4057,9 +4379,17 @@ function QuotesTable({
         onChanged={onChanged}
         onClose={() => setQuickView(null)}
       />
+      <QuoteCompareModal
+        open={compareOpen}
+        session={session}
+        quotes={selectedQuotes}
+        onClose={() => setCompareOpen(false)}
+      />
       <QuoteRecommendationDraftReviewModal
         open={sendDraftOpen}
         toLabel={selectedQuotesRecipientLabel}
+        tenantId={session.tenantId}
+        uploadedById={session.createdById}
         draft={sendDraft}
         signatureBlock={signatureBlock}
         busy={sendBusy}
@@ -4068,6 +4398,366 @@ function QuotesTable({
         onSend={sendSelectedQuotesDraft}
       />
     </div>
+  );
+}
+
+type CompareDropEdge = "before" | "after";
+
+function QuoteCompareModal({
+  open,
+  session,
+  quotes,
+  onClose,
+}: {
+  open: boolean;
+  session: QuotingSession;
+  quotes: CarrierQuote[];
+  onClose: () => void;
+}) {
+  const quoteRows = useMemo(
+    () =>
+      quotes
+        .map((quote) => ({
+          quote,
+          carrier: api.carriers.get(quote.carrierId),
+          rank: session.quotes.findIndex((row) => row.carrierId === quote.carrierId) + 1,
+          lineItems: quoteLineItemsForSession(session, quote),
+        }))
+        .sort((a, b) => a.rank - b.rank),
+    [quotes, session]
+  );
+  const defaultOrderIds = useMemo(
+    () => quoteRows.map(({ quote }) => quote.carrierId),
+    [quoteRows]
+  );
+  const defaultOrderKey = defaultOrderIds.join("|");
+  const [orderedQuoteIds, setOrderedQuoteIds] = useState<string[]>([]);
+  const [draggingCarrierId, setDraggingCarrierId] = useState<string | null>(null);
+  const [compareDropTarget, setCompareDropTarget] = useState<{
+    carrierId: string;
+    edge: CompareDropEdge;
+  } | null>(null);
+  const compareTableRef = useRef<HTMLDivElement | null>(null);
+  const activeOrderIds = orderedQuoteIds.length > 0 ? orderedQuoteIds : defaultOrderIds;
+  const sortedQuotes = activeOrderIds
+    .map((carrierId) => quoteRows.find(({ quote }) => quote.carrierId === carrierId))
+    .filter(Boolean) as typeof quoteRows;
+  const bestPremium =
+    sortedQuotes.length > 0 ? Math.min(...sortedQuotes.map(({ quote }) => quote.premium)) : 0;
+  const bestScore =
+    sortedQuotes.length > 0 ? Math.max(...sortedQuotes.map(({ quote }) => quote.score)) : 0;
+  const coverageLabels = Array.from(
+    new Set(sortedQuotes.flatMap(({ lineItems }) => lineItems.map((item) => item.label)))
+  );
+
+  useEffect(() => {
+    if (!open) return;
+    setOrderedQuoteIds(defaultOrderIds);
+    setDraggingCarrierId(null);
+    setCompareDropTarget(null);
+  }, [open, defaultOrderKey]);
+
+  function removeComparedQuote(carrierId: string) {
+    setOrderedQuoteIds((current) => {
+      const base = current.length > 0 ? current : defaultOrderIds;
+      return base.filter((id) => id !== carrierId);
+    });
+  }
+
+  function moveComparedQuote(
+    dragCarrierId: string,
+    targetCarrierId: string,
+    edge: CompareDropEdge = "before"
+  ) {
+    if (dragCarrierId === targetCarrierId) return;
+    setOrderedQuoteIds((current) => {
+      const base = current.length > 0 ? current : defaultOrderIds;
+      if (!base.includes(dragCarrierId) || !base.includes(targetCarrierId)) return base;
+      const next = base.filter((id) => id !== dragCarrierId);
+      const targetIndex = next.indexOf(targetCarrierId);
+      const insertAt = edge === "after" ? targetIndex + 1 : targetIndex;
+      next.splice(insertAt, 0, dragCarrierId);
+      return next;
+    });
+  }
+
+  function compareDropTargetFor(event: React.DragEvent<HTMLElement>) {
+    const root = compareTableRef.current;
+    if (!root || !draggingCarrierId) return null;
+    const headers = Array.from(
+      root.querySelectorAll<HTMLElement>("[data-compare-carrier-id]")
+    ).filter((header) => header.dataset.compareCarrierId !== draggingCarrierId);
+    if (headers.length === 0) return null;
+
+    let target: { carrierId: string; edge: CompareDropEdge; distance: number } | null = null;
+    for (const header of headers) {
+      const carrierId = header.dataset.compareCarrierId;
+      if (!carrierId) continue;
+      const rect = header.getBoundingClientRect();
+      const midpoint = rect.left + rect.width / 2;
+      const edge: CompareDropEdge = event.clientX < midpoint ? "before" : "after";
+      const distance = Math.abs(event.clientX - midpoint);
+      if (!target || distance < target.distance) {
+        target = { carrierId, edge, distance };
+      }
+    }
+    return target ? { carrierId: target.carrierId, edge: target.edge } : null;
+  }
+
+  function handleCompareDragOver(event: React.DragEvent<HTMLDivElement>) {
+    if (!draggingCarrierId) return;
+    const target = compareDropTargetFor(event);
+    if (!target) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setCompareDropTarget(target);
+  }
+
+  function handleCompareDrop(event: React.DragEvent<HTMLDivElement>) {
+    if (!draggingCarrierId) return;
+    event.preventDefault();
+    const target = compareDropTarget ?? compareDropTargetFor(event);
+    if (target) {
+      moveComparedQuote(draggingCarrierId, target.carrierId, target.edge);
+    }
+    setCompareDropTarget(null);
+    setDraggingCarrierId(null);
+  }
+
+  return (
+    <Modal open={open} onClose={onClose} title="Compare policies" size="xl" closeIcon="back">
+      {sortedQuotes.length < 2 ? (
+        <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-950">
+          Select at least two quote options to compare.
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <div className="grid gap-3 md:grid-cols-3">
+            <DetailGroup title="Lowest premium">
+              <div className="text-2xl font-semibold tabular-nums text-ink-900">
+                {fmt.money(bestPremium)}
+              </div>
+              <p className="mt-1 text-xs text-ink-500">
+                {sortedQuotes.find(({ quote }) => quote.premium === bestPremium)?.carrier?.name ??
+                  "Selected carrier"}
+              </p>
+            </DetailGroup>
+            <DetailGroup title="Strongest match">
+              <div className="text-2xl font-semibold tabular-nums text-ink-900">
+                {quoteMatchPercent(bestScore)}%
+              </div>
+              <p className="mt-1 text-xs text-ink-500">
+                {sortedQuotes.find(({ quote }) => quote.score === bestScore)?.carrier?.name ??
+                  "Selected carrier"}
+              </p>
+            </DetailGroup>
+            <DetailGroup title="Options selected">
+              <div className="text-2xl font-semibold tabular-nums text-ink-900">
+                {sortedQuotes.length}
+              </div>
+              <p className="mt-1 text-xs text-ink-500">
+                Current comparison order.
+              </p>
+            </DetailGroup>
+          </div>
+
+          <div
+            ref={compareTableRef}
+            className="max-w-full overflow-x-auto rounded-md border border-ink-100 bg-white"
+            onDragOver={handleCompareDragOver}
+            onDrop={handleCompareDrop}
+            onDragLeave={(event) => {
+              const next = event.relatedTarget;
+              if (next instanceof Node && event.currentTarget.contains(next)) return;
+              if (!next) return;
+              setCompareDropTarget(null);
+            }}
+          >
+            <table className="min-w-[900px] w-full border-collapse text-sm">
+              <thead>
+                <tr className="border-b border-ink-100 bg-ink-50/80 text-left">
+                  <th className="sticky left-0 z-10 w-48 bg-ink-50/95 px-3 py-2 text-xs font-semibold uppercase tracking-wider text-ink-500">
+                    Category
+                  </th>
+                  {sortedQuotes.map(({ quote, carrier, rank }) => (
+                    <th
+                      key={quote.carrierId}
+                      data-compare-carrier-id={quote.carrierId}
+                      className={`min-w-56 px-3 py-2 align-top transition ${
+                        compareDropTarget?.carrierId === quote.carrierId
+                          ? "bg-gold-50 ring-2 ring-inset ring-gold-300"
+                          : draggingCarrierId && draggingCarrierId !== quote.carrierId
+                          ? "bg-gold-50/50"
+                          : ""
+                      }`}
+                    >
+                      <div className="space-y-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <button
+                            type="button"
+                            draggable
+                            className="inline-flex h-9 shrink-0 cursor-grab items-center gap-1.5 rounded-md border border-gold-200 bg-gold-50 px-2.5 text-gold-900 active:cursor-grabbing"
+                            onDragStart={(event) => {
+                              setDraggingCarrierId(quote.carrierId);
+                              setCompareDropTarget(null);
+                              event.dataTransfer.effectAllowed = "move";
+                              event.dataTransfer.setData("text/plain", quote.carrierId);
+                            }}
+                            onDragEnd={() => {
+                              setCompareDropTarget(null);
+                              setDraggingCarrierId(null);
+                            }}
+                            title={`Press and hold to move ${carrier?.name ?? "this carrier"}`}
+                            aria-label={`Move ${carrier?.name ?? "carrier"} in comparison`}
+                          >
+                            <GripVertical className="h-3.5 w-3.5" />
+                            <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-gold-100 text-[11px] font-bold text-gold-800">
+                              {rank}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-ink-200 bg-white text-ink-500 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-700"
+                            onClick={() => removeComparedQuote(quote.carrierId)}
+                            title={`Remove ${carrier?.name ?? "carrier"} from comparison`}
+                            aria-label={`Remove ${carrier?.name ?? "carrier"} from comparison`}
+                          >
+                            <X className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                        <div className="min-w-0">
+                          <div className="font-semibold text-ink-900">
+                            {carrier?.name ?? "Unknown carrier"}
+                          </div>
+                          <div className="mt-1">
+                            <QuoteMatchBadge score={quote.score} />
+                          </div>
+                        </div>
+                      </div>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-ink-100">
+                <CompareRow
+                  label="Annual premium"
+                  values={sortedQuotes.map(({ quote }) => ({
+                    key: quote.carrierId,
+                    value: (
+                      <span className="text-lg font-semibold tabular-nums text-ink-900">
+                        {fmt.money(quote.premium)}
+                      </span>
+                    ),
+                    best: quote.premium === bestPremium,
+                  }))}
+                />
+                <CompareRow
+                  label="Match"
+                  values={sortedQuotes.map(({ quote }) => ({
+                    key: quote.carrierId,
+                    value: `${quoteMatchPercent(quote.score)}% match`,
+                    best: quote.score === bestScore,
+                  }))}
+                />
+                <CompareRow
+                  label="Confidence"
+                  values={sortedQuotes.map(({ quote }) => ({
+                    key: quote.carrierId,
+                    value: `${Math.round(quote.confidence * 100)}%`,
+                  }))}
+                />
+                <CompareRow
+                  label="Carrier runner"
+                  values={sortedQuotes.map(({ quote }) => ({
+                    key: quote.carrierId,
+                    value: quote.providerTrace?.providerLabel ?? "AI carrier portal runner",
+                  }))}
+                />
+                <CompareRow
+                  label="Quote reference"
+                  values={sortedQuotes.map(({ quote }) => ({
+                    key: quote.carrierId,
+                    value:
+                      quote.providerTrace?.runnerTrace?.extractedQuote?.quoteNumber ??
+                      quote.providerTrace?.requestId ??
+                      "Pending",
+                  }))}
+                />
+                <CompareRow
+                  label="Why it matched"
+                  values={sortedQuotes.map(({ quote }) => ({
+                    key: quote.carrierId,
+                    value: quote.fitReason,
+                  }))}
+                />
+                {coverageLabels.map((label) => (
+                  <CompareRow
+                    key={label}
+                    label={label}
+                    values={sortedQuotes.map(({ quote, lineItems }) => {
+                      const item = lineItems.find((row) => row.label === label);
+                      return {
+                        key: quote.carrierId,
+                        value: item ? (
+                          <div>
+                            <div className="font-medium tabular-nums text-ink-900">
+                              {fmt.money(item.amount)}
+                            </div>
+                            <div className="mt-0.5 text-[11px] leading-snug text-ink-500">
+                              {item.detail}
+                            </div>
+                          </div>
+                        ) : (
+                          "Not included"
+                        ),
+                      };
+                    })}
+                  />
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex justify-end border-t border-ink-100 pt-3">
+            <button type="button" className="btn-outline text-sm" onClick={onClose}>
+              <X className="h-3.5 w-3.5" />
+              Close
+            </button>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function CompareRow({
+  label,
+  values,
+}: {
+  label: string;
+  values: Array<{ key: string; value: React.ReactNode; best?: boolean }>;
+}) {
+  return (
+    <tr>
+      <th className="sticky left-0 z-10 bg-white px-3 py-2 text-left text-xs font-semibold uppercase tracking-wider text-ink-500">
+        {label}
+      </th>
+      {values.map((item) => (
+        <td
+          key={item.key}
+          className={`px-3 py-2 align-top text-sm text-ink-700 ${
+            item.best ? "bg-emerald-50 text-emerald-950" : ""
+          }`}
+        >
+          <div className="flex items-start gap-2">
+            {item.best && (
+              <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-700" />
+            )}
+            <div className="min-w-0">{item.value}</div>
+          </div>
+        </td>
+      ))}
+    </tr>
   );
 }
 
@@ -4647,6 +5337,7 @@ function SendQuoteToContactButton({
         `Hi ${firstName},`,
         ``,
         `Based on the information we have on file, I'd recommend prioritizing ${carrierName}.`,
+        `I attached the quote PDF so you can review the premium, match score, and coverage breakdown in one place.`,
         ``,
         `Quote snapshot:`,
         `  Carrier: ${carrierName}`,
@@ -4661,7 +5352,7 @@ function SendQuoteToContactButton({
         ``,
         `Let me know if you'd like to move forward or want me to compare against other options on our panel - happy to walk through any of it on a quick call.`,
       ].join("\n"),
-      attachments: [],
+      attachments: [quotePacketAttachment(session, [quote])],
     };
   }
 
@@ -4714,11 +5405,13 @@ function SendQuoteToContactButton({
         ) : (
           <Send className="h-3.5 w-3.5" />
         )}
-        {busy ? "Sending..." : "View email draft"}
+        {busy ? "Sending..." : "View send"}
       </button>
       <QuoteRecommendationDraftReviewModal
         open={draftOpen}
         toLabel={toLabel}
+        tenantId={session.tenantId}
+        uploadedById={session.createdById}
         draft={draft}
         signatureBlock={signatureBlock}
         busy={busy}
@@ -4733,6 +5426,8 @@ function SendQuoteToContactButton({
 function QuoteRecommendationDraftReviewModal({
   open,
   toLabel,
+  tenantId,
+  uploadedById,
   draft,
   signatureBlock,
   busy,
@@ -4742,6 +5437,8 @@ function QuoteRecommendationDraftReviewModal({
 }: {
   open: boolean;
   toLabel: string;
+  tenantId: string;
+  uploadedById?: string;
   draft: QuoteRecommendationDraft | null;
   signatureBlock: EmailSignatureBlock | null;
   busy: boolean;
@@ -4750,7 +5447,13 @@ function QuoteRecommendationDraftReviewModal({
   onSend: () => void;
 }) {
   const [attaching, setAttaching] = useState(false);
+  const [previewDocument, setPreviewDocument] = useState<Document | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const previewUploadedAt = useMemo(() => new Date().toISOString(), [open]);
+
+  useEffect(() => {
+    if (!open) setPreviewDocument(null);
+  }, [open]);
 
   async function handleFiles(files: FileList | null) {
     const picked = Array.from(files ?? []);
@@ -4777,6 +5480,7 @@ function QuoteRecommendationDraftReviewModal({
   }
 
   return (
+    <>
     <Modal open={open} onClose={onClose} title="Review client quote email" size="xl">
       <div className="space-y-4">
         {!draft ? (
@@ -4836,13 +5540,28 @@ function QuoteRecommendationDraftReviewModal({
                         className="inline-flex max-w-full items-center gap-1 rounded-full border border-gold-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-gold-900"
                         title={attachment.description}
                       >
-                        <FileText className="h-3 w-3 shrink-0" />
-                        <span className="truncate">{attachment.fileName}</span>
-                        {attachment.sizeBytes ? (
-                          <span className="shrink-0 text-[10px] text-ink-500">
-                            {formatAttachmentSize(attachment.sizeBytes)}
-                          </span>
-                        ) : null}
+                        <button
+                          type="button"
+                          className="inline-flex min-w-0 items-center gap-1 text-left hover:text-black"
+                          onClick={() =>
+                            setPreviewDocument(
+                              emailDraftAttachmentPreviewDocument(attachment, {
+                                tenantId,
+                                uploadedById,
+                                uploadedAt: previewUploadedAt,
+                              })
+                            )
+                          }
+                          title={`Preview ${attachment.fileName}`}
+                        >
+                          <FileText className="h-3 w-3 shrink-0" />
+                          <span className="truncate">{attachment.fileName}</span>
+                          {attachment.sizeBytes ? (
+                            <span className="shrink-0 text-[10px] text-ink-500">
+                              {formatAttachmentSize(attachment.sizeBytes)}
+                            </span>
+                          ) : null}
+                        </button>
                         <button
                           type="button"
                           className="shrink-0 text-ink-400 hover:text-rose-600"
@@ -4890,7 +5609,13 @@ function QuoteRecommendationDraftReviewModal({
           </button>
         </div>
       </div>
-    </Modal>
+      </Modal>
+      <DocumentViewerModal
+        document={previewDocument}
+        open={!!previewDocument}
+        onClose={() => setPreviewDocument(null)}
+      />
+    </>
   );
 }
 

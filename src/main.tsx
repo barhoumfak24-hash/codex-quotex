@@ -4,9 +4,12 @@ import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import { AuthProvider } from "./lib/auth";
 import { TenantProvider } from "./lib/tenant";
-import { DemoProvider } from "./lib/demo";
+import { IntegrationNoticeProvider } from "./lib/integrationNotice";
 import { printBootDiagnostic } from "./lib/diag";
+import { initClientErrorTracking } from "./lib/errorTracking";
 import "./index.css";
+
+initClientErrorTracking();
 
 // Visible in every deployed-app DevTools console — see src/lib/diag.ts.
 printBootDiagnostic();
@@ -14,13 +17,13 @@ printBootDiagnostic();
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <BrowserRouter>
-      <DemoProvider>
+      <IntegrationNoticeProvider>
         <AuthProvider>
           <TenantProvider>
             <App />
           </TenantProvider>
         </AuthProvider>
-      </DemoProvider>
+      </IntegrationNoticeProvider>
     </BrowserRouter>
   </React.StrictMode>
 );

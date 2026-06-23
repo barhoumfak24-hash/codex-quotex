@@ -290,6 +290,7 @@ export function DraftCampaignCard({
       const next = await draftMarketingStudioCampaign({
         prompt: cleanPrompt,
         agencyName: agency?.name,
+        agencyAddress: agency?.address,
         senderName: marketingConfig.senderName,
         signOff: marketingConfig.signOff,
       });

@@ -1,7 +1,12 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { aiDraftPamphlet } from "../ai";
-import { buildHeroImagePrompt, heroImageUrl, nextHeroImageSeed } from "../pamphletImage";
+import {
+  buildHeroImagePrompt,
+  heroImageUrl,
+  nextHeroImageSeed,
+  setImageProvider,
+} from "../pamphletImage";
 
 // =====================================================================
 // AI-generated pamphlet imagery through the server image gateway.
@@ -61,7 +66,17 @@ describe("buildHeroImagePrompt", () => {
 });
 
 describe("heroImageUrl", () => {
-  it("emits a deterministic local image URL in frontend-only demo mode", () => {
+  beforeEach(() => {
+    vi.stubEnv("VITE_AI_MODE", "");
+    setImageProvider("local");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    setImageProvider("openai");
+  });
+
+  it("emits a deterministic local image URL when local image generation is selected", () => {
     const p = aiDraftPamphlet({
       prompt: "Storm season is here — review coastal coverage.",
       agencyName: "Palm Coast",

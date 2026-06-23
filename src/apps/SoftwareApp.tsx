@@ -21,6 +21,8 @@ function PortalLoading() {
 const EmployeeLoginPage = lazyPage(() => import("@/pages/auth/EmployeeLoginPage"), "EmployeeLoginPage");
 const MasterLoginPage = lazyPage(() => import("@/pages/auth/MasterLoginPage"), "MasterLoginPage");
 const NotFoundPage = lazyPage(() => import("@/pages/public/NotFoundPage"), "NotFoundPage");
+const PrivacyPage = lazyPage(() => import("@/pages/public/LegalPages"), "PrivacyPage");
+const TermsPage = lazyPage(() => import("@/pages/public/LegalPages"), "TermsPage");
 const SoftwareEntryPage = lazyPage(() => import("@/pages/software/SoftwareEntryPage"), "SoftwareEntryPage");
 
 const AgencySettingsPage = lazyPage(() => import("@/pages/employee/AgencySettingsPage"), "AgencySettingsPage");
@@ -75,12 +77,14 @@ const DataToolsPage = lazyPage(() => import("@/pages/master/DataToolsPage"), "Da
 const ESignedDocumentsPage = lazyPage(() => import("@/pages/master/ESignedDocumentsPage"), "ESignedDocumentsPage");
 const MasterDashboard = lazyPage(() => import("@/pages/master/MasterDashboard"), "MasterDashboard");
 const MasterActivitiesPage = lazyPage(() => import("@/pages/master/MasterActivitiesPage"), "MasterActivitiesPage");
+const MasterDemosPage = lazyPage(() => import("@/pages/master/MasterDemosPage"), "MasterDemosPage");
 const MasterPlanBuilderPage = lazyPage(() => import("@/pages/master/MasterPlanBuilderPage"), "MasterPlanBuilderPage");
 const MasterRenewalsPage = lazyPage(() => import("@/pages/master/MasterRenewalsPage"), "MasterRenewalsPage");
 const MasterUsersPage = lazyPage(() => import("@/pages/master/MasterUsersPage"), "MasterUsersPage");
 const PlatformSettingsPage = lazyPage(() => import("@/pages/master/PlatformSettingsPage"), "PlatformSettingsPage");
 const TrainingVideosPage = lazyPage(() => import("@/pages/master/TrainingVideosPage"), "TrainingVideosPage");
 const UsageAnalyticsPage = lazyPage(() => import("@/pages/master/UsageAnalyticsPage"), "UsageAnalyticsPage");
+const AgencyAppDemoPage = lazyPage(() => import("@/pages/public/AgencyAppDemoPage"), "AgencyAppDemoPage");
 const CheckoutRemoteSignPage = lazyPage(
   () => import("@/pages/transactions/TransactionSitePage"),
   "CheckoutRemoteSignPage"
@@ -96,7 +100,10 @@ export function SoftwareApp() {
         <Route path="/signup" element={<Navigate to="/employee/login" replace />} />
         <Route path="/employee/login" element={<EmployeeLoginPage />} />
         <Route path="/master/login" element={<MasterLoginPage />} />
+        <Route path="/demo/app" element={<AgencyAppDemoPage />} />
         <Route path="/checkout/sign/:packetId" element={<CheckoutRemoteSignPage />} />
+        <Route path="/privacy" element={<PrivacyPage />} />
+        <Route path="/terms" element={<TermsPage />} />
 
       <Route
         element={
@@ -148,6 +155,7 @@ export function SoftwareApp() {
         }
       >
         <Route path="/master" element={<MasterDashboard />} />
+        <Route path="/master/demos" element={<MasterDemosPage />} />
         <Route path="/master/agencies" element={<AgenciesPage />} />
         <Route path="/master/agencies/:agencyId" element={<AgencyDetailPage />} />
         <Route path="/master/carriers" element={<CarrierLibraryPage />} />

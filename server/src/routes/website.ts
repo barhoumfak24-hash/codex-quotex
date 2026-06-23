@@ -1,5 +1,8 @@
 import { Router } from "express";
+import type { NextFunction, Request, Response } from "express";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
+import { isProduction } from "../env.js";
 
 export const websiteRoutes = Router();
 
@@ -76,7 +79,7 @@ websiteRoutes.get("/config/:agencyId", (req, res) => {
   });
 });
 
-websiteRoutes.post("/prospects", (req, res) => {
+websiteRoutes.post("/prospects", requireWebsiteSignature, (req, res) => {
   const parsed = websiteProspectSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({
@@ -92,7 +95,7 @@ websiteRoutes.post("/prospects", (req, res) => {
   });
 });
 
-websiteRoutes.post("/sync", (req, res) => {
+websiteRoutes.post("/sync", requireWebsiteSignature, (req, res) => {
   const parsed = websiteSyncSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({
@@ -107,3 +110,36 @@ websiteRoutes.post("/sync", (req, res) => {
     next: "Production verifies the webhook signature, applies the tenant-scoped customer update, and fans out a customer-safe status event.",
   });
 });
+
+export function requireWebsiteSignature(req: Request, res: Response, next: NextFunction) {
+  const secret = process.env.WEBSITE_WEBHOOK_SECRET?.trim();
+  if (!secret) {
+    if (isProduction()) {
+      return res.status(500).json({ error: "website_webhook_secret_not_configured" });
+    }
+    return next();
+  }
+
+  const signature = parseSignature(req.header("x-quotex-signature") ?? req.header("x-signature"));
+  if (!signature) return res.status(401).json({ error: "missing_website_signature" });
+
+  const payload = req.rawBody ?? Buffer.from(JSON.stringify(req.body ?? {}));
+  const expected = createHmac("sha256", secret).update(payload).digest("hex");
+  if (!constantTimeEqualHex(signature, expected)) {
+    return res.status(401).json({ error: "invalid_website_signature" });
+  }
+  next();
+}
+
+function parseSignature(value: string | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  const normalized = trimmed.startsWith("sha256=") ? trimmed.slice("sha256=".length) : trimmed;
+  return /^[a-f0-9]{64}$/i.test(normalized) ? normalized.toLowerCase() : null;
+}
+
+function constantTimeEqualHex(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left, "hex");
+  const rightBuffer = Buffer.from(right, "hex");
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}

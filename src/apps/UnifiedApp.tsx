@@ -1,6 +1,4 @@
-import { ArrowLeft } from "lucide-react";
-import type { MouseEvent, ReactNode } from "react";
-import { Link, Navigate, Route, Routes, useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { Navigate, Route, Routes } from "react-router-dom";
 import { CustomerLayout } from "@/components/layout/CustomerLayout";
 import { EmployeeLayout } from "@/components/layout/EmployeeLayout";
 import { MasterLayout } from "@/components/layout/MasterLayout";
@@ -65,6 +63,7 @@ import { DataToolsPage } from "@/pages/master/DataToolsPage";
 import { ESignedDocumentsPage } from "@/pages/master/ESignedDocumentsPage";
 import { MasterDashboard } from "@/pages/master/MasterDashboard";
 import { MasterActivitiesPage } from "@/pages/master/MasterActivitiesPage";
+import { MasterDemosPage } from "@/pages/master/MasterDemosPage";
 import { MasterLeadsPage } from "@/pages/master/MasterLeadsPage";
 import { MasterPlanBuilderPage } from "@/pages/master/MasterPlanBuilderPage";
 import { MasterRenewalsPage } from "@/pages/master/MasterRenewalsPage";
@@ -75,25 +74,24 @@ import { UsageAnalyticsPage } from "@/pages/master/UsageAnalyticsPage";
 
 import { AboutPage } from "@/pages/public/AboutPage";
 import { AgencyMobileApp } from "@/apps/AgencyMobileApp";
+import { AgencyAppDemoPage } from "@/pages/public/AgencyAppDemoPage";
 import { ContactPage } from "@/pages/public/ContactPage";
 import { HomePage } from "@/pages/public/HomePage";
 import { MarketingSmartContactPage } from "@/pages/public/MarketingSmartContactPage";
 import { NotFoundPage } from "@/pages/public/NotFoundPage";
 import { PrivateClientPage } from "@/pages/public/PrivateClientPage";
+import { PrivacyPage, TermsPage } from "@/pages/public/LegalPages";
 import { QuotexContactPage } from "@/pages/public/QuotexContactPage";
 import { QuotexHomePage } from "@/pages/public/QuotexHomePage";
 import { ServicesPage } from "@/pages/public/ServicesPage";
 import { SoftwareEntryPage } from "@/pages/software/SoftwareEntryPage";
 import { CheckoutRemoteSignPage, TransactionSitePage } from "@/pages/transactions/TransactionSitePage";
-import { useDemoNotice } from "@/lib/demo";
 
 export function UnifiedApp() {
   return (
-    <>
-      <DemoReturnButton />
-      <DemoRouteSandbox>
-        <Routes>
+    <Routes>
         <Route path="/" element={<QuotexHomePage />} />
+        <Route path="/demo/app" element={<AgencyAppDemoPage />} />
         <Route path="/agency-app/*" element={<AgencyMobileApp />} />
         <Route path="/app/*" element={<AgencyMobileApp />} />
       <Route path="/checkout" element={<TransactionSitePage />} />
@@ -102,11 +100,15 @@ export function UnifiedApp() {
       <Route path="/marketing/contact" element={<MarketingSmartContactPage />} />
 
       <Route element={<PublicLayout />}>
+        <Route path="/privacy" element={<PrivacyPage />} />
+        <Route path="/terms" element={<TermsPage />} />
         <Route path="/agency" element={<HomePage />} />
         <Route path="/agency/services" element={<ServicesPage />} />
         <Route path="/agency/private-client" element={<PrivateClientPage />} />
         <Route path="/agency/about" element={<AboutPage />} />
         <Route path="/agency/contact" element={<ContactPage />} />
+        <Route path="/agency/privacy" element={<PrivacyPage />} />
+        <Route path="/agency/terms" element={<TermsPage />} />
         <Route path="/services" element={<ServicesPage />} />
         <Route path="/private-client" element={<PrivateClientPage />} />
         <Route path="/about" element={<AboutPage />} />
@@ -211,6 +213,7 @@ export function UnifiedApp() {
       >
         <Route path="/master" element={<MasterDashboard />} />
         <Route path="/master/leads" element={<MasterLeadsPage />} />
+        <Route path="/master/demos" element={<MasterDemosPage />} />
         <Route path="/master/agencies" element={<AgenciesPage />} />
         <Route path="/master/agencies/:agencyId" element={<AgencyDetailPage />} />
         <Route path="/master/carriers" element={<CarrierLibraryPage />} />
@@ -232,98 +235,6 @@ export function UnifiedApp() {
 
       <Route path="/404" element={<NotFoundPage />} />
       <Route path="*" element={<Navigate to="/404" replace />} />
-      </Routes>
-    </DemoRouteSandbox>
-    </>
-  );
-}
-
-function DemoRouteSandbox({ children }: { children: ReactNode }) {
-  const { pathname } = useLocation();
-  const navigate = useNavigate();
-  const showDemoNotice = useDemoNotice();
-  const appBase =
-    pathname === "/agency-app" || pathname.startsWith("/agency-app/")
-      ? "/agency-app"
-      : pathname === "/app" || pathname.startsWith("/app/")
-        ? "/app"
-        : "";
-  const websiteBase = pathname === "/agency" || pathname.startsWith("/agency/") ? "/agency" : "";
-  const activeBase = websiteBase || appBase;
-
-  function showBlockedNotice(feature: string) {
-    showDemoNotice({
-      feature,
-      title: "This stays inside the demo",
-      body: "Use the back button in the top-left corner to leave this demo. Links and actions inside the demo are kept inside this same demo surface.",
-    });
-  }
-
-  function handleClickCapture(event: MouseEvent<HTMLDivElement>) {
-    if (!activeBase || event.defaultPrevented || event.button !== 0) return;
-    const anchor = (event.target as Element | null)?.closest<HTMLAnchorElement>("a[href]");
-    if (!anchor || anchor.hasAttribute("download")) return;
-    const rawHref = anchor.getAttribute("href");
-    if (!rawHref || rawHref.startsWith("#")) return;
-
-    if (rawHref.startsWith("mailto:") || rawHref.startsWith("tel:")) {
-      event.preventDefault();
-      showBlockedNotice(rawHref.startsWith("tel:") ? "Phone link" : "Email link");
-      return;
-    }
-
-    const url = new URL(rawHref, window.location.href);
-    if (url.origin !== window.location.origin) {
-      event.preventDefault();
-      showBlockedNotice("External link");
-      return;
-    }
-
-    if (url.pathname === activeBase || url.pathname.startsWith(`${activeBase}/`)) {
-      return;
-    }
-
-    const allowedRoots = websiteBase
-      ? ["/", "/services", "/private-client", "/about", "/contact", "/login", "/signup", "/quote", "/customer"]
-      : ["/", "/customer", "/login", "/signup", "/quote", "/contact"];
-    const canStayInsideDemo = allowedRoots.some(
-      (root) => url.pathname === root || (root !== "/" && url.pathname.startsWith(`${root}/`))
-    );
-
-    event.preventDefault();
-    if (!canStayInsideDemo) {
-      showBlockedNotice("Demo navigation");
-      return;
-    }
-
-    const targetPath = url.pathname === "/" ? activeBase : `${activeBase}${url.pathname}`;
-    navigate(`${targetPath}${url.search}${url.hash}`);
-  }
-
-  return <div onClickCapture={handleClickCapture}>{children}</div>;
-}
-
-function DemoReturnButton() {
-  const { pathname } = useLocation();
-  const [searchParams] = useSearchParams();
-  const isDemoSurface =
-    pathname === "/agency" ||
-    pathname.startsWith("/agency/") ||
-    pathname === "/agency-app" ||
-    pathname.startsWith("/agency-app/") ||
-    pathname === "/app" ||
-    pathname.startsWith("/app/");
-
-  if (searchParams.get("demoBack") !== "1" && !isDemoSurface) return null;
-
-  return (
-    <Link
-      to="/?demoPicker=1"
-      className="fixed left-4 top-4 z-[90] inline-flex min-h-11 items-center gap-2 rounded-md border border-white/25 bg-black px-4 py-2 text-sm font-semibold text-white shadow-[0_10px_30px_rgba(0,0,0,0.25)] transition hover:bg-ink-800 focus:outline-none focus:ring-2 focus:ring-gold-300"
-      aria-label="Back to demos"
-    >
-      <ArrowLeft className="h-4 w-4" />
-      Back to demos
-    </Link>
+    </Routes>
   );
 }

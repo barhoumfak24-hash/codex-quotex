@@ -84,7 +84,7 @@ describe("summarizeQuotingWorkflow", () => {
               carrierReference: "REF-123",
               implementedAt: "2026-06-01T13:00:00.000Z",
               implementedById: "user_agent",
-              mode: "demo_adapter",
+              mode: "manual_workflow",
             },
           },
         ],

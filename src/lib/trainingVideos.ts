@@ -295,13 +295,13 @@ function categoryWalkthroughVideos(audience: "agent" | "manager"): PortalVideo[]
 export const AGENT_HOW_TO_VIDEOS: PortalVideo[] = [
   ...categoryWalkthroughVideos("agent"),
   {
-    id: "agent-complete-demo-walkthrough",
+    id: "agent-complete-product-walkthrough",
     audience: "agent",
     eyebrow: "Start here",
     title: "Complete Quotex software walkthrough",
     duration: "4 min",
     body:
-      "A full narrated demo-mode tour of the staff workspace, from dashboard rhythm through clients, policies, documents, billing, claims, renewals, marketing, calendar, accounting, analytics, and training.",
+      "A full narrated product walkthrough of the staff workspace, from dashboard rhythm through clients, policies, documents, billing, claims, renewals, marketing, calendar, accounting, analytics, and training.",
     chapters: [
       {
         id: "command-center",
@@ -310,7 +310,7 @@ export const AGENT_HOW_TO_VIDEOS: PortalVideo[] = [
         summary: "Start from the dashboard and understand the daily work rhythm.",
         transcript:
           "This walkthrough starts on the Quotex dashboard. Agents begin with reminders, notifications, prospect queue, remarks, and assigned activity so every workday starts from the correct queue.",
-        keywords: ["complete walkthrough", "dashboard", "demo mode", "command center", "daily workflow"],
+        keywords: ["complete walkthrough", "dashboard", "product walkthrough", "command center", "daily workflow"],
       },
       {
         id: "client-policy-service",
@@ -641,13 +641,13 @@ export const AGENT_HOW_TO_VIDEOS: PortalVideo[] = [
 export const MANAGER_HOW_TO_VIDEOS: PortalVideo[] = [
   ...categoryWalkthroughVideos("manager"),
   {
-    id: "manager-complete-demo-walkthrough",
+    id: "manager-complete-product-walkthrough",
     audience: "manager",
     eyebrow: "Start here",
     title: "Complete Quotex software walkthrough",
     duration: "4 min",
     body:
-      "A full narrated demo-mode tour of the manager workspace, from dashboard rhythm through routing, clients, policies, documents, billing, claims, renewals, marketing, calendar, accounting, analytics, and training.",
+      "A full narrated product walkthrough of the manager workspace, from dashboard rhythm through routing, clients, policies, documents, billing, claims, renewals, marketing, calendar, accounting, analytics, and training.",
     chapters: [
       {
         id: "manager-command-center",
@@ -656,7 +656,7 @@ export const MANAGER_HOW_TO_VIDEOS: PortalVideo[] = [
         summary: "Start from the dashboard and read the agency work queues.",
         transcript:
           "This walkthrough starts on the manager dashboard. Managers use reminders, notifications, prospect queue, remarks, and Activity Center visibility to understand what needs attention without taking ownership of every activity.",
-        keywords: ["complete walkthrough", "manager dashboard", "demo mode", "activity center", "routing"],
+        keywords: ["complete walkthrough", "manager dashboard", "product walkthrough", "activity center", "routing"],
       },
       {
         id: "manager-client-policy-service",

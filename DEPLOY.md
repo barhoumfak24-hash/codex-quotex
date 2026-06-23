@@ -1,91 +1,134 @@
-# Deploy the Quotex demo to Vercel
+# Deploy Quotex to Vercel
 
-This is a static Vite SPA. Deploying takes about 90 seconds end-to-end.
+This project is a Vite frontend with the Express API mounted on Vercel at `/api/app`.
+Use pnpm for every install, build, test, and deployment command.
 
-There are two flows. Use whichever is easier for you.
+## Option A - Deploy From Vercel
 
-## Option A — Deploy from the Vercel dashboard (recommended for first time)
+1. Push the current branch to GitHub.
+2. In Vercel, import the GitHub repository.
+3. Confirm the project settings:
+   - Framework preset: `Vite`
+   - Install command: use the `installCommand` in `vercel.json`.
+   - Build command: `pnpm build`
+   - Output directory: `dist`
+4. Set production environment variables in Vercel.
+   - `VITE_APP_NAME=Quotex Insurance`
+   - `VITE_API_BASE_URL=/api/app/api` or leave it blank to use the production default.
+   - `VITE_SENTRY_DSN`, `VITE_SENTRY_ENVIRONMENT`, and `VITE_SENTRY_RELEASE` for frontend error tracking.
+   - `DIAG_TOKEN` and `CRON_SECRET` as long random server-only tokens. Do not prefix them with `VITE_`.
+   - `DATABASE_URL` and `DIRECT_URL`; use the pooled runtime URL for `DATABASE_URL` and the direct Postgres URL for `DIRECT_URL`.
+   - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_PROJECT_REF`, `SUPABASE_ACCESS_TOKEN`, `SUPABASE_STORAGE_DOCUMENT_BUCKET`, and `BACKUP_STORAGE_BUCKETS`.
+   - `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` for shared serverless API rate limits.
+   - `SENTRY_DSN`, `SENTRY_ENVIRONMENT`, and `SENTRY_RELEASE` for backend error tracking.
+   - `MAILBOX_OAUTH_PUBLIC_API_ORIGIN=https://your-domain.com/api/app` when mailbox OAuth is enabled.
+   - Server secrets such as database URLs, provider API keys, Stripe keys, mail keys, and AI keys must stay server-only.
+5. Deploy.
 
-1. Push this branch to GitHub (already done):
-   - Repo: `barhoumfak24-hash/quotexinsurance`
-   - Branch: `claude/quotex-insurance-platform-dfSjs`
-2. Go to https://vercel.com/new and click **Import Git Repository**.
-3. Pick the `quotexinsurance` repo. If you can't see it, click **Adjust GitHub App permissions** and grant access.
-4. On the import screen, Vercel should auto-detect:
-   - **Framework Preset:** Vite
-   - **Build Command:** `npm run build`
-   - **Output Directory:** `dist`
-   - **Install Command:** `npm install`
-   If anything is different, override it — these values are already locked in `vercel.json`.
-5. Under **Environment Variables**, add only what's safe for the browser:
-   - `VITE_APP_NAME` = `Quotex Insurance`
-   - `VITE_API_BASE_URL` = `https://your-prod-api.example/api` (leave blank if not wiring a backend)
-   - `VITE_GOOGLE_MAPS_API_KEY` *(top-priority production provider)* — Google Cloud Maps Platform API key with Places API (New) enabled. **You must restrict this key in Cloud Console with HTTP referrer restrictions for your Vercel domain** (`https://*.vercel.app/*` for previews, plus your custom domain) — without restrictions, the key gets scraped from the bundle and abused. When present, Google Places (New) is the active provider and Place Details runs on selection to populate Street/Apt/City/State/ZIP from real Google address components.
-   - `VITE_SMARTY_WEBSITE_KEY` *(second-priority — used if Google key not set)* — SmartyStreets US Autocomplete Pro **website key**. Restrict the key to your deployment domain in the Smarty dashboard (Host allowlist).
-   - `VITE_MAPBOX_TOKEN` *(optional, second-priority provider)* — a Mapbox **public** access token, URL-restricted to your Vercel domain. Used if Smarty is not configured. When neither is set, the demo falls back to Nominatim (OpenStreetMap), which is keyless but only does whole-word matching — leading to gaps on partial inputs like "901 McD".
-   - **Do NOT add** any secret keys (Anthropic, Stripe secret, Twilio, SendGrid, AWS, server-side Google Places, etc.) — those only belong in the backend, never in the frontend bundle.
-6. Click **Deploy**. First build ≈ 60–90 seconds.
-7. Vercel gives you a `*.vercel.app` URL. The home page shows the demo banner; `/login` is the unified demo entry with 4 role buttons.
+Never set a production Vercel environment variable to `http://localhost:4000/api`.
 
-### Pick the demo branch as the production branch
-
-By default Vercel uses `main` as the production branch. Either:
-- Merge `claude/quotex-insurance-platform-dfSjs` into `main` and redeploy, **or**
-- In **Project Settings → Git**, change the **Production Branch** to `claude/quotex-insurance-platform-dfSjs`.
-
-## Option B — Deploy from the CLI
+## Option B - Deploy From CLI
 
 ```bash
-npm install -g vercel        # one-time
-vercel login                 # opens browser
-vercel                       # first deploy → preview URL
-vercel --prod                # promote to production
+corepack enable
+corepack prepare pnpm@11.0.7 --activate
+pnpm install --frozen-lockfile
+pnpm run quality
+pnpm run production:check
+pnpm dlx vercel@54.14.5 deploy --prod --yes
 ```
 
-The CLI reads `vercel.json` for build settings; you'll only be asked which scope/project to use.
+The CLI reads `vercel.json` for build, routing, and security header settings.
 
-## What `vercel.json` is doing
+## Option C - Publish Local Changes Through GitHub
 
-- `framework: "vite"` — Vercel uses Vite's defaults.
-- `rewrites` — every path falls back to `index.html` so React Router handles client-side routing (`/customer`, `/employee/prospects/...`, etc.) without 404s on refresh.
-- Security headers — `X-Frame-Options: DENY` (no iframe embedding), `X-Content-Type-Options: nosniff`, restrictive `Referrer-Policy` and `Permissions-Policy`. **`X-Robots-Tag: noindex, nofollow`** is set so the demo is not indexed by search engines.
-- `Cache-Control: immutable` on hashed `/assets/*` bundles for fast revisits.
+The production Vercel project is linked at `.vercel/project.json`. The safest auto-publish path is:
 
-## After it's live
+1. Run local checks.
+2. Commit the finished change.
+3. Push the `quotexinsurance` branch to GitHub.
+4. Let Vercel deploy the connected branch.
 
-- Hit your `*.vercel.app/login` — try each of the four demo roles.
-- The yellow **Demo Mode** banner is on every page. The four “quick demo” buttons are the canonical entry point.
-- All sensitive integrations (Stripe pay, document download, carrier claim links, email/SMS send) open the polished “Coming in production build” modal.
-- Demo data lives in the visitor's `localStorage` so each person sees a clean slate; **Master → Data tools → Reset demo data** wipes it.
+Use this command after a finished Codex change:
 
-## When you're ready to wire real backend (later)
+```bash
+pnpm run publish:latest -- --message "Update public contact info"
+```
 
-1. Deploy the backend in `server/` (Render, Fly, Railway, AWS — anywhere that runs Node + Postgres). Provision Postgres and run `npx prisma migrate deploy`.
-2. Set `VITE_API_BASE_URL` in Vercel to your backend's public origin (e.g. `https://api.quotex.example/api`) and add the backend origin to the CORS allowlist in `server/src/index.ts` (`FRONTEND_ORIGIN` env var).
-3. Open `src/lib/api.ts` and replace each method body with `fetch(import.meta.env.VITE_API_BASE_URL + ...)`. The shape already matches the route map in `server/src/routes/`.
-4. Remove the demo banner + ComingSoon notice modal from `src/lib/demo.tsx` (or feature-flag them via `VITE_DEMO_MODE`).
+`publish:latest` refuses to publish unless the local Vercel project points at the Quotex production project and the current branch is `quotexinsurance`. By default, it runs `pnpm run quality` before committing or pushing.
 
-## Automated tests gate every deploy
+To install local hooks that auto-push normal Git commits on the `quotexinsurance` branch:
 
-`npm test` runs the Vitest suite under `src/lib/__tests__/`. Today it
-covers the address autocomplete service end-to-end — Nominatim contract
-parsing, Mapbox contract parsing, the Mapbox→Nominatim fallback chain,
-error telemetry, and the empty-query short-circuit — so a future
-provider regression trips the build before users see a bad dropdown.
+```bash
+pnpm run publish:install-hooks
+```
 
-**Wire it into Vercel:**
+Those hooks run typecheck and production build before any push. If the checks fail, the push is blocked and Vercel will not deploy broken code.
 
-- The default Vercel build command is `npm run build`. Change it to
-  `npm test && npm run build` under **Project Settings → Build &
-  Output Settings → Build Command** so failing tests block production.
-- Or add a GitHub Action (`.github/workflows/test.yml`) that runs
-  `npm ci && npm test && npm run build` on every push and require it
-  as a status check on `main`.
+## What `vercel.json` Does
 
-Watch mode for local iteration: `npm run test:watch`.
+- Builds the Vite frontend into `dist`.
+- Mounts the Express API through `/api/app`.
+- Rewrites application routes back to `index.html` so React Router handles refreshes.
+- Adds security headers, including `X-Frame-Options`, `X-Content-Type-Options`, `Referrer-Policy`, and `Permissions-Policy`.
+- Keeps `X-Robots-Tag: noindex, nofollow` until the public marketing site is intentionally ready for indexing.
+- Caches hashed frontend assets aggressively.
+
+## Required Checks Before Production
+
+Run this locally before opening a PR or deploying:
+
+```bash
+pnpm run quality
+pnpm run production:check
+```
+
+`pnpm run quality` runs linting, type checking, tests, frontend build validation, server build validation, and dependency audits.
+
+`pnpm run production:check` runs fail-closed server env validation plus backup configuration checks. It does not replace the live `/api/app/cron/disaster-recovery` check, which must pass against the deployed Supabase project.
+
+## PR Gate
+
+`.github/workflows/pr-quality.yml` runs on pull requests and blocks merges when checks fail. It uses pnpm, not npm.
+
+Before merging AI-generated changes, use the PR template and confirm:
+
+- tests passed
+- lint/type/build checks passed
+- dependency/security checks passed
+- CodeRabbit or reviewer feedback was handled
+- AI-generated changes were manually reviewed
+- no secrets or credentials were added
+- risky migrations or production-impacting changes are explained
+
+## Live Smoke Test
+
+After deployment:
+
+1. Open the production domain.
+2. Confirm the frontend loads without console errors.
+3. Confirm `/api/app/health` returns healthy JSON.
+4. Confirm protected API routes reject anonymous access.
+5. Confirm the built frontend bundle does not contain `localhost:4000`.
+6. Check Vercel runtime logs for startup warnings or errors.
+7. Call `/api/app/cron/disaster-recovery` with `Authorization: Bearer <CRON_SECRET>` and confirm it returns `ready`.
+
+## Backend And Data Readiness
+
+The Express API is mounted in this Vercel project, and Supabase/Postgres migrations are part of the production build.
+
+Do not move real sensitive agency data into production until:
+
+- Supabase RLS has been verified against real authenticated users.
+- Backup/PITR is enabled and a restore drill has succeeded.
+- Sentry is configured for frontend and backend.
+- AI, mail, Stripe, storage, and carrier-runner secrets are server-only and rotated if ever pasted into chat or logs.
+- Any remaining demo/local-state paths are replaced by authenticated backend persistence.
 
 ## Troubleshooting
 
-- **404 on `/customer`, `/employee/...` after refresh** — the `rewrites` rule in `vercel.json` handles this. If you removed it, add it back.
-- **Build fails with “Cannot find module”** — re-run `npm install` locally and ensure `package-lock.json` is committed (it is).
-- **Custom domain** — add it under **Project → Domains** and update DNS as instructed. Use `noindex` until the demo is replaced with the production build.
+- 404 on app routes after refresh: confirm the SPA rewrite still exists in `vercel.json`.
+- Build cannot find dependencies: run pnpm install commands above and commit lockfile changes.
+- API calls fail in production: confirm `VITE_API_BASE_URL` is blank or `/api/app/api`, not localhost.
+- Mailbox OAuth redirects to localhost: set `MAILBOX_OAUTH_PUBLIC_API_ORIGIN=https://your-domain.com/api/app`.
+- Public pages should be indexed: remove or narrow `X-Robots-Tag: noindex, nofollow` only when the public site is ready.

@@ -1,3 +1,4 @@
+import { apiBaseUrl } from "./apiBase";
 import { getConfiguredAgencyId } from "./appSurface";
 
 export interface WebsiteLeadInput {
@@ -9,15 +10,6 @@ export interface WebsiteLeadInput {
   email?: string;
   phone?: string;
   message?: string;
-}
-
-function apiBaseUrl(): string {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return String((import.meta as any)?.env?.VITE_API_BASE_URL ?? "").replace(/\/+$/, "");
-  } catch {
-    return "";
-  }
 }
 
 export async function submitWebsiteLead(input: WebsiteLeadInput): Promise<boolean> {

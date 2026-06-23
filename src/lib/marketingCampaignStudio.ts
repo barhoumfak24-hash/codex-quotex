@@ -150,6 +150,7 @@ const CURATED_IMAGES: Record<string, string[]> = {
 export async function draftMarketingStudioCampaign(input: {
   prompt: string;
   agencyName?: string;
+  agencyAddress?: string;
   senderName?: string;
   signOff?: string;
 }): Promise<MarketingStudioDraft> {
@@ -163,12 +164,13 @@ export async function draftMarketingStudioCampaign(input: {
       {
         prompt: input.prompt,
         agencyName: input.agencyName,
+        agencyAddress: input.agencyAddress,
         senderName: input.senderName,
         signOff: input.signOff,
       },
       { timeoutMs: 60_000 }
     );
-    return raw ? normalizeStudioDraft(raw) : localDraft;
+    return raw ? ensureStudioDraftCompliance(normalizeStudioDraft(raw), input) : localDraft;
   } catch {
     return localDraft;
   }
@@ -233,6 +235,7 @@ export function marketingStudioImageUrl(draft: MarketingStudioDraft, seed: numbe
 export function createLocalStudioDraft(input: {
   prompt: string;
   agencyName?: string;
+  agencyAddress?: string;
   senderName?: string;
   signOff?: string;
 }): MarketingStudioDraft {
@@ -253,7 +256,7 @@ export function createLocalStudioDraft(input: {
     audience: campaign.audience,
     recurrence: campaign.recurrence,
     emailSubject: campaign.subject,
-    emailBody: ensureEmailMinimum(emailCampaign.body, input),
+    emailBody: ensureMarketingEmailCompliance(ensureEmailMinimum(emailCampaign.body, input), input.agencyAddress),
     pamphlet: {
       eyebrow: eyebrowForBrief(brief),
       headline: headlineForBrief(brief),
@@ -375,6 +378,31 @@ function ensureEmailMinimum(
     "",
     closing,
   ].join("\n");
+}
+
+function ensureStudioDraftCompliance(
+  draft: MarketingStudioDraft,
+  input: { agencyAddress?: string }
+): MarketingStudioDraft {
+  return {
+    ...draft,
+    emailBody: ensureMarketingEmailCompliance(draft.emailBody, input.agencyAddress),
+  };
+}
+
+function ensureMarketingEmailCompliance(body: string, agencyAddress?: string): string {
+  const address = agencyAddress?.trim();
+  if (hasMarketingAddress(body, address)) return body;
+  const addressLine = address
+    ? `Mailing address: ${address}`
+    : "Mailing address: agency address must be configured before production send.";
+  return `${body.trim()}\n\n${addressLine}`;
+}
+
+function hasMarketingAddress(body: string, agencyAddress?: string): boolean {
+  if (/\bmailing address\b|\bphysical address\b/i.test(body)) return true;
+  const normalizedAddress = agencyAddress?.toLowerCase().replace(/\s+/g, " ").trim();
+  return Boolean(normalizedAddress && body.toLowerCase().includes(normalizedAddress));
 }
 
 function sentenceCase(value: string): string {

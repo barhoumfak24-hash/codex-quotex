@@ -20,13 +20,11 @@ import { QuoteFlowPage } from "@/pages/customer/QuoteFlowPage";
 import { ContactPage } from "@/pages/public/ContactPage";
 import { MarketingSmartContactPage } from "@/pages/public/MarketingSmartContactPage";
 import { useAuth } from "@/lib/auth";
-import { useDemoNotice } from "@/lib/demo";
 import { useTenant } from "@/lib/tenant";
 
 export function AgencyMobileApp() {
   const { pathname } = useLocation();
   const navigate = useNavigate();
-  const showDemoNotice = useDemoNotice();
   const appBase = pathname === "/agency-app" || pathname.startsWith("/agency-app/")
     ? "/agency-app"
     : pathname === "/app" || pathname.startsWith("/app/")
@@ -58,25 +56,9 @@ export function AgencyMobileApp() {
     if (!rawHref || rawHref.startsWith("#")) {
       return;
     }
-    if (rawHref.startsWith("mailto:") || rawHref.startsWith("tel:")) {
-      event.preventDefault();
-      showDemoNotice({
-        feature: rawHref.startsWith("tel:") ? "Phone link" : "Email link",
-        title: "This stays inside the demo app",
-        body: "Phone and email links are disabled here so the demo app cannot open anything outside the phone frame.",
-      });
-      return;
-    }
+    if (rawHref.startsWith("mailto:") || rawHref.startsWith("tel:")) return;
     const url = new URL(rawHref, window.location.href);
-    if (url.origin !== window.location.origin) {
-      event.preventDefault();
-      showDemoNotice({
-        feature: "External link",
-        title: "This stays inside the demo app",
-        body: "Use the back button in the top-left corner to leave the demo. Links inside the phone are kept inside the app demo.",
-      });
-      return;
-    }
+    if (url.origin !== window.location.origin) return;
     if (url.pathname.startsWith(appBase)) return;
     if (!phoneInternalRoutes.some((route) => url.pathname === route || url.pathname.startsWith(`${route}/`))) {
       return;
@@ -86,66 +68,72 @@ export function AgencyMobileApp() {
   }
 
   return (
-    <div
-      className="flex h-dvh overflow-hidden bg-[radial-gradient(circle_at_top_left,rgba(179,143,61,0.24),transparent_32%),linear-gradient(135deg,#181611_0%,#050505_100%)] px-3 pb-3 pt-16 text-ink-950 md:px-4 md:pb-4 md:pt-20"
-    >
-      <div className="mx-auto flex h-full min-h-0 w-full max-w-[430px] flex-col overflow-hidden rounded-[34px] border border-white/18 bg-[#f8f5ef] shadow-[0_28px_100px_rgba(0,0,0,0.55)] md:max-h-[900px]">
-        <div className="flex items-center justify-between border-b border-ink-100 bg-[#11100c] px-5 py-3 text-[11px] font-semibold text-white/70">
-          <span>9:41</span>
-          <span className="h-5 w-24 rounded-full bg-black/80" aria-hidden="true" />
-          <span>100%</span>
-        </div>
-        <div
-          className="agency-mobile-frame relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain bg-[#f8f5ef]"
-          onClickCapture={keepInternalLinksInsidePhone}
-        >
-          <Routes>
-            <Route index element={<QuotexAppHome appPath={appPath} />} />
-            <Route path={routePath("/login")} element={<CustomerLoginPage />} />
-            <Route path={routePath("/signup")} element={<CustomerSignupPage />} />
-            <Route path={routePath("/marketing/contact")} element={<MarketingSmartContactPage />} />
-            <Route
-              path={routePath("/quote/start")}
-              element={
-                <RequireRole roles={["customer"]} redirectTo={appPath("/login")}>
-                  <Navigate to={appPath("/customer/quote/new")} replace />
-                </RequireRole>
-              }
-            />
-            <Route
-              path={routePath("/contact")}
-              element={
-                <RequireRole roles={["customer"]} redirectTo={appPath("/login")}>
-                  <ContactPage />
-                </RequireRole>
-              }
-            />
+    <div className="agency-mobile-stage flex h-dvh overflow-hidden px-3 pb-3 pt-16 text-ink-950 md:px-4 md:pb-4 md:pt-20">
+      <div className="agency-device-frame mx-auto flex h-full min-h-0 w-full max-w-[430px] flex-col overflow-hidden rounded-[46px] border border-white/20 bg-[#090908] p-2 shadow-[0_34px_110px_rgba(0,0,0,0.72)] md:max-h-[900px]">
+        <span className="agency-device-button agency-device-button-action" aria-hidden="true" />
+        <span className="agency-device-button agency-device-button-volume" aria-hidden="true" />
+        <span className="agency-device-button agency-device-button-power" aria-hidden="true" />
+        <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden rounded-[38px] border border-white/10 bg-[#f8f5ef]">
+          <div className="agency-device-status flex items-center justify-between border-b border-white/10 bg-[#0f100d] px-5 py-3 text-[11px] font-semibold text-white/[0.78]">
+            <span>9:41</span>
+            <span className="h-5 w-24 rounded-full bg-black shadow-inner" aria-hidden="true" />
+            <span>100%</span>
+          </div>
+          <div
+            className="agency-mobile-frame relative min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain bg-[#f8f5ef]"
+            onClickCapture={keepInternalLinksInsidePhone}
+          >
+            <Routes>
+              <Route index element={<QuotexAppHome appPath={appPath} />} />
+              <Route path={routePath("/login")} element={<CustomerLoginPage />} />
+              <Route path={routePath("/signup")} element={<CustomerSignupPage />} />
+              <Route path={routePath("/marketing/contact")} element={<MarketingSmartContactPage />} />
+              <Route
+                path={routePath("/quote/start")}
+                element={
+                  <RequireRole roles={["customer"]} redirectTo={appPath("/login")}>
+                    <Navigate to={appPath("/customer/quote/new")} replace />
+                  </RequireRole>
+                }
+              />
+              <Route
+                path={routePath("/contact")}
+                element={
+                  <RequireRole roles={["customer"]} redirectTo={appPath("/login")}>
+                    <ContactPage />
+                  </RequireRole>
+                }
+              />
 
-            <Route
-              element={
-                <RequireRole roles={["customer"]} redirectTo={appPath("/login")}>
-                  <CustomerLayout />
-                </RequireRole>
-              }
-            >
-              <Route path={routePath("/customer")} element={<CustomerDashboard />} />
-              <Route path={routePath("/customer/policies")} element={<CustomerPoliciesPage />} />
-              <Route path={routePath("/customer/policies/:policyId")} element={<CustomerPolicyPage />} />
-              <Route path={routePath("/customer/assets")} element={<CustomerAssetsPage />} />
-              <Route path={routePath("/customer/assets/:assetId")} element={<CustomerAssetPage />} />
-              <Route path={routePath("/customer/documents")} element={<CustomerDocumentsPage />} />
-              <Route path={routePath("/customer/claims")} element={<CustomerClaimsPage />} />
-              <Route path={routePath("/customer/settings")} element={<CustomerSettingsPage />} />
-              <Route path={routePath("/customer/quote/new")} element={<QuoteFlowPage />} />
-              <Route path={routePath("/customer/questionnaire/:sessionId")} element={<ClientQuestionnairePage />} />
-            </Route>
+              <Route
+                element={
+                  <RequireRole roles={["customer"]} redirectTo={appPath("/login")}>
+                    <CustomerLayout />
+                  </RequireRole>
+                }
+              >
+                <Route path={routePath("/customer")} element={<CustomerDashboard />} />
+                <Route path={routePath("/customer/policies")} element={<CustomerPoliciesPage />} />
+                <Route path={routePath("/customer/policies/:policyId")} element={<CustomerPolicyPage />} />
+                <Route path={routePath("/customer/assets")} element={<CustomerAssetsPage />} />
+                <Route path={routePath("/customer/assets/:assetId")} element={<CustomerAssetPage />} />
+                <Route path={routePath("/customer/documents")} element={<CustomerDocumentsPage />} />
+                <Route path={routePath("/customer/claims")} element={<CustomerClaimsPage />} />
+                <Route path={routePath("/customer/settings")} element={<CustomerSettingsPage />} />
+                <Route path={routePath("/customer/quote/new")} element={<QuoteFlowPage />} />
+                <Route path={routePath("/customer/questionnaire/:sessionId")} element={<ClientQuestionnairePage />} />
+              </Route>
 
-            <Route path={routePath("/services")} element={<Navigate to={appPath("/")} replace />} />
-            <Route path={routePath("/private-client")} element={<Navigate to={appPath("/")} replace />} />
-            <Route path={routePath("/about")} element={<Navigate to={appPath("/")} replace />} />
-            <Route path={routePath("/software")} element={<Navigate to={appPath("/")} replace />} />
-            <Route path="*" element={<Navigate to={appPath("/")} replace />} />
-          </Routes>
+              <Route path={routePath("/services")} element={<Navigate to={appPath("/")} replace />} />
+              <Route path={routePath("/private-client")} element={<Navigate to={appPath("/")} replace />} />
+              <Route path={routePath("/about")} element={<Navigate to={appPath("/")} replace />} />
+              <Route path={routePath("/software")} element={<Navigate to={appPath("/")} replace />} />
+              <Route path="*" element={<Navigate to={appPath("/")} replace />} />
+            </Routes>
+          </div>
+          <div className="pointer-events-none absolute inset-x-0 bottom-2 z-20 flex justify-center">
+            <span className="h-1 w-28 rounded-full bg-black/25" aria-hidden="true" />
+          </div>
         </div>
       </div>
     </div>

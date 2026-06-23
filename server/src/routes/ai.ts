@@ -1,4 +1,6 @@
 import { Router } from "express";
+import type { NextFunction, Request, Response } from "express";
+import { assertBodyTenantMatchesAuth } from "../middleware/auth.js";
 import {
   aiCarrierMatch,
   aiDraftCampaign,
@@ -11,6 +13,7 @@ import {
   aiMarketingMessage,
   aiMarketingCreative,
   aiPortalAssistant,
+  aiSortIntent,
   aiParseCarrierAppetite,
   aiParseIntake,
   aiPremiumEstimate,
@@ -20,12 +23,70 @@ import { generateOpenAiImage } from "../services/ai/provider.js";
 // ALL AI is server-side. No model key ever crosses to the browser.
 export const aiRoutes = Router();
 
+const DEFAULT_AI_STRING_LIMIT = 50_000;
+const AI_STRING_LIMITS: Record<string, number> = {
+  body: 20_000,
+  dataurl: 1_800_000,
+  filename: 300,
+  knowledge: 80_000,
+  localanswer: 80_000,
+  prompt: 10_000,
+  question: 8_000,
+  rawdescription: 20_000,
+  text: 80_000,
+};
+
+aiRoutes.use(rejectOversizedAiInput);
+aiRoutes.use((req, res, next) => {
+  if (!assertBodyTenantMatchesAuth(req, res)) return;
+  next();
+});
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function badRequest(res: import("express").Response, message: string) {
   return res.status(400).json({ error: "bad_request", message });
+}
+
+function rejectOversizedAiInput(req: Request, res: Response, next: NextFunction) {
+  const violation = findOversizedString(req.body);
+  if (violation) {
+    return res.status(413).json({
+      error: "ai_payload_too_large",
+      field: violation.path,
+      maxCharacters: violation.max,
+    });
+  }
+  next();
+}
+
+function findOversizedString(
+  value: unknown,
+  path: string[] = [],
+  seen = new WeakSet<object>()
+): { path: string; max: number } | null {
+  if (typeof value === "string") {
+    const key = path[path.length - 1]?.toLowerCase() ?? "";
+    const max = AI_STRING_LIMITS[key] ?? DEFAULT_AI_STRING_LIMIT;
+    return value.length > max ? { path: path.join(".") || "body", max } : null;
+  }
+  if (!value || typeof value !== "object") return null;
+  if (seen.has(value)) return null;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      const violation = findOversizedString(value[index], [...path, String(index)], seen);
+      if (violation) return violation;
+    }
+    return null;
+  }
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    const violation = findOversizedString(child, [...path, key], seen);
+    if (violation) return violation;
+  }
+  return null;
 }
 
 aiRoutes.post("/parse-intake", async (req, res) => {
@@ -239,6 +300,20 @@ aiRoutes.post("/portal-assistant", async (req, res) => {
       history: Array.isArray(history) ? history : undefined,
       localAnswer,
       knowledge,
+    });
+    res.json(out);
+  } catch {
+    res.status(500).json({ error: "ai_failed" });
+  }
+});
+
+aiRoutes.post("/sort-intent", async (req, res) => {
+  try {
+    const { query, context } = req.body ?? {};
+    if (typeof query !== "string" || query.trim().length === 0) return badRequest(res, "query is required");
+    const out = await aiSortIntent({
+      query,
+      context: typeof context === "string" ? context : undefined,
     });
     res.json(out);
   } catch {

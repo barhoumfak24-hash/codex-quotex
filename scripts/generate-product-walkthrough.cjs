@@ -5,9 +5,9 @@ const { chromium } = require("playwright");
 
 const root = path.resolve(__dirname, "..");
 const outDir = path.join(root, "public", "training");
-const videoPath = path.join(outDir, "quotex-complete-demo-walkthrough.webm");
-const narrationPath = path.join(outDir, "quotex-complete-demo-walkthrough.wav");
-const narrationTextPath = path.join(outDir, "quotex-complete-demo-walkthrough-narration.txt");
+const videoPath = path.join(outDir, "quotex-complete-product-walkthrough.webm");
+const narrationPath = path.join(outDir, "quotex-complete-product-walkthrough.wav");
+const narrationTextPath = path.join(outDir, "quotex-complete-product-walkthrough-narration.txt");
 const baseUrl = process.env.QUOTEX_BASE_URL || "http://localhost:5174";
 
 const scenes = [
@@ -145,7 +145,7 @@ function ensureDir() {
 
 function narrationText() {
   return [
-    "Welcome to the Quotex Insurance complete demo walkthrough. This training uses demo-mode screens and teaches the full software workflow from the perspective of agency staff.",
+    "Welcome to the Quotex Insurance complete product walkthrough. This training teaches the full software workflow from the perspective of agency staff.",
     ...scenes.map((scene, index) => `Section ${index + 1}. ${scene.title}. ${scene.caption}`),
     "That is the full operating rhythm. Start from the dashboard, open the exact record, keep every action attached to the right client, policy, claim, billing record, or activity, and use training chapters whenever a staff member needs a precise how-to.",
   ].join(" ");
@@ -299,7 +299,7 @@ async function recordVideo(captured) {
       ctx.fillText("Quotex Insurance", 98, 72);
       ctx.fillStyle = "rgba(255,255,255,0.68)";
       ctx.font = "600 13px Arial";
-      ctx.fillText("Complete software demo walkthrough", 98, 96);
+      ctx.fillText("Complete software product walkthrough", 98, 96);
       ctx.fillStyle = "#050504";
       roundedRect(52, 51, 44, 44, 10);
       ctx.fill();

@@ -100,18 +100,15 @@ export function PolicyDetailCard({
   }, [customerVisibleDocs]);
 
   function handleDownload(d: Document) {
-    // Demo: we don't have real bytes, so we render a small text
-    // stub describing the file and trigger a browser download.
-    // The audit-trail call still fires in production-equivalent fashion.
-    const stub = [
+    const unavailableNotice = [
       `${d.fileName}`,
       `Type:   ${api.helpers.documentTypeLabel(d.type as string)}`,
       `Uploaded: ${fmt.dateTime(d.uploadedAt)}`,
       ``,
-      `In production, this is a binary download from the carrier`,
-      `document service. The demo records the audit-trail entry only.`,
+      `Document bytes are not available for this record yet.`,
+      `Connect the document storage provider or re-upload the original file to download it.`,
     ].join("\n");
-    const blob = new Blob([stub], { type: "text/plain;charset=utf-8" });
+    const blob = new Blob([unavailableNotice], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -133,13 +130,11 @@ export function PolicyDetailCard({
   }
 
   function handleView(d: Document) {
-    // Stub viewer for the demo. In production this opens a signed
-    // viewer URL in a new tab. Audit log still fires.
     window.alert(
       `${d.fileName}\n\n` +
         `${api.helpers.documentTypeLabel(d.type as string)}\n` +
         `Uploaded ${fmt.dateTime(d.uploadedAt)}\n\n` +
-        `In production, this opens an in-browser PDF viewer. The audit-log entry has been recorded.`
+        `Document bytes are not available for this record yet. Connect storage or re-upload the original file to view it.`
     );
     api.helpers.logDocumentDownload({
       tenantId: d.tenantId,

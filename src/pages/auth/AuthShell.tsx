@@ -2,7 +2,6 @@ import { Link, useLocation } from "react-router-dom";
 import type { ReactNode } from "react";
 import { ArrowLeft } from "lucide-react";
 import { Logo } from "@/components/layout/Logo";
-import { DemoBanner, DemoModeBadge } from "@/components/ui/DemoBanner";
 import { getAppSurface, toSurfaceRoute } from "@/lib/appSurface";
 
 export function AuthShell({
@@ -21,10 +20,8 @@ export function AuthShell({
   const homeRoute = toSurfaceRoute("/", location.pathname);
   return (
     <div className={`${isAppSurface ? "min-h-full" : "min-h-screen"} bg-ink-50 flex flex-col`}>
-      {!isAppSurface && <DemoBanner />}
       <div className={`${isAppSurface ? "px-4 py-4" : "px-6 py-5"} flex items-center gap-3`}>
         <Logo />
-        {!isAppSurface && <DemoModeBadge />}
       </div>
       <div
         className={

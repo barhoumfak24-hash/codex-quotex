@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ExternalLink, Lock, LogOut, Mail, Pencil, Save, ShieldCheck, UserCog, X } from "lucide-react";
+import { ExternalLink, Loader2, Lock, LogOut, Mail, Pencil, Save, ShieldCheck, UserCog, X } from "lucide-react";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { EmployeeBackButton } from "@/components/layout/EmployeeBackButton";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
+import { startMailboxOAuth, type MailboxOAuthProvider } from "@/lib/mailboxOAuth";
 import {
   inferMailProvider,
   isValidBusinessEmail,
@@ -35,6 +36,7 @@ export function EmployeeAccountSettingsPage() {
   const [profileError, setProfileError] = useState<string | null>(null);
   const [profileSaved, setProfileSaved] = useState(false);
   const [mailboxNotice, setMailboxNotice] = useState<string | null>(null);
+  const [mailboxConnecting, setMailboxConnecting] = useState<MailboxOAuthProvider | null>(null);
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [passwordSaved, setPasswordSaved] = useState(false);
   const [profileDraft, setProfileDraft] = useState({
@@ -77,6 +79,25 @@ export function EmployeeAccountSettingsPage() {
     liveUser?.mailProvider,
     profileLocked,
   ]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const mailboxStatus = params.get("mailbox");
+    if (mailboxStatus === "connected") {
+      const provider = params.get("provider");
+      setMailboxNotice(
+        provider
+          ? `${provider === "microsoft" ? "Microsoft" : "Google"} mailbox connected.`
+          : "Mailbox connected."
+      );
+    } else if (mailboxStatus === "error") {
+      setMailboxNotice("Mailbox authorization did not complete. Start the connection again.");
+    } else {
+      return;
+    }
+    window.history.replaceState(null, "", `${window.location.pathname}${window.location.hash}`);
+  }, []);
 
   const displayEmail = liveUser?.businessEmail ?? liveUser?.email ?? "";
   const staffMailbox = liveUser ? api.mailboxes.staff(liveUser.id) : undefined;
@@ -185,6 +206,34 @@ export function EmployeeAccountSettingsPage() {
     setPasswordDraft({ current: "", next: "", confirm: "" });
     setSecurityLocked(true);
     setPasswordSaved(true);
+  }
+
+  async function connectMailbox(provider: MailboxOAuthProvider) {
+    if (!liveUser) return;
+    if (!agency?.id) {
+      setMailboxNotice("Agency context is required before connecting a mailbox.");
+      return;
+    }
+    const currentUser = liveUser;
+    setMailboxConnecting(provider);
+    setMailboxNotice(null);
+    try {
+      const result = await startMailboxOAuth({
+        provider,
+        user: currentUser,
+        tenantId: agency.id,
+        redirectAfter: "/employee/account-settings",
+      });
+      if (result.ok) {
+        window.location.assign(result.authorizationUrl);
+        return;
+      }
+      setMailboxNotice(result.message ?? result.error ?? "Mailbox authorization could not be started.");
+    } catch (error) {
+      setMailboxNotice(error instanceof Error ? error.message : "Mailbox authorization could not be started.");
+    } finally {
+      setMailboxConnecting(null);
+    }
   }
 
   return (
@@ -366,7 +415,7 @@ export function EmployeeAccountSettingsPage() {
           }
           subtitle="This is the mailbox Quotex uses for client, prospect, holder, and carrier email sends from your account."
           action={
-            <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center justify-end gap-1.5">
               <a
                 href={mailboxUrl(mailboxAddress, mailboxProvider)}
                 target="_blank"
@@ -377,17 +426,29 @@ export function EmployeeAccountSettingsPage() {
               </a>
               <button
                 type="button"
-                className="btn-ghost text-xs"
-                onClick={() => {
-                  const connected = api.mailboxes.connectStaffDemo(liveUser.id, liveUser.id);
-                  setMailboxNotice(
-                    connected
-                      ? "Demo mailbox connection refreshed. Production still requires OAuth authorization."
-                      : "Mailbox connection could not be refreshed."
-                  );
-                }}
+                className="btn-outline text-xs"
+                disabled={mailboxConnecting !== null}
+                onClick={() => void connectMailbox("google")}
               >
-                <ShieldCheck className="h-3.5 w-3.5" /> Refresh demo connection
+                {mailboxConnecting === "google" ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <ShieldCheck className="h-3.5 w-3.5" />
+                )}
+                Connect Google
+              </button>
+              <button
+                type="button"
+                className="btn-outline text-xs"
+                disabled={mailboxConnecting !== null}
+                onClick={() => void connectMailbox("microsoft")}
+              >
+                {mailboxConnecting === "microsoft" ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <ShieldCheck className="h-3.5 w-3.5" />
+                )}
+                Connect Microsoft
               </button>
             </div>
           }
@@ -415,7 +476,7 @@ export function EmployeeAccountSettingsPage() {
           <div className="rounded-md border border-ink-100 bg-ink-50 px-3 py-2">
             <div className="text-[10px] uppercase tracking-wider text-ink-500">Mode</div>
             <div className="mt-1 text-sm font-semibold text-ink-900">
-              {staffMailbox?.authMode === "demo" ? "Demo" : staffMailbox?.authMode ?? "Pending"}
+              {staffMailbox?.authMode === "demo" ? "Legacy local record" : staffMailbox?.authMode ?? "Pending"}
             </div>
           </div>
         </div>

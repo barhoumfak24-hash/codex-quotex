@@ -9,27 +9,11 @@ export function DataToolsPage() {
       <MasterBackButton />
       <div>
         <h1 className="font-display text-3xl">Data tools</h1>
-        <p className="text-ink-500 text-sm mt-1">Developer utilities for the local demo data store.</p>
+        <p className="text-ink-500 text-sm mt-1">Read-only diagnostics and export utilities.</p>
       </div>
       <Disclaimer>
-        These actions only affect the in-browser localStorage mock. The real platform must run all
-        destructive operations server-side under audited admin permissions.
+        Destructive production operations must run server-side under audited admin permissions.
       </Disclaimer>
-      <Card>
-        <CardHeader title="Reset demo data" />
-        <p className="text-sm text-ink-600 mb-4">Restores all tables (agencies, customers, carriers, etc.) to the seeded state.</p>
-        <button
-          className="btn-outline text-rose-600"
-          onClick={() => {
-            if (confirm("Reset all local demo data? This cannot be undone.")) {
-              db.reset();
-              location.reload();
-            }
-          }}
-        >
-          Reset demo data
-        </button>
-      </Card>
       <Card>
         <CardHeader title="Export snapshot" />
         <button

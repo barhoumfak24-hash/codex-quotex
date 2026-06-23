@@ -51,6 +51,7 @@ import {
   mailProviderShortLabel,
 } from "@/lib/mailProvider";
 import { fileToCommunicationAttachment, formatAttachmentSize } from "@/lib/messageAttachments";
+import { sendCommunicationThroughLiveMailbox } from "@/lib/liveMailbox";
 import type {
   Communication,
   CommunicationAttachment,
@@ -503,8 +504,8 @@ export function MessagesPage() {
 
       {mailbox.authMode === "demo" && (
         <div className="rounded-md border border-gold-200 bg-gold-50/60 px-4 py-3 text-xs text-gold-900">
-          Demo mailbox connection active. Production send/sync requires Google or Microsoft OAuth
-          tokens stored in the encrypted backend vault for this exact staff mailbox.
+          Legacy local mailbox record detected. Live send/sync requires Google or Microsoft OAuth tokens
+          stored in the encrypted backend vault for this exact staff mailbox.
         </div>
       )}
 
@@ -952,6 +953,8 @@ function ThreadActionsMenu({
   const [open, setOpen] = useState(false);
   const pinned = !!api.messagePins.isPinned(tenantId, userId, kind, refId);
   const muted = !!api.messageMutes.isMuted(tenantId, userId, kind, refId);
+  const blockable = isBlockableMessageKind(kind);
+  const blocked = blockable ? !!api.messageBlocks.isBlocked(tenantId, userId, kind, refId) : false;
   const count = api.messagePins.countForUser(tenantId, userId);
   const atCap = !pinned && count >= api.messagePins.MAX_PINS;
 
@@ -990,6 +993,27 @@ function ThreadActionsMenu({
   function markRead() {
     if (kind === "internal") api.internalMessages.markRead(refId, userId);
     else api.communications.markContactRead(contactRef, userId);
+    setOpen(false);
+    onChanged();
+  }
+
+  function reportConversation() {
+    const reason = prompt("What should be reviewed about this conversation?", "");
+    if (reason === null) return;
+    api.messageReports.report({
+      tenantId,
+      userId,
+      kind,
+      refId,
+      reason,
+    });
+    setOpen(false);
+    onChanged();
+  }
+
+  function toggleBlock() {
+    if (!isBlockableMessageKind(kind)) return;
+    api.messageBlocks.toggle({ tenantId, userId, kind, refId });
     setOpen(false);
     onChanged();
   }
@@ -1090,6 +1114,24 @@ function ThreadActionsMenu({
               <Check className="h-3.5 w-3.5 text-ink-500" />
               Mark as read
             </button>
+            <button
+              type="button"
+              onClick={reportConversation}
+              className="w-full text-left px-3 py-1.5 flex items-center gap-2 hover:bg-ink-50"
+            >
+              <AlertTriangle className="h-3.5 w-3.5 text-amber-600" />
+              Report conversation
+            </button>
+            {blockable && (
+              <button
+                type="button"
+                onClick={toggleBlock}
+                className="w-full text-left px-3 py-1.5 flex items-center gap-2 hover:bg-ink-50"
+              >
+                <BellOff className="h-3.5 w-3.5 text-ink-500" />
+                {blocked ? "Unblock sender" : "Block sender"}
+              </button>
+            )}
             {canArchive && (
               <button
                 type="button"
@@ -1114,6 +1156,12 @@ function ThreadActionsMenu({
       )}
     </div>
   );
+}
+
+function isBlockableMessageKind(
+  kind: "internal" | "client" | "prospect" | "holder" | "carrier"
+): kind is "client" | "prospect" | "holder" | "carrier" {
+  return kind === "client" || kind === "prospect" || kind === "holder" || kind === "carrier";
 }
 
 function mailboxUrlForContact(
@@ -1234,12 +1282,12 @@ function ActiveContactPane({
   const latestEmailRow = visibleRows.length ? visibleRows[visibleRows.length - 1].row : undefined;
   const threadUrl = mailboxUrlForContact(mailbox, contact, latestEmailRow);
 
-  function send(msg: ComposedMessage) {
+  async function send(msg: ComposedMessage) {
     setBusy(true);
     try {
       // Signature is auto-appended inside api.communications.create
       // based on the sender's saved emailSignature + images.
-      api.communications.create({
+      const comm = api.communications.create({
         tenantId,
         customerId: contact!.kind === "client" ? contact!.id : undefined,
         prospectId: contact!.kind === "prospect" ? contact!.id : undefined,
@@ -1260,6 +1308,11 @@ function ActiveContactPane({
         attachments: msg.attachments,
         createdById: userId,
       });
+      const sender = api.users.get(userId);
+      if (sender) {
+        const liveResult = await sendCommunicationThroughLiveMailbox({ tenantId, user: sender, communication: comm });
+        if (!liveResult.ok) alert(liveResult.message);
+      }
       setReplyTarget(null);
       onSent();
     } finally {
@@ -1918,7 +1971,7 @@ function NewSendModal({
     setAttachments((current) => current.filter((attachment) => attachment.id !== id));
   }
 
-  function send() {
+  async function send() {
     if (!picked || !body.trim()) return;
     setBusy(true);
     try {
@@ -1938,7 +1991,7 @@ function NewSendModal({
         onDone({ kind: "internal", id: thread.id });
         return;
       }
-      api.communications.create({
+      const comm = api.communications.create({
         tenantId,
         customerId: picked.kind === "client" ? picked.id : undefined,
         prospectId: picked.kind === "prospect" ? picked.id : undefined,
@@ -1953,6 +2006,8 @@ function NewSendModal({
         attachments,
         createdById: viewer.id,
       });
+      const liveResult = await sendCommunicationThroughLiveMailbox({ tenantId, user: viewer, communication: comm });
+      if (!liveResult.ok) alert(liveResult.message);
       onDone({ kind: picked.kind, id: picked.id });
     } finally {
       setBusy(false);

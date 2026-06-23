@@ -191,6 +191,64 @@ describe("askPortalAssistant", () => {
     expect(a.action).toEqual({ label: "View client", to: `/employee/clients/${customer.id}` });
   });
 
+  it("answers from the current client page instead of generic help", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const customer = api.customers.list(agency.id)[0];
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: manager.id, role: "manager" as const },
+      currentPath: `/employee/clients/${customer.id}`,
+    };
+
+    const a = askPortalAssistant("what should I do here?", "manager", ctx);
+
+    expect(a.topicId).toBe("current-client");
+    expect(a.text).toContain(customer.name);
+    expect(a.text).toContain("AI quoting");
+    expect((a.actions ?? []).map((action) => action.to)).toContain(
+      `/employee/clients/${customer.id}#ai-quoting-workspace`
+    );
+  });
+
+  it("summarizes the current policy page with linked actions", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const policy = api.policies.listByTenant(agency.id)[0];
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: manager.id, role: "manager" as const },
+      currentPath: `/employee/policies/${policy.id}`,
+    };
+
+    const a = askPortalAssistant("summarize this page", "manager", ctx);
+
+    expect(a.topicId).toBe("current-policy");
+    expect(a.text).toContain(policy.policyNumber ?? policy.id);
+    expect((a.actions ?? []).map((action) => action.to)).toContain(
+      `/employee/clients/${policy.customerId}`
+    );
+  });
+
+  it("gives an operational dashboard snapshot for current-page questions", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    const ctx = {
+      tenantId: agency.id,
+      viewer: { id: manager.id, role: "manager" as const },
+      currentPath: "/employee",
+    };
+
+    const a = askPortalAssistant("what should I do next?", "manager", ctx);
+
+    expect(a.topicId).toBe("current-dashboard");
+    expect(a.text).toContain("Open activities");
+    expect((a.actions ?? []).map((action) => action.to)).toContain("/employee/tasks");
+  });
+
   it("answers premium, agent, contact, and renewal-date questions", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];

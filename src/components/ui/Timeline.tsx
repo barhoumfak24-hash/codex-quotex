@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { ArrowUpRight, Bot, Building2, ChevronDown, ChevronUp, Cog, FileText, Image as ImageIcon, Mail, Paperclip, Search, User } from "lucide-react";
 import type {
   Communication,
@@ -41,7 +41,7 @@ interface TimelineProps {
   // When set, each event title is clickable and shows the detail modal.
   // Defaults to true.
   clickable?: boolean;
-  // What deep-link to use for "Open related…" inside the modal.
+  // What destination deep-link to use inside the detail modal.
   // "employee" → routes to /employee/clients/:id, etc.
   // "customer" → routes to /agency/customer/policies/:id, etc.
   context?: "employee" | "customer";
@@ -290,7 +290,13 @@ export function Timeline({
         title="Remark"
         size="md"
       >
-        {active && <StatusDetail event={active} context={context} />}
+        {active && (
+          <StatusDetail
+            event={active}
+            context={context}
+            onNavigate={() => setActive(null)}
+          />
+        )}
       </Modal>
     </>
   );
@@ -311,10 +317,13 @@ function hasEventAttachments(event: StatusEvent): boolean {
 function StatusDetail({
   event,
   context,
+  onNavigate,
 }: {
   event: StatusEvent;
   context: "employee" | "customer";
+  onNavigate: () => void;
 }) {
+  const location = useLocation();
   const customer = event.customerId ? api.customers.get(event.customerId) : null;
   const prospect = event.prospectId ? api.prospects.get(event.prospectId) : null;
   const asset = event.assetId ? api.assets.get(event.assetId) : null;
@@ -345,6 +354,8 @@ function StatusDetail({
   const [showMessage, setShowMessage] = useState(false);
   const attachments = event.attachments ?? [];
   const relatedTarget = relatedRemarkTarget(event, context, messageRow);
+  const currentUrl = `${location.pathname}${location.search}${location.hash}`;
+  const navigableRelatedTarget = relatedTarget?.to === currentUrl ? null : relatedTarget;
 
   return (
     <div className="space-y-4">
@@ -360,13 +371,14 @@ function StatusDetail({
         {policy && <Field label="Policy">{fmt.policyRef(policy)}</Field>}
       </dl>
 
-      {relatedTarget && (
+      {navigableRelatedTarget && (
         <Link
-          to={relatedTarget.to}
+          to={navigableRelatedTarget.to}
+          onClick={onNavigate}
           className="btn-outline inline-flex text-sm"
         >
           <ArrowUpRight className="h-3.5 w-3.5" />
-          {relatedTarget.label}
+          {navigableRelatedTarget.label}
         </Link>
       )}
 
@@ -422,10 +434,10 @@ function relatedRemarkTarget(
   messageRow: MessageRow | null
 ): RelatedRemarkTarget | null {
   if (context === "customer") {
-    if (event.claimId) return { to: "/agency/customer/claims", label: "Open related claim" };
-    if (event.documentId) return { to: `/agency/customer/documents?document=${encodeURIComponent(event.documentId)}`, label: "Open related document" };
-    if (event.policyId) return { to: `/agency/customer/policies/${event.policyId}`, label: "Open related policy" };
-    if (event.assetId) return { to: `/agency/customer/assets/${event.assetId}`, label: "Open related asset" };
+    if (event.claimId) return { to: "/agency/customer/claims", label: openTo("claim") };
+    if (event.documentId) return { to: `/agency/customer/documents?document=${encodeURIComponent(event.documentId)}`, label: openTo("document") };
+    if (event.policyId) return { to: `/agency/customer/policies/${event.policyId}`, label: openTo("policy") };
+    if (event.assetId) return { to: `/agency/customer/assets/${event.assetId}`, label: openTo("asset") };
     return null;
   }
 
@@ -437,46 +449,50 @@ function relatedRemarkTarget(
     if (event.customerId) {
       return {
         to: `/employee/clients/${event.customerId}#ai-quoting-workspace`,
-        label: "Open related quote workspace",
+        label: openTo("AI quoting workspace"),
       };
     }
     if (event.prospectId) {
       return {
         to: `/employee/prospects/${event.prospectId}#ai-quoting-workspace`,
-        label: "Open related quote workspace",
+        label: openTo("AI quoting workspace"),
       };
     }
   }
 
   if (event.claimId) {
-    return { to: `/employee/claims?claim=${encodeURIComponent(event.claimId)}`, label: "Open related claim" };
+    return { to: `/employee/claims?claim=${encodeURIComponent(event.claimId)}`, label: openTo("claim") };
   }
   if (event.documentId) {
-    return { to: `/employee/documents?document=${encodeURIComponent(event.documentId)}`, label: "Open related document" };
+    return { to: `/employee/documents?document=${encodeURIComponent(event.documentId)}`, label: openTo("document") };
   }
   if (event.depositId || /billing|payment|invoice|premium/i.test(event.message)) {
-    if (event.policyId) return { to: `/employee/billing/${event.policyId}`, label: "Open related billing" };
-    return { to: "/employee/billing", label: "Open related billing" };
+    if (event.policyId) return { to: `/employee/billing/${event.policyId}`, label: openTo("billing") };
+    return { to: "/employee/billing", label: openTo("billing") };
   }
   if (event.renewalId) {
-    return { to: "/employee/renewals", label: "Open related renewal" };
+    return { to: "/employee/renewals", label: openTo("renewal") };
   }
   if (event.policyId) {
-    return { to: `/employee/policies/${event.policyId}`, label: "Open related policy" };
+    return { to: `/employee/policies/${event.policyId}`, label: openTo("policy") };
   }
   if (event.assetId && event.customerId) {
     return {
       to: `/employee/clients/${event.customerId}/assets/${event.assetId}`,
-      label: "Open related asset",
+      label: openTo("asset"),
     };
   }
   if (event.customerId) {
-    return { to: `/employee/clients/${event.customerId}#client-remarks`, label: "Open related client" };
+    return { to: `/employee/clients/${event.customerId}#client-remarks`, label: openTo("client") };
   }
   if (event.prospectId) {
-    return { to: `/employee/prospects/${event.prospectId}`, label: "Open related prospect" };
+    return { to: `/employee/prospects/${event.prospectId}`, label: openTo("prospect") };
   }
   return null;
+}
+
+function openTo(destination: string): string {
+  return `Open to ${destination}`;
 }
 
 function messageRouteForRemark(messageRow: MessageRow | null): RelatedRemarkTarget | null {
@@ -484,14 +500,14 @@ function messageRouteForRemark(messageRow: MessageRow | null): RelatedRemarkTarg
   if (messageRow.kind === "marketing") {
     if (messageRow.row.customerId) {
       return {
-        to: `/employee/messages?contact=client:${messageRow.row.customerId}`,
-        label: "Open related message",
+        to: `/employee/messages?contact=${encodeURIComponent(`client:${messageRow.row.customerId}`)}`,
+        label: openTo("message thread"),
       };
     }
     if (messageRow.row.prospectId) {
       return {
-        to: `/employee/messages?contact=prospect:${messageRow.row.prospectId}`,
-        label: "Open related message",
+        to: `/employee/messages?contact=${encodeURIComponent(`prospect:${messageRow.row.prospectId}`)}`,
+        label: openTo("message thread"),
       };
     }
     return null;
@@ -499,17 +515,17 @@ function messageRouteForRemark(messageRow: MessageRow | null): RelatedRemarkTarg
 
   const row = messageRow.row;
   if (row.customerId) {
-    return { to: `/employee/messages?contact=client:${row.customerId}`, label: "Open related message" };
+    return { to: `/employee/messages?contact=${encodeURIComponent(`client:${row.customerId}`)}`, label: openTo("message thread") };
   }
   if (row.prospectId) {
-    return { to: `/employee/messages?contact=prospect:${row.prospectId}`, label: "Open related message" };
+    return { to: `/employee/messages?contact=${encodeURIComponent(`prospect:${row.prospectId}`)}`, label: openTo("message thread") };
   }
   if (row.carrierContactId) {
-    return { to: `/employee/messages?contact=carrier:${row.carrierContactId}`, label: "Open related message" };
+    return { to: `/employee/messages?contact=${encodeURIComponent(`carrier:${row.carrierContactId}`)}`, label: openTo("message thread") };
   }
   const holderId = row.externalRecipientEmail?.trim().toLowerCase();
   if (holderId) {
-    return { to: `/employee/messages?contact=holder:${encodeURIComponent(holderId)}`, label: "Open related message" };
+    return { to: `/employee/messages?contact=${encodeURIComponent(`holder:${holderId}`)}`, label: openTo("message thread") };
   }
   return null;
 }

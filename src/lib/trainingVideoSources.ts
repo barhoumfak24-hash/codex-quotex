@@ -17,7 +17,7 @@ export interface TrainingVideoSource {
 }
 
 const STORAGE_KEY = "quotex.training.video.sources.v1";
-const COMPLETE_DEMO_WALKTHROUGH_URL = "/training/quotex-complete-demo-walkthrough.webm";
+const COMPLETE_PRODUCT_WALKTHROUGH_URL = "/training/quotex-complete-product-walkthrough.webm";
 const CATEGORY_TRAINING_VIDEO_SLUGS = [
   "dashboard",
   "activity-center",
@@ -41,8 +41,8 @@ const CATEGORY_TRAINING_VIDEO_SLUGS = [
 ];
 
 const BUNDLED_TRAINING_VIDEO_SOURCES: SourceStore = {
-  "agent-complete-demo-walkthrough": bundledSource("agent-complete-demo-walkthrough"),
-  "manager-complete-demo-walkthrough": bundledSource("manager-complete-demo-walkthrough"),
+  "agent-complete-product-walkthrough": bundledSource("agent-complete-product-walkthrough"),
+  "manager-complete-product-walkthrough": bundledSource("manager-complete-product-walkthrough"),
   ...Object.fromEntries(
     CATEGORY_TRAINING_VIDEO_SLUGS.flatMap((slug) => [
       [`agent-category-${slug}`, bundledCategorySource(`agent-category-${slug}`, slug)],
@@ -181,10 +181,10 @@ function parseTrainingVideoUrl(value: string): URL {
 function bundledSource(videoId: string): TrainingVideoSource {
   return {
     videoId,
-    url: COMPLETE_DEMO_WALKTHROUGH_URL,
+    url: COMPLETE_PRODUCT_WALKTHROUGH_URL,
     provider: "direct",
-    sourceName: "Bundled complete demo walkthrough",
-    notes: "Generated from the live Quotex demo and bundled with the app.",
+    sourceName: "Bundled complete product walkthrough",
+    notes: "Generated from the live Quotex product workflow and bundled with the app.",
     updatedAt: "2026-06-06T00:00:00.000Z",
     bundled: true,
   };
@@ -196,7 +196,7 @@ function bundledCategorySource(videoId: string, slug: string): TrainingVideoSour
     url: `/training/categories/${slug}.webm`,
     provider: "direct",
     sourceName: "Bundled live category walkthrough",
-    notes: "Recorded from the live Quotex demo with narration.",
+    notes: "Recorded from the live Quotex workflow with narration.",
     updatedAt: "2026-06-06T00:00:00.000Z",
     bundled: true,
   };

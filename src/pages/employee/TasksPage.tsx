@@ -48,7 +48,7 @@ import { CreateActivityModal } from "@/components/tasks/CreateActivityModal";
 import { EmployeeBackButton } from "@/components/layout/EmployeeBackButton";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
-import { useDemoNotice } from "@/lib/demo";
+import { useIntegrationNotice } from "@/lib/integrationNotice";
 import { api } from "@/lib/api";
 import { fmt } from "@/lib/format";
 import {
@@ -120,7 +120,7 @@ interface QuotingWorkflowRow {
 export function TasksPage() {
   const { agency } = useTenant();
   const { user } = useAuth();
-  const showDemoNotice = useDemoNotice();
+  const showIntegrationNotice = useIntegrationNotice();
   const [, setRev] = useState(0);
   const refresh = () => setRev((r) => r + 1);
   useEffect(() => subscribeToDbChanges(refresh), []);
@@ -662,7 +662,7 @@ export function TasksPage() {
         />
       )}
 
-      {/* Demo-mode reminder for the "add carrier portal" inline path */}
+      {/* Reminder for the "add carrier portal" inline path */}
       <div className="text-[11px] text-ink-400">
         Carrier agent-portal URLs are managed under{" "}
         <Link to="/master/carriers" className="text-gold-700 hover:underline">
@@ -1233,7 +1233,7 @@ function RoutingCard({
       // Personal vs commercial isn't an explicit field on
       // Prospect - derive from the asset type. All current
       // asset types are personal lines for this private-
-      // client demo book; the helper returns a friendly
+      // client record set; the helper returns a friendly
       // label either way.
       const line = prospectLineLabel(p.assetType);
       const tags: NonNullable<RoutingRow["tags"]> = [
@@ -1793,12 +1793,48 @@ function BoardColumn({
 }) {
   const { user } = useAuth();
   const [dropTarget, setDropTarget] = useState<{ taskId: string; edge: DropEdge } | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const columnRef = useRef<HTMLDivElement | null>(null);
   const taskIds = tasks.map((t) => t.id);
   const acceptsCurrentDrag = !!draggingTaskId && taskIds.includes(draggingTaskId);
 
   function dropEdgeFor(event: React.DragEvent<HTMLElement>): DropEdge {
     const rect = event.currentTarget.getBoundingClientRect();
     return event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+  }
+
+  function nearestDropTargetFor(event: React.DragEvent<HTMLElement>) {
+    const list = listRef.current;
+    if (!list || !draggingTaskId) return null;
+    const cards = Array.from(
+      list.querySelectorAll<HTMLElement>("[data-activity-card-id]")
+    ).filter((card) => card.dataset.activityCardId !== draggingTaskId);
+    if (cards.length === 0) return null;
+
+    let bestTaskId: string | null = null;
+    let bestEdge: DropEdge = "after";
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (const card of cards) {
+      const taskId = card.dataset.activityCardId;
+      if (!taskId) continue;
+      const rect = card.getBoundingClientRect();
+      const midpoint = rect.top + rect.height / 2;
+      const edge: DropEdge = event.clientY < midpoint ? "before" : "after";
+      const centerDistance = Math.abs(event.clientY - midpoint);
+      const gapDistance =
+        event.clientY < rect.top
+          ? rect.top - event.clientY
+          : event.clientY > rect.bottom
+          ? event.clientY - rect.bottom
+          : 0;
+      const distance = gapDistance * 0.7 + centerDistance * 0.3;
+      if (distance < bestDistance) {
+        bestTaskId = taskId;
+        bestEdge = edge;
+        bestDistance = distance;
+      }
+    }
+    return bestTaskId ? { taskId: bestTaskId, edge: bestEdge } : null;
   }
 
   function reorderedIds(targetTaskId: string, edge: DropEdge): string[] {
@@ -1822,8 +1858,46 @@ function BoardColumn({
     onDragEnd();
   }
 
+  function handleColumnDragOver(event: React.DragEvent<HTMLDivElement>) {
+    if (!acceptsCurrentDrag) return;
+    const target = nearestDropTargetFor(event);
+    if (!target) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setDropTarget(target);
+  }
+
+  function handleColumnDrop(event: React.DragEvent<HTMLDivElement>) {
+    if (!acceptsCurrentDrag) return;
+    event.preventDefault();
+    const draggedId =
+      event.dataTransfer.getData("application/x-quotex-task-id") ||
+      event.dataTransfer.getData("text/plain");
+    if (draggedId && draggedId !== draggingTaskId) onDragStart(draggedId);
+    const target = dropTarget ?? nearestDropTargetFor(event);
+    if (target) {
+      handleDrop(target.taskId, target.edge);
+    } else {
+      setDropTarget(null);
+      onDragEnd();
+    }
+  }
+
   return (
-    <div className="rounded-lg border border-ink-100 bg-ink-50/40 p-3 min-w-0 min-h-[274px]">
+    <div
+      ref={columnRef}
+      className={`rounded-lg border border-ink-100 bg-ink-50/40 p-3 min-w-0 min-h-[274px] transition ${
+        draggingTaskId && acceptsCurrentDrag ? "ring-2 ring-gold-100" : ""
+      }`}
+      onDragOver={handleColumnDragOver}
+      onDrop={handleColumnDrop}
+      onDragLeave={(event) => {
+        const next = event.relatedTarget;
+        if (next instanceof Node && event.currentTarget.contains(next)) return;
+        if (!next) return;
+        setDropTarget(null);
+      }}
+    >
       <div className="flex items-center justify-between mb-3 px-1">
         <div className="flex items-center gap-2">
           <h3 className="font-display text-lg">{title}</h3>
@@ -1839,7 +1913,10 @@ function BoardColumn({
           {emptyHint}
         </div>
       ) : (
-        <div className="space-y-3">
+        <div
+          ref={listRef}
+          className="space-y-4 py-5 -my-3"
+        >
           {tasks.map((t) => (
             <ActivityCard
               key={t.id}
@@ -1859,9 +1936,12 @@ function BoardColumn({
                 if (!acceptsCurrentDrag || draggingTaskId === t.id) return;
                 event.preventDefault();
                 event.dataTransfer.dropEffect = "move";
-                setDropTarget({ taskId: t.id, edge: dropEdgeFor(event) });
+                setDropTarget(nearestDropTargetFor(event) ?? { taskId: t.id, edge: dropEdgeFor(event) });
               }}
-              onCollapsedDragLeave={() => {
+              onCollapsedDragLeave={(event) => {
+                const next = event.relatedTarget;
+                if (next instanceof Node && columnRef.current?.contains(next)) return;
+                if (!next) return;
                 setDropTarget((current) => (current?.taskId === t.id ? null : current));
               }}
               onCollapsedDrop={(event) => {
@@ -1870,7 +1950,8 @@ function BoardColumn({
                   event.dataTransfer.getData("application/x-quotex-task-id") ||
                   event.dataTransfer.getData("text/plain");
                 if (draggedId && draggedId !== draggingTaskId) onDragStart(draggedId);
-                handleDrop(t.id, dropEdgeFor(event));
+                const target = nearestDropTargetFor(event) ?? { taskId: t.id, edge: dropEdgeFor(event) };
+                handleDrop(target.taskId, target.edge);
               }}
               onCollapsedDragEnd={() => {
                 setDropTarget(null);
@@ -1915,7 +1996,7 @@ function ActivityCard({
 }) {
   const { user } = useAuth();
   const { agency } = useTenant();
-  const showDemoNotice = useDemoNotice();
+  const showIntegrationNotice = useIntegrationNotice();
   // Activities start collapsed so the To do / In progress columns
   // read as scannable lists. Agent expands a card to act on it.
   // Deep-link arrivals (?focus=<taskId>) open expanded + scroll
@@ -2012,6 +2093,7 @@ function ActivityCard({
     }
     return (
       <div
+        data-activity-card-id={task.id}
         draggable
         onDragStart={onCollapsedDragStart}
         onDragOver={onCollapsedDragOver}
@@ -2024,10 +2106,10 @@ function ActivityCard({
         title="Drag to reorder this activity"
       >
         {dropEdge === "before" && (
-          <div className="pointer-events-none absolute -top-0.5 left-3 right-3 z-20 h-1 rounded-full bg-gold-500 shadow-sm" />
+          <div className="pointer-events-none absolute -top-2 left-2 right-2 z-20 h-3 rounded-md border border-gold-300 bg-gold-100/90 shadow-sm" />
         )}
         {dropEdge === "after" && (
-          <div className="pointer-events-none absolute -bottom-0.5 left-3 right-3 z-20 h-1 rounded-full bg-gold-500 shadow-sm" />
+          <div className="pointer-events-none absolute -bottom-2 left-2 right-2 z-20 h-3 rounded-md border border-gold-300 bg-gold-100/90 shadow-sm" />
         )}
         <SeverityBar severity={severity} />
         <button

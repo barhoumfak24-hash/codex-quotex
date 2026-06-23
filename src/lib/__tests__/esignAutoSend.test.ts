@@ -17,15 +17,34 @@ afterEach(() => {
 });
 
 describe("esign.runAll", () => {
+  function createCleanCustomerDocument(
+    db: typeof import("../db").db,
+    api: typeof import("../api").api
+  ) {
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const doc = {
+      id: `doc_esign_test_${Math.random().toString(36).slice(2)}`,
+      tenantId: agency.id,
+      uploadedById: agent.id,
+      fileName: "Test-E-Sign-Packet.pdf",
+      fileType: "application/pdf",
+      type: "endorsement_document" as const,
+      visibility: "employee_only" as const,
+      status: "approved" as const,
+      storagePath: "test/e-sign-packet.pdf",
+      customerId: customer.id,
+      uploadedAt: new Date().toISOString(),
+    };
+    db.insert("documents", doc);
+    return { agency, customer, agent, doc };
+  }
+
   it("setRequirements only tags the document and does not dispatch anything", async () => {
     const { api } = await import("../api");
     const { db } = await import("../db");
-    const agency = api.agencies.list()[0];
-    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
-    const someDoc = db
-      .list("documents")
-      .find((d) => d.tenantId === agency.id && d.customerId);
-    if (!someDoc) return;
+    const { agency, agent, doc: someDoc } = createCleanCustomerDocument(db, api);
     const commsBefore = api.communications.listByTenant(agency.id).length;
     const tasksBefore = api.tasks.listByTenant(agency.id).length;
 
@@ -73,13 +92,7 @@ describe("esign.runAll", () => {
   it("creates an Activity Center task per agent-side e-sign requirement", async () => {
     const { api } = await import("../api");
     const { db } = await import("../db");
-    const agency = api.agencies.list()[0];
-    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
-    // Flip on agent esign on one existing document.
-    const someDoc = db
-      .list("documents")
-      .find((d) => d.tenantId === agency.id && d.customerId);
-    if (!someDoc) return;
+    const { agency, agent, doc: someDoc } = createCleanCustomerDocument(db, api);
     api.esign.setRequirements(someDoc.id, {
       agentEsignRequired: true,
       agentEsignAssignedToId: agent.id,
@@ -153,12 +166,7 @@ describe("esign.runAll", () => {
   it("markAgentSigned resolves the linked Activity Center task", async () => {
     const { api } = await import("../api");
     const { db } = await import("../db");
-    const agency = api.agencies.list()[0];
-    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
-    const someDoc = db
-      .list("documents")
-      .find((d) => d.tenantId === agency.id && d.customerId);
-    if (!someDoc) return;
+    const { agency, agent, doc: someDoc } = createCleanCustomerDocument(db, api);
     api.esign.setRequirements(someDoc.id, {
       agentEsignRequired: true,
       agentEsignAssignedToId: agent.id,

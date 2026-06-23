@@ -510,7 +510,10 @@ describe("commercial quoting session", () => {
       session.id,
       commercialAnswers,
       { id: agent.id, name: agent.name, role: "agent" },
-      { selectedCommercialCarrierIds: selectedCarrierIds }
+      {
+        selectedCommercialCarrierIds: selectedCarrierIds,
+        commercialCarrierEmailDrafts: previewDrafts,
+      }
     );
 
     expect(submitted?.commercialApplicationSentAt).toBeTruthy();
@@ -524,7 +527,7 @@ describe("commercial quoting session", () => {
     ).toBe(true);
     expect(
       submitted?.commercialCarrierSubmissions?.every(
-        (row) => row.status === "awaiting_response" && !row.responseAt
+        (row) => row.status === "accepted" && row.responseAt
       )
     ).toBe(true);
     const applicationMessageIds = (submitted?.commercialCarrierSubmissions ?? []).flatMap(
@@ -616,10 +619,7 @@ describe("commercial quoting session", () => {
     expect(applicationSummaryEvent?.communicationId).toBeTruthy();
     expect(applicationMessageIds).toContain(applicationSummaryEvent?.communicationId);
     expect(applicationSummaryEvent?.documentId).toBeTruthy();
-    expect(submitted?.quotes).toHaveLength(0);
-
-    const carrierResponses = api.quoting.readCommercialCarrierResponses(session.id);
-    expect(carrierResponses?.quotes.map((quote) => quote.carrierId).sort()).toEqual(
+    expect(submitted?.quotes.map((quote) => quote.carrierId).sort()).toEqual(
       [...selectedCarrierIds].sort()
     );
   });
@@ -648,27 +648,31 @@ describe("commercial quoting session", () => {
       .slice(0, 4)
       .map((row) => row.carrierId);
     expect(selectedCarrierIds.length).toBeGreaterThanOrEqual(3);
+    const applicationDrafts = api.quoting.previewCommercialCarrierEmails(
+      session.id,
+      commercialAnswers,
+      "application",
+      selectedCarrierIds
+    );
+    expect(applicationDrafts.length).toBeGreaterThan(0);
 
     const submitted = api.quoting.submitQuestionnaireResponses(
       session.id,
       commercialAnswers,
       { id: agent.id, name: agent.name, role: "agent" },
-      { selectedCommercialCarrierIds: selectedCarrierIds }
+      {
+        selectedCommercialCarrierIds: selectedCarrierIds,
+        commercialCarrierEmailDrafts: applicationDrafts,
+      }
     );
-    expect(
-      submitted?.commercialCarrierSubmissions?.every(
-        (submission) => submission.status === "awaiting_response"
-      )
-    ).toBe(true);
-    const carrierResponses = api.quoting.readCommercialCarrierResponses(session.id);
     const supplementalCarrierIds = new Set(
-      (carrierResponses?.commercialCarrierSubmissions ?? [])
+      (submitted?.commercialCarrierSubmissions ?? [])
         .filter((submission) => submission.status === "needs_client_info")
         .map((submission) => submission.carrierId)
     );
     expect(supplementalCarrierIds.size).toBeGreaterThan(0);
 
-    const secondRound = (carrierResponses?.questionnaireQuestions ?? []).filter(
+    const secondRound = (submitted?.questionnaireQuestions ?? []).filter(
       (question) => question.round === "second_round"
     );
     const secondRoundAnswers = Object.fromEntries(
@@ -745,43 +749,33 @@ describe("commercial quoting session", () => {
       "base-legal-business-name-as-registered": "Acme Logistics LLC",
       "base-federal-ein": "12-3456789",
     });
-    expect(submitted?.status).toBe("quoting");
+    expect(submitted?.status).toBe("awaiting_reply");
     expect(submitted?.commercialApplicationSentAt).toBeTruthy();
-    expect(submitted?.commercialSecondRoundSentAt).toBeUndefined();
+    expect(submitted?.commercialSecondRoundSentAt).toBeTruthy();
     expect(submitted?.questionnaireResponses?.["base-federal-ein"]).toBe("12-3456789");
-    expect(api.tasks.listByTenant(agency.id).length).toBe(tasksBefore);
-    expect(submitted?.quotes).toHaveLength(0);
-    expect(
-      submitted?.commercialCarrierSubmissions?.every(
-        (submission) => submission.status === "awaiting_response"
-      )
-    ).toBe(true);
-
-    const carrierResponses = api.quoting.readCommercialCarrierResponses(session.id);
-    expect(carrierResponses?.status).toBe("awaiting_reply");
-    expect(carrierResponses?.commercialSecondRoundSentAt).toBeTruthy();
+    expect(api.tasks.listByTenant(agency.id).length).toBeGreaterThan(tasksBefore);
     const supplementalTask = api.tasks
       .listByTenant(agency.id)
       .find((task) => task.activityKey === `quote-session:${session.id}:supplemental_pending`);
     expect(supplementalTask?.assignedToId).toBe(agent.id);
     expect(supplementalTask?.status).toBe("open");
-    expect(carrierResponses?.quotes.length).toBeGreaterThan(0);
+    expect(submitted?.quotes.length).toBeGreaterThan(0);
     const initiallyAcceptedIds = new Set(
-      (carrierResponses?.commercialCarrierSubmissions ?? [])
+      (submitted?.commercialCarrierSubmissions ?? [])
         .filter((s) => s.status === "accepted" || s.status === "supplemental_sent")
         .map((s) => s.carrierId)
     );
     const initiallyWaitingIds = new Set(
-      (carrierResponses?.commercialCarrierSubmissions ?? [])
+      (submitted?.commercialCarrierSubmissions ?? [])
         .filter((s) => s.status === "needs_client_info")
         .map((s) => s.carrierId)
     );
     expect(initiallyAcceptedIds.size).toBeGreaterThan(0);
     expect(initiallyWaitingIds.size).toBeGreaterThan(0);
-    expect(carrierResponses?.quotes.every((q) => initiallyAcceptedIds.has(q.carrierId))).toBe(true);
-    expect(carrierResponses?.quotes.some((q) => initiallyWaitingIds.has(q.carrierId))).toBe(false);
+    expect(submitted?.quotes.every((q) => initiallyAcceptedIds.has(q.carrierId))).toBe(true);
+    expect(submitted?.quotes.some((q) => initiallyWaitingIds.has(q.carrierId))).toBe(false);
 
-    const secondRound = (carrierResponses?.questionnaireQuestions ?? []).filter(
+    const secondRound = (submitted?.questionnaireQuestions ?? []).filter(
       (q) => q.round === "second_round"
     );
     expect(secondRound.length).toBeGreaterThan(0);

@@ -18,7 +18,7 @@ import { postServerAi } from "@/lib/aiGateway";
 import { fmt } from "@/lib/format";
 import { isStaffRole, staffRoleLabel } from "@/lib/roles";
 import { findVideoChapter, videoChapterPath } from "@/lib/trainingVideos";
-import type { Role, Task, TaskSeverity, User } from "@/types";
+import type { QuotingSession, Role, Task, TaskSeverity, User } from "@/types";
 
 export interface AssistantAnswer {
   // Markdown-ish plain text (rendered as paragraphs + bullet lines).
@@ -573,18 +573,18 @@ const KB: KbEntry[] = [
     related: ["How does document review work?"],
   },
   {
-    id: "demo-mode",
-    question: "Is this real data?",
+    id: "data-security",
+    question: "Is this production data?",
     keywords: [
-      "demo",
-      "demo mode",
       "real data",
       "sandbox",
       "test data",
       "is this live",
+      "data security",
+      "storage",
     ],
     answer:
-      "This is a demo environment â€” data lives in your browser and AI outputs are illustrative. Document uploads store filename/metadata only. In production, files go to encrypted storage and AI runs server-side behind /api endpoints.",
+      "Production records are tenant-scoped and should be stored behind server-side authorization, encrypted storage, audit logging, and Row Level Security. AI outputs are still preliminary and require licensed-agent review before binding or customer-facing decisions.",
   },
   {
     id: "client-portal",
@@ -1436,6 +1436,375 @@ function contactMessagesAction(contact: MatchedContact, label = "Open message th
   return contact.kind === "customer"
     ? messagesAction({ customerId: contact.id }, label)
     : messagesAction({ prospectId: contact.id }, label);
+}
+
+const CURRENT_PAGE_INTENT_RE =
+  /\b(this page|this screen|current page|current screen|where am i|what am i looking at|what should i do|what's next|whats next|next step|summarize|summary|recap|catch me up|help me here|on this page|right here)\b/;
+
+function isCurrentPageQuestion(q: string, ctx?: AssistantContext): boolean {
+  if (!ctx?.currentPath) return false;
+  return CURRENT_PAGE_INTENT_RE.test(q);
+}
+
+function pageLabelFromPath(path: string): string {
+  const normalized = path.split(/[?#]/)[0] || "/employee";
+  if (normalized === "/employee") return "dashboard";
+  if (normalized.startsWith("/employee/clients/")) return "client profile";
+  if (normalized.startsWith("/employee/prospects/")) return "prospect profile";
+  if (normalized.startsWith("/employee/policies/")) return "policy detail";
+  if (normalized.startsWith("/employee/tasks")) return "Activity Center";
+  if (normalized.startsWith("/employee/messages")) return "Messages";
+  if (normalized.startsWith("/employee/calendar")) return "Calendar";
+  if (normalized.startsWith("/employee/marketing")) return "AI marketing studio";
+  if (normalized.startsWith("/employee/claims")) return "Claims";
+  if (normalized.startsWith("/employee/billing")) return "Billing";
+  if (normalized.startsWith("/employee/documents")) return "Documents";
+  if (normalized.startsWith("/employee/carriers")) return "Carrier library";
+  if (normalized.startsWith("/employee/settings")) return "Agency settings";
+  return "employee portal";
+}
+
+function userNames(ids: Array<string | undefined | null>): string {
+  const names = Array.from(
+    new Set(
+      ids
+        .filter((id): id is string => !!id)
+        .map((id) => api.users.get(id)?.name)
+        .filter((name): name is string => !!name)
+    )
+  );
+  return names.length ? names.join(", ") : "unassigned";
+}
+
+function contactStaffLine(contact: MatchedContact): string {
+  if (contact.kind === "prospect") {
+    const prospect = api.prospects.get(contact.id);
+    return userNames([
+      prospect?.assignedAgentId,
+      ...(prospect?.additionalAgentIds ?? []),
+      prospect?.assignedCsrId,
+      ...(prospect?.additionalCsrIds ?? []),
+    ]);
+  }
+  const customer = api.customers.get(contact.id);
+  return userNames([
+    customer?.assignedAgentId,
+    ...(customer?.additionalAgentIds ?? []),
+    customer?.assignedCsrId,
+    ...(customer?.additionalCsrIds ?? []),
+  ]);
+}
+
+function openTasksForContact(contact: MatchedContact, ctx: AssistantContext): Task[] {
+  return api.tasks
+    .listByTenant(ctx.tenantId)
+    .filter((task) => canSeeTask(task, ctx))
+    .filter((task) =>
+      contact.kind === "customer"
+        ? task.customerId === contact.id
+        : task.prospectId === contact.id
+    )
+    .filter((task) => api.tasks.statusOf(task) !== "resolved")
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+}
+
+function latestQuotingSessionForContact(contact: MatchedContact): QuotingSession | undefined {
+  return contact.kind === "customer"
+    ? api.quoting.getForCustomer(contact.id)
+    : api.quoting.getForProspect(contact.id);
+}
+
+function quotingSessionLine(session?: QuotingSession): string {
+  if (!session) return "No open AI quoting workspace on file.";
+  const line = session.lineOfBusiness === "commercial" ? "Commercial" : "Personal";
+  const missingCount = session.missingFields.length;
+  const quoteCount = session.quotes.length;
+  const pieces = [
+    `${line} ${api.helpers.assetTypeLabel(session.assetType)}`,
+    `status ${session.status.replace(/_/g, " ")}`,
+    missingCount ? `${missingCount} missing field${missingCount === 1 ? "" : "s"}` : "no missing fields recorded",
+    quoteCount ? `${quoteCount} ranked quote${quoteCount === 1 ? "" : "s"}` : "",
+  ].filter(Boolean);
+  return pieces.join(" - ");
+}
+
+function currentContactAnswer(contact: MatchedContact, ctx: AssistantContext): AssistantAnswer {
+  const tasks = openTasksForContact(contact, ctx);
+  const session = latestQuotingSessionForContact(contact);
+  const recentRemarks = api.status
+    .listByTenant(ctx.tenantId)
+    .filter((event) =>
+      contact.kind === "customer"
+        ? event.customerId === contact.id
+        : event.prospectId === contact.id
+    )
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+    .slice(0, 2);
+
+  if (contact.kind === "prospect") {
+    const prospect = api.prospects.get(contact.id);
+    const actions = [
+      prospectAction(contact.id, "Open prospect"),
+      contactQuotingAction(contact),
+      contactMessagesAction(contact),
+      ...(tasks[0] ? [taskAction(tasks[0].id, "Open top activity")] : []),
+    ];
+    return {
+      text:
+        `You are on ${contact.name}'s prospect profile.\n` +
+        `- Assigned staff: ${contactStaffLine(contact)}\n` +
+        `- Status: ${prospect?.status.replace(/_/g, " ") ?? "unknown"}\n` +
+        `- Interest: ${prospect ? api.helpers.assetTypeLabel(prospect.assetType) : "not recorded"}${
+          prospect?.estimatedValue ? ` (${formatMoney(prospect.estimatedValue)})` : ""
+        }\n` +
+        `- Open activities: ${tasks.length}\n` +
+        `- AI quoting: ${quotingSessionLine(session)}\n` +
+        (recentRemarks.length
+          ? `- Latest remarks: ${recentRemarks.map((event) => event.message).join(" | ")}\n`
+          : "") +
+        `\nBest next move: use the quoting workspace if the prospect is ready to quote, or open the message thread/activity if there is an active follow-up.`,
+      topicId: "current-prospect",
+      actions,
+      action: actions[0],
+      related: [
+        `Open ${contact.name}'s AI quoting workspace`,
+        `What is ${contact.name}'s status?`,
+        `Create an activity for ${contact.name}`,
+      ],
+    };
+  }
+
+  const customer = api.customers.get(contact.id);
+  const assets = api.assets.listByCustomer(contact.id);
+  const policies = api.policies.listByCustomer(contact.id);
+  const bound = policies.filter((policy) => policy.status === "bound");
+  const claims = api.claims.listByCustomer(contact.id);
+  const openClaims = claims.filter((claim) => claim.status !== "closed");
+  const documents = api.documents.listByEntity({ customerId: contact.id });
+  const premium = bound.reduce(
+    (sum, policy) => sum + (policy.finalPremium ?? policy.premiumEstimate ?? 0),
+    0
+  );
+  const nextRenewal = policies
+    .map((policy) => policy.renewalDate)
+    .filter((date): date is string => !!date)
+    .sort()[0];
+  const actions = [
+    clientAction(contact.id, "Open client"),
+    contactQuotingAction(contact),
+    contactMessagesAction(contact),
+    ...(tasks[0] ? [taskAction(tasks[0].id, "Open top activity")] : []),
+    ...(policies[0] ? [policyAction(policies[0].id, "Open policy")] : []),
+  ];
+  return {
+    text:
+      `You are on ${contact.name}'s client profile.\n` +
+      `- Assigned staff: ${contactStaffLine(contact)}\n` +
+      `- Client line: ${customer?.lineOfBusiness ?? "not set"}\n` +
+      `- Contact: ${customer?.email ?? "no email"}${customer?.phone ? ` - ${customer.phone}` : ""}\n` +
+      `- Assets: ${assets.length}; policies: ${policies.length} (${bound.length} bound); claims: ${claims.length} (${openClaims.length} open)\n` +
+      `- Premium under management: ${formatMoney(premium)}${nextRenewal ? `; next renewal: ${formatDate(nextRenewal)}` : ""}\n` +
+      `- Documents: ${documents.length}; open activities: ${tasks.length}\n` +
+      `- AI quoting: ${quotingSessionLine(session)}\n` +
+      (recentRemarks.length
+        ? `- Latest remarks: ${recentRemarks.map((event) => event.message).join(" | ")}\n`
+        : "") +
+      `\nBest next move: handle any open activity first; otherwise continue the AI quoting workspace or review the policy/document card tied to the client question.`,
+    topicId: "current-client",
+    actions,
+    action: actions[0],
+    related: [
+      `When does ${contact.name} renew?`,
+      `How many policies does ${contact.name} have?`,
+      `Open ${contact.name}'s AI quoting workspace`,
+    ],
+  };
+}
+
+function currentPolicyAnswer(policyId: string, ctx: AssistantContext): AssistantAnswer | null {
+  const policy = api.policies.get(policyId);
+  if (!policy) return null;
+  const customer = api.customers.get(policy.customerId);
+  if (customer && !api.customers.canSee(customer, ctx.viewer)) return null;
+  const asset = api.assets.get(policy.assetId);
+  const carrier = api.carriers.get(policy.carrierId);
+  const tasks = api.tasks
+    .listByTenant(ctx.tenantId)
+    .filter((task) => canSeeTask(task, ctx))
+    .filter((task) => task.policyId === policy.id || task.customerId === policy.customerId)
+    .filter((task) => api.tasks.statusOf(task) !== "resolved");
+  const actions = [
+    policyAction(policy.id, "Open policy"),
+    clientAction(policy.customerId, "Open client"),
+    billingAction(policy.id, "Open billing"),
+    ...(tasks[0] ? [taskAction(tasks[0].id, "Open top activity")] : []),
+  ];
+  return {
+    text:
+      `You are on policy ${policy.policyNumber ?? policy.id}.\n` +
+      `- Client: ${customer?.name ?? "unknown"}\n` +
+      `- Asset: ${asset?.label ?? "not linked"}\n` +
+      `- Carrier: ${carrier?.name ?? policy.carrierId}\n` +
+      `- Status: ${policy.status.replace(/_/g, " ")}; renewal: ${formatDate(policy.renewalDate)}\n` +
+      `- Premium: ${formatMoney(policy.finalPremium ?? policy.premiumEstimate ?? 0)}\n` +
+      `- Coverages: ${(policy.coverages ?? []).length}; participants: ${(policy.participants ?? []).length}; open related activities: ${tasks.length}\n` +
+      `\nBest next move: if the question is billing, open billing; if it is coverage or participants, stay on this policy detail and review the matching card.`,
+    topicId: "current-policy",
+    action: actions[0],
+    actions,
+    related: [
+      `Open ${customer?.name ?? "this client"}`,
+      "How do I view full policy details?",
+      "Create an activity for this policy",
+    ],
+  };
+}
+
+function currentMessagesAnswer(ctx: AssistantContext): AssistantAnswer {
+  const path = ctx.currentPath ?? "";
+  const contactParam = new URLSearchParams(path.split("?")[1]?.split("#")[0] ?? "").get("contact") ?? "";
+  const decoded = decodeURIComponent(contactParam);
+  const [kind, id] = decoded.split(":");
+  let contact: MatchedContact | null = null;
+  if (kind === "client") {
+    const customer = api.customers.get(id);
+    if (customer && api.customers.canSee(customer, ctx.viewer)) {
+      contact = { kind: "customer", id: customer.id, name: customer.name };
+    }
+  } else if (kind === "prospect") {
+    const prospect = api.prospects.get(id);
+    if (prospect) contact = { kind: "prospect", id: prospect.id, name: prospect.name };
+  }
+  if (contact) {
+    const comms =
+      contact.kind === "customer"
+        ? api.communications.listByCustomer(contact.id)
+        : api.communications.listByTenant(ctx.tenantId).filter((comm) => comm.prospectId === contact.id);
+    const latest = [...comms].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
+    return {
+      text:
+        `You are in the message thread for ${contact.name}.\n` +
+        `- Total messages on file: ${comms.length}\n` +
+        `- Latest: ${latest ? `${latest.direction} ${latest.channel} on ${formatDateTime(latest.createdAt)}${latest.subject ? ` - ${latest.subject}` : ""}` : "no message yet"}\n` +
+        `- Related quoting: ${quotingSessionLine(latestQuotingSessionForContact(contact))}\n` +
+        `\nBest next move: answer from the thread if this is a client/prospect reply; open the profile or quoting workspace if the reply changes file data.`,
+      topicId: "current-messages",
+      action: contactMessagesAction(contact),
+      actions: [contactMessagesAction(contact), contactProfileAction(contact), contactQuotingAction(contact)],
+    };
+  }
+  return {
+    text:
+      "You are in Messages. Use this screen to review client/prospect/carrier conversations, open the exact thread, and send replies that stay attached to the contact record.",
+    topicId: "current-messages",
+    action: categoryAction("/employee/messages", "Open messages"),
+  };
+}
+
+function currentDashboardAnswer(ctx: AssistantContext): AssistantAnswer {
+  const isManager = ctx.viewer.role === "manager" || ctx.viewer.role === "master_admin";
+  const customers = api.customers.listVisible(ctx.tenantId, ctx.viewer);
+  const customerIds = new Set(customers.map((customer) => customer.id));
+  const openTasks = api.tasks
+    .listOpen(ctx.tenantId)
+    .filter((task) => isManager || canSeeTask(task, ctx));
+  const urgent = openTasks.filter((task) => task.severity === "urgent").length;
+  const sessions = api.quoting
+    .listByTenant(ctx.tenantId)
+    .filter((session) => !session.customerId || customerIds.has(session.customerId));
+  const openQuotes = sessions.filter((session) => session.status !== "complete").length;
+  const quoteReady = sessions.filter((session) => session.status === "complete" && session.quotes.length > 0).length;
+  return {
+    text:
+      `You are on the employee dashboard.\n` +
+      `- Visible clients: ${customers.length}\n` +
+      `- Open activities: ${openTasks.length}${urgent ? ` (${urgent} high importance)` : ""}\n` +
+      `- AI quote workspaces in progress: ${openQuotes}; rankings ready: ${quoteReady}\n` +
+      `- Scope: ${isManager ? "agency-wide manager view" : "your assigned book"}\n` +
+      `\nBest next move: open the Activity Center if there is owned work, or go to Clients/Quoting when you are trying to move a specific file forward.`,
+    topicId: "current-dashboard",
+    actions: [
+      categoryAction("/employee/tasks", "Open Activity Center"),
+      categoryAction("/employee/clients", "Open clients"),
+      categoryAction("/employee/messages", "Open messages"),
+    ],
+  };
+}
+
+function currentTasksAnswer(ctx: AssistantContext): AssistantAnswer {
+  const isManager = ctx.viewer.role === "manager" || ctx.viewer.role === "master_admin";
+  const openTasks = api.tasks
+    .listOpen(ctx.tenantId)
+    .filter((task) => isManager || canSeeTask(task, ctx));
+  const inProgress = openTasks.filter((task) => api.tasks.statusOf(task) === "in_progress");
+  const top = [...openTasks].sort((a, b) => {
+    const severityRank = { urgent: 3, warning: 2, info: 1 } as Record<TaskSeverity, number>;
+    const severityDelta =
+      (severityRank[b.severity ?? "info"] ?? 0) - (severityRank[a.severity ?? "info"] ?? 0);
+    if (severityDelta !== 0) return severityDelta;
+    return a.createdAt < b.createdAt ? 1 : -1;
+  })[0];
+  return {
+    text:
+      `You are in the Activity Center.\n` +
+      `- Open activities: ${openTasks.length}\n` +
+      `- In progress: ${inProgress.length}\n` +
+      `- Top item: ${top ? `${top.title} (${(top.severity ?? "info").replace(/_/g, " ")})` : "none"}\n` +
+      `- Scope: ${isManager ? "agency-wide manager view" : "your assigned queue"}\n` +
+      `\nBest next move: work the highest-importance item first, or tell me the activity title and I can prepare start, snooze, due-date, importance, or resolve actions for confirmation.`,
+    topicId: "current-tasks",
+    action: top ? taskAction(top.id, "Open top activity") : categoryAction("/employee/tasks", "Open Activity Center"),
+    actions: [categoryAction("/employee/tasks", "Open Activity Center")],
+  };
+}
+
+function currentMarketingAnswer(ctx: AssistantContext): AssistantAnswer {
+  const campaigns = api.marketing.listCampaigns(ctx.tenantId);
+  const active = campaigns.filter((campaign) => campaign.status === "active").length;
+  const scheduled = campaigns.filter((campaign) => campaign.status === "scheduled").length;
+  const latest = [...campaigns].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
+  return {
+    text:
+      `You are in AI marketing studio.\n` +
+      `- Campaigns on file: ${campaigns.length}\n` +
+      `- Active: ${active}; scheduled: ${scheduled}\n` +
+      `- Latest campaign: ${latest ? `${latest.name} (${latest.status})` : "none"}\n` +
+      `\nBest next move: pick a precise audience first, preview the full creative/message, then send or schedule only after the final content and recipients look right.`,
+    topicId: "current-marketing",
+    action: categoryAction("/employee/marketing", "Open marketing"),
+    related: ["How does AI marketing work?", "How do I send an AI campaign on email and SMS together?"],
+  };
+}
+
+function currentGenericPageAnswer(ctx: AssistantContext): AssistantAnswer {
+  const label = pageLabelFromPath(ctx.currentPath ?? "");
+  return {
+    text:
+      `You are on the ${label} page. I can use the visible agency records plus this route to answer questions, find records, or prepare confirmed actions. Ask for a summary, a record lookup, or tell me exactly what you want opened or changed.`,
+    topicId: "current-page",
+    related: ["What should I do next?", "Open Activity Center", "Summarize this page"],
+  };
+}
+
+function tryCurrentPageAnswer(q: string, ctx: AssistantContext): AssistantAnswer | null {
+  if (!isCurrentPageQuestion(q, ctx)) return null;
+  const path = ctx.currentPath ?? "";
+  const contact = contactFromCurrentPath(ctx);
+  if (contact) return currentContactAnswer(contact, ctx);
+
+  const policyId = /\/employee\/policies\/([^/?#]+)/.exec(path)?.[1];
+  if (policyId) {
+    const answer = currentPolicyAnswer(decodeURIComponent(policyId), ctx);
+    if (answer) return answer;
+  }
+
+  if (path === "/employee" || path.startsWith("/employee?") || path.startsWith("/employee#")) {
+    return currentDashboardAnswer(ctx);
+  }
+  if (path.startsWith("/employee/tasks")) return currentTasksAnswer(ctx);
+  if (path.startsWith("/employee/messages")) return currentMessagesAnswer(ctx);
+  if (path.startsWith("/employee/marketing")) return currentMarketingAnswer(ctx);
+  return currentGenericPageAnswer(ctx);
 }
 
 function attachTrainingVideo(
@@ -4341,6 +4710,8 @@ export function askPortalAssistant(
     if (isDirectActionCommand(question)) {
       return actionNeedsSpecificsAnswer(question, ctx);
     }
+    const currentPage = tryCurrentPageAnswer(q, ctx);
+    if (currentPage) return currentPage;
   }
 
   // Live-data lookups (need the records the viewer can see). Use the

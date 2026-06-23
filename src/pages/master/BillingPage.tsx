@@ -508,7 +508,7 @@ function RevenueTile({
 }
 
 function saleTone(status: SoftwareSaleStatus): "neutral" | "info" | "success" | "warn" | "error" | "gold" {
-  if (status === "paid_demo") return "success";
+  if (status === "paid") return "success";
   if (status === "provisioning") return "gold";
   if (status === "closed") return "neutral";
   return "warn";

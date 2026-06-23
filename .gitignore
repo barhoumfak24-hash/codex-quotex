@@ -27,5 +27,6 @@ app-*-check.png
 .tmp-*
 artifacts
 work
+backups
 tmp-*
 *.wav

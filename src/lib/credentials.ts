@@ -1,15 +1,16 @@
 import type { Role, SubscriptionTier } from "@/types";
 
 // =====================================================================
-// Staff credential generator (demo only).
+// Staff credential generator for local browser-backed records.
 //
 // Real backend MUST:
 //  - hash passwords (argon2id / bcrypt) and never return them in API responses
 //  - issue one-time-use reveal links for distribution (signed, short TTL)
 //  - require password rotation on first login + MFA enrollment
 //
-// This file is fine for the demo: passwords are stored in plain text in the
-// mock DB so the master portal can display them once, then regenerate.
+// The browser-backed store is not a credential vault. Production must hash
+// passwords server-side and store agency codes / connection secrets in the
+// encrypted backend vault.
 // =====================================================================
 
 const ADJECTIVES = [
@@ -60,9 +61,9 @@ export function normalizeAgencyCode(code: string): string {
 }
 
 const AGENCY_CODE_CIPHER_PREFIX = "qac1.";
-const AGENCY_CODE_DEMO_KEY = "quotex-agency-code";
+const AGENCY_CODE_LOCAL_KEY = "quotex-agency-code";
 const CONNECTION_SECRET_CIPHER_PREFIX = "qcs1.";
-const CONNECTION_SECRET_DEMO_KEY = "quotex-connection-secret";
+const CONNECTION_SECRET_LOCAL_KEY = "quotex-connection-secret";
 
 function xorText(value: string, key: string): string {
   let out = "";
@@ -88,14 +89,14 @@ function fromHex(value: string): string {
 
 export function encryptAgencyCode(code: string): string {
   const normalized = normalizeAgencyCode(code);
-  return `${AGENCY_CODE_CIPHER_PREFIX}${toHex(xorText(normalized, AGENCY_CODE_DEMO_KEY))}`;
+  return `${AGENCY_CODE_CIPHER_PREFIX}${toHex(xorText(normalized, AGENCY_CODE_LOCAL_KEY))}`;
 }
 
 export function decryptAgencyCode(encrypted?: string | null): string | null {
   if (!encrypted?.startsWith(AGENCY_CODE_CIPHER_PREFIX)) return null;
   try {
     const payload = encrypted.slice(AGENCY_CODE_CIPHER_PREFIX.length);
-    return normalizeAgencyCode(xorText(fromHex(payload), AGENCY_CODE_DEMO_KEY));
+    return normalizeAgencyCode(xorText(fromHex(payload), AGENCY_CODE_LOCAL_KEY));
   } catch {
     return null;
   }
@@ -129,14 +130,14 @@ export function generateConnectionSecret(prefix = "qtx_site"): string {
 }
 
 export function encryptConnectionSecret(secret: string): string {
-  return `${CONNECTION_SECRET_CIPHER_PREFIX}${toHex(xorText(secret, CONNECTION_SECRET_DEMO_KEY))}`;
+  return `${CONNECTION_SECRET_CIPHER_PREFIX}${toHex(xorText(secret, CONNECTION_SECRET_LOCAL_KEY))}`;
 }
 
 export function decryptConnectionSecret(encrypted?: string | null): string | null {
   if (!encrypted?.startsWith(CONNECTION_SECRET_CIPHER_PREFIX)) return null;
   try {
     const payload = encrypted.slice(CONNECTION_SECRET_CIPHER_PREFIX.length);
-    return xorText(fromHex(payload), CONNECTION_SECRET_DEMO_KEY);
+    return xorText(fromHex(payload), CONNECTION_SECRET_LOCAL_KEY);
   } catch {
     return null;
   }

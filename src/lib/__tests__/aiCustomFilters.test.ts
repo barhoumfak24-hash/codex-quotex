@@ -5,7 +5,7 @@ describe("matchesAiCustomFilter", () => {
   it("matches free-text names and assigned agents", () => {
     expect(
       matchesAiCustomFilter("Olivia", {
-        text: ["Alexandra Whitford", "Olivia Marsh", "customer@demo.example"],
+        text: ["Alexandra Whitford", "Olivia Marsh", "alexandra.whitford@example.com"],
         flags: { assigned: true },
       })
     ).toBe(true);

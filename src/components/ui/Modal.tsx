@@ -1,7 +1,16 @@
 import { ArrowLeft, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { getAppSurface } from "@/lib/appSurface";
+
+const FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "textarea:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
 
 function measureAppFrame(): CSSProperties | undefined {
   if (typeof document === "undefined") return undefined;
@@ -14,6 +23,41 @@ function measureAppFrame(): CSSProperties | undefined {
     width: rect.width,
     height: rect.height,
   };
+}
+
+function getFocusableElements(container: HTMLElement): HTMLElement[] {
+  return Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+    (element) =>
+      !element.getAttribute("aria-hidden") &&
+      (element.offsetWidth > 0 || element.offsetHeight > 0 || element.getClientRects().length > 0)
+  );
+}
+
+function focusModalPanel(panel: HTMLElement | null) {
+  if (!panel) return;
+  const firstFocusable = getFocusableElements(panel)[0];
+  (firstFocusable ?? panel).focus();
+}
+
+function trapModalFocus(event: KeyboardEvent, panel: HTMLElement) {
+  const focusable = getFocusableElements(panel);
+  if (focusable.length === 0) {
+    event.preventDefault();
+    panel.focus();
+    return;
+  }
+
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = document.activeElement;
+
+  if (event.shiftKey && (!active || active === first || !panel.contains(active))) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && active === last) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 export function Modal({
@@ -35,10 +79,24 @@ export function Modal({
 }) {
   const isAppSurface = getAppSurface() === "agencyApp";
   const [appFrameStyle, setAppFrameStyle] = useState<CSSProperties | undefined>();
+  const titleId = useId();
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const previouslyFocusedRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    previouslyFocusedRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusTimer = window.setTimeout(() => focusModalPanel(panelRef.current), 0);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+        return;
+      }
+      if (e.key === "Tab" && panelRef.current) {
+        trapModalFocus(e, panelRef.current);
+      }
+    };
     window.addEventListener("keydown", onKey);
     // Lock body scroll while the modal is open so wheel events
     // don't leak through the backdrop and the modal feels modal.
@@ -50,9 +108,13 @@ export function Modal({
     }
     document.body.style.overflow = "hidden";
     return () => {
+      window.clearTimeout(focusTimer);
       window.removeEventListener("keydown", onKey);
       document.body.style.overflow = prevOverflow;
       document.body.style.paddingRight = prevPaddingRight;
+      if (previouslyFocusedRef.current?.isConnected) {
+        previouslyFocusedRef.current.focus();
+      }
     };
   }, [open, onClose]);
 
@@ -99,6 +161,12 @@ export function Modal({
       }}
     >
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={title ? titleId : undefined}
+        aria-label={title ? undefined : closeLabel}
+        tabIndex={-1}
         // Cap to the viewport height, then let the body section
         // scroll. Keeps the header + footer in view at all times so
         // the Send button is always reachable, even on a laptop.
@@ -109,7 +177,13 @@ export function Modal({
         }
       >
         <div className="flex items-start justify-between gap-3 px-5 py-3 hairline shrink-0">
-          <h3 className="min-w-0 break-words text-base font-semibold leading-snug">{title}</h3>
+          {title ? (
+            <h3 id={titleId} className="min-w-0 break-words text-base font-semibold leading-snug">
+              {title}
+            </h3>
+          ) : (
+            <span />
+          )}
           <button
             type="button"
             onClick={onClose}

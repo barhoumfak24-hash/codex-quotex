@@ -56,7 +56,7 @@ function providerFor(carrier: Carrier, quote: CarrierQuote): BindingProvider {
   const quoteProvider = quote.providerTrace?.provider;
   if (quoteProvider === "carrier_portal_automation") return "carrier_portal_automation";
   if (carrier.agentPortalUrl) return "manual_required";
-  return "demo_adapter";
+  return "configuration_only";
 }
 
 function providerLabel(provider: BindingProvider, carrier: Carrier, quote: CarrierQuote): string {
@@ -67,13 +67,13 @@ function providerLabel(provider: BindingProvider, carrier: Carrier, quote: Carri
       ? `${quote.providerTrace.providerLabel} manual bind`
       : "Manual carrier bind";
   }
-  return "Demo carrier adapter";
+  return "Manual carrier workflow";
 }
 
 function transportFor(provider: BindingProvider): CarrierPolicyBindingTrace["transport"] {
   if (provider === "carrier_portal_automation") return "browser_automation";
   if (provider === "manual_required") return "manual";
-  return "demo";
+  return "manual";
 }
 
 export function buildCarrierPolicyBindingRequest(
@@ -114,7 +114,7 @@ function blockingReasonsFor(
 ): string[] {
   const reasons: string[] = [];
   const bridgeUrl = readClientEnv("VITE_QUOTEX_CARRIER_BINDING_BRIDGE_URL");
-  if (provider === "demo_adapter") {
+  if (provider === "configuration_only") {
     reasons.push("no carrier portal handoff configured");
   }
   if (provider === "manual_required") {
@@ -142,7 +142,7 @@ export function prepareCarrierPolicyBinding(
   const status: CarrierPolicyBindingTrace["status"] =
     provider === "manual_required"
       ? "manual_required"
-      : provider === "demo_adapter"
+      : provider === "configuration_only"
         ? "prepared_not_sent"
         : "prepared_not_sent";
   const messages =
@@ -161,9 +161,9 @@ export function prepareCarrierPolicyBinding(
             "No carrier page is submitted unless every verification checkpoint passes.",
             ...blockingReasons,
           ]
-      : provider === "demo_adapter"
+      : provider === "configuration_only"
         ? [
-            `Recorded demo implementation ${request.requestId}.`,
+            `Recorded manual implementation placeholder ${request.requestId}.`,
             "No carrier-side bind request was sent.",
           ]
         : [

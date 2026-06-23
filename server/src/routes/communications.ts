@@ -33,16 +33,26 @@ const invoicePayloadSchema = z.object({
   contactName: z.string().min(1),
   email: z.string().email(),
   phone: z.string().optional(),
+  website: z.string().optional(),
   agencyCode: z.string().min(1),
   seats: z.number().int().positive(),
   estimatedMonthly: z.number().nonnegative(),
   setupFee: z.number().nonnegative().default(0),
   websiteAppAddOnLabel: z.string().optional(),
   websiteAppAddOnMonthly: z.number().nonnegative().optional(),
+  paymentMode: z.enum(["stripe_checkout", "manual_invoice"]).optional(),
+  source: z.enum(["transaction_site", "master_portal"]).optional(),
+  stripeCheckoutSessionId: z.string().optional(),
   termMonths: z.union([z.literal(12), z.literal(24), z.literal(36)]).default(12),
   termDiscountPercent: z.number().nonnegative().default(0),
   termDiscountMonthly: z.number().nonnegative().default(0),
   monthlyBeforeTermDiscount: z.number().nonnegative().optional(),
+  standardEstimatedMonthly: z.number().nonnegative().optional(),
+  customMonthlyPriceUsd: z.number().nonnegative().optional(),
+  customMonthlyPriceReason: z.string().optional(),
+  signedByName: z.string().optional(),
+  signedByEmail: z.string().email().optional(),
+  signedAt: z.string().optional(),
   signedAgreements: z.array(signedAgreementSchema).default([]),
 });
 
@@ -91,7 +101,9 @@ communicationsRoutes.post("/software-sale/invoice-email", async (req, res) => {
   const payload = parsed.data;
   const result = await sendEmail({
     to: payload.email,
-    subject: `Quotex invoice and agency code for ${payload.agencyName}`,
+    from: masterPortalEmailFrom(),
+    replyTo: masterPortalReplyTo(),
+    subject: `Quotex invoice ${invoiceNumberFor(payload.saleId)} - ${payload.agencyName}`,
     html: invoiceEmailHtml(payload),
     text: invoiceEmailText(payload),
     categories: ["software-sale", "invoice"],
@@ -133,6 +145,15 @@ ${payload.signingLink}`;
 }
 
 function invoiceEmailHtml(payload: z.infer<typeof invoicePayloadSchema>) {
+  const invoiceNumber = invoiceNumberFor(payload.saleId);
+  const purchaseSource =
+    payload.source === "master_portal" ? "Master portal assisted purchase" : "Secure checkout purchase";
+  const paymentMethod =
+    payload.paymentMode === "manual_invoice"
+      ? "Master-assisted invoice"
+      : payload.paymentMode === "stripe_checkout"
+      ? "Checkout payment"
+      : "Payment recorded";
   const signedRows =
     payload.signedAgreements.length > 0
       ? payload.signedAgreements
@@ -147,26 +168,60 @@ function invoiceEmailHtml(payload: z.infer<typeof invoicePayloadSchema>) {
           )
           .join("")
       : `<tr><td colspan="3">Signed documents pending or recorded outside this invoice.</td></tr>`;
+  const customPriceRows =
+    payload.customMonthlyPriceUsd !== undefined
+      ? `
+        ${invoiceRow("Standard monthly plan", money(payload.standardEstimatedMonthly ?? payload.estimatedMonthly))}
+        ${invoiceRow("Approved monthly price", money(payload.customMonthlyPriceUsd))}
+        ${payload.customMonthlyPriceReason ? invoiceRow("Special pricing note", payload.customMonthlyPriceReason) : ""}
+      `
+      : "";
 
   return emailShell(
-    "Your Quotex invoice and agency code",
+    `Invoice ${invoiceNumber}`,
     `
       <p>Hi ${escapeHtml(payload.contactName)},</p>
-      <p>Thank you for completing the Quotex monthly software plan for <strong>${escapeHtml(payload.agencyName)}</strong>. Your agency code is below.</p>
+      <p>Thank you for completing the Quotex software purchase for <strong>${escapeHtml(payload.agencyName)}</strong>. This invoice confirms the selected plan, signed checkout documents, and the agency access code issued for provisioning.</p>
+
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:18px 0;background:#faf9f5;border:1px solid #e5dfd0;border-radius:12px;overflow:hidden;">
+        <tr>
+          <td style="padding:16px;vertical-align:top;width:50%;border-right:1px solid #e5dfd0;">
+            <div style="font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:#75622b;font-weight:700;">Bill to</div>
+            <div style="margin-top:8px;font-size:16px;font-weight:700;color:#111;">${escapeHtml(payload.agencyName)}</div>
+            <div>${escapeHtml(payload.contactName)}</div>
+            <div>${escapeHtml(payload.email)}</div>
+            ${payload.phone ? `<div>${escapeHtml(payload.phone)}</div>` : ""}
+            ${payload.website ? `<div>${escapeHtml(payload.website)}</div>` : ""}
+          </td>
+          <td style="padding:16px;vertical-align:top;">
+            <div style="font-size:11px;letter-spacing:0.14em;text-transform:uppercase;color:#75622b;font-weight:700;">Invoice details</div>
+            <div style="margin-top:8px;"><strong>Invoice:</strong> ${escapeHtml(invoiceNumber)}</div>
+            <div><strong>Purchase:</strong> ${escapeHtml(purchaseSource)}</div>
+            <div><strong>Payment:</strong> ${escapeHtml(paymentMethod)}</div>
+            <div><strong>Date:</strong> ${escapeHtml(formatDateTime(payload.signedAt))}</div>
+            ${payload.stripeCheckoutSessionId ? `<div><strong>Reference:</strong> ${escapeHtml(payload.stripeCheckoutSessionId)}</div>` : ""}
+          </td>
+        </tr>
+      </table>
+
       <div style="border:1px solid #d9c37a;background:#fff8dc;border-radius:10px;padding:18px;margin:18px 0;">
         <div style="font-size:12px;letter-spacing:0.12em;text-transform:uppercase;color:#75622b;">Encrypted agency code</div>
         <div style="font-size:28px;font-weight:700;margin-top:6px;color:#111;">${escapeHtml(payload.agencyCode)}</div>
+        <div style="font-size:13px;color:#75622b;margin-top:8px;">Use this code only for authorized agency staff account setup.</div>
       </div>
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:18px 0;">
         ${invoiceRow("Invoice record", payload.saleId)}
         ${invoiceRow("Staff users", String(payload.seats))}
         ${invoiceRow("Website / app package", payload.websiteAppAddOnLabel ?? "Software only")}
         ${invoiceRow("Website / app monthly", money(payload.websiteAppAddOnMonthly ?? 0))}
+        ${payload.monthlyBeforeTermDiscount !== undefined ? invoiceRow("Monthly before term discount", money(payload.monthlyBeforeTermDiscount)) : ""}
         ${invoiceRow("Term", `${payload.termMonths} months${payload.termDiscountPercent ? `, ${payload.termDiscountPercent}% monthly discount` : ""}`)}
         ${invoiceRow("Term discount", `-${money(payload.termDiscountMonthly)}/mo`)}
+        ${customPriceRows}
         ${invoiceRow("Setup fee", money(payload.setupFee))}
         ${invoiceRow("Monthly total", `${money(payload.estimatedMonthly)}/mo`, true)}
       </table>
+      <p style="font-size:13px;color:#666;margin-top:-8px;">Unless otherwise stated in the signed checkout documents, the monthly software subscription renews according to the selected term and payment authorization.</p>
       <h2 style="font-size:18px;margin:24px 0 10px;">Signed checkout documents</h2>
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;">
         <thead>
@@ -178,27 +233,39 @@ function invoiceEmailHtml(payload: z.infer<typeof invoicePayloadSchema>) {
         </thead>
         <tbody>${signedRows}</tbody>
       </table>
-      <p style="font-size:13px;color:#666;margin-top:22px;">Keep this email for your records. Production payments, legal agreements, and agency-code issuance should be finalized through the connected payment processor and counsel-approved documents.</p>
+      <p style="font-size:13px;color:#666;margin-top:22px;">Keep this email for your records. If any invoice detail is incorrect, reply directly to this email before provisioning continues.</p>
     `
   );
 }
 
 function invoiceEmailText(payload: z.infer<typeof invoicePayloadSchema>) {
+  const invoiceNumber = invoiceNumberFor(payload.saleId);
   const signedDocuments = payload.signedAgreements.length
     ? payload.signedAgreements
         .map((agreement) => `- ${agreement.title}: ${agreement.signedByName ?? payload.contactName}, ${formatDateTime(agreement.signedAt)}`)
         .join("\n")
     : "- Signed documents pending or recorded outside this invoice.";
 
-  return `Quotex invoice for ${payload.agencyName}
+  return `Quotex invoice ${invoiceNumber}
 
+Bill to: ${payload.agencyName}
+Contact: ${payload.contactName}
+Email: ${payload.email}
+${payload.phone ? `Phone: ${payload.phone}\n` : ""}${payload.website ? `Website: ${payload.website}\n` : ""}
 Agency code: ${payload.agencyCode}
 Invoice record: ${payload.saleId}
+Purchase source: ${payload.source === "master_portal" ? "Master portal assisted purchase" : "Secure checkout purchase"}
+Payment method: ${payload.paymentMode === "manual_invoice" ? "Master-assisted invoice" : "Checkout payment"}
+${payload.stripeCheckoutSessionId ? `Transaction reference: ${payload.stripeCheckoutSessionId}\n` : ""}
 Staff users: ${payload.seats}
 Website / app package: ${payload.websiteAppAddOnLabel ?? "Software only"}
 Website / app monthly: ${money(payload.websiteAppAddOnMonthly ?? 0)}
+${payload.monthlyBeforeTermDiscount !== undefined ? `Monthly before term discount: ${money(payload.monthlyBeforeTermDiscount)}\n` : ""}
 Term: ${payload.termMonths} months${payload.termDiscountPercent ? `, ${payload.termDiscountPercent}% monthly discount` : ""}
 Term discount: -${money(payload.termDiscountMonthly)}/mo
+${payload.customMonthlyPriceUsd !== undefined ? `Standard monthly plan: ${money(payload.standardEstimatedMonthly ?? payload.estimatedMonthly)}
+Approved monthly price: ${money(payload.customMonthlyPriceUsd)}
+${payload.customMonthlyPriceReason ? `Special pricing note: ${payload.customMonthlyPriceReason}\n` : ""}` : ""}
 Setup fee: ${money(payload.setupFee)}
 Monthly total: ${money(payload.estimatedMonthly)}/mo
 
@@ -271,6 +338,30 @@ function formatDateTime(value?: string) {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+function invoiceNumberFor(saleId: string) {
+  const suffix = saleId.replace(/[^a-z0-9]/gi, "").slice(-8).toUpperCase() || "00000000";
+  return `QTX-${suffix}`;
+}
+
+function masterPortalEmailFrom() {
+  return (
+    env("MASTER_PORTAL_EMAIL_FROM") ||
+    env("MASTER_PORTAL_EMAIL") ||
+    env("EMAIL_FROM") ||
+    env("SENDGRID_FROM_EMAIL") ||
+    env("RESEND_FROM_EMAIL") ||
+    "Quotex Insurance <no-reply@quotexinsurance.com>"
+  );
+}
+
+function masterPortalReplyTo() {
+  return env("MASTER_PORTAL_REPLY_TO") || env("MASTER_PORTAL_EMAIL") || env("EMAIL_REPLY_TO") || undefined;
+}
+
+function env(key: string) {
+  return process.env[key]?.trim() ?? "";
 }
 
 function escapeHtml(value: string) {

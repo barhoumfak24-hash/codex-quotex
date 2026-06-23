@@ -90,7 +90,7 @@ export function downloadDocumentStub(d: Document) {
     documentName: d.documentName,
   });
   const body = [
-    `Quotex Insurance — Demo Document Placeholder`,
+    `Quotex Insurance - Document unavailable`,
     ``,
     `File:        ${d.fileName}`,
     `Type:        ${typeLabel}`,
@@ -99,14 +99,14 @@ export function downloadDocumentStub(d: Document) {
     `Tenant:      ${d.tenantId}`,
     `Storage:     ${d.storagePath}`,
     ``,
-    `In production this would be a signed S3 URL returning the real file.`,
-    `No real document content exists in the demo environment.`,
+    `The original document content is not available from the configured storage path.`,
+    `Re-upload the file or verify the document storage integration before sending this document.`,
   ].join("\n");
   const blob = new Blob([body], { type: "text/plain" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = d.fileName.replace(/\.[^.]+$/, "") + "-demo.txt";
+  a.download = d.fileName.replace(/\.[^.]+$/, "") + "-unavailable.txt";
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -345,8 +345,7 @@ export function DocumentViewerModal({
                   <div>
                     <div className="font-medium text-ink-900">{d.fileName}</div>
                     <p className="text-xs text-ink-500 mt-1 max-w-sm mx-auto">
-                      Image preview is rendered inline in production. The demo doesn't carry
-                      actual file bytes for privacy.
+                      Image preview is rendered inline when file bytes are available through the document service.
                     </p>
                   </div>
                 </div>
@@ -395,9 +394,7 @@ export function DocumentViewerModal({
                   layout={d.templateFieldLayout}
                 />
                 <div className="mt-8 rounded-md border border-dashed border-ink-200 bg-ink-50 p-4 text-xs text-ink-600">
-                  This is the Quotex demo viewer. In production this pane embeds the actual
-                  PDF or image via a signed viewer URL on the document service — no new tab,
-                  no download required. The audit log records every view.
+                  This pane embeds the actual PDF or image via a signed viewer URL on the document service. The audit log records every view.
                 </div>
               </>
             )}

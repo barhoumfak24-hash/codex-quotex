@@ -65,7 +65,7 @@ function providerFor(carrier: Carrier): ProviderKind {
     carrier.quotingAutomation?.agentPortalUrl ?? carrier.quotingAutomation?.customerPortalUrl ?? ""
   }`.toLowerCase();
   if (automationProvider || carrier.agentPortalUrl) return "carrier_portal_automation";
-  return "demo_adapter";
+  return "configuration_only";
 }
 
 function providerLabel(provider: ProviderKind, carrier: Carrier): string {
@@ -77,7 +77,7 @@ function providerLabel(provider: ProviderKind, carrier: Carrier): string {
 
 function transportFor(provider: ProviderKind): CarrierQuoteProviderTrace["transport"] {
   if (provider === "carrier_portal_automation") return "browser_automation";
-  return "demo";
+  return "manual";
 }
 
 function stableHash(input: string): number {
@@ -221,7 +221,7 @@ function providerMessages(
     ];
   }
   return [
-    `No carrier portal runner is configured for request ${request.requestId}; the demo estimate remains available for comparison.`,
+    `No carrier portal runner is configured for request ${request.requestId}; a configuration-only estimate remains available for comparison.`,
   ];
 }
 
@@ -268,7 +268,7 @@ export function runCarrierQuoteProvider(input: CarrierQuoteProviderRunInput): Ca
       ? `${readiness.providerLabel} live bridge`
       : readiness.quoteApiStatus === "simulated"
       ? `${readiness.providerLabel} adapter ready`
-      : "demo estimate only";
+      : "configuration-only estimate";
   const executionSuffix =
     readiness.provider === "carrier_portal_automation"
       ? runnerTrace?.jobId ?? `RPA-${carrier.id.slice(-5).toUpperCase()}-${stableHash(request.requestId) % 10000}`
@@ -276,7 +276,9 @@ export function runCarrierQuoteProvider(input: CarrierQuoteProviderRunInput): Ca
   const messages = providerMessages(readiness, request);
   if (runnerTrace) {
     messages.push(
-      `Runner status: ${runnerTrace.status.replace(/_/g, " ")} (${runnerTrace.mode.replace(/_/g, " ")}).`,
+      `Runner status: ${runnerTrace.status.replace(/_/g, " ")} (${
+        runnerTrace.mode === "configuration_trace" ? "configuration trace" : runnerTrace.mode.replace(/_/g, " ")
+      }).`,
       `${runnerTrace.mappedFieldCount} fields mapped; ${runnerTrace.requiredFieldCount} required fields identified.`,
       ...runnerTrace.validationChecks
         .filter((check) => check.status !== "pass")
@@ -334,7 +336,7 @@ export function runCarrierQuoteProviders(input: {
         } prepared for parallel submission`
       : undefined,
     simulatedCount > 0
-      ? `${simulatedCount} configured ${simulatedCount === 1 ? "adapter" : "adapters"} running in demo-safe mode`
+      ? `${simulatedCount} configured ${simulatedCount === 1 ? "adapter" : "adapters"} running in configuration-only mode`
       : undefined,
   ].filter(Boolean);
   const summary = best

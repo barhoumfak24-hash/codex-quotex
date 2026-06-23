@@ -1174,7 +1174,7 @@ function AttachmentManager({
               Cancel
             </button>
             <div className="text-[11px] text-ink-500 ml-auto">
-              Demo only — we record metadata; in production the file uploads to the doc service.
+              File metadata is added to the AI manifest and stored with the campaign assets.
             </div>
           </div>
         </div>

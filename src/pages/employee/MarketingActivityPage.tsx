@@ -7,7 +7,7 @@ import { Modal } from "@/components/ui/Modal";
 import { EmployeeBackButton } from "@/components/layout/EmployeeBackButton";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
-import { useDemoNotice } from "@/lib/demo";
+import { useIntegrationNotice } from "@/lib/integrationNotice";
 import { api } from "@/lib/api";
 import { fmt } from "@/lib/format";
 import type { MarketingCampaign, MarketingMessage } from "@/types";
@@ -22,7 +22,7 @@ import { DraftCampaignCard } from "@/components/marketing/DraftCampaignCard";
 export function MarketingActivityPage() {
   const { agency } = useTenant();
   const { user } = useAuth();
-  const showDemoNotice = useDemoNotice();
+  const showIntegrationNotice = useIntegrationNotice();
   const [rev, setRev] = useState(0);
   const refresh = () => setRev((r) => r + 1);
   const [query, setQuery] = useState("");
@@ -350,10 +350,10 @@ export function MarketingActivityPage() {
                 type="button"
                 className="btn-outline text-xs"
                 onClick={() =>
-                  showDemoNotice({
+                  showIntegrationNotice({
                     feature: "Download marketing files",
-                    title: "Marketing exports are disabled in the demo",
-                    body: "In production, this exports the campaign's audience list + sent-message CSV for compliance.",
+                    title: "Marketing export needs a configured file service",
+                    body: "This export prepares the campaign audience list and sent-message CSV for compliance once storage is connected.",
                   })
                 }
               >

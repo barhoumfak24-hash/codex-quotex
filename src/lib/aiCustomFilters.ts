@@ -1,7 +1,35 @@
+import { postServerAi } from "./aiGateway";
+import { evaluateAiProductionGate } from "./aiProductionGuards";
+
 export interface AiCustomFilterSubject {
   text: Array<string | undefined | null>;
   flags?: Record<string, boolean | undefined>;
   numbers?: Array<number | undefined | null>;
+}
+
+export async function normalizeAiCustomFilterQuery(
+  query: string,
+  context?: string
+): Promise<string> {
+  const raw = query.trim();
+  if (!raw) return "";
+  const out = await postServerAi<{ normalizedQuery?: string; confidence?: number }>(
+    "/ai/sort-intent",
+    { query: raw, context },
+    { timeoutMs: 4_000 }
+  );
+  const normalized = out?.normalizedQuery?.trim();
+  if (!normalized || normalized.length > 240) return raw;
+  const confidence = typeof out?.confidence === "number" ? out.confidence : 0.5;
+  const gate = evaluateAiProductionGate({
+    system: "custom_sort",
+    action: "normalize_query",
+    tenantScoped: true,
+    confidence,
+    usesOnlyProvidedFacts: true,
+  });
+  if (!gate.allowed || confidence < 0.6) return raw;
+  return normalized;
 }
 
 const STOP_WORDS = new Set([

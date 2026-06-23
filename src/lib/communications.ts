@@ -1,4 +1,5 @@
 import { WEBSITE_APP_ADD_ON_OPTIONS } from "@/lib/tiers";
+import { apiBaseUrl } from "@/lib/apiBase";
 import type { SoftwareSale, SoftwareSaleSignedAgreement } from "@/types";
 
 export type CommunicationResult = {
@@ -6,8 +7,8 @@ export type CommunicationResult = {
   result?: {
     id?: string;
     sid?: string;
-    status: "sent" | "demo_queued" | "opted_out" | "failed";
-    provider: "sendgrid" | "resend" | "twilio" | "demo";
+    status: "sent" | "opted_out" | "failed";
+    provider: "sendgrid" | "resend" | "twilio" | "unconfigured";
     configured: boolean;
     error?: string;
   };
@@ -58,18 +59,39 @@ export async function sendSoftwareSaleInvoiceEmail(sale: SoftwareSale): Promise<
     contactName: sale.contactName,
     email: sale.email,
     phone: sale.phone,
+    website: sale.website,
     agencyCode: softwareSaleAgencyCode(sale),
     seats: sale.seats,
     estimatedMonthly: sale.estimatedMonthly,
     setupFee: sale.setupFee,
     websiteAppAddOnLabel: WEBSITE_APP_ADD_ON_OPTIONS[sale.websiteAppAddOn ?? "none"].label,
     websiteAppAddOnMonthly: sale.websiteAppAddOnMonthly ?? 0,
+    paymentMode: sale.paymentMode,
+    source: sale.source,
+    stripeCheckoutSessionId: sale.stripeCheckoutSessionId,
     termMonths: sale.termMonths ?? 12,
     termDiscountPercent: sale.termDiscountPercent ?? 0,
     termDiscountMonthly: sale.termDiscountMonthly ?? 0,
     monthlyBeforeTermDiscount: sale.monthlyBeforeTermDiscount,
+    standardEstimatedMonthly: sale.standardEstimatedMonthly,
+    customMonthlyPriceUsd: sale.customMonthlyPriceUsd,
+    customMonthlyPriceReason: sale.customMonthlyPriceReason,
+    signedByName: sale.signedByName,
+    signedByEmail: sale.signedByEmail,
+    signedAt: sale.signedAt,
     signedAgreements: cleanSignedAgreements(sale.signedAgreements),
   });
+}
+
+export function softwareSaleInvoicePatchFromResult(result: CommunicationResult): Partial<SoftwareSale> {
+  const status = result.result?.status;
+  const sent = result.ok && status === "sent";
+  return {
+    invoiceEmailStatus: status === "sent" || status === "failed" ? status : "failed",
+    invoiceEmailProvider: result.result?.provider,
+    invoiceEmailSentAt: sent ? new Date().toISOString() : undefined,
+    invoiceEmailError: sent ? undefined : result.result?.error ?? result.error ?? "Invoice email could not be sent.",
+  };
 }
 
 async function postCommunication(path: string, payload: Record<string, unknown>): Promise<CommunicationResult> {
@@ -88,15 +110,6 @@ async function postCommunication(path: string, payload: Record<string, unknown>)
       ok: false,
       error: error instanceof Error ? error.message : "The communications API could not be reached.",
     };
-  }
-}
-
-function apiBaseUrl(): string {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return String((import.meta as any)?.env?.VITE_API_BASE_URL || "/api").replace(/\/+$/, "");
-  } catch {
-    return "/api";
   }
 }
 

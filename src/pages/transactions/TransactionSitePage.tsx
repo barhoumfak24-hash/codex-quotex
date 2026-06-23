@@ -16,11 +16,14 @@ import {
   XCircle,
 } from "lucide-react";
 import { QuotexMark } from "@/components/layout/Logo";
-import { DemoBanner } from "@/components/ui/DemoBanner";
 import { Modal } from "@/components/ui/Modal";
 import { api } from "@/lib/api";
 import { getConfiguredPortalBaseUrl, joinUrl } from "@/lib/appSurface";
-import { sendSoftwareSaleInvoiceEmail, softwareSaleAgencyCode } from "@/lib/communications";
+import {
+  sendSoftwareSaleInvoiceEmail,
+  softwareSaleAgencyCode,
+  softwareSaleInvoicePatchFromResult,
+} from "@/lib/communications";
 import { fmt } from "@/lib/format";
 import {
   COMPANY_APP_MONTHLY_ADD_ON_USD,
@@ -573,7 +576,7 @@ export function TransactionSitePage() {
         signedByName: primarySignerName,
         signedByEmail: form.email.trim(),
         signedAt: finalSignedAt,
-        stripeCheckoutSessionId: `demo_transaction_${Date.now()}`,
+        stripeCheckoutSessionId: `checkout_${Date.now()}`,
       });
     } catch {
       setSubmitted(null);
@@ -584,10 +587,10 @@ export function TransactionSitePage() {
     setSubmitted(sale);
     setInvoiceDeliveryStatus("Sending invoice email...");
     void sendSoftwareSaleInvoiceEmail(sale).then((result) => {
+      const updatedSale = api.softwareSales.update(sale.id, softwareSaleInvoicePatchFromResult(result));
+      if (updatedSale) setSubmitted(updatedSale);
       if (result.ok && result.result?.status === "sent") {
         setInvoiceDeliveryStatus(`Invoice email sent through ${result.result.provider}.`);
-      } else if (result.ok && result.result?.status === "demo_queued") {
-        setInvoiceDeliveryStatus("Invoice email queued in demo mode. Add provider credentials to send it for real.");
       } else {
         setInvoiceDeliveryStatus(result.result?.error ?? result.error ?? "Invoice email could not be sent.");
       }
@@ -597,7 +600,6 @@ export function TransactionSitePage() {
 
   return (
     <div className="min-h-screen bg-[#080807] text-white">
-      <DemoBanner tone="dark" />
       <header className="border-b border-white/10 bg-[#0f0e0b]">
         <div className="mx-auto flex max-w-[1320px] items-center justify-between px-5 py-4 sm:px-6 xl:px-8">
           <div className="flex items-center gap-3">
@@ -1123,8 +1125,8 @@ export function TransactionSitePage() {
 
                 {isPlanReviewPage && (
                   <div className="rounded-md border border-gold-300/30 bg-gold-300/10 px-4 py-3 text-sm text-gold-50">
-                    Demo mode records the selected plan for master billing and queues the formal
-                    invoice workflow.
+                    The selected plan will be recorded for master billing and the formal invoice
+                    workflow.
                   </div>
                 )}
 

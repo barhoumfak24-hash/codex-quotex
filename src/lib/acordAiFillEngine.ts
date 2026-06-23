@@ -20,6 +20,10 @@ import {
   type AcordMappedField,
   type AcordTemplateLike,
 } from "./acordQuestionnaires";
+import {
+  aiEvidenceAllowsDocumentAutofill,
+  findAiPublicEvidence,
+} from "./aiProductionGuards";
 
 type AcordFillSource =
   | "questionnaire"
@@ -402,22 +406,9 @@ function fieldEvidenceAllowsDocumentUse(
   evidence: QuotingSession["publicFieldEvidence"],
   source: "asset_detail" | "public_record"
 ): boolean {
-  const match = findEvidenceForField(fieldKey, evidence);
+  const match = findAiPublicEvidence(evidence, fieldKey);
   if (!match) return source !== "public_record";
-  return match.allowDocumentAutofill && match.verified && match.confidence >= 0.8;
-}
-
-function findEvidenceForField(
-  fieldKey: string,
-  evidence: QuotingSession["publicFieldEvidence"]
-): NonNullable<QuotingSession["publicFieldEvidence"]>[string] | undefined {
-  if (!evidence) return undefined;
-  const normalizedFieldKey = normalize(fieldKey);
-  return Object.entries(evidence).find(([key, item]) => {
-    const normalizedKey = normalize(key);
-    const normalizedItemKey = normalize(item.fieldKey);
-    return normalizedKey === normalizedFieldKey || normalizedItemKey === normalizedFieldKey;
-  })?.[1];
+  return aiEvidenceAllowsDocumentAutofill(match);
 }
 
 function bestCandidateForField(label: string, candidates: CandidateValue[]): CandidateValue | null {

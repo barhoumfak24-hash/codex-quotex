@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { Logo } from "./Logo";
 import { useAuth } from "@/lib/auth";
-import { DemoBanner, DemoModeBadge } from "@/components/ui/DemoBanner";
 import { CountBadge } from "@/components/ui/CountBadge";
 import { ErrorBoundary } from "@/components/ui/ErrorBoundary";
 import { getAppSurface, toAppRoute, toSurfaceRoute } from "@/lib/appSurface";
@@ -77,6 +76,9 @@ export function PortalShell({
   if (isAppSurface) {
     return (
       <div className="flex h-full min-h-0 flex-col bg-[#f7f2e8]">
+        <a href="#main-content" className="skip-link">
+          Skip to main content
+        </a>
         <header className="shrink-0 border-b border-ink-100 bg-white px-4 py-3">
           <div className="flex items-start justify-between gap-4">
             <Logo subtitle={subtitle} stacked />
@@ -89,7 +91,12 @@ export function PortalShell({
           </div>
         </header>
 
-        <main ref={mainRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-4 pb-6">
+        <main
+          id="main-content"
+          ref={mainRef}
+          tabIndex={-1}
+          className="min-h-0 flex-1 overflow-y-auto px-4 py-4 pb-6"
+        >
           {isMenuRoute ? (
             <section className="flex min-h-full flex-col">
               <div className="mb-5">
@@ -98,7 +105,7 @@ export function PortalShell({
                 </div>
                 <h1 className="mt-2 font-display text-4xl leading-none text-ink-950">Choose a section</h1>
               </div>
-              <nav className="grid gap-3.5">
+              <nav className="grid gap-3.5" aria-label="Client mobile app sections">
                 {nav.map((item) => {
                   const appTarget = surfaceRoute(item.appTo ?? item.to);
                   const returnsHome = !!item.appTo && item.appTo !== item.to;
@@ -197,17 +204,22 @@ export function PortalShell({
 
   return (
     <div className="h-dvh min-h-0 overflow-x-auto bg-ink-50">
+      <a href="#main-content" className="skip-link">
+        Skip to main content
+      </a>
       <div className="flex h-full min-w-[1360px] flex-col overflow-hidden">
-      <DemoBanner />
       <div className="flex min-h-0 flex-1">
-        <aside className="flex h-full w-64 shrink-0 flex-col overflow-hidden border-r border-ink-100 bg-white">
+        <aside
+          className="flex h-full w-64 shrink-0 flex-col overflow-hidden border-r border-ink-100 bg-white"
+          aria-label="Employee portal navigation"
+        >
         <div className={`${compactSidebar ? "employee-sidebar-logo px-5 py-4" : "px-5 py-5"} hairline`}>
           <div className="flex items-start justify-between gap-3">
             <Logo subtitle={compactSidebar ? undefined : subtitle} stacked />
-            {!compactSidebar && <DemoModeBadge />}
           </div>
         </div>
         <nav
+          aria-label="Employee portal sections"
           style={compactNavStyle}
           className={
             compactSidebar
@@ -291,7 +303,12 @@ export function PortalShell({
           )}
         </header>
         {topRight && <div className="px-6 py-3 bg-white border-b border-ink-100">{topRight}</div>}
-        <main ref={mainRef} className="flex-1 overflow-auto p-8 pb-14">
+        <main
+          id="main-content"
+          ref={mainRef}
+          tabIndex={-1}
+          className="flex-1 overflow-auto p-8 pb-14"
+        >
           <div className="min-w-[1040px]">
             <ErrorBoundary>
               <Outlet />

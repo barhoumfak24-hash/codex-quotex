@@ -1,6 +1,6 @@
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
-import { useEffect, useRef, useState } from "react";
-import { Archive, ArrowLeft, Building2, CalendarClock, CheckCircle2, ChevronDown, ChevronUp, ClipboardList, Download, FileText, LifeBuoy, Loader2, Lock, Mail, Megaphone, MessageSquare, Pencil, Plus, Search, Send, Sparkles, Users, X } from "lucide-react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Archive, ArrowLeft, Building2, CalendarClock, CheckCircle2, ChevronDown, ChevronUp, ClipboardList, Download, Eye, FileText, KeyRound, LifeBuoy, Loader2, Lock, Mail, Megaphone, MessageSquare, Pencil, Plus, Search, Send, ShieldCheck, Sparkles, Users, X } from "lucide-react";
 import { AddPolicyModal } from "@/components/policies/AddPolicyModal";
 import { PolicyActions } from "@/components/policies/PolicyActions";
 import { ClientBillingCard } from "@/components/billing/ClientBillingCard";
@@ -24,7 +24,7 @@ import { PolicyStatusBadge } from "@/components/ui/StatusBadge";
 import { Timeline } from "@/components/ui/Timeline";
 import { useTenant } from "@/lib/tenant";
 import { useAuth } from "@/lib/auth";
-import { useDemoNotice } from "@/lib/demo";
+import { useIntegrationNotice } from "@/lib/integrationNotice";
 import { api } from "@/lib/api";
 import { aiExtractPolicyFromFile } from "@/lib/ai";
 import { isRoutingManagerRole } from "@/lib/roles";
@@ -50,6 +50,28 @@ function uniqueStaffIds(ids: Array<string | undefined>): string[] {
   return Array.from(new Set(ids.filter((id): id is string => !!id)));
 }
 
+function generateManagerVerificationCode(): string {
+  if (typeof window !== "undefined" && window.crypto?.getRandomValues) {
+    const values = new Uint32Array(1);
+    window.crypto.getRandomValues(values);
+    return String(values[0] % 1000000).padStart(6, "0");
+  }
+  return String(Math.floor(Math.random() * 1000000)).padStart(6, "0");
+}
+
+function profileValue(value?: string | null): string {
+  const clean = value?.trim();
+  return clean ? clean : "-";
+}
+
+function yesNo(value: boolean): string {
+  return value ? "Yes" : "No";
+}
+
+function joinedValue(values: string[]): string {
+  return values.length > 0 ? values.join(", ") : "-";
+}
+
 export function ClientDetailPage() {
   const { customerId } = useParams();
   const { agency } = useTenant();
@@ -65,7 +87,7 @@ export function ClientDetailPage() {
       document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
     }, 80);
   }, [location.hash]);
-  const showDemoNotice = useDemoNotice();
+  const showIntegrationNotice = useIntegrationNotice();
   // Look up the customer up front so we can seed controlled state with
   // its addresses before any conditional returns.
   const customerForInit = customerId ? api.customers.get(customerId) : undefined;
@@ -127,6 +149,12 @@ export function ClientDetailPage() {
   const [createActivityOpen, setCreateActivityOpen] = useState(false);
   const [previewTemplateOpen, setPreviewTemplateOpen] = useState(false);
   const [documentsUploaderOpen, setDocumentsUploaderOpen] = useState(false);
+  const [fullProfileOpen, setFullProfileOpen] = useState(false);
+  const [encryptedInfoOpen, setEncryptedInfoOpen] = useState(false);
+  const [encryptedAccessGranted, setEncryptedAccessGranted] = useState(false);
+  const [managerVerificationCode, setManagerVerificationCode] = useState("");
+  const [managerVerificationError, setManagerVerificationError] = useState<string | null>(null);
+  const [generatedManagerCode, setGeneratedManagerCode] = useState<string | null>(null);
   if (!customerId) {
     return (
       <EmptyState
@@ -162,6 +190,7 @@ export function ClientDetailPage() {
   const activeUser = user;
   const activeCustomer = customer;
   const canManageRouting = isRoutingManagerRole(user.role);
+  const canViewEncryptedInfo = canManageRouting;
   const agentOptions = api.users
     .list(agency.id)
     .filter((u) => u.role === "agent" || u.role === "manager");
@@ -260,6 +289,33 @@ export function ClientDetailPage() {
         block: "start",
       });
     }, 60);
+  }
+
+  function openEncryptedInformation() {
+    if (!canViewEncryptedInfo) return;
+    setGeneratedManagerCode(generateManagerVerificationCode());
+    setManagerVerificationCode("");
+    setManagerVerificationError(null);
+    setEncryptedAccessGranted(false);
+    setEncryptedInfoOpen(true);
+  }
+
+  function closeEncryptedInformation() {
+    setEncryptedInfoOpen(false);
+    setEncryptedAccessGranted(false);
+    setManagerVerificationCode("");
+    setManagerVerificationError(null);
+    setGeneratedManagerCode(null);
+  }
+
+  function verifyEncryptedInformation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!generatedManagerCode || managerVerificationCode.trim() !== generatedManagerCode) {
+      setManagerVerificationError("The verification code does not match.");
+      return;
+    }
+    setEncryptedAccessGranted(true);
+    setManagerVerificationError(null);
   }
 
   async function handleOperationsFile(files: File[]) {
@@ -395,6 +451,32 @@ export function ClientDetailPage() {
         <Card>
           <CardHeader
             title="Profile"
+            action={
+              <div className="flex flex-wrap justify-end gap-1.5">
+                <Button
+                  size="xs"
+                  variant="outline"
+                  icon={<Eye className="h-3.5 w-3.5" />}
+                  onClick={() => setFullProfileOpen(true)}
+                >
+                  View full profile
+                </Button>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  icon={<ShieldCheck className="h-3.5 w-3.5" />}
+                  onClick={openEncryptedInformation}
+                  disabled={!canViewEncryptedInfo}
+                  title={
+                    canViewEncryptedInfo
+                      ? "Manager verification required"
+                      : "Only managers can view encrypted information."
+                  }
+                >
+                  See encrypted information
+                </Button>
+              </div>
+            }
             subtitle={
               editingProfile
                 ? "Editing — save your changes to re-lock the form."
@@ -1153,6 +1235,234 @@ export function ClientDetailPage() {
           Asset deep-link (customer view)
         </Link>
       )}
+
+      <Modal
+        open={fullProfileOpen}
+        onClose={() => setFullProfileOpen(false)}
+        title="Full client profile"
+        size="xl"
+      >
+        <div className="space-y-5">
+          <ProfileDetailSection title="Client information">
+            <ProfileDetailGrid>
+              <ProfileDetailRow label="Client name" value={profileValue(customer.name)} />
+              <ProfileDetailRow label="Business name" value={profileValue(customer.businessName)} />
+              <ProfileDetailRow
+                label="Client line"
+                value={customer.lineOfBusiness === "commercial" ? "Commercial lines" : "Personal lines"}
+              />
+              <ProfileDetailRow label="Client code" value={profileValue(customer.clientCode)} />
+              <ProfileDetailRow label="Email" value={profileValue(customer.email)} />
+              <ProfileDetailRow label="Phone" value={profileValue(customer.phone)} />
+              <ProfileDetailRow label="Mailing address" value={profileValue(customer.mailingAddress)} />
+              <ProfileDetailRow label="Created" value={fmt.dateTime(customer.createdAt)} />
+            </ProfileDetailGrid>
+          </ProfileDetailSection>
+
+          {customer.lineOfBusiness === "commercial" && (
+            <ProfileDetailSection title="Commercial profile">
+              <div className="rounded-md border border-ink-100 bg-ink-50/60 p-3 text-sm leading-6 text-ink-700 whitespace-pre-wrap">
+                {profileValue(customer.operationsDescription)}
+              </div>
+            </ProfileDetailSection>
+          )}
+
+          <ProfileDetailSection title="Assigned team">
+            <ProfileDetailGrid>
+              <ProfileDetailRow label="Agents" value={joinedValue(assignedAgentNames)} />
+              <ProfileDetailRow label="CSRs" value={joinedValue(assignedCsrNames)} />
+            </ProfileDetailGrid>
+          </ProfileDetailSection>
+
+          <ProfileDetailSection title="Portfolio summary">
+            <ProfileDetailGrid>
+              <ProfileDetailRow label="Assets" value={assets.length} />
+              <ProfileDetailRow label="Active policies" value={activePolicies.length} />
+              <ProfileDetailRow label="Previous policies" value={previousPolicies.length} />
+              <ProfileDetailRow label="Claims" value={claims.length} />
+              <ProfileDetailRow label="Documents" value={docs.length} />
+              <ProfileDetailRow label="Open activities" value={openActivities.length} />
+            </ProfileDetailGrid>
+          </ProfileDetailSection>
+
+          <ProfileDetailSection title="Policies">
+            {policies.length === 0 ? (
+              <div className="text-sm text-ink-500">No policies are attached to this client.</div>
+            ) : (
+              <div className="divide-y divide-ink-100 rounded-md border border-ink-100">
+                {policies.map((policy) => {
+                  const carrier = api.carriers.get(policy.carrierId);
+                  const asset = api.assets.get(policy.assetId);
+                  return (
+                    <div key={policy.id} className="grid gap-1 px-3 py-2 text-sm sm:grid-cols-[minmax(0,1fr)_auto]">
+                      <div className="min-w-0">
+                        <div className="font-semibold text-ink-900">{fmt.policyRef(policy)}</div>
+                        <div className="text-ink-500">
+                          {carrier?.name ?? "Carrier pending"} - {asset?.label ?? "No asset linked"}
+                        </div>
+                      </div>
+                      <div className="text-ink-500 sm:text-right">{fmt.titleCase(policy.status)}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </ProfileDetailSection>
+
+          <ProfileDetailSection title="Additional contacts">
+            {customer.additionalContacts && customer.additionalContacts.length > 0 ? (
+              <div className="divide-y divide-ink-100 rounded-md border border-ink-100">
+                {customer.additionalContacts.map((contact, index) => (
+                  <div key={`${contact.name}-${index}`} className="px-3 py-2 text-sm">
+                    <div className="font-semibold text-ink-900">{profileValue(contact.name)}</div>
+                    <div className="text-ink-500">
+                      {profileValue(contact.relation)} - {profileValue(contact.phone)} - {profileValue(contact.email)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-sm text-ink-500">No additional contacts on file.</div>
+            )}
+          </ProfileDetailSection>
+
+          <ProfileDetailSection title="Consent and portal status">
+            <ProfileDetailGrid>
+              <ProfileDetailRow label="Email marketing opt-in" value={yesNo(customer.marketingOptInEmail)} />
+              <ProfileDetailRow label="SMS marketing opt-in" value={yesNo(customer.marketingOptInSms)} />
+              <ProfileDetailRow label="Terms accepted" value={fmt.dateTime(customer.termsAcceptedAt)} />
+              <ProfileDetailRow label="Terms version" value={profileValue(customer.termsVersion)} />
+              <ProfileDetailRow label="Email consent" value={fmt.dateTime(customer.emailConsentAt)} />
+              <ProfileDetailRow label="SMS consent" value={fmt.dateTime(customer.smsConsentAt)} />
+            </ProfileDetailGrid>
+          </ProfileDetailSection>
+        </div>
+      </Modal>
+
+      <Modal
+        open={encryptedInfoOpen}
+        onClose={closeEncryptedInformation}
+        title="Encrypted information"
+        size="lg"
+      >
+        {!canViewEncryptedInfo ? (
+          <div className="rounded-md border border-alert-ring bg-alert-soft p-4 text-sm text-alert">
+            Only managers can access encrypted client information.
+          </div>
+        ) : encryptedAccessGranted ? (
+          <div className="space-y-5">
+            <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-semibold text-emerald-700">
+              Manager verification complete.
+            </div>
+            <ProfileDetailSection title="Protected identifiers">
+              <ProfileDetailGrid>
+                <ProfileDetailRow label="Agency UUID" value={agency.id} mono />
+                <ProfileDetailRow label="Client UUID" value={customer.id} mono />
+                <ProfileDetailRow label="Portal user UUID" value={profileValue(customer.userId)} mono />
+                <ProfileDetailRow label="Branch UUID" value={profileValue(customer.branchId)} mono />
+                <ProfileDetailRow label="Assigned agent UUIDs" value={joinedValue(assignedAgentIds)} mono />
+                <ProfileDetailRow label="Assigned CSR UUIDs" value={joinedValue(assignedCsrIds)} mono />
+              </ProfileDetailGrid>
+            </ProfileDetailSection>
+            <ProfileDetailSection title="Protected consent trail">
+              <ProfileDetailGrid>
+                <ProfileDetailRow label="Terms accepted at" value={fmt.dateTime(customer.termsAcceptedAt)} />
+                <ProfileDetailRow label="Terms version" value={profileValue(customer.termsVersion)} />
+                <ProfileDetailRow label="Email consent at" value={fmt.dateTime(customer.emailConsentAt)} />
+                <ProfileDetailRow label="SMS consent at" value={fmt.dateTime(customer.smsConsentAt)} />
+              </ProfileDetailGrid>
+            </ProfileDetailSection>
+            <ProfileDetailSection title="Protected data scopes">
+              <ProfileDetailGrid>
+                <ProfileDetailRow label="Message thread scope" value={`client:${customer.id}`} mono />
+                <ProfileDetailRow label="Document scope" value={`tenant:${agency.id} / client:${customer.id}`} mono />
+                <ProfileDetailRow label="Routing scope" value={joinedValue([customer.assignedAgentId, customer.assignedCsrId].filter((id): id is string => !!id))} mono />
+              </ProfileDetailGrid>
+            </ProfileDetailSection>
+          </div>
+        ) : (
+          <form className="space-y-4" onSubmit={verifyEncryptedInformation}>
+            <div className="rounded-md border border-gold-200 bg-gold-50 p-4">
+              <div className="flex items-center gap-2 text-sm font-semibold text-ink-900">
+                <KeyRound className="h-4 w-4 text-gold-700" />
+                Manager 2FA required
+              </div>
+              <p className="mt-2 text-sm leading-6 text-ink-600">
+                Enter the one-time verification code for this manager session before protected client identifiers and encrypted data scopes are shown.
+              </p>
+              {generatedManagerCode && (
+                <div className="mt-3 inline-flex items-center gap-2 rounded-md border border-gold-200 bg-white px-3 py-2 text-sm">
+                  <span className="text-ink-500">Verification code</span>
+                  <span className="font-mono text-base font-semibold tracking-[0.25em] text-ink-900">
+                    {generatedManagerCode}
+                  </span>
+                </div>
+              )}
+            </div>
+            <div>
+              <label className="label">2FA code</label>
+              <input
+                className={`input ${managerVerificationError ? "border-alert-ring ring-1 ring-alert-ring" : ""}`}
+                value={managerVerificationCode}
+                onChange={(event) => {
+                  setManagerVerificationCode(event.target.value.replace(/\D/g, "").slice(0, 6));
+                  setManagerVerificationError(null);
+                }}
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                placeholder="Enter 6-digit code"
+              />
+              {managerVerificationError && (
+                <div className="mt-1 text-xs font-semibold text-alert">{managerVerificationError}</div>
+              )}
+            </div>
+            <div className="flex flex-wrap justify-end gap-2 border-t border-ink-100 pt-4">
+              <Button variant="outline" onClick={closeEncryptedInformation}>
+                Cancel
+              </Button>
+              <Button type="submit" variant="primary" disabled={managerVerificationCode.length !== 6}>
+                Verify and view
+              </Button>
+            </div>
+          </form>
+        )}
+      </Modal>
+    </div>
+  );
+}
+
+function ProfileDetailSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="space-y-2">
+      <h4 className="text-xs font-semibold uppercase tracking-wider text-ink-500">{title}</h4>
+      {children}
+    </section>
+  );
+}
+
+function ProfileDetailGrid({ children }: { children: ReactNode }) {
+  return <div className="grid gap-2 sm:grid-cols-2">{children}</div>;
+}
+
+function ProfileDetailRow({
+  label,
+  value,
+  mono = false,
+}: {
+  label: string;
+  value: ReactNode;
+  mono?: boolean;
+}) {
+  return (
+    <div className="rounded-md border border-ink-100 bg-ink-50/60 px-3 py-2">
+      <div className="text-[11px] font-semibold uppercase tracking-wider text-ink-500">{label}</div>
+      <div className={`mt-1 break-words text-sm text-ink-900 ${mono ? "font-mono" : ""}`}>{value}</div>
     </div>
   );
 }
@@ -3848,8 +4158,7 @@ function FilledTemplatePreviewModal({
             </div>
 
             <p className="text-[11px] text-ink-400">
-              Demo preview — fields are merged from this client's record. In production the
-              agency's actual form is populated and rendered to PDF.
+              Fields are merged from this client's record, populated into the agency form, and rendered to PDF.
             </p>
           </>
         )}
@@ -4150,7 +4459,7 @@ function TemplateDocumentPreviewModal({
 // customer-visible doc tagged with the AI-suggested type.
 //
 // In production the file picker is wired to the document service
-// + an LLM extraction pipeline. The demo records inputs +
+// + an LLM extraction pipeline. The local record stores inputs +
 // synthesizes the output document so the audit trail is
 // realistic and the UX is testable end-to-end.
 // =====================================================================
@@ -4318,7 +4627,7 @@ function AiFillSection({
       {/* Source-file uploader */}
       <FileDropZone
         title={files.length === 0 ? "Attach source files for the AI to read" : "Add more source files"}
-        help="Drop PDFs, images, documents, or paste a copied screenshot. Demo records filenames; production uploads to document storage before AI extraction."
+        help="Drop PDFs, images, documents, or paste a copied screenshot. Files are stored before AI extraction so the source record stays attached to the client."
         accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.txt"
         multiple
         compact

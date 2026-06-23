@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { Building2, Check, Plus, Search, User, X } from "lucide-react";
+import { AlertTriangle, Building2, Check, Plus, Search, User, X } from "lucide-react";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { AddressAutocomplete } from "@/components/ui/AddressAutocomplete";
 import { AiQuotingWorkspace } from "@/components/quoting/AiQuotingWorkspace";
@@ -19,6 +19,7 @@ import type {
   InsuranceCategory,
   QuotingLineOfBusiness,
   Asset,
+  Prospect,
 } from "@/types";
 
 // =====================================================================
@@ -113,6 +114,11 @@ function primaryCategoryQuestionAddress(
   return firstAddressQuestion ? answers[firstAddressQuestion.key]?.trim() || undefined : undefined;
 }
 
+function cleanOptionalText(value: unknown): string | undefined {
+  const text = String(value ?? "").trim();
+  return text.length > 0 ? text : undefined;
+}
+
 export function ClientQuotingCard({
   tenantId,
   userId,
@@ -124,6 +130,50 @@ export function ClientQuotingCard({
   customer: CustomerProfile;
   onChanged?: () => void;
 }) {
+  return (
+    <ContactQuotingCard
+      tenantId={tenantId}
+      userId={userId}
+      contact={{ kind: "client", record: customer }}
+      onChanged={onChanged}
+    />
+  );
+}
+
+export function ProspectQuotingCard({
+  tenantId,
+  userId,
+  prospect,
+  onChanged,
+}: {
+  tenantId: string;
+  userId: string;
+  prospect: Prospect;
+  onChanged?: () => void;
+}) {
+  return (
+    <ContactQuotingCard
+      tenantId={tenantId}
+      userId={userId}
+      contact={{ kind: "prospect", record: prospect }}
+      onChanged={onChanged}
+    />
+  );
+}
+
+function ContactQuotingCard({
+  tenantId,
+  userId,
+  contact,
+  onChanged,
+}: {
+  tenantId: string;
+  userId: string;
+  contact:
+    | { kind: "client"; record: CustomerProfile }
+    | { kind: "prospect"; record: Prospect };
+  onChanged?: () => void;
+}) {
   const [, setRev] = useState(0);
   const [showImplementedQuoteAudit, setShowImplementedQuoteAudit] = useState(false);
   const refresh = () => {
@@ -131,8 +181,17 @@ export function ClientQuotingCard({
     onChanged?.();
   };
   useEffect(() => subscribeToDbChanges(() => setRev((r) => r + 1)), []);
-  const assets = api.assets.listByCustomer(customer.id);
-  const existing = api.quoting.getForCustomer(customer.id);
+  const customer = contact.kind === "client" ? contact.record : undefined;
+  const prospect = contact.kind === "prospect" ? contact.record : undefined;
+  const contactId = contact.record.id;
+  const contactName = contact.record.name;
+  const convertedCustomerId = customer?.id ?? prospect?.customerId;
+  const prospectQuoteRequest = prospect?.quoteRequestId ? api.quotes.get(prospect.quoteRequestId) : undefined;
+  const assets = convertedCustomerId ? api.assets.listByCustomer(convertedCustomerId) : [];
+  const existing =
+    contact.kind === "client"
+      ? api.quoting.getForCustomer(contact.record.id)
+      : api.quoting.getForProspect(contact.record.id);
   const implementedQuote = existing?.quotes.find((quote) => quote.implementation?.policyId);
   const implementedPolicy = implementedQuote?.implementation?.policyId
     ? api.policies.get(implementedQuote.implementation.policyId)
@@ -152,8 +211,9 @@ export function ClientQuotingCard({
   const [assetCategorySearch, setAssetCategorySearch] = useState("");
   const [assetSearch, setAssetSearch] = useState("");
   const [showNewAssetForm, setShowNewAssetForm] = useState(false);
+  const [prospectDraftAssets, setProspectDraftAssets] = useState<Asset[]>([]);
   const [newAssetValue, setNewAssetValue] = useState<number>(
-    existing?.estimatedValue ?? 1_000_000
+    existing?.estimatedValue ?? prospect?.estimatedValue ?? 1_000_000
   );
   const [newAssetDetails, setNewAssetDetails] = useState<Record<string, string>>({});
   const assetCategoryOptions = useMemo<AssetCategoryOption[]>(() => {
@@ -173,13 +233,13 @@ export function ClientQuotingCard({
       ? selectedLineCategoryOptions.find((option) => option.id === selectedNewCategoryId)
       : undefined;
   const newAssetType: AssetType =
-    selectedNewCategory?.assetType ?? existing?.assetType ?? defaultNewCategory.assetType;
+    selectedNewCategory?.assetType ?? existing?.assetType ?? prospect?.assetType ?? defaultNewCategory.assetType;
   const matchingAssets = selectedNewCategory
-    ? assets.filter((asset) => asset.type === selectedNewCategory.assetType)
+    ? [...assets, ...prospectDraftAssets].filter((asset) => asset.type === selectedNewCategory.assetType)
     : [];
 
   const selectedAssets = selectedAssetIds
-    .map((id) => assets.find((asset) => asset.id === id))
+    .map((id) => [...assets, ...prospectDraftAssets].find((asset) => asset.id === id))
     .filter((asset): asset is Asset => !!asset);
   const isNoAssetSelection = !existing && selectedAssetIds.length === 0;
   const hasSelectedQuoteAsset = !!existing || (!!selectedNewCategory && selectedAssetIds.length > 0);
@@ -195,19 +255,24 @@ export function ClientQuotingCard({
       : {};
   const estimatedValue = pickedAsset
     ? pickedAsset.estimatedValue
-    : undefined;
+    : existing?.estimatedValue ?? prospect?.estimatedValue;
   const assetDetails = pickedAsset
     ? cleanQuoteAssetDetails(assetType, pickedAsset.details)
     : {};
+  const prospectiveQuoteAddress =
+    primaryCategoryQuestionAddress(newAssetDetailQuestions, newAssetCategoryDetails) ??
+    cleanOptionalText(prospectQuoteRequest?.parsedData?.address) ??
+    cleanOptionalText(prospectQuoteRequest?.parsedData?.propertyAddress);
   const address =
     primaryQuoteAssetAddress(assetType, assetDetails) ??
-    customer.garagingAddress ??
-    customer.mailingAddress;
+    prospectiveQuoteAddress ??
+    customer?.mailingAddress;
   const newAssetMissingQuestions = showNewAssetForm && selectedNewCategory
-    ? missingRequiredCategoryQuestions(newAssetDetailQuestions, newAssetDetails).map(
-        (question) => `${question.label} is required.`
-      )
+    ? missingRequiredCategoryQuestions(newAssetDetailQuestions, newAssetDetails)
     : [];
+  const newAssetMissingQuestionKeys = new Set(
+    newAssetMissingQuestions.map((question) => question.key)
+  );
   const intakeWarnings: string[] = [];
   const setupLineLabel =
     selectedLineOfBusiness === "personal"
@@ -260,15 +325,35 @@ export function ClientQuotingCard({
       String(details.garagingAddress ?? "").trim() ||
       String(details.vin ?? "").trim() ||
       `New ${selectedNewCategory.label}`;
-    const asset = api.assets.create({
-      tenantId,
-      customerId: customer.id,
-      type: selectedNewCategory.assetType,
-      label,
-      estimatedValue: newAssetValue,
-      details,
-      status: "pending",
-    });
+    const customerIdForAsset = customer?.id ?? prospect?.customerId;
+    const asset = customerIdForAsset
+      ? api.assets.create({
+          tenantId,
+          customerId: customerIdForAsset,
+          type: selectedNewCategory.assetType,
+          label,
+          estimatedValue: newAssetValue,
+          details,
+          status: "pending",
+        })
+      : {
+          id: `prospect_draft_asset_${Date.now()}`,
+          tenantId,
+          customerId: "",
+          type: selectedNewCategory.assetType,
+          label,
+          estimatedValue: newAssetValue,
+          details: {
+            ...details,
+            prospectId: prospect?.id,
+            proposedQuoteAsset: true,
+          },
+          status: "pending" as const,
+          createdAt: new Date().toISOString(),
+        };
+    if (!customerIdForAsset) {
+      setProspectDraftAssets((current) => [asset, ...current.filter((row) => row.id !== asset.id)]);
+    }
     setSelectedAssetIds((current) => [asset.id, ...current.filter((id) => id !== asset.id)]);
     setShowNewAssetForm(false);
     setNewAssetDetails({});
@@ -276,21 +361,11 @@ export function ClientQuotingCard({
     refresh();
   }
 
-  function scrollToWorkspace() {
-    window.setTimeout(() => {
-      document.getElementById("ai-quoting-workspace")?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
-    }, 80);
-  }
-
   function resetImplementedQuote() {
     if (!existing) return;
     api.quoting.reset(existing.id);
     setShowImplementedQuoteAudit(false);
     refresh();
-    scrollToWorkspace();
   }
 
   return (
@@ -298,7 +373,7 @@ export function ClientQuotingCard({
       <CardHeader title="AI quoting workspace" />
 
       {!existing && (
-        <div className="rounded-md border border-ink-100 bg-ink-50/40 p-3 mb-4 space-y-3">
+        <div key="quote-setup" className="rounded-md border border-ink-100 bg-ink-50/40 p-3 mb-4 space-y-3">
           <div>
             <label className="label">Policy type / line</label>
             <div className="grid gap-2 sm:grid-cols-2">
@@ -418,12 +493,15 @@ export function ClientQuotingCard({
                       question={question}
                       value={newAssetDetails[question.key] ?? ""}
                       onChange={(value) => setNewAssetDetail(question.key, value)}
+                      missing={newAssetMissingQuestionKeys.has(question.key)}
                     />
                   ))}
                 </div>
                 {newAssetMissingQuestions.length > 0 && (
                   <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
-                    {newAssetMissingQuestions.join(" ")}
+                    {newAssetMissingQuestions
+                      .map((question) => `${question.label} is required.`)
+                      .join(" ")}
                   </div>
                 )}
                 <div className="mt-3 flex justify-end">
@@ -518,17 +596,16 @@ export function ClientQuotingCard({
           </div>
         </div>
       ) : isWaitingForRequiredCategory ? (
-        <div className="rounded-md border border-ink-100 bg-white px-4 py-3 text-sm text-ink-600">
-          Setup incomplete.
-        </div>
+        null
       ) : (
         <AiQuotingWorkspace
+          key="ai-quoting-workspace"
           tenantId={tenantId}
           userId={userId}
           contact={{
-            kind: "client",
-            id: customer.id,
-            name: customer.name,
+            kind: contact.kind,
+            id: contactId,
+            name: contactName,
             assetType,
             estimatedValue,
             address,
@@ -542,7 +619,6 @@ export function ClientQuotingCard({
             lineOfBusiness: selectedLineOfBusiness ?? selectedNewCategory?.lineOfBusiness,
           }}
           onChanged={refresh}
-          onReset={scrollToWorkspace}
         />
       )}
     </Card>
@@ -553,16 +629,27 @@ function CategoryQuestionDetailField({
   question,
   value,
   onChange,
+  missing = false,
 }: {
   question: CategoryQuestion;
   value: string;
   onChange: (value: string) => void;
+  missing?: boolean;
 }) {
   const label = `${question.label}${question.required ? " *" : ""}`;
   const className = question.inputType === "textarea" ? "sm:col-span-2" : "";
+  const fieldClassName = `input ${
+    missing ? "border-amber-400 bg-amber-50 focus:border-amber-500 focus:ring-amber-200" : ""
+  }`;
 
   return (
-    <div className={className}>
+    <div
+      className={
+        missing
+          ? `${className} rounded-md border border-amber-300 bg-amber-50/70 p-3`
+          : className
+      }
+    >
       <label className="label">{label}</label>
       {question.inputType === "address" ? (
         <AddressAutocomplete
@@ -570,16 +657,17 @@ function CategoryQuestionDetailField({
           onChange={onChange}
           placeholder={question.placeholder ?? "Start typing address..."}
           required={!!question.required}
+          className={fieldClassName}
         />
       ) : question.inputType === "textarea" ? (
         <textarea
-          className="input min-h-[74px] text-sm"
+          className={`${fieldClassName} min-h-[74px] text-sm`}
           value={value}
           onChange={(event) => onChange(event.target.value)}
           placeholder={question.placeholder}
         />
       ) : question.inputType === "select" ? (
-        <select className="input" value={value} onChange={(event) => onChange(event.target.value)}>
+        <select className={fieldClassName} value={value} onChange={(event) => onChange(event.target.value)}>
           <option value="">Select...</option>
           {(question.options ?? []).map((option) => (
             <option key={option} value={option}>
@@ -588,7 +676,7 @@ function CategoryQuestionDetailField({
           ))}
         </select>
       ) : question.inputType === "boolean" ? (
-        <select className="input" value={value} onChange={(event) => onChange(event.target.value)}>
+        <select className={fieldClassName} value={value} onChange={(event) => onChange(event.target.value)}>
           <option value="">Select...</option>
           <option value="Yes">Yes</option>
           <option value="No">No</option>
@@ -596,7 +684,7 @@ function CategoryQuestionDetailField({
         </select>
       ) : (
         <input
-          className="input"
+          className={fieldClassName}
           type={
             question.inputType === "number" || question.inputType === "currency"
               ? "number"
@@ -611,6 +699,12 @@ function CategoryQuestionDetailField({
           onChange={(event) => onChange(event.target.value)}
           placeholder={question.placeholder}
         />
+      )}
+      {missing && (
+        <div className="mt-2 flex items-center gap-1.5 text-[11px] font-medium text-amber-900">
+          <AlertTriangle className="h-3.5 w-3.5" />
+          Missing required field.
+        </div>
       )}
       {question.helpText && (
         <div className="mt-1 text-[11px] text-ink-500">{question.helpText}</div>
@@ -786,8 +880,17 @@ function AssetCategorySearchPicker({
   onSelect: (option: AssetCategoryOption) => void;
 }) {
   const normalizedSearch = search.trim().toLowerCase();
-  const selected = options.find((option) => option.id === selectedId);
-  const filteredOptions = options.filter((option) => {
+  const uniqueOptions = useMemo(() => {
+    const seen = new Set<string>();
+    return options.filter((option) => {
+      const key = `${option.id}:${option.lineOfBusiness}:${option.assetType}:${option.label}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }, [options]);
+  const selected = uniqueOptions.find((option) => option.id === selectedId);
+  const filteredOptions = uniqueOptions.filter((option) => {
     if (!normalizedSearch) return true;
     const searchableText = [
       option.label,
@@ -824,7 +927,7 @@ function AssetCategorySearchPicker({
           const isSelected = option.id === selectedId;
           return (
             <button
-              key={option.id}
+              key={`${option.id}:${option.lineOfBusiness}:${option.assetType}:${option.label}`}
               type="button"
               className={`w-full rounded-md border px-3 py-2 text-left transition ${
                 isSelected

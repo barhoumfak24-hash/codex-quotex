@@ -146,6 +146,7 @@ export function ClientQuestionnairePage() {
   const missing = required.filter((q) => !(responses[q.id] ?? "").trim());
   const missingQuestionIds = new Set(missing.map((question) => question.id));
   const isCommercialIncomplete = session.lineOfBusiness === "commercial" && missing.length > 0;
+  const showMissingFieldHighlights = missing.length > 0;
   const showIncompleteFieldWarnings = incompleteFieldsRevealed && isCommercialIncomplete;
 
   function setAnswer(id: string, value: string) {
@@ -255,7 +256,7 @@ export function ClientQuestionnairePage() {
           />
           <div className="space-y-4">
             {sectionQuestions.map((q) => {
-              const isMissing = showIncompleteFieldWarnings && missingQuestionIds.has(q.id);
+              const isMissing = showMissingFieldHighlights && missingQuestionIds.has(q.id);
               const fieldClass = `input text-sm ${
                 isMissing ? "border-amber-400 bg-amber-50 focus:border-amber-500 focus:ring-amber-200" : ""
               }`;

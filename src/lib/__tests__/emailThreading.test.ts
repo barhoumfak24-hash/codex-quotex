@@ -165,11 +165,13 @@ describe("connected mailbox setup", () => {
     const agencyMailbox = api.mailboxes.agencyMarketing(agency.id);
 
     expect(staffMailbox?.ownerType).toBe("staff");
-    expect(staffMailbox?.scopes).toEqual(expect.arrayContaining(["send", "read", "sync"]));
+    expect(staffMailbox?.status).toBe("needs_auth");
+    expect(staffMailbox?.scopes).toEqual([]);
     expect(agencyMailbox?.ownerType).toBe("agency_marketing");
-    expect(agencyMailbox?.scopes).toEqual(["send"]);
+    expect(agencyMailbox?.status).toBe("needs_auth");
+    expect(agencyMailbox?.scopes).toEqual([]);
     expect(api.mailboxes.productionRequirements(staffMailbox)).toContain(
-      "Replace the demo connection with provider OAuth before production send/sync."
+      "Complete provider authorization."
     );
   });
 });

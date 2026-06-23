@@ -22,7 +22,9 @@ const VALID_AUDIENCES = new Set<DraftCampaignAudience>([
   "high_value_clients",
   "renewal_clients",
 ]);
-const VALID_CHANNELS = new Set<"email">(["email"]);
+type CampaignChannel = "email" | "sms";
+
+const VALID_CHANNELS = new Set<CampaignChannel>(["email", "sms"]);
 const VALID_RECURRENCES = new Set<DraftedCampaign["recurrence"]>([
   "none",
   "daily",
@@ -45,6 +47,7 @@ interface LLMCampaignDraft {
 export async function aiDraftCampaignLLM(input: {
   prompt: string;
   agencyName?: string;
+  agencyAddress?: string;
   senderName?: string;
   signOff?: string;
 }): Promise<DraftedCampaign> {
@@ -72,7 +75,8 @@ export function mergeLLMCampaignDraft(
     usefulPamphletDescription(llm.pamphletDescription) ?? base.pamphletDescription;
   const imagePrompt = usefulImagePrompt(llm.imagePrompt) ?? base.imagePrompt;
 
-  body = ensureEmailShape(body, input);
+  body = channels.includes("email") ? ensureEmailShape(body, input) : ensureSmsShape(body);
+  if (channels.includes("sms")) body = ensureSmsStop(body);
 
   const summary =
     cleanText(llm.summary, { max: 260 }) ??
@@ -190,10 +194,10 @@ function usefulImagePrompt(value: unknown): string | undefined {
   return generic || tooThin ? undefined : cleaned;
 }
 
-function sanitizeChannels(value: unknown[] | undefined): "email"[] | undefined {
+function sanitizeChannels(value: unknown[] | undefined): CampaignChannel[] | undefined {
   if (!Array.isArray(value)) return undefined;
-  const out = value.filter((v): v is "email" => {
-    return typeof v === "string" && VALID_CHANNELS.has(v as "email");
+  const out = value.filter((v): v is CampaignChannel => {
+    return typeof v === "string" && VALID_CHANNELS.has(v as CampaignChannel);
   });
   return out.length ? Array.from(new Set(out)) : undefined;
 }
@@ -216,7 +220,7 @@ function sanitizeRecurrence(value: unknown): DraftedCampaign["recurrence"] | und
 
 function ensureEmailShape(
   body: string,
-  input: { agencyName?: string; senderName?: string; signOff?: string }
+  input: { agencyName?: string; agencyAddress?: string; senderName?: string; signOff?: string }
 ): string {
   const hasPersonalization = /\{first_name\}/i.test(body);
   const hasSignOff = /warm regards|best,|sincerely|thank you|regards/i.test(body);
@@ -225,7 +229,7 @@ function ensureEmailShape(
   const signOff = input.signOff ?? "Warm regards,";
   const sender = input.senderName ?? "the team";
   const agency = input.agencyName ?? "your agency";
-  return [
+  const shaped = [
     hasPersonalization ? null : "Hi {first_name},",
     hasPersonalization ? null : "",
     lines,
@@ -241,6 +245,38 @@ function ensureEmailShape(
     .filter((line): line is string => line !== null)
     .join("\n")
     .trim();
+  return ensureMarketingEmailCompliance(shaped, input.agencyAddress);
+}
+
+function ensureMarketingEmailCompliance(body: string, agencyAddress?: string): string {
+  const hasPhysicalAddress = hasConfiguredAddress(body, agencyAddress);
+  if (hasPhysicalAddress) return body;
+  const address = agencyAddress?.trim();
+  const addressLine = address
+    ? `Mailing address: ${address}`
+    : "Mailing address: agency address must be configured before production send.";
+  return `${body.trim()}\n\n${addressLine}`;
+}
+
+function hasConfiguredAddress(body: string, agencyAddress?: string): boolean {
+  const normalizedBody = body.toLowerCase();
+  if (/\bmailing address\b|\bphysical address\b/i.test(body)) return true;
+  const normalizedAddress = agencyAddress?.toLowerCase().replace(/\s+/g, " ").trim();
+  return Boolean(normalizedAddress && normalizedBody.includes(normalizedAddress));
+}
+
+function ensureSmsShape(body: string): string {
+  const cleaned = body
+    .replace(/^hi\s+\{first_name\},?\s*/i, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  return ensureSmsStop(cleaned);
+}
+
+function ensureSmsStop(body: string): string {
+  return /reply\s+stop/i.test(body)
+    ? body
+    : `${body.trim()}\n\nReply STOP to opt out.`;
 }
 
 function audienceLabel(audience: DraftCampaignAudience[]): string {

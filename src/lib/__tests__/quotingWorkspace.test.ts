@@ -120,6 +120,92 @@ describe("api.quoting workspace", () => {
     expect(session.questionnaireResponseMeta?.[yearBuilt!.id]?.updatedByRole).toBe("ai");
   });
 
+  it("does not prefill estimate-only sweep answers as confirmed questionnaire responses", async () => {
+    const { api, agency, agent } = await seed();
+    const customer = api.customers.list(agency.id)[0];
+    const category = api.categories.get("cat_primary_home")!;
+    const session = api.quoting.upsertCustomerIntakeSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      quoteRequestId: "quote_request_estimate_only",
+      assetType: category.assetType,
+      categoryId: category.id,
+      categoryLabel: category.label,
+      contactName: customer.name,
+      address: "44 Sea Breeze Ln, Palm Beach, FL 33480",
+      estimatedValue: 1_250_000,
+      assetDetails: {
+        propertyAddress: "44 Sea Breeze Ln, Palm Beach, FL 33480",
+        yearBuilt: "2018",
+        squareFootage: "4200",
+      },
+      publicFieldEvidence: {
+        yearBuilt: {
+          fieldKey: "yearBuilt",
+          sourceKind: "model_estimate",
+          sourceLabel: "AI public-data sweep estimate",
+          confidence: 0.48,
+          verified: false,
+          allowDocumentAutofill: false,
+          collectedAt: "2026-06-19T12:00:00.000Z",
+        },
+        squareFootage: {
+          fieldKey: "squareFootage",
+          sourceKind: "model_estimate",
+          sourceLabel: "AI public-data sweep estimate",
+          confidence: 0.48,
+          verified: false,
+          allowDocumentAutofill: false,
+          collectedAt: "2026-06-19T12:00:00.000Z",
+        },
+      },
+      lineOfBusiness: "personal",
+      createdById: agent.id,
+      status: "submitted_to_agent",
+    });
+
+    const expanded = api.quoting.get(session.id)!;
+    const yearBuilt = expanded.questionnaireQuestions?.find((question) => /year built/i.test(question.label));
+    const squareFootage = expanded.questionnaireQuestions?.find((question) => /square footage/i.test(question.label));
+
+    expect(yearBuilt).toBeTruthy();
+    expect(squareFootage).toBeTruthy();
+    expect(expanded.questionnaireResponses?.[yearBuilt!.id]).toBeUndefined();
+    expect(expanded.questionnaireResponses?.[squareFootage!.id]).toBeUndefined();
+    expect(expanded.missingFields).toEqual(
+      expect.arrayContaining([yearBuilt!.label, squareFootage!.label])
+    );
+  });
+
+  it("keeps personal-lines sessions on AI mapping until the agent advances to questionnaire", async () => {
+    const { api, agency, agent } = await seed();
+    const customer = api.customers.list(agency.id)[0];
+    const asset = api.assets.listByCustomer(customer.id).find((a) => a.type === "coastal_home");
+    const initial = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      assetId: asset?.id,
+      createdById: agent.id,
+      assetType: asset?.type ?? "coastal_home",
+      contactName: customer.name,
+      estimatedValue: asset?.estimatedValue ?? 1_500_000,
+      address: customer.mailingAddress,
+      lineOfBusiness: "personal",
+    });
+
+    expect(initial.lineOfBusiness).toBe("personal");
+    expect(initial.questionnaireQuestions?.length).toBeGreaterThan(0);
+    expect(initial.personalQuestionnairePreparedAt).toBeUndefined();
+
+    const prepared = api.quoting.preparePersonalQuestionnaire(initial.id)!;
+    expect(prepared.personalQuestionnairePreparedAt).toBeTruthy();
+    expect(prepared.questionnaireQuestions?.length).toBe(initial.questionnaireQuestions?.length);
+
+    const steppedBack = api.quoting.stepBack(initial.id)!;
+    expect(steppedBack.personalQuestionnairePreparedAt).toBeUndefined();
+    expect(steppedBack.questionnaireQuestions?.length).toBe(initial.questionnaireQuestions?.length);
+  });
+
   it("draftQuestionnaire writes a message body the agent can review", async () => {
     const { api, agency, agent, prospect } = await seed();
     const s1 = await api.quoting.startSession({
@@ -478,6 +564,90 @@ describe("api.quoting workspace", () => {
     expect(api.quoting.getForCustomer(customer.id)?.lineOfBusiness).toBe("personal");
   });
 
+  it("marks commercial ACORD applications as sent after carrier email draft review", async () => {
+    const { api, agency, agent } = await seed();
+    const { db } = await import("../db");
+    const customer = api.customers.list(agency.id)[0];
+    const acordTemplate = api.documents
+      .listTemplates(agency.id)
+      .find((document) =>
+        `${document.fileName} ${document.documentName ?? ""}`.toLowerCase().includes("acord")
+      );
+    expect(acordTemplate).toBeTruthy();
+
+    const initial = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: agent.id,
+      assetType: "other",
+      contactName: customer.name,
+      estimatedValue: 1_000_000,
+      address: customer.mailingAddress,
+      lineOfBusiness: "commercial",
+      selectedAcordTemplateIds: [acordTemplate!.id],
+    });
+    const prepared = api.quoting.prepareCommercialQuestionnaire(initial.id)!;
+    const responses = Object.fromEntries(
+      (prepared.questionnaireQuestions ?? []).map((question) => [
+        question.id,
+        question.kind === "number" ? "1" : "Confirmed for carrier submission test",
+      ])
+    );
+    const selectedCarrierIds = api.quoting
+      .recommendCommercialCarriers(prepared.id, responses)
+      .filter(
+        (recommendation) =>
+          !recommendation.disabledReason && recommendation.underwriterContacts.length > 0
+      )
+      .slice(0, 2)
+      .map((recommendation) => recommendation.carrierId);
+    expect(selectedCarrierIds.length).toBeGreaterThan(0);
+
+    const drafts = api.quoting.previewCommercialCarrierEmails(
+      prepared.id,
+      responses,
+      "application",
+      selectedCarrierIds
+    );
+    expect(drafts.length).toBeGreaterThan(0);
+
+    const sent = api.quoting.submitQuestionnaireResponses(
+      prepared.id,
+      responses,
+      { id: agent.id, name: agent.name, role: "agent" },
+      {
+        selectedCommercialCarrierIds: selectedCarrierIds,
+        commercialCarrierEmailDrafts: drafts,
+      }
+    )!;
+
+    const persisted = api.quoting.get(prepared.id)!;
+    expect(sent.commercialApplicationSentAt ?? persisted.commercialApplicationSentAt).toBeTruthy();
+    expect(persisted.commercialCarrierSubmissions?.length).toBeGreaterThan(0);
+    expect(
+      persisted.commercialCarrierSubmissions?.some(
+        (submission) =>
+          (submission.applicationMessageIds?.length ?? 0) > 0 ||
+          (submission.applicationDocumentIds?.length ?? 0) > 0 ||
+          submission.status === "application_sent" ||
+          submission.status === "awaiting_response" ||
+          submission.status === "accepted" ||
+          submission.status === "declined" ||
+          submission.status === "needs_client_info" ||
+          submission.status === "needs_supplemental" ||
+          submission.status === "supplemental_sent"
+      )
+    ).toBe(true);
+
+    db.update("quotingSessions", persisted.id, {
+      commercialApplicationSentAt: undefined,
+      status: "gathering_info",
+    });
+    const repaired = api.quoting.get(persisted.id)!;
+    expect(repaired.commercialApplicationSentAt).toBeTruthy();
+    expect(repaired.status).not.toBe("gathering_info");
+  });
+
   it("implements a selected carrier quote as a bound policy record", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
@@ -526,7 +696,7 @@ describe("api.quoting workspace", () => {
     expect(result.bindingTrace?.status).toMatch(/manual_required|prepared_not_sent/);
     expect(result.policy.carrierBindingStatus).toBe(result.bindingTrace?.status);
     expect(result.policy.carrierBindingReference).toBe(result.bindingTrace?.carrierReference);
-    expect(result.policy.carrierBindingMode).toBe("demo_adapter");
+    expect(result.policy.carrierBindingMode).toBe("manual_workflow");
     expect(api.quoting.get(complete.id)?.quotes[0].implementation?.policyId).toBe(result.policy.id);
     expect(api.quoting.get(complete.id)?.quotes[0].implementation?.bindingTrace?.requestId).toBe(
       result.bindingTrace?.requestId

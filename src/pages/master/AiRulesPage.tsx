@@ -30,8 +30,8 @@ export function AiRulesPage() {
         <p className="text-sm text-ink-600">
           Configure <code>AI_PROVIDER</code> in <code>server/.env</code> (openai | anthropic |
           gemini | stub). Use <code>OPENAI_API_KEY</code> and <code>OPENAI_MODEL</code> for the production
-          OpenAI route. Browser demo mode uses deterministic fallbacks unless <code>VITE_AI_MODE</code> is
-          set to <code>server</code>.
+          OpenAI route. Production AI calls must route through server-side endpoints with audit logging,
+          rate limits, and tenant checks enabled.
         </p>
       </Card>
     </div>

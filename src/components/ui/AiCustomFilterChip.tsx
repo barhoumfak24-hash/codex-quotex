@@ -1,5 +1,6 @@
 import { FormEvent, useState } from "react";
 import { Sparkles, X } from "lucide-react";
+import { normalizeAiCustomFilterQuery } from "@/lib/aiCustomFilters";
 
 export function AiCustomFilterChip({
   value,
@@ -16,15 +17,22 @@ export function AiCustomFilterChip({
 }) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(value);
+  const [busy, setBusy] = useState(false);
   const active = value.trim().length > 0;
   const buttonSize = size === "md" ? "min-h-[42px] px-3 py-2 text-sm" : "min-h-8 px-3 py-1.5 text-xs";
   const inputSize = size === "md" ? "h-[42px] pl-9 pr-2 text-sm" : "h-8 pl-8 pr-2 text-xs";
   const iconSize = size === "md" ? "h-4 w-4" : "h-3.5 w-3.5";
 
-  function submit(e: FormEvent) {
+  async function submit(e: FormEvent) {
     e.preventDefault();
-    onChange(draft.trim());
-    setOpen(false);
+    const raw = draft.trim();
+    setBusy(true);
+    try {
+      onChange(await normalizeAiCustomFilterQuery(raw, label));
+      setOpen(false);
+    } finally {
+      setBusy(false);
+    }
   }
 
   if (open) {
@@ -40,13 +48,14 @@ export function AiCustomFilterChip({
             onChange={(e) => setDraft(e.target.value)}
           />
         </div>
-        <button type="submit" className={`btn-primary ${size === "md" ? "text-sm" : "text-xs"}`}>
-          Apply
+        <button type="submit" className={`btn-primary ${size === "md" ? "text-sm" : "text-xs"}`} disabled={busy}>
+          {busy ? "Applying" : "Apply"}
         </button>
         <button
           type="button"
           className="btn-outline text-xs !px-2"
           title="Cancel custom filter"
+          disabled={busy}
           onClick={() => {
             setDraft(value);
             setOpen(false);

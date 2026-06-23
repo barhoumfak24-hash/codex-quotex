@@ -2,9 +2,16 @@ import { useEffect, useState } from "react";
 import {
   Ban,
   Building2,
+  CheckCircle2,
+  Database,
   ExternalLink,
+  FileArchive,
+  FileSearch,
+  FileSpreadsheet,
+  FileText,
   Globe2,
   Image as ImageIcon,
+  Loader2,
   Lock,
   Mail,
   MapPin,
@@ -14,9 +21,11 @@ import {
   RefreshCw,
   RotateCcw,
   Save,
+  SearchCheck,
   ShieldCheck,
   Trash2,
   Users,
+  WandSparkles,
   X,
 } from "lucide-react";
 import { Card, CardHeader } from "@/components/ui/Card";
@@ -24,7 +33,9 @@ import { Badge } from "@/components/ui/Badge";
 import { EmployeeBackButton } from "@/components/layout/EmployeeBackButton";
 import { FileDropZone } from "@/components/ui/FileDropZone";
 import { MapLink } from "@/components/ui/MapLink";
+import { aiExtractContactFromFile } from "@/lib/ai";
 import { useAuth } from "@/lib/auth";
+import { readAiFileForExtraction } from "@/lib/fileIntakeExtraction";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
 import { subscribeToDbChanges } from "@/lib/db";
@@ -41,7 +52,18 @@ import {
   standardAgencyMonthlyPriceUsd,
   websiteAppAddOnMonthlyUsd,
 } from "@/lib/tiers";
-import type { Agency, Branch, SoftwareSaleWebsiteAppAddOn, SubscriptionTier, User } from "@/types";
+import type {
+  Agency,
+  AssetType,
+  Branch,
+  SecurityBan,
+  SecurityIncident,
+  SecurityIncidentSeverity,
+  SecurityIncidentStatus,
+  SoftwareSaleWebsiteAppAddOn,
+  SubscriptionTier,
+  User,
+} from "@/types";
 
 const USER_PRESETS = [10, 25, 50];
 const WEBSITE_APP_ADD_ON_ORDER: SoftwareSaleWebsiteAppAddOn[] = [
@@ -50,6 +72,56 @@ const WEBSITE_APP_ADD_ON_ORDER: SoftwareSaleWebsiteAppAddOn[] = [
   "app",
   "website_app",
 ];
+
+type MigrationRecordKey =
+  | "clients"
+  | "contacts"
+  | "policies"
+  | "documents"
+  | "activities"
+  | "claims"
+  | "renewals";
+
+type MigrationSourceFile = {
+  name: string;
+  size: number;
+  type: string;
+  extension: string;
+};
+
+type MigrationImportSummary = {
+  clients: number;
+  policies: number;
+  assets: number;
+  documents: number;
+  notes: number;
+  skipped: number;
+};
+
+type MigrationImportBatch = {
+  id: string;
+  fileCount: number;
+  totalBytes: number;
+  uploadedAt: string;
+  sourceLabel: string;
+  files: MigrationSourceFile[];
+  packageNames: string[];
+  counts: Record<MigrationRecordKey, number>;
+  reviewItems: { label: string; count: number }[];
+  confidence: number;
+  importedAt?: string;
+  importSummary?: MigrationImportSummary;
+};
+
+const MIGRATION_RECORD_LABELS: Record<MigrationRecordKey, string> = {
+  clients: "Clients",
+  contacts: "Contacts",
+  policies: "Policies",
+  documents: "Documents",
+  activities: "Activities",
+  claims: "Claims",
+  renewals: "Renewals",
+};
 
 function billingTierForUserSlots(slots: number): SubscriptionTier {
   if (slots <= 10) return "minimum";
@@ -73,6 +145,637 @@ function splitServiceAreas(value: string): string[] {
     .split(",")
     .map((v) => v.trim())
     .filter(Boolean);
+}
+
+function fileExtension(fileName: string) {
+  const match = fileName.toLowerCase().match(/\.([a-z0-9]+)$/);
+  return match?.[1] ?? "";
+}
+
+function fileNameIncludes(fileName: string, terms: string[]) {
+  const normalized = fileName.toLowerCase();
+  return terms.some((term) => normalized.includes(term));
+}
+
+function estimateMigrationCounts(files: File[]): MigrationImportBatch["counts"] {
+  const counts: MigrationImportBatch["counts"] = {
+    clients: 0,
+    contacts: 0,
+    policies: 0,
+    documents: 0,
+    activities: 0,
+    claims: 0,
+    renewals: 0,
+  };
+  files.forEach((file) => {
+    const name = file.name.toLowerCase();
+    const ext = fileExtension(name);
+    const spreadsheet = ["csv", "xlsx", "xls"].includes(ext);
+    const document = ["pdf", "doc", "docx", "jpg", "jpeg", "png", "tif", "tiff"].includes(ext);
+    const archive = ["zip", "7z"].includes(ext);
+    const sizeFactor = Math.max(1, Math.min(16, Math.round(file.size / 125_000)));
+
+    if (fileNameIncludes(name, ["client", "customer", "insured", "account"])) counts.clients += spreadsheet ? sizeFactor * 18 : sizeFactor * 4;
+    if (fileNameIncludes(name, ["contact", "driver", "participant", "holder"])) counts.contacts += spreadsheet ? sizeFactor * 14 : sizeFactor * 3;
+    if (fileNameIncludes(name, ["policy", "policies", "line", "coverage", "premium"])) counts.policies += spreadsheet ? sizeFactor * 16 : sizeFactor * 3;
+    if (fileNameIncludes(name, ["activity", "activities", "note", "remark", "task", "follow"])) counts.activities += spreadsheet ? sizeFactor * 20 : sizeFactor * 2;
+    if (fileNameIncludes(name, ["claim", "loss", "incident"])) counts.claims += spreadsheet ? sizeFactor * 9 : sizeFactor * 2;
+    if (fileNameIncludes(name, ["renewal", "expiration", "expiring", "xdate"])) counts.renewals += spreadsheet ? sizeFactor * 10 : sizeFactor * 2;
+    if (document || archive || fileNameIncludes(name, ["document", "attachment", "dec", "certificate", "acord"])) counts.documents += archive ? sizeFactor * 42 : sizeFactor;
+  });
+
+  const spreadsheetCount = files.filter((file) => ["csv", "xlsx", "xls"].includes(fileExtension(file.name))).length;
+  const documentCount = files.filter((file) => ["pdf", "doc", "docx", "jpg", "jpeg", "png", "tif", "tiff"].includes(fileExtension(file.name))).length;
+  if (spreadsheetCount > 0) {
+    counts.clients ||= spreadsheetCount * 32;
+    counts.policies ||= spreadsheetCount * 24;
+    counts.contacts ||= spreadsheetCount * 18;
+  }
+  if (documentCount > 0) counts.documents ||= documentCount;
+
+  return counts;
+}
+
+function buildMigrationBatch(files: File[], sourceLabel: string): MigrationImportBatch {
+  const counts = estimateMigrationCounts(files);
+  const totalRecords = Object.values(counts).reduce((sum, count) => sum + count, 0);
+  const spreadsheetCount = files.filter((file) => ["csv", "xlsx", "xls"].includes(fileExtension(file.name))).length;
+  const archiveCount = files.filter((file) => ["zip", "7z"].includes(fileExtension(file.name))).length;
+  const imageCount = files.filter((file) => ["jpg", "jpeg", "png", "tif", "tiff"].includes(fileExtension(file.name))).length;
+  const reviewItems = [
+    {
+      label: "Duplicate names / account codes",
+      count: Math.max(0, Math.round((counts.clients + counts.contacts) * 0.04)),
+    },
+    {
+      label: "Unmatched policy documents",
+      count: Math.max(0, Math.round(counts.documents * 0.07)),
+    },
+    {
+      label: "Coverage rows needing line confirmation",
+      count: Math.max(0, Math.round(counts.policies * 0.05)),
+    },
+    {
+      label: "Images or screenshots needing OCR review",
+      count: imageCount,
+    },
+  ].filter((item) => item.count > 0);
+  const confidence = Math.max(
+    72,
+    Math.min(98, 86 + spreadsheetCount * 2 + archiveCount - reviewItems.length * 2)
+  );
+
+  return {
+    id: `migration_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    fileCount: files.length,
+    totalBytes: files.reduce((sum, file) => sum + file.size, 0),
+    uploadedAt: new Date().toISOString(),
+    sourceLabel,
+    files: files.map((file) => ({
+      name: file.name,
+      size: file.size,
+      type: file.type || "application/octet-stream",
+      extension: fileExtension(file.name),
+    })),
+    packageNames: files.slice(0, 6).map((file) => file.name),
+    counts: totalRecords > 0 ? counts : { ...counts, documents: files.length },
+    reviewItems,
+    confidence,
+  };
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+type ParsedMigrationRecord = {
+  sourceFileName: string;
+  clientCode?: string;
+  name?: string;
+  businessName?: string;
+  email?: string;
+  phone?: string;
+  mailingAddress?: string;
+  lineOfBusiness?: "personal" | "commercial";
+  assetType?: AssetType;
+  estimatedValue?: number;
+  policyNumber?: string;
+  carrierName?: string;
+  premiumEstimate?: number;
+  finalPremium?: number;
+  effectiveDate?: string;
+  renewalDate?: string;
+  notes?: string;
+  confidence: number;
+  sources: string[];
+};
+
+const MIGRATION_ASSET_LABELS: Record<AssetType, string> = {
+  coastal_home: "Coastal Home",
+  luxury_vehicle: "Luxury Vehicle",
+  yacht: "Yacht",
+  jewelry: "Jewelry",
+  umbrella_liability: "Umbrella Liability",
+  full_portfolio: "Full Portfolio",
+  other: "Other",
+};
+
+function normalizeImportKey(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function cleanImportText(value: unknown): string | undefined {
+  if (value == null) return undefined;
+  const text = String(value).replace(/\s+/g, " ").trim();
+  if (!text || /^(n\/a|na|none|null|unknown|not applicable)$/i.test(text)) return undefined;
+  return text;
+}
+
+function splitDelimitedLine(line: string, delimiter: string): string[] {
+  const cells: string[] = [];
+  let cell = "";
+  let quoted = false;
+  for (let i = 0; i < line.length; i += 1) {
+    const char = line[i];
+    const next = line[i + 1];
+    if (char === '"' && quoted && next === '"') {
+      cell += '"';
+      i += 1;
+      continue;
+    }
+    if (char === '"') {
+      quoted = !quoted;
+      continue;
+    }
+    if (char === delimiter && !quoted) {
+      cells.push(cell.trim());
+      cell = "";
+      continue;
+    }
+    cell += char;
+  }
+  cells.push(cell.trim());
+  return cells;
+}
+
+function parseDelimitedRows(text: string): Record<string, string>[] {
+  const lines = text
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length < 2) return [];
+  const delimiter = lines[0].includes("\t") ? "\t" : ",";
+  const headers = splitDelimitedLine(lines[0], delimiter).map(normalizeImportKey);
+  if (headers.filter(Boolean).length < 2) return [];
+  return lines.slice(1).flatMap((line) => {
+    const values = splitDelimitedLine(line, delimiter);
+    const row: Record<string, string> = {};
+    headers.forEach((header, index) => {
+      if (header) row[header] = values[index] ?? "";
+    });
+    return Object.values(row).some((value) => value.trim()) ? [row] : [];
+  });
+}
+
+function pickImportField(row: Record<string, string>, aliases: string[]): string | undefined {
+  const normalized = aliases.map(normalizeImportKey);
+  for (const alias of normalized) {
+    const exact = cleanImportText(row[alias]);
+    if (exact) return exact;
+  }
+  for (const [key, value] of Object.entries(row)) {
+    if (normalized.some((alias) => key.includes(alias) || alias.includes(key))) {
+      const clean = cleanImportText(value);
+      if (clean) return clean;
+    }
+  }
+  return undefined;
+}
+
+function parseMoney(value?: string): number | undefined {
+  if (!value) return undefined;
+  const multiplier = /\b(m|mm|million)\b/i.test(value) ? 1_000_000 : /\b(k|thousand)\b/i.test(value) ? 1_000 : 1;
+  const parsed = Number(value.replace(/[^0-9.]/g, ""));
+  if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+  return Math.round(parsed * multiplier);
+}
+
+function normalizeImportDate(value?: string): string | undefined {
+  const clean = cleanImportText(value);
+  if (!clean) return undefined;
+  const direct = clean.match(/\b(\d{4})-(\d{2})-(\d{2})\b/);
+  if (direct) return direct[0];
+  const slash = clean.match(/\b(\d{1,2})\/(\d{1,2})\/(\d{2,4})\b/);
+  if (!slash) return undefined;
+  const year = slash[3].length === 2 ? `20${slash[3]}` : slash[3];
+  return `${year}-${slash[1].padStart(2, "0")}-${slash[2].padStart(2, "0")}`;
+}
+
+function inferImportLine(text: string): "personal" | "commercial" | undefined {
+  const lower = text.toLowerCase();
+  if (/\b(commercial|business|bop|general liability|gl|workers comp|commercial auto|professional liability|fein|naics|premises|operations)\b/.test(lower)) {
+    return "commercial";
+  }
+  if (/\b(personal|homeowners?|dwelling|personal auto|yacht|jewelry|umbrella|household|residence)\b/.test(lower)) {
+    return "personal";
+  }
+  return undefined;
+}
+
+function inferImportAssetType(text: string): AssetType | undefined {
+  const lower = text.toLowerCase();
+  if (/\b(home|house|property|dwelling|condo|residence|coastal)\b/.test(lower)) return "coastal_home";
+  if (/\b(auto|vehicle|car|truck|fleet|garage|vin)\b/.test(lower)) return "luxury_vehicle";
+  if (/\b(yacht|boat|vessel|hull|marina)\b/.test(lower)) return "yacht";
+  if (/\b(jewel|ring|watch|necklace|appraisal|collection)\b/.test(lower)) return "jewelry";
+  if (/\b(umbrella|excess liability)\b/.test(lower)) return "umbrella_liability";
+  if (/\b(portfolio|schedule|multiple assets)\b/.test(lower)) return "full_portfolio";
+  return undefined;
+}
+
+function importAddressFromRow(row: Record<string, string>): string | undefined {
+  const direct = pickImportField(row, [
+    "mailing address",
+    "insured address",
+    "applicant address",
+    "customer address",
+    "client address",
+    "property address",
+    "risk address",
+    "address",
+  ]);
+  if (direct) return direct;
+  const street = pickImportField(row, ["address 1", "address1", "street", "street address"]);
+  const city = pickImportField(row, ["city"]);
+  const state = pickImportField(row, ["state"]);
+  const zip = pickImportField(row, ["zip", "postal code"]);
+  const line2 = [city, state].filter(Boolean).join(", ");
+  return [street, [line2, zip].filter(Boolean).join(" ")].filter(Boolean).join(", ") || undefined;
+}
+
+function parsedRecordFromRow(row: Record<string, string>, sourceFileName: string): ParsedMigrationRecord | null {
+  const businessName = pickImportField(row, ["business name", "company name", "entity name", "legal name", "dba"]);
+  const name =
+    pickImportField(row, ["client name", "customer name", "insured name", "applicant name", "named insured", "account name", "name"]) ??
+    businessName;
+  const email = pickImportField(row, ["email", "email address", "primary email", "business email"]);
+  const phone = pickImportField(row, ["phone", "telephone", "mobile", "cell"]);
+  const mailingAddress = importAddressFromRow(row);
+  const lineText = [
+    pickImportField(row, ["line of business", "department", "lob", "line"]),
+    pickImportField(row, ["policy type", "coverage", "category", "asset type"]),
+    businessName,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const assetText = [
+    pickImportField(row, ["asset type", "category", "policy type", "coverage", "description"]),
+    sourceFileName,
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const clientCode = pickImportField(row, ["client code", "customer code", "account code", "client id", "customer id"]);
+  const policyNumber = pickImportField(row, ["policy number", "policy no", "policy #", "policy"]);
+  const carrierName = pickImportField(row, ["carrier", "company", "insurer", "market"]);
+  const premium =
+    parseMoney(pickImportField(row, ["final premium", "annual premium", "premium", "estimated premium"])) ??
+    undefined;
+  const estimatedValue = parseMoney(
+    pickImportField(row, ["estimated value", "replacement cost", "dwelling limit", "coverage a", "building limit", "asset value"])
+  );
+  const notes = pickImportField(row, ["notes", "remarks", "description", "operations"]);
+  const fieldCount = [
+    name,
+    businessName,
+    email,
+    phone,
+    mailingAddress,
+    clientCode,
+    policyNumber,
+    carrierName,
+    premium,
+    estimatedValue,
+    notes,
+  ].filter(Boolean).length;
+  if (fieldCount === 0) return null;
+  return {
+    sourceFileName,
+    clientCode,
+    name,
+    businessName,
+    email,
+    phone,
+    mailingAddress,
+    lineOfBusiness: inferImportLine(lineText) ?? (businessName ? "commercial" : undefined),
+    assetType: inferImportAssetType(assetText),
+    estimatedValue,
+    policyNumber,
+    carrierName,
+    premiumEstimate: premium,
+    finalPremium: premium,
+    effectiveDate: normalizeImportDate(pickImportField(row, ["effective date", "eff date", "inception date"])),
+    renewalDate: normalizeImportDate(pickImportField(row, ["renewal date", "expiration date", "expiry date", "exp date"])),
+    notes,
+    confidence: Math.min(0.96, 0.42 + fieldCount * 0.06 + (email ? 0.12 : 0) + (policyNumber ? 0.08 : 0)),
+    sources: [`Row from ${sourceFileName}`],
+  };
+}
+
+function extractLabeledText(text: string, labels: string[]): string | undefined {
+  for (const label of labels) {
+    const pattern = new RegExp(String.raw`(?:^|\n)\s*${label}\s*[:#-]?\s*([^\n]{2,140})`, "i");
+    const value = cleanImportText(text.match(pattern)?.[1]);
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function parsePolicyFromText(text: string, fileName: string, carrierNames: string[]): Partial<ParsedMigrationRecord> {
+  const policyNumber =
+    extractLabeledText(text, ["policy number", "policy no", "policy #"]) ??
+    cleanImportText(text.match(/\b[A-Z]{2,5}[-\s]?\d{4,12}(?:[-\s]?[A-Z0-9]{1,6})?\b/i)?.[0]);
+  const carrierName =
+    extractLabeledText(text, ["carrier", "insurance company", "insurer"]) ??
+    carrierNames.find((name) => text.toLowerCase().includes(name.toLowerCase()));
+  const premium =
+    parseMoney(extractLabeledText(text, ["annual premium", "policy premium", "premium"])) ??
+    undefined;
+  return {
+    policyNumber,
+    carrierName,
+    premiumEstimate: premium,
+    finalPremium: premium,
+    effectiveDate: normalizeImportDate(extractLabeledText(text, ["effective date", "eff date", "inception date"])),
+    renewalDate: normalizeImportDate(extractLabeledText(text, ["renewal date", "expiration date", "expiry date", "exp date"])),
+    assetType: inferImportAssetType(`${fileName}\n${text}`),
+  };
+}
+
+async function migrationRecordsFromFile(file: File, carrierNames: string[]): Promise<ParsedMigrationRecord[]> {
+  const ext = fileExtension(file.name);
+  if (["csv", "txt", "tsv"].includes(ext) || file.type.startsWith("text/")) {
+    const text = await file.text();
+    const rows = parseDelimitedRows(text);
+    if (rows.length > 0) {
+      return rows
+        .slice(0, 500)
+        .map((row) => parsedRecordFromRow(row, file.name))
+        .filter((record): record is ParsedMigrationRecord => Boolean(record));
+    }
+  }
+
+  const payload = await readAiFileForExtraction(file);
+  const contact = await aiExtractContactFromFile({
+    fileName: file.name,
+    fileType: file.type,
+    text: payload.text,
+    dataUrl: payload.dataUrl,
+  });
+  const policy = payload.text ? parsePolicyFromText(payload.text, file.name, carrierNames) : {};
+  const name = contact.name ?? contact.businessName;
+  const filledCount = [
+    name,
+    contact.email,
+    contact.phone,
+    contact.address,
+    contact.businessName,
+    contact.assetType,
+    contact.estimatedValue,
+    contact.notes,
+    policy.policyNumber,
+    policy.carrierName,
+    policy.finalPremium,
+  ].filter(Boolean).length;
+  if (filledCount === 0) return [];
+  return [
+    {
+      sourceFileName: file.name,
+      name,
+      businessName: contact.businessName,
+      email: contact.email,
+      phone: contact.phone,
+      mailingAddress: contact.address,
+      lineOfBusiness: contact.lineOfBusiness,
+      assetType: contact.assetType ?? policy.assetType,
+      estimatedValue: contact.estimatedValue,
+      policyNumber: policy.policyNumber,
+      carrierName: policy.carrierName,
+      premiumEstimate: policy.premiumEstimate,
+      finalPremium: policy.finalPremium,
+      effectiveDate: policy.effectiveDate,
+      renewalDate: policy.renewalDate,
+      notes: contact.notes ?? contact.summary,
+      confidence: Math.min(0.96, Math.max(contact.confidence, 0.34 + filledCount * 0.06)),
+      sources: Array.from(new Set([...payload.sources, ...contact.sources])),
+    },
+  ];
+}
+
+function staffOwnerForImport(staff: User[], role: "agent" | "csr" | "manager") {
+  return staff.find((member) => member.active && member.role === role) ?? staff.find((member) => member.active);
+}
+
+function matchExistingCustomer(
+  customers: ReturnType<typeof api.customers.list>,
+  record: ParsedMigrationRecord
+) {
+  const email = record.email?.toLowerCase();
+  const code = record.clientCode?.toLowerCase();
+  return customers.find((customer) => {
+    if (email && customer.email.toLowerCase() === email) return true;
+    if (code && customer.clientCode?.toLowerCase() === code) return true;
+    return false;
+  });
+}
+
+function matchCarrierByName(carriers: ReturnType<typeof api.carriers.listForTenant>, carrierName?: string) {
+  if (!carrierName) return undefined;
+  const normalized = carrierName.toLowerCase();
+  return carriers.find((carrier) => {
+    const name = carrier.name.toLowerCase();
+    return name === normalized || name.includes(normalized) || normalized.includes(name);
+  });
+}
+
+function customerPatchFromRecord(record: ParsedMigrationRecord) {
+  return {
+    lineOfBusiness: record.lineOfBusiness,
+    businessName: record.businessName,
+    phone: record.phone,
+    mailingAddress: record.mailingAddress,
+    clientCode: record.clientCode,
+  };
+}
+
+async function runAgencyMigrationImport(input: {
+  agency: Agency;
+  batch: MigrationImportBatch;
+  files: File[];
+  currentUserId: string;
+}): Promise<MigrationImportSummary> {
+  const summary: MigrationImportSummary = {
+    clients: 0,
+    policies: 0,
+    assets: 0,
+    documents: 0,
+    notes: 0,
+    skipped: 0,
+  };
+  const staff = api.users
+    .list(input.agency.id)
+    .filter((member) => member.role === "agent" || member.role === "manager" || member.role === "csr");
+  const assignedAgent = staffOwnerForImport(staff, "agent") ?? staffOwnerForImport(staff, "manager");
+  const assignedCsr = staffOwnerForImport(staff, "csr");
+  const carriers = api.carriers.listForTenant(input.agency.id);
+  const carrierNames = carriers.map((carrier) => carrier.name);
+  let customers = api.customers.list(input.agency.id, { includeArchived: true });
+
+  for (const file of input.files) {
+    const document = api.documents.create({
+      tenantId: input.agency.id,
+      uploadedById: input.currentUserId,
+      fileName: file.name,
+      fileType: file.type || "application/octet-stream",
+      documentName: `Migration source - ${file.name}`,
+      type: "other",
+      visibility: "employee_only",
+      status: "approved",
+      agencyId: input.agency.id,
+    });
+    summary.documents += 1;
+
+    const records = await migrationRecordsFromFile(file, carrierNames);
+    if (records.length === 0) {
+      summary.skipped += 1;
+      continue;
+    }
+
+    for (const record of records) {
+      const name = cleanImportText(record.name ?? record.businessName);
+      const email = cleanImportText(record.email)?.toLowerCase();
+      let customer = matchExistingCustomer(customers, record);
+      if (!customer) {
+        if (!name || !email) {
+          summary.skipped += 1;
+          continue;
+        }
+        const existingUser = api.users.byEmail(email);
+        if (existingUser && existingUser.tenantId !== input.agency.id) {
+          summary.skipped += 1;
+          continue;
+        }
+        const customerUser =
+          existingUser ??
+          api.users.create({
+            tenantId: input.agency.id,
+            role: "customer",
+            email,
+            name,
+            phone: record.phone,
+            profileCompleted: true,
+          });
+        customer = api.customers.create({
+          tenantId: input.agency.id,
+          userId: customerUser.id,
+          clientCode: record.clientCode,
+          lineOfBusiness: record.lineOfBusiness,
+          businessName: record.businessName,
+          name,
+          email,
+          phone: record.phone,
+          mailingAddress: record.mailingAddress,
+          marketingOptInEmail: Boolean(email),
+          marketingOptInSms: false,
+          assignedAgentId: assignedAgent?.id,
+          assignedCsrId: assignedCsr?.id,
+          additionalAgentIds: [],
+          additionalCsrIds: [],
+          archived: false,
+        });
+        customers = [customer, ...customers];
+        summary.clients += 1;
+      } else {
+        const patch = customerPatchFromRecord(record);
+        const safePatch = Object.fromEntries(
+          Object.entries(patch).filter(([key, value]) => value && !(customer as any)[key])
+        );
+        if (Object.keys(safePatch).length > 0) {
+          customer = api.customers.update(customer.id, safePatch) ?? customer;
+          customers = customers.map((row) => (row.id === customer!.id ? customer! : row));
+        }
+      }
+
+      const shouldCreateAsset = Boolean(record.assetType || record.estimatedValue || record.mailingAddress);
+      const asset = shouldCreateAsset
+        ? api.assets.create({
+            tenantId: input.agency.id,
+            customerId: customer.id,
+            type: record.assetType ?? "other",
+            label: `${MIGRATION_ASSET_LABELS[record.assetType ?? "other"]} - ${customer.name}`,
+            estimatedValue: record.estimatedValue ?? record.finalPremium ?? 0,
+            details: {
+              source: record.sourceFileName,
+              address: record.mailingAddress,
+              notes: record.notes,
+              lineOfBusiness: record.lineOfBusiness,
+            },
+            status: record.policyNumber ? "insured" : "pending",
+          })
+        : undefined;
+      if (asset) summary.assets += 1;
+
+      const carrier = matchCarrierByName(carriers, record.carrierName);
+      if (record.policyNumber && asset && carrier) {
+        api.policies.create({
+          tenantId: input.agency.id,
+          customerId: customer.id,
+          assetId: asset.id,
+          carrierId: carrier.id,
+          policyNumber: record.policyNumber,
+          premiumEstimate: record.premiumEstimate,
+          finalPremium: record.finalPremium,
+          effectiveDate: record.effectiveDate,
+          renewalDate: record.renewalDate,
+          status: "bound",
+          renewalStatus: "not_due",
+          agentId: assignedAgent?.id,
+          department: record.lineOfBusiness,
+        });
+        summary.policies += 1;
+      } else if (record.policyNumber) {
+        summary.skipped += 1;
+      }
+
+      api.notes.create({
+        tenantId: input.agency.id,
+        authorId: input.currentUserId,
+        customerId: customer.id,
+        body: [
+          `AI migration imported verified data from ${record.sourceFileName}.`,
+          record.notes ? `Notes: ${record.notes}` : "",
+          `Source document: ${document.fileName}.`,
+          `Confidence: ${Math.round(record.confidence * 100)}%.`,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        visibility: "internal",
+      });
+      summary.notes += 1;
+    }
+  }
+
+  api.status.create({
+    tenantId: input.agency.id,
+    source: "ai",
+    message: `Agency migration imported ${summary.clients} client${summary.clients === 1 ? "" : "s"}, ${summary.policies} polic${summary.policies === 1 ? "y" : "ies"}, ${summary.documents} document${summary.documents === 1 ? "" : "s"}, and left ${summary.skipped} item${summary.skipped === 1 ? "" : "s"} for review from ${input.batch.sourceLabel}.`,
+    visibility: "internal",
+    createdById: input.currentUserId,
+  });
+
+  return summary;
 }
 
 function compactAddress(branch: Branch) {
@@ -160,8 +863,14 @@ export function AgencySettingsPage() {
   const staffUsers = api.users
     .list(agency.id)
     .filter((u) => u.role === "agent" || u.role === "manager" || u.role === "csr");
+  const securityUsers = api.users
+    .list(agency.id)
+    .filter((u) => u.role !== "master_admin")
+    .sort((a, b) => a.name.localeCompare(b.name));
   const activeStaffUsers = staffUsers.filter((u) => u.active);
   const disabledStaffUsers = staffUsers.filter((u) => !u.active);
+  const securityIncidents = api.security.listIncidents(agency.id);
+  const activeSecurityBans = api.security.listBans(agency.id, true);
   const managerCount = activeStaffUsers.filter((u) => u.role === "manager").length;
   const agentCount = activeStaffUsers.filter((u) => u.role === "agent" || u.role === "csr").length;
   const branches = api.branches.listByAgency(agency.id);
@@ -646,6 +1355,8 @@ export function AgencySettingsPage() {
         </div>
       </Card>
 
+      <AgencyDataImportCard agency={agency} currentUserId={user?.id ?? "ai"} />
+
       <AgencyLogoCard
         agency={agency}
         onChanged={() => setRev((r) => r + 1)}
@@ -667,6 +1378,15 @@ export function AgencySettingsPage() {
         currentUserId={user?.id}
         notice={staffNotice}
         onChangeAccess={changeStaffAccess}
+      />
+
+      <SecurityControlsCard
+        agencyId={agency.id}
+        users={securityUsers}
+        currentUserId={user?.id}
+        incidents={securityIncidents}
+        activeBans={activeSecurityBans}
+        onChanged={() => setRev((r) => r + 1)}
       />
 
       <div className="grid gap-4 lg:grid-cols-3">
@@ -718,6 +1438,295 @@ function SnapshotCard({
   );
 }
 
+function AgencyDataImportCard({ agency, currentUserId }: { agency: Agency; currentUserId: string }) {
+  const [sourceLabel, setSourceLabel] = useState("Applied Epic export");
+  const [batches, setBatches] = useState<MigrationImportBatch[]>([]);
+  const [batchFiles, setBatchFiles] = useState<Record<string, File[]>>({});
+  const [importing, setImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const latest = batches[0];
+  const totalRecords = latest
+    ? Object.values(latest.counts).reduce((sum, count) => sum + count, 0)
+    : 0;
+  const reviewCount = latest
+    ? latest.reviewItems.reduce((sum, item) => sum + item.count, 0)
+    : 0;
+
+  function receiveMigrationFiles(files: File[]) {
+    if (files.length === 0) return;
+    const batch = buildMigrationBatch(files, sourceLabel.trim() || "Agency export");
+    setBatchFiles((current) => ({ ...current, [batch.id]: files }));
+    setBatches((current) => [batch, ...current].slice(0, 5));
+    setImportError(null);
+  }
+
+  async function importLatestBatch() {
+    if (!latest || importing || latest.importedAt) return;
+    const files = batchFiles[latest.id] ?? [];
+    if (files.length === 0) {
+      setImportError("The uploaded files are no longer available in this browser session.");
+      return;
+    }
+    setImporting(true);
+    setImportError(null);
+    try {
+      const importSummary = await runAgencyMigrationImport({
+        agency,
+        batch: latest,
+        files,
+        currentUserId,
+      });
+      setBatches((current) =>
+        current.map((batch) =>
+          batch.id === latest.id
+            ? { ...batch, importedAt: new Date().toISOString(), importSummary }
+            : batch
+        )
+      );
+    } catch (err) {
+      setImportError(err instanceof Error ? err.message : "The import could not be completed.");
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  return (
+    <Card>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <CardHeader
+          title={
+            <span className="inline-flex items-center gap-2">
+              <Database className="h-4 w-4 text-gold-600" /> Agency data import
+            </span>
+          }
+          subtitle="Upload export packages, spreadsheets, documents, and screenshots into a staged migration preview."
+        />
+        {latest?.importedAt ? (
+          <Badge tone="success">Imported</Badge>
+        ) : latest ? (
+          <Badge tone={reviewCount > 0 ? "gold" : "success"}>{latest.confidence}% mapped</Badge>
+        ) : (
+          <Badge tone="neutral">No package staged</Badge>
+        )}
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+        <div className="space-y-3">
+          <div>
+            <label className="label" htmlFor="migration-source-label">Source package</label>
+            <input
+              id="migration-source-label"
+              className="input"
+              value={sourceLabel}
+              onChange={(event) => setSourceLabel(event.target.value)}
+              placeholder="Applied Epic export"
+            />
+          </div>
+          <FileDropZone
+            title="Upload migration package"
+            help="ZIP, CSV, XLSX, PDF, DOC, image, or screenshot batches."
+            accept=".zip,.7z,.csv,.xlsx,.xls,.pdf,.doc,.docx,.jpg,.jpeg,.png,.tif,.tiff"
+            multiple
+            icon="ai"
+            onFiles={receiveMigrationFiles}
+          />
+          <div className="grid gap-2 sm:grid-cols-3">
+            <MigrationStat
+              icon={<FileSpreadsheet className="h-4 w-4" />}
+              label="Structured"
+              value={
+                latest
+                  ? String(
+                      latest.packageNames.filter((name) =>
+                        ["csv", "xlsx", "xls"].includes(fileExtension(name))
+                      ).length
+                    )
+                  : "0"
+              }
+            />
+            <MigrationStat
+              icon={<FileText className="h-4 w-4" />}
+              label="Documents"
+              value={latest ? String(latest.counts.documents) : "0"}
+            />
+            <MigrationStat
+              icon={<FileArchive className="h-4 w-4" />}
+              label="Package size"
+              value={latest ? formatBytes(latest.totalBytes) : "0 B"}
+            />
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-ink-100 bg-ink-50/50 p-4">
+          {latest ? (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-ink-500">
+                    Staged import
+                  </div>
+                  <div className="mt-1 text-lg font-semibold text-ink-900">
+                    {totalRecords.toLocaleString()} detected records
+                  </div>
+                  <div className="mt-1 text-xs text-ink-500">
+                    {latest.fileCount} files - {fmt.dateTime(latest.uploadedAt)}
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    className="btn-primary text-xs"
+                    onClick={importLatestBatch}
+                    disabled={importing || Boolean(latest.importedAt)}
+                  >
+                    {importing ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : latest.importedAt ? (
+                      <CheckCircle2 className="h-3.5 w-3.5" />
+                    ) : (
+                      <WandSparkles className="h-3.5 w-3.5" />
+                    )}
+                    {latest.importedAt ? "Imported" : importing ? "Importing" : "Run AI import"}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-outline text-xs"
+                    onClick={() => {
+                      setBatches([]);
+                      setBatchFiles({});
+                      setImportError(null);
+                    }}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" /> Clear
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid gap-2 sm:grid-cols-2">
+                {(Object.keys(MIGRATION_RECORD_LABELS) as MigrationRecordKey[]).map((key) => (
+                  <div
+                    key={key}
+                    className="flex items-center justify-between gap-3 rounded-md border border-ink-100 bg-white px-3 py-2"
+                  >
+                    <span className="text-sm text-ink-600">{MIGRATION_RECORD_LABELS[key]}</span>
+                    <span className="text-sm font-semibold text-ink-900">
+                      {latest.counts[key].toLocaleString()}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="rounded-md border border-white bg-white px-3 py-3">
+                <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-ink-500">
+                  <SearchCheck className="h-3.5 w-3.5 text-gold-700" />
+                  Exception review
+                </div>
+                {latest.reviewItems.length > 0 ? (
+                  <div className="space-y-2">
+                    {latest.reviewItems.map((item) => (
+                      <div key={item.label} className="flex items-center justify-between gap-3 text-sm">
+                        <span className="text-ink-600">{item.label}</span>
+                        <Badge tone="gold">{item.count}</Badge>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 text-sm font-medium text-emerald-700">
+                    <CheckCircle2 className="h-4 w-4" /> Ready for clean import review
+                  </div>
+                )}
+              </div>
+
+              {latest.importSummary && (
+                <div className="grid gap-2 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-3 sm:grid-cols-3">
+                  <MigrationStat
+                    icon={<Users className="h-4 w-4" />}
+                    label="Clients"
+                    value={String(latest.importSummary.clients)}
+                  />
+                  <MigrationStat
+                    icon={<ShieldCheck className="h-4 w-4" />}
+                    label="Policies"
+                    value={String(latest.importSummary.policies)}
+                  />
+                  <MigrationStat
+                    icon={<FileText className="h-4 w-4" />}
+                    label="Documents"
+                    value={String(latest.importSummary.documents)}
+                  />
+                </div>
+              )}
+
+              {importError && (
+                <div className="rounded-md border border-alert/20 bg-alert-soft px-3 py-2 text-xs font-medium text-alert">
+                  {importError}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="flex min-h-72 flex-col items-center justify-center rounded-lg border border-dashed border-ink-200 bg-white px-5 text-center">
+              <FileSearch className="h-8 w-8 text-gold-700" />
+              <div className="mt-3 text-sm font-semibold text-ink-900">
+                No import package staged
+              </div>
+              <div className="mt-1 max-w-sm text-xs leading-relaxed text-ink-500">
+                Upload the agency export package to preview clients, policies, documents, and review exceptions before migration.
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {batches.length > 1 && (
+        <div className="mt-4 overflow-hidden rounded-lg border border-ink-100">
+          <div className="grid grid-cols-[1fr_8rem_8rem_8rem] gap-3 border-b border-ink-100 bg-ink-50 px-4 py-2 text-xs font-semibold uppercase tracking-wider text-ink-500">
+            <div>Recent packages</div>
+            <div>Files</div>
+            <div>Records</div>
+            <div>Confidence</div>
+          </div>
+          <div className="divide-y divide-ink-100">
+            {batches.slice(1).map((batch) => (
+              <div
+                key={batch.id}
+                className="grid grid-cols-[1fr_8rem_8rem_8rem] items-center gap-3 bg-white px-4 py-2 text-sm"
+              >
+                <div className="min-w-0">
+                  <div className="truncate font-medium text-ink-900">{batch.sourceLabel}</div>
+                  <div className="truncate text-xs text-ink-500">{batch.packageNames.join(", ")}</div>
+                </div>
+                <div>{batch.fileCount}</div>
+                <div>{Object.values(batch.counts).reduce((sum, count) => sum + count, 0).toLocaleString()}</div>
+                <div>{batch.confidence}%</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function MigrationStat({
+  icon,
+  label,
+  value,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="rounded-md border border-ink-100 bg-white px-3 py-2">
+      <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-ink-500">
+        <span className="text-gold-700">{icon}</span>
+        {label}
+      </div>
+      <div className="mt-1 truncate text-sm font-semibold text-ink-900">{value}</div>
+    </div>
+  );
+}
+
 function AgencyProfileSummary({ agency }: { agency: Agency }) {
   return (
     <Card>
@@ -764,12 +1773,6 @@ function MarketingSenderCard({
   const provider = sender.provider ?? mailbox?.provider ?? "other";
   const requirements = api.mailboxes.productionRequirements(mailbox);
 
-  function refreshDemoSender() {
-    api.mailboxes.connectAgencyMarketingDemo(agency.id);
-    setNotice("Agency marketing sender refreshed for demo mode.");
-    onChanged?.();
-  }
-
   return (
     <Card>
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -787,11 +1790,6 @@ function MarketingSenderCard({
             >
               <Mail className="h-3.5 w-3.5" /> Open mailbox
             </a>
-          ) : null}
-          {editable ? (
-            <button className="btn-ghost text-xs" type="button" onClick={refreshDemoSender}>
-              <RefreshCw className="h-3.5 w-3.5" /> Refresh demo
-            </button>
           ) : null}
         </div>
       </div>
@@ -1226,6 +2224,312 @@ function UserInformationCard({
       <div className="mt-3 rounded-md border border-ink-100 bg-white px-3 py-2 text-xs leading-relaxed text-ink-500">
         Deleted and banned users stay on this list for audit visibility. They cannot sign in, but the agency's
         purchased capacity remains {agency.allowedUsers} user slots until the plan itself is edited.
+      </div>
+    </Card>
+  );
+}
+
+const SECURITY_SEVERITIES: SecurityIncidentSeverity[] = ["low", "medium", "high", "critical"];
+
+function securitySeverityTone(severity: SecurityIncidentSeverity): "neutral" | "warn" | "error" {
+  if (severity === "critical" || severity === "high") return "error";
+  if (severity === "medium") return "warn";
+  return "neutral";
+}
+
+function securityStatusTone(status: SecurityIncidentStatus): "neutral" | "success" | "warn" {
+  if (status === "reviewed") return "success";
+  if (status === "open") return "warn";
+  return "neutral";
+}
+
+function SecurityControlsCard({
+  agencyId,
+  users,
+  currentUserId,
+  incidents,
+  activeBans,
+  onChanged,
+}: {
+  agencyId: string;
+  users: User[];
+  currentUserId?: string;
+  incidents: SecurityIncident[];
+  activeBans: SecurityBan[];
+  onChanged: () => void;
+}) {
+  const [selectedUserId, setSelectedUserId] = useState("");
+  const [ipAddress, setIpAddress] = useState("");
+  const [severity, setSeverity] = useState<SecurityIncidentSeverity>("medium");
+  const [reason, setReason] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
+  const selectedUser = users.find((row) => row.id === selectedUserId);
+  const recentIncidents = incidents.slice(0, 6);
+
+  function trimmedReason() {
+    return reason.trim();
+  }
+
+  function resetSecurityForm(keepSubject = true) {
+    setReason("");
+    setSeverity("medium");
+    if (!keepSubject) {
+      setSelectedUserId("");
+      setIpAddress("");
+    }
+  }
+
+  function flagSuspiciousBehavior() {
+    const normalizedIp = api.security.normalizeIpAddress(ipAddress);
+    if (!currentUserId) return;
+    if (!selectedUser && !normalizedIp) {
+      setNotice("Select a user or enter an IP address before flagging behavior.");
+      return;
+    }
+    if (!trimmedReason()) {
+      setNotice("Add a reason so the security review has context.");
+      return;
+    }
+    const incident = api.security.flag({
+      tenantId: agencyId,
+      reportedById: currentUserId,
+      subjectKind: selectedUser ? undefined : "ip",
+      subjectUserId: selectedUser?.id,
+      subjectLabel: selectedUser?.name || normalizedIp,
+      ipAddress: normalizedIp,
+      severity,
+      reason: trimmedReason(),
+    });
+    setNotice(`Suspicious behavior flagged as ${incident.severity}.`);
+    resetSecurityForm();
+    onChanged();
+  }
+
+  function banSelectedUser() {
+    if (!currentUserId || !selectedUser) {
+      setNotice("Select a user before creating a user ban.");
+      return;
+    }
+    if (selectedUser.id === currentUserId) {
+      setNotice("You cannot ban your own signed-in account.");
+      return;
+    }
+    const ban = api.security.banUser({
+      tenantId: agencyId,
+      userId: selectedUser.id,
+      createdById: currentUserId,
+      reason: trimmedReason() || `Suspicious behavior review for ${selectedUser.name}.`,
+    });
+    if (!ban) {
+      setNotice("That user could not be banned.");
+      return;
+    }
+    setNotice(`${selectedUser.name} is now banned from signing in.`);
+    resetSecurityForm(false);
+    onChanged();
+  }
+
+  function banEnteredIp() {
+    const normalizedIp = api.security.normalizeIpAddress(ipAddress);
+    if (!currentUserId || !normalizedIp) {
+      setNotice("Enter an IP address before creating an IP ban.");
+      return;
+    }
+    const ban = api.security.banIp({
+      tenantId: agencyId,
+      ipAddress: normalizedIp,
+      createdById: currentUserId,
+      reason: trimmedReason() || `Suspicious traffic from ${normalizedIp}.`,
+    });
+    if (!ban) {
+      setNotice("That IP address could not be banned.");
+      return;
+    }
+    setNotice(`${normalizedIp} is now on the active IP ban list.`);
+    resetSecurityForm(false);
+    onChanged();
+  }
+
+  function markIncident(id: string, status: SecurityIncidentStatus) {
+    if (!currentUserId) return;
+    api.security.updateIncidentStatus(id, status, currentUserId);
+    onChanged();
+  }
+
+  function revokeBan(id: string) {
+    if (!currentUserId) return;
+    api.security.revokeBan(id, currentUserId);
+    setNotice("Security ban revoked. User access still depends on the staff/user access status.");
+    onChanged();
+  }
+
+  return (
+    <Card>
+      <CardHeader
+        title={
+          <span className="inline-flex items-center gap-2">
+            <ShieldCheck className="h-4 w-4 text-gold-600" /> Security controls
+          </span>
+        }
+        subtitle="Flag suspicious behavior, ban a user account, or block an IP address."
+      />
+
+      {notice && (
+        <div className="mb-4 rounded-md border border-gold-200 bg-gold-50 px-3 py-2 text-xs font-medium text-ink-700">
+          {notice}
+        </div>
+      )}
+
+      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_12rem]">
+        <div>
+          <label className="label" htmlFor="security-user">User/account</label>
+          <select
+            id="security-user"
+            className="input"
+            value={selectedUserId}
+            onChange={(e) => setSelectedUserId(e.target.value)}
+          >
+            <option value="">Select a user</option>
+            {users.map((securityUser) => (
+              <option key={securityUser.id} value={securityUser.id}>
+                {securityUser.name} - {fmt.titleCase(securityUser.role)}
+                {!securityUser.active ? " - disabled" : ""}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="label" htmlFor="security-ip">IP address</label>
+          <input
+            id="security-ip"
+            className="input"
+            value={ipAddress}
+            placeholder="203.0.113.42"
+            onChange={(e) => setIpAddress(e.target.value)}
+          />
+        </div>
+        <div>
+          <label className="label" htmlFor="security-severity">Severity</label>
+          <select
+            id="security-severity"
+            className="input"
+            value={severity}
+            onChange={(e) => setSeverity(e.target.value as SecurityIncidentSeverity)}
+          >
+            {SECURITY_SEVERITIES.map((level) => (
+              <option key={level} value={level}>
+                {fmt.titleCase(level)}
+              </option>
+            ))}
+          </select>
+        </div>
+        <div className="lg:col-span-3">
+          <label className="label" htmlFor="security-reason">Reason</label>
+          <textarea
+            id="security-reason"
+            className="input min-h-24"
+            value={reason}
+            placeholder="Describe what looked suspicious."
+            onChange={(e) => setReason(e.target.value)}
+          />
+        </div>
+      </div>
+
+      <div className="mt-4 flex flex-wrap gap-2">
+        <button type="button" className="btn-outline" onClick={flagSuspiciousBehavior}>
+          <ShieldCheck className="h-4 w-4" /> Flag behavior
+        </button>
+        <button type="button" className="btn-outline" onClick={banSelectedUser}>
+          <Ban className="h-4 w-4" /> Ban user
+        </button>
+        <button type="button" className="btn-outline" onClick={banEnteredIp}>
+          <Ban className="h-4 w-4" /> Ban IP
+        </button>
+      </div>
+
+      <div className="mt-6 grid gap-4 lg:grid-cols-2">
+        <section className="rounded-lg border border-ink-100 bg-white">
+          <div className="flex items-center justify-between border-b border-ink-100 px-4 py-3">
+            <h3 className="text-sm font-semibold text-ink-900">Active bans</h3>
+            <Badge tone={activeBans.length ? "error" : "success"}>{activeBans.length}</Badge>
+          </div>
+          <div className="divide-y divide-ink-100">
+            {activeBans.length === 0 ? (
+              <div className="px-4 py-6 text-sm text-ink-500">No active security bans.</div>
+            ) : (
+              activeBans.map((ban) => (
+                <div key={ban.id} className="flex items-start justify-between gap-3 px-4 py-3 text-sm">
+                  <div className="min-w-0">
+                    <div className="font-semibold text-ink-900">
+                      {ban.kind === "ip" ? "IP ban" : "User ban"} - {ban.subjectLabel ?? ban.ipAddress ?? ban.userId}
+                    </div>
+                    <div className="mt-1 line-clamp-2 text-xs text-ink-500">{ban.reason}</div>
+                    <div className="mt-1 text-[11px] text-ink-400">
+                      {fmt.date(ban.createdAt)} by {ban.createdByName ?? "Unknown"}
+                    </div>
+                  </div>
+                  <button type="button" className="btn-outline h-9 px-3 text-xs" onClick={() => revokeBan(ban.id)}>
+                    <RotateCcw className="h-3.5 w-3.5" /> Revoke
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+
+        <section className="rounded-lg border border-ink-100 bg-white">
+          <div className="flex items-center justify-between border-b border-ink-100 px-4 py-3">
+            <h3 className="text-sm font-semibold text-ink-900">Recent flags</h3>
+            <Badge tone={incidents.some((incident) => incident.status === "open") ? "warn" : "neutral"}>
+              {incidents.filter((incident) => incident.status === "open").length} open
+            </Badge>
+          </div>
+          <div className="divide-y divide-ink-100">
+            {recentIncidents.length === 0 ? (
+              <div className="px-4 py-6 text-sm text-ink-500">No suspicious behavior has been flagged.</div>
+            ) : (
+              recentIncidents.map((incident) => (
+                <div key={incident.id} className="px-4 py-3 text-sm">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="font-semibold text-ink-900">
+                      {incident.subjectLabel ?? incident.ipAddress ?? "Unknown subject"}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <Badge tone={securitySeverityTone(incident.severity)}>
+                        {fmt.titleCase(incident.severity)}
+                      </Badge>
+                      <Badge tone={securityStatusTone(incident.status)}>
+                        {fmt.titleCase(incident.status)}
+                      </Badge>
+                    </div>
+                  </div>
+                  <div className="mt-1 text-xs leading-relaxed text-ink-600">{incident.reason}</div>
+                  <div className="mt-1 text-[11px] text-ink-400">
+                    {fmt.date(incident.createdAt)} by {incident.reportedByName ?? "Unknown"}
+                  </div>
+                  {incident.status === "open" && (
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        className="btn-outline h-8 px-2.5 text-xs"
+                        onClick={() => markIncident(incident.id, "reviewed")}
+                      >
+                        <CheckCircle2 className="h-3.5 w-3.5" /> Reviewed
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-outline h-8 px-2.5 text-xs"
+                        onClick={() => markIncident(incident.id, "dismissed")}
+                      >
+                        <X className="h-3.5 w-3.5" /> Dismiss
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        </section>
       </div>
     </Card>
   );

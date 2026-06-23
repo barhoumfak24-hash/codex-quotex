@@ -15,7 +15,7 @@ export type SubscriptionTier = "minimum" | "mid" | "ultra";
 
 export type SoftwareSaleStatus =
   | "checkout_pending"
-  | "paid_demo"
+  | "paid"
   | "provisioning"
   | "closed";
 
@@ -28,7 +28,7 @@ export type SoftwareSaleWebsiteAppAddOn =
 export type SoftwarePlanTermMonths = 12 | 24 | 36;
 
 export type DemoLeadStatus = "new" | "contacted" | "qualified" | "not_fit" | "closed";
-export type DemoLeadSource = "view_demo" | "manual";
+export type DemoLeadSource = "walkthrough_request" | "manual";
 
 export interface DemoLead {
   id: string;
@@ -84,8 +84,8 @@ export interface SoftwareSale {
   customMonthlyPriceUsd?: number;
   customMonthlyPriceReason?: string;
   status: SoftwareSaleStatus;
-  source: "transaction_site";
-  paymentMode: "stripe_checkout" | "demo_invoice";
+  source: "transaction_site" | "master_portal";
+  paymentMode: "stripe_checkout" | "manual_invoice";
   notes?: string;
   signedAgreementNames?: string[];
   signedAgreements?: SoftwareSaleSignedAgreement[];
@@ -93,6 +93,10 @@ export interface SoftwareSale {
   signedByEmail?: string;
   signedAt?: string;
   stripeCheckoutSessionId?: string;
+  invoiceEmailSentAt?: string;
+  invoiceEmailStatus?: "sent" | "failed";
+  invoiceEmailProvider?: "sendgrid" | "resend" | "twilio" | "unconfigured";
+  invoiceEmailError?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -682,6 +686,15 @@ export type MailProvider = "gmail" | "outlook" | "apple" | "yahoo" | "other";
 export type ConnectedMailboxOwnerType = "staff" | "agency_marketing";
 export type ConnectedMailboxStatus = "connected" | "needs_auth" | "needs_reauth" | "error" | "disabled";
 export type ConnectedMailboxAuthMode = "oauth" | "smtp_imap" | "demo";
+export type MailboxOutboxStatus = "queued" | "sending" | "sent" | "failed" | "cancelled";
+export type MailboxDeliveryStatus =
+  | "draft"
+  | "queued"
+  | "sending"
+  | "sent"
+  | "failed"
+  | "received"
+  | "synced";
 
 export interface ConnectedMailbox {
   id: string;
@@ -703,6 +716,34 @@ export interface ConnectedMailbox {
   lastError?: string;
   updatedAt: string;
   updatedById?: string;
+}
+
+export interface MailboxOutboxJob {
+  id: string;
+  tenantId: string;
+  communicationId: string;
+  mailboxConnectionId?: string;
+  mailboxAccount?: string;
+  mailboxProvider?: MailProvider;
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject?: string;
+  body: string;
+  bodyFormat?: "plain" | "html";
+  attachments?: CommunicationAttachment[];
+  idempotencyKey: string;
+  status: MailboxOutboxStatus;
+  attemptCount: number;
+  nextAttemptAt?: string;
+  lastAttemptAt?: string;
+  lastError?: string;
+  providerMessageId?: string;
+  providerThreadId?: string;
+  providerUrl?: string;
+  createdAt: string;
+  updatedAt: string;
+  createdById?: string;
 }
 
 // ---------------------------------------------------------------------
@@ -924,7 +965,7 @@ export interface Policy {
   nextPaymentAmount?: number;
   carrierBindingStatus?: CarrierPolicyBindingTrace["status"];
   carrierBindingReference?: string;
-  carrierBindingMode?: "live_api" | "demo_adapter";
+  carrierBindingMode?: "live_api" | "manual_workflow";
   carrierBindingTrace?: CarrierPolicyBindingTrace;
   closedAt?: string;
   closedById?: string;
@@ -1780,6 +1821,8 @@ export interface Communication {
   mailboxAccount?: string;
   mailboxProvider?: MailProvider;
   mailboxConnectionId?: string;
+  deliveryStatus?: MailboxDeliveryStatus;
+  outboxJobId?: string;
   externalMessageId?: string;
   externalThreadId?: string;
   externalUrl?: string;
@@ -1882,7 +1925,7 @@ export interface CommercialCarrierSubmission {
   applicationMessageIds?: string[];
   supplementalMessageIds?: string[];
   supplementalDocumentIds?: string[];
-  submissionMethod?: "carrier_portal_automation" | "underwriter_email" | "demo";
+  submissionMethod?: "carrier_portal_automation" | "underwriter_email" | "manual_workflow";
   connectorLabel?: string;
   automationJobId?: string;
   automationTrace?: CarrierPortalRunnerTrace;
@@ -1952,9 +1995,9 @@ export interface CarrierQuote {
 }
 
 export interface CarrierQuoteProviderTrace {
-  provider: "carrier_portal_automation" | "demo_adapter";
+  provider: "carrier_portal_automation" | "configuration_only";
   providerLabel: string;
-  transport: "browser_automation" | "demo";
+  transport: "browser_automation" | "manual";
   requestId: string;
   executionId?: string;
   liveReady: boolean;
@@ -1990,7 +2033,7 @@ export interface CarrierPortalExtractedQuote {
 
 export interface CarrierPortalRunnerTrace {
   jobId: string;
-  mode: "live_worker" | "demo_worker";
+  mode: "live_worker" | "configuration_trace";
   surface: "agent_portal" | "customer_portal";
   entryUrl: string;
   credentialReference?: string;
@@ -2015,7 +2058,7 @@ export interface CarrierQuoteImplementation {
   carrierPortalUrl?: string;
   implementedAt: string;
   implementedById: string;
-  mode: "live_api" | "demo_adapter";
+  mode: "live_api" | "manual_workflow";
   bindingTrace?: CarrierPolicyBindingTrace;
 }
 
@@ -2023,9 +2066,9 @@ export interface CarrierPolicyBindingTrace {
   provider:
     | "carrier_portal_automation"
     | "manual_required"
-    | "demo_adapter";
+    | "configuration_only";
   providerLabel: string;
-  transport: "soap" | "rest" | "browser_automation" | "manual" | "demo";
+  transport: "soap" | "rest" | "browser_automation" | "manual";
   requestId: string;
   executionId?: string;
   liveReady: boolean;
@@ -2122,6 +2165,10 @@ export interface QuotingSession {
   // fill audit has initialized the selected ACORD packet, so the
   // questions reflect the remaining blank ACORD fields.
   commercialQuestionnairePreparedAt?: string;
+  // Personal line sessions create tailored questions during AI
+  // mapping, but the agent should still review the mapping step
+  // before the questionnaire becomes the active workflow page.
+  personalQuestionnairePreparedAt?: string;
   // Answers keyed by question id. Agent and customer screens both
   // edit this same shared draft.
   questionnaireResponses?: Record<string, string>;
@@ -2180,6 +2227,71 @@ export interface MessageMute {
   kind: "internal" | "client" | "prospect" | "carrier" | "holder";
   refId: string;
   mutedAt: string;
+}
+
+export interface MessageReport {
+  id: string;
+  tenantId: string;
+  userId: string;
+  kind: "internal" | "client" | "prospect" | "carrier" | "holder";
+  refId: string;
+  reason: string;
+  status: "open" | "reviewed" | "dismissed";
+  reportedAt: string;
+}
+
+export interface MessageBlock {
+  id: string;
+  tenantId: string;
+  userId: string;
+  kind: "client" | "prospect" | "carrier" | "holder";
+  refId: string;
+  blockedAt: string;
+}
+
+export type SecurityIncidentSeverity = "low" | "medium" | "high" | "critical";
+export type SecurityIncidentStatus = "open" | "reviewed" | "dismissed";
+export type SecuritySubjectKind =
+  | "staff"
+  | "customer"
+  | "prospect"
+  | "carrier"
+  | "ip"
+  | "unknown";
+
+export interface SecurityIncident {
+  id: string;
+  tenantId: string;
+  reportedById: string;
+  reportedByName?: string;
+  subjectKind: SecuritySubjectKind;
+  subjectUserId?: string;
+  subjectLabel?: string;
+  ipAddress?: string;
+  severity: SecurityIncidentSeverity;
+  reason: string;
+  status: SecurityIncidentStatus;
+  resultingBanId?: string;
+  createdAt: string;
+  reviewedAt?: string;
+  reviewedById?: string;
+}
+
+export interface SecurityBan {
+  id: string;
+  tenantId: string;
+  kind: "user" | "ip";
+  userId?: string;
+  ipAddress?: string;
+  subjectLabel?: string;
+  reason: string;
+  createdById: string;
+  createdByName?: string;
+  incidentId?: string;
+  active: boolean;
+  createdAt: string;
+  revokedAt?: string;
+  revokedById?: string;
 }
 
 export interface AuditLog {

@@ -8,8 +8,8 @@ beforeEach(() => {
   db.reset();
 });
 
-describe("demo leads", () => {
-  it("captures homepage view-demo submissions for the master lead queue", () => {
+describe("walkthrough leads", () => {
+  it("captures homepage walkthrough submissions for the master lead queue", () => {
     const lead = api.demoLeads.create({
       firstName: "Maya",
       lastName: "Stone",
@@ -18,17 +18,17 @@ describe("demo leads", () => {
       role: "Owner",
       staffSize: "10-24",
       phone: "+1 (555) 222-1010",
-      interest: "Full Quotex software demo",
+      interest: "Full Quotex software walkthrough",
       marketingOptIn: true,
-      source: "view_demo",
+      source: "walkthrough_request",
     });
 
     expect(lead.status).toBe("new");
     expect(api.demoLeads.list()[0].agencyName).toBe("Harbor Private Risk");
-    expect(api.demoLeads.list()[0].source).toBe("view_demo");
+    expect(api.demoLeads.list()[0].source).toBe("walkthrough_request");
   });
 
-  it("imports older homepage demo requests from the legacy localStorage key", () => {
+  it("imports older homepage requests from the legacy localStorage key", () => {
     window.localStorage.setItem(
       "quotex.demoRequests.v1",
       JSON.stringify([
@@ -41,7 +41,7 @@ describe("demo leads", () => {
           role: "Principal",
           staffSize: "25-49",
           phone: "+1 (555) 333-9090",
-          interest: "Agency website demo",
+          interest: "Agency website walkthrough",
           notes: "Wants to see website and app.",
           marketingOptIn: true,
           createdAt: "2026-06-10T13:00:00.000Z",

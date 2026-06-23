@@ -1,6 +1,6 @@
 import { Link, useNavigate } from "react-router-dom";
 import { useState } from "react";
-import { BadgeDollarSign, Building2, ShieldCheck, Sparkles, Users, Wallet } from "lucide-react";
+import { ArrowRight, BadgeDollarSign, Building2, MonitorPlay, ShieldCheck, Sparkles, Users, Wallet } from "lucide-react";
 import { Card, CardHeader, StatCard } from "@/components/ui/Card";
 import { Modal } from "@/components/ui/Modal";
 import { api } from "@/lib/api";
@@ -95,6 +95,26 @@ export function MasterDashboard() {
           onClick={() => navigate("/master/billing")}
         />
       </div>
+
+      <Card className="border-gold-200 bg-gold-50/40">
+        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+          <div className="flex items-start gap-3">
+            <div className="grid h-11 w-11 shrink-0 place-items-center rounded-lg border border-gold-200 bg-white text-gold-700">
+              <MonitorPlay className="h-5 w-5" />
+            </div>
+            <div>
+              <h2 className="text-lg font-semibold text-ink-950">Presentation demos</h2>
+              <p className="mt-1 max-w-3xl text-sm leading-relaxed text-ink-600">
+                Open the software workspace, agency website, or client app with fake Palm Coast simulation data.
+              </p>
+            </div>
+          </div>
+          <button type="button" className="btn-primary shrink-0" onClick={() => navigate("/master/demos")}>
+            Open demos
+            <ArrowRight className="h-4 w-4" />
+          </button>
+        </div>
+      </Card>
 
       <MasterMetricModal
         open={drilldown != null}

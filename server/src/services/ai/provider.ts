@@ -4,6 +4,13 @@
 // shape because model output is advisory and must never be trusted as a
 // final insurance decision.
 
+import { runServerAiJob } from "./governor.js";
+import {
+  applyOpenAiRoutingDefaults,
+  getOpenAiImageModel,
+  resolveOpenAiModelRoute,
+} from "./modelRouter.js";
+
 export type CompleteArgs = {
   system: string;
   user: string;
@@ -32,9 +39,6 @@ class AiProviderHttpError extends Error {
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
-const DEFAULT_OPENAI_MODEL = "gpt-5.5";
-const DEFAULT_OPENAI_IMAGE_MODEL = "gpt-image-2";
-const DEFAULT_OPENAI_FALLBACK_MODELS = ["gpt-5.4", "gpt-5.4-mini"];
 
 const stubProvider: AiProvider = {
   async completeJson<T = unknown>(): Promise<T> {
@@ -141,23 +145,16 @@ function extractOpenAiText(data: unknown): string {
   return chunks.join("\n").trim();
 }
 
-function configuredFallbackModels(): string[] {
-  const raw = process.env.OPENAI_FALLBACK_MODELS;
-  if (!raw) return DEFAULT_OPENAI_FALLBACK_MODELS;
-  return raw
-    .split(",")
-    .map((m) => m.trim())
-    .filter(Boolean);
-}
-
 function qualityReasoningEffort(
   quality: CompleteArgs["quality"] | undefined,
-  explicit: CompleteArgs["reasoningEffort"] | undefined
+  explicit: CompleteArgs["reasoningEffort"] | undefined,
+  routed: CompleteArgs["reasoningEffort"] | undefined
 ): NonNullable<CompleteArgs["reasoningEffort"]> {
   if (explicit) return explicit;
   if (process.env.OPENAI_REASONING_EFFORT) {
     return process.env.OPENAI_REASONING_EFFORT as NonNullable<CompleteArgs["reasoningEffort"]>;
   }
+  if (routed) return routed;
   switch (quality) {
     case "fast":
       return "low";
@@ -172,13 +169,7 @@ function qualityReasoningEffort(
 }
 
 function candidateModels(args: CompleteArgs): string[] {
-  const primary =
-    args.model ??
-    (args.quality === "maximum" && process.env.OPENAI_MAX_REASONING_MODEL
-      ? process.env.OPENAI_MAX_REASONING_MODEL
-      : process.env.OPENAI_MODEL) ??
-    DEFAULT_OPENAI_MODEL;
-  return Array.from(new Set([primary, ...configuredFallbackModels()]));
+  return resolveOpenAiModelRoute(args).models;
 }
 
 function openAiUserContent(args: CompleteArgs): unknown {
@@ -262,6 +253,7 @@ async function openaiProvider(): Promise<AiProvider> {
   const url = process.env.OPENAI_RESPONSES_URL ?? "https://api.openai.com/v1/responses";
   return {
     async completeJson<T = unknown>(args: CompleteArgs): Promise<T> {
+      const route = resolveOpenAiModelRoute(args);
       const format = args.schema
         ? {
             type: "json_schema",
@@ -287,7 +279,7 @@ async function openaiProvider(): Promise<AiProvider> {
               ],
               text: { format },
               ...(model.startsWith("gpt-5")
-                ? { reasoning: { effort: qualityReasoningEffort(args.quality, args.reasoningEffort) } }
+                ? { reasoning: { effort: qualityReasoningEffort(args.quality, args.reasoningEffort, route.reasoningEffort) } }
                 : {}),
               max_output_tokens: args.maxOutputTokens ?? 1_200,
               store: false,
@@ -339,8 +331,11 @@ async function pick(): Promise<AiProvider> {
 
 export const provider: AiProvider = {
   async completeJson(args) {
-    const impl = await pick();
-    return impl.completeJson(args);
+    const routedArgs = applyOpenAiRoutingDefaults(args);
+    return runServerAiJob(routedArgs, async () => {
+      const impl = await pick();
+      return impl.completeJson(routedArgs);
+    });
   },
 };
 
@@ -348,33 +343,44 @@ export async function generateOpenAiImage(input: {
   prompt: string;
   size?: "1024x1024" | "1024x1536" | "1536x1024";
 }): Promise<{ mimeType: string; bytes: Buffer } | null> {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return null;
-  const data = await fetchJsonWithRetry(
-    process.env.OPENAI_IMAGES_URL ?? "https://api.openai.com/v1/images/generations",
+  return runServerAiJob(
     {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: process.env.OPENAI_IMAGE_MODEL ?? DEFAULT_OPENAI_IMAGE_MODEL,
-        prompt: input.prompt.slice(0, 4_000),
-        size: input.size ?? "1024x1536",
-        n: 1,
-      }),
+      system: "Generate one campaign image for Quotex marketing material.",
+      user: input.prompt.slice(0, 4_000),
+      schemaName: "image_generation",
+      quality: "standard",
+      model: getOpenAiImageModel(),
     },
-    2
+    async () => {
+      const apiKey = process.env.OPENAI_API_KEY;
+      if (!apiKey) return null;
+      const data = await fetchJsonWithRetry(
+        process.env.OPENAI_IMAGES_URL ?? "https://api.openai.com/v1/images/generations",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model: getOpenAiImageModel(),
+            prompt: input.prompt.slice(0, 4_000),
+            size: input.size ?? "1024x1536",
+            n: 1,
+          }),
+        },
+        2
+      );
+      if (typeof data !== "object" || data === null) return null;
+      const first = Array.isArray((data as Record<string, unknown>).data)
+        ? ((data as Record<string, unknown>).data as unknown[])[0]
+        : null;
+      if (typeof first !== "object" || first === null) return null;
+      const row = first as Record<string, unknown>;
+      if (typeof row.b64_json === "string") {
+        return { mimeType: "image/png", bytes: Buffer.from(row.b64_json, "base64") };
+      }
+      return null;
+    }
   );
-  if (typeof data !== "object" || data === null) return null;
-  const first = Array.isArray((data as Record<string, unknown>).data)
-    ? ((data as Record<string, unknown>).data as unknown[])[0]
-    : null;
-  if (typeof first !== "object" || first === null) return null;
-  const row = first as Record<string, unknown>;
-  if (typeof row.b64_json === "string") {
-    return { mimeType: "image/png", bytes: Buffer.from(row.b64_json, "base64") };
-  }
-  return null;
 }

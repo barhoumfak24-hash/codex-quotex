@@ -32,6 +32,7 @@ interface CommonProps {
   className?: string;
   children?: ReactNode;
   title?: string;
+  ariaLabel?: string;
   disabled?: boolean;
   // Lets callers paint the button red for destructive actions
   // without forking variants. Reads the existing rose-600 token so
@@ -103,6 +104,18 @@ function classesFor(
     .join(" ");
 }
 
+function isExternalHref(href: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(href);
+}
+
+function protectedRel(rel: string | undefined, target: string | undefined): string | undefined {
+  if (target !== "_blank") return rel;
+  const tokens = new Set((rel ?? "").split(/\s+/).filter(Boolean));
+  tokens.add("noopener");
+  tokens.add("noreferrer");
+  return Array.from(tokens).join(" ");
+}
+
 export function Button(props: ButtonProps) {
   const {
     variant = "outline",
@@ -112,6 +125,7 @@ export function Button(props: ButtonProps) {
     className,
     children,
     title,
+    ariaLabel,
     disabled,
     tone = "default",
     fullWidth = false,
@@ -134,7 +148,9 @@ export function Button(props: ButtonProps) {
         title={title}
         target={props.target}
         rel={props.rel}
+        aria-label={ariaLabel}
         aria-disabled={disabled || undefined}
+        tabIndex={disabled ? -1 : undefined}
         onClick={disabled ? (e) => e.preventDefault() : undefined}
       >
         {content}
@@ -142,14 +158,18 @@ export function Button(props: ButtonProps) {
     );
   }
   if ("href" in props && props.href !== undefined) {
+    const target = props.target ?? (isExternalHref(props.href) ? "_blank" : undefined);
     return (
       <a
         href={disabled ? undefined : props.href}
         className={cls}
         title={title}
-        target={props.target}
-        rel={props.rel}
+        target={target}
+        rel={protectedRel(props.rel, target)}
+        aria-label={ariaLabel}
         aria-disabled={disabled || undefined}
+        tabIndex={disabled ? -1 : undefined}
+        onClick={disabled ? (e) => e.preventDefault() : undefined}
       >
         {content}
       </a>
@@ -163,6 +183,7 @@ export function Button(props: ButtonProps) {
       onClick={btnProps.onClick}
       disabled={disabled}
       title={title}
+      aria-label={ariaLabel}
     >
       {content}
     </button>

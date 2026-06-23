@@ -202,7 +202,7 @@ export function CustomMessageComposer({
       <div className="space-y-5">
         <Disclaimer>
           Messages send exactly as typed — the AI does not rewrite them. Audience and schedule are
-          stored locally in this demo and not delivered to any real recipient.
+          recorded with the campaign and delivered through the configured mailbox provider.
         </Disclaimer>
 
         <div>
@@ -241,7 +241,7 @@ export function CustomMessageComposer({
           <div className="label">Attachments</div>
           <FileDropZone
             title="Attach files"
-            help="Drop files or paste a copied image/screenshot. Attachments stay metadata-only in demo."
+            help="Drop files or paste a copied image/screenshot. Attachments are stored with the campaign."
             multiple
             compact
             icon="attachment"
@@ -265,8 +265,7 @@ export function CustomMessageComposer({
             </ul>
           )}
           <p className="mt-2 text-[11px] text-ink-400">
-            Demo only — filenames are recorded, files are not uploaded. In production these go to
-            S3 and ride along with each send.
+            Attachments are stored in encrypted document storage and included with each send.
           </p>
         </div>
 

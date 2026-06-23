@@ -64,6 +64,43 @@ describe("softwareSales", () => {
     expect(api.softwareSales.get(sale.id)?.status).toBe("provisioning");
   });
 
+  it("captures master-portal assisted purchases separately from self-checkout", () => {
+    const sale = api.softwareSales.create({
+      agencyName: "Beacon Risk Group",
+      contactName: "Avery Clark",
+      email: "avery@example.com",
+      tier: "minimum",
+      seats: 10,
+      estimatedMonthly: softwareSaleMonthlyTotalForSeats(10, "none"),
+      setupFee: SOFTWARE_SETUP_FEE_USD,
+      websiteAppAddOn: "none",
+      websiteAppAddOnMonthly: 0,
+      source: "master_portal",
+      paymentMode: "manual_invoice",
+      stripeCheckoutSessionId: "master_plan_test",
+    });
+
+    expect(sale.source).toBe("master_portal");
+    expect(sale.paymentMode).toBe("manual_invoice");
+  });
+
+  it("blocks creation of a second master portal user", () => {
+    const seededMaster = api.users.list().find((user) => user.role === "master_admin");
+    expect(seededMaster).toBeTruthy();
+
+    expect(() =>
+      api.users.create({
+        role: "master_admin",
+        tenantId: null,
+        email: "second-master@example.com",
+        name: "Second Master",
+      })
+    ).toThrow("master_admin_limit_reached");
+
+    const updated = api.users.update(seededMaster!.id, { name: "Founder" });
+    expect(updated?.name).toBe("Founder");
+  });
+
   it("applies website and Quotex app bundle savings without user-volume discounting", () => {
     expect(softwareUserMonthlyDiscount(9)).toBe(0);
     expect(softwareUserMonthlyDiscount(10)).toBe(0);

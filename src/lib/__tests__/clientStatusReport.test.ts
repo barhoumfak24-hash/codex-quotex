@@ -392,7 +392,7 @@ describe("renewals.sendReminder", () => {
     const after = api.status.listFor({ customerId: policy.customerId });
     expect(after.length).toBe(beforeEvents + 1);
     expect(after[0].renewalId).toBe(renewal.id);
-    expect(after[0].message).toMatch(/Renewal reminder sent via EMAIL/);
+    expect(after[0].message).toMatch(/Renewal reminder email sent/);
   });
 
   it("returns reminderSent=false when the renewal can't be found", async () => {

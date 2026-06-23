@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "packageManager": "pnpm@11.0.7",
   "scripts": {
     "dev": "vite",
     "dev:software": "vite --mode software",
@@ -15,9 +16,29 @@
     "build:app": "tsc -b && vite build --mode agency-app --outDir dist-app",
     "build:checkout": "tsc -b && vite build --mode checkout --outDir dist-checkout",
     "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "security:audit": "pnpm audit --audit-level=high",
+    "server:build": "pnpm -C server run build",
+    "server:security:audit": "pnpm -C server audit --audit-level=high",
+    "production:check": "pnpm -C server run production:check && pnpm run backup:check",
+    "backup:check": "node scripts/check-backup-config.mjs",
+    "backup:db": "node scripts/backup-postgres.mjs",
+    "backup:storage": "node scripts/backup-supabase-storage.mjs",
+    "backup:verify": "node scripts/verify-backups.mjs",
+    "backup:all": "pnpm run backup:check && pnpm run backup:db && pnpm run backup:storage && pnpm run backup:verify",
+    "dr:check": "pnpm run backup:check",
+    "dr:backup": "pnpm run backup:all",
+    "dr:live-check": "node scripts/dr-live-check.mjs",
+    "dr:incident": "node scripts/dr-create-incident.mjs",
+    "dr:tenant-snapshot": "node scripts/dr-export-tenant-snapshot.mjs",
+    "deploy:prod": "node scripts/deploy-quotex-production.mjs",
+    "publish:latest": "node scripts/publish-latest.mjs",
+    "publish:install-hooks": "node scripts/install-auto-push-hooks.mjs",
+    "quality:server": "pnpm run server:build && pnpm run server:security:audit",
+    "quality": "pnpm run lint && pnpm run test && pnpm run build && pnpm run security:audit && pnpm run quality:server"
   },
   "dependencies": {
     "lucide-react": "^0.460.0",
@@ -29,13 +50,13 @@
     "@types/node": "^25.7.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.3.3",
+    "@vitejs/plugin-react": "4.7.0",
     "autoprefixer": "^10.4.20",
     "jsdom": "^29.1.1",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.15",
     "typescript": "^5.6.3",
-    "vite": "^5.4.11",
-    "vitest": "^2.1.9"
+    "vite": "^6.4.3",
+    "vitest": "^3.2.6"
   }
 }

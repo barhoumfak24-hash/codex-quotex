@@ -7,6 +7,7 @@ import type {
   CarrierQuote,
   QuotingSession,
 } from "@/types";
+import { evaluateAiProductionGate } from "./aiProductionGuards";
 
 type FieldSource = CarrierPortalFieldMapping["source"];
 
@@ -210,7 +211,7 @@ function validationChecks(input: {
     status: input.bridgeUrl ? "pass" : "warn",
     detail: input.bridgeUrl
       ? "Carrier automation bridge URL is configured for live server-side browser work."
-      : "No live worker is configured in this environment, so Quotex records a demo-safe runner trace.",
+      : "No live worker is configured in this environment, so Quotex records a configuration trace only.",
   });
   push({
     label: "Carrier state availability",
@@ -281,11 +282,27 @@ export function runCarrierPortalRunner(input: CarrierPortalRunnerInput): Carrier
   const credentialReference = automation?.credentialReference;
   const bridgeUrl = readClientEnv("VITE_QUOTEX_CARRIER_AUTOMATION_BRIDGE_URL");
   const mode: CarrierPortalRunnerTrace["mode"] =
-    bridgeUrl && automation?.status === "connected" ? "live_worker" : "demo_worker";
+    bridgeUrl && automation?.status === "connected" ? "live_worker" : "configuration_trace";
   const jobId = `RPA-${input.carrier.id.slice(-5).toUpperCase()}-${input.session.id.slice(-6).toUpperCase()}-${
     stableHash(`${input.carrier.id}:${input.session.id}:${input.state ?? ""}`) % 10000
   }`;
   const fieldMappings = collectFieldMappings(input.session, input.state);
+  const gate = evaluateAiProductionGate({
+    system: "carrier_portal_runner",
+    action: surface,
+    tenantScoped: true,
+    confidence:
+      fieldMappings.length > 0
+        ? Math.min(...fieldMappings.map((field) => field.confidence))
+        : 0,
+    evidenceCount: fieldMappings.length,
+    verifiedEvidenceCount: fieldMappings.filter((field) => field.confidence >= 0.88).length,
+    humanApproved:
+      mode === "configuration_trace" ||
+      readClientEnv("VITE_QUOTEX_CARRIER_RUNNER_HUMAN_APPROVED") === "true",
+    touchesExternalSystem: mode === "live_worker",
+    usesOnlyProvidedFacts: true,
+  });
   const checks = validationChecks({
     carrier: input.carrier,
     session: input.session,
@@ -295,6 +312,16 @@ export function runCarrierPortalRunner(input: CarrierPortalRunnerInput): Carrier
     bridgeUrl,
     fieldMappings,
   });
+  if (mode === "live_worker" && !gate.allowed) {
+    checks.push({
+      label: "AI production gate",
+      status: "block",
+      detail: `Live carrier automation blocked: ${[
+        ...gate.blockedReasons,
+        ...gate.warnings,
+      ].join(", ")}.`,
+    });
+  }
   const hardBlocks = checks.filter((check) => check.status === "block");
   const status: CarrierPortalRunnerTrace["status"] =
     hardBlocks.length > 0
@@ -310,7 +337,13 @@ export function runCarrierPortalRunner(input: CarrierPortalRunnerInput): Carrier
     `Mapped ${fieldMappings.length} Quotex field${fieldMappings.length === 1 ? "" : "s"} into carrier form fields.`,
     mode === "live_worker"
       ? "Live worker is configured; job is ready for server-side browser execution and MFA handling."
-      : "Demo-safe runner trace generated because live worker configuration is not present in this environment.",
+      : "Configuration trace generated because live worker configuration is not present in this environment.",
+    gate.allowed
+      ? `AI production gate passed for ${surface}.`
+      : `AI production gate held runner work for review: ${[
+          ...gate.blockedReasons,
+          ...gate.warnings,
+        ].join(", ")}.`,
     quote
       ? `Quote result captured: ${quote.quoteNumber} at ${quote.premium.toLocaleString("en-US", {
           style: "currency",

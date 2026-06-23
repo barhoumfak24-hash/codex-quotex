@@ -59,7 +59,7 @@ const EMPTY_DEMO_LEAD_FORM: DemoLeadForm = {
   role: "",
   staffSize: "",
   phone: "",
-  interest: "Full Quotex software demo",
+  interest: "Full Quotex walkthrough",
   notes: "",
   marketingOptIn: true,
 };
@@ -68,33 +68,33 @@ const DEMO_ACCESS_CHOICES = [
   {
     id: "software",
     icon: <MonitorPlay className="h-5 w-5" />,
-    label: "Software workspace demo",
+    label: "Software workspace walkthrough",
     body: "Open the agency operating system with clients, quote flows, policies, billing, claims, marketing, and activity center.",
-    to: "/employee?demoBack=1",
-    cta: "Open software demo",
+    to: "/contact",
+    cta: "Request access",
   },
   {
     id: "website",
     icon: <Globe2 className="h-5 w-5" />,
-    label: "Agency website demo",
+    label: "Agency website walkthrough",
     body: "See the branded agency website path for quote intake, client sign-in, service pages, and customer contact.",
-    to: "/agency?demoBack=1",
-    cta: "Open website demo",
+    to: "/contact",
+    cta: "Request access",
   },
   {
     id: "app",
     icon: <Smartphone className="h-5 w-5" />,
-    label: "Quotex app demo",
+    label: "Quotex app walkthrough",
     body: "Preview the client mobile app experience for portal access, quotes, documents, claims, billing, and agency contact.",
-    to: "/agency-app?demoBack=1",
-    cta: "Open app demo",
+    to: "/contact",
+    cta: "Request access",
   },
   {
     id: "plan",
     icon: <ShieldCheck className="h-5 w-5" />,
     label: "Build monthly plan",
     body: "Use the plan builder to select users, website/app add-ons, term length, contract documents, and payment flow.",
-    to: "/checkout?demoBack=1",
+    to: "/checkout",
     cta: "Build my plan",
   },
 ];
@@ -317,13 +317,6 @@ export function QuotexHomePage() {
   }, [activeVideoId]);
 
   useEffect(() => {
-    if (!searchParams.has("demoPicker")) return;
-    setDemoLeadSubmitted(true);
-    setDemoLeadOpen(true);
-    setSearchParams({});
-  }, [searchParams, setSearchParams]);
-
-  useEffect(() => {
     const requestedPreview = searchParams.get("preview");
     if (!requestedPreview) return;
     const exists = PUBLIC_WHAT_IT_DOES_VIDEOS.some((video) => video.id === requestedPreview);
@@ -331,12 +324,33 @@ export function QuotexHomePage() {
     const requestedVideo = PUBLIC_WHAT_IT_DOES_VIDEOS.find((video) => video.id === requestedPreview);
     setDemoLeadForm((current) => ({
       ...current,
-      interest: `${requestedVideo ? publicPreviewLabel(requestedVideo.id) : "Quotex"} demo`,
+      interest: `${requestedVideo ? publicPreviewLabel(requestedVideo.id) : "Quotex"} walkthrough`,
     }));
     setDemoLeadSubmitted(false);
     setDemoLeadOpen(true);
     setSearchParams({});
   }, [searchParams, setSearchParams]);
+
+  useEffect(() => {
+    if (!demoLeadOpen || typeof document === "undefined") return undefined;
+
+    const html = document.documentElement;
+    const body = document.body;
+    const previousHtmlOverflow = html.style.overflow;
+    const previousBodyOverflow = body.style.overflow;
+    const previousBodyPaddingRight = body.style.paddingRight;
+    const scrollbarWidth = window.innerWidth - html.clientWidth;
+
+    html.style.overflow = "hidden";
+    body.style.overflow = "hidden";
+    if (scrollbarWidth > 0) body.style.paddingRight = `${scrollbarWidth}px`;
+
+    return () => {
+      html.style.overflow = previousHtmlOverflow;
+      body.style.overflow = previousBodyOverflow;
+      body.style.paddingRight = previousBodyPaddingRight;
+    };
+  }, [demoLeadOpen]);
 
   useEffect(() => {
     if (!activeVideo || !previewPlaying) return;
@@ -356,7 +370,7 @@ export function QuotexHomePage() {
 
   function openPublicPreview(videoId: string, updateUrl = false) {
     if (updateUrl) setSearchParams({});
-    openDemoLead(`${publicPreviewLabel(videoId)} demo`);
+    openDemoLead(`${publicPreviewLabel(videoId)} walkthrough`);
   }
 
   function closePublicPreview() {
@@ -375,7 +389,7 @@ export function QuotexHomePage() {
     setPreviewPlaying((value) => !value);
   }
 
-  function openDemoLead(interest = "Full Quotex software demo") {
+  function openDemoLead(interest = "Full Quotex walkthrough") {
     setDemoLeadForm((current) => ({ ...current, interest }));
     setDemoLeadSubmitted(false);
     setDemoLeadOpen(true);
@@ -399,10 +413,10 @@ export function QuotexHomePage() {
       role: demoLeadForm.role.trim(),
       staffSize: demoLeadForm.staffSize.trim(),
       phone: demoLeadForm.phone.trim() || undefined,
-      interest: demoLeadForm.interest.trim() || "Full Quotex software demo",
+      interest: demoLeadForm.interest.trim() || "Full Quotex walkthrough",
       notes: demoLeadForm.notes.trim() || undefined,
       marketingOptIn: demoLeadForm.marketingOptIn,
-      source: "view_demo",
+      source: "walkthrough_request",
     });
     setDemoLeadSubmitted(true);
   }
@@ -459,7 +473,7 @@ export function QuotexHomePage() {
             <button
               type="button"
               className="btn h-11 min-w-[7.5rem] border-white bg-white px-5 !text-black hover:bg-white/90"
-              onClick={() => openDemoLead("Full Quotex platform demo")}
+              onClick={() => openDemoLead("Full Quotex platform walkthrough")}
             >
               View demo
             </button>
@@ -511,7 +525,7 @@ export function QuotexHomePage() {
                 What Quotex does.
               </h2>
               <p className="mt-3 max-w-2xl text-sm leading-relaxed text-white/62">
-                Each demo request is routed through a guided form so your team captures qualified
+                Each walkthrough request is routed through a guided form so your team captures qualified
                 agencies before opening the live environment.
               </p>
             </div>
@@ -536,7 +550,7 @@ export function QuotexHomePage() {
                     </span>
                     <div className="absolute inset-0 grid place-items-center">
                       <span className="rounded-full border border-white/20 bg-black/58 px-4 py-2 text-sm font-semibold text-white backdrop-blur">
-                        Demo available by request
+                        Walkthrough available by request
                       </span>
                     </div>
                   </div>
@@ -550,7 +564,7 @@ export function QuotexHomePage() {
                   <div className="mt-auto flex items-center justify-start gap-3 border-t border-white/10 pt-4">
                     <PublicPreviewAction
                       videoId={video.id}
-                      onViewDemo={() => openDemoLead(`${publicPreviewLabel(video.id)} demo`)}
+                      onViewDemo={() => openDemoLead(`${publicPreviewLabel(video.id)} walkthrough`)}
                       onViewPhotos={() => setActiveAlbumId(publicAlbumId(video.id))}
                     />
                   </div>
@@ -563,17 +577,17 @@ export function QuotexHomePage() {
 
       {demoLeadOpen && (
         <div
-          className="fixed inset-0 z-50 grid place-items-center bg-black/82 px-4 py-6 backdrop-blur-sm"
+          className="fixed inset-0 z-50 grid place-items-center overflow-hidden bg-black/82 px-3 py-3 backdrop-blur-sm sm:px-4 sm:py-6"
           role="dialog"
           aria-modal="true"
-          aria-labelledby="quotex-demo-lead-title"
+          aria-labelledby="quotex-sales-lead-title"
         >
-          <div className="relative grid max-h-[calc(100vh-3rem)] w-full max-w-6xl overflow-hidden rounded-xl border border-white/12 bg-white text-ink-950 shadow-[0_30px_90px_rgba(0,0,0,0.58)] lg:grid-cols-[0.76fr_1.1fr]">
+          <div className="relative grid max-h-[calc(100dvh-1.5rem)] min-h-0 w-full max-w-6xl overflow-hidden rounded-xl border border-white/12 bg-white text-ink-950 shadow-[0_30px_90px_rgba(0,0,0,0.58)] sm:max-h-[calc(100dvh-3rem)] lg:grid-cols-[0.76fr_1.1fr]">
             <button
               type="button"
               className="absolute right-4 top-4 z-10 grid h-10 w-10 place-items-center rounded-md border border-black/10 bg-white/80 text-ink-700 transition hover:bg-white hover:text-black"
               onClick={closeDemoLead}
-              aria-label="Close demo request"
+              aria-label="Close walkthrough request"
             >
               <X className="h-4 w-4" />
             </button>
@@ -589,18 +603,17 @@ export function QuotexHomePage() {
                   <span className="font-display text-2xl leading-none">Quotex Insurance</span>
                 </Link>
                 <div>
-                  <div className="text-xs font-semibold uppercase tracking-[0.16em] text-white/60">Guided demo</div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.16em] text-white/60">Guided walkthrough</div>
                   <h2 className="mt-6 max-w-[27rem] font-display text-4xl leading-[0.98] text-white">
                     See why modern insurance agencies use Quotex.
                   </h2>
                   <p className="mt-5 text-base leading-relaxed text-white/70">
-                    Tell us who you are, then choose the software, website, app, or plan-builder
-                    demo you want to open immediately.
+                    Tell us who you are, then we will route the right onboarding and access path.
                   </p>
                 </div>
                 <div className="rounded-xl border border-white/12 bg-white/[0.06] p-4 shadow-[0_22px_60px_rgba(0,0,0,0.28)]">
                   <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-gold-200">
-                    Demo access unlocks
+                    Walkthrough covers
                   </div>
                   <div className="mt-3 grid gap-2 text-sm font-semibold text-white/76">
                     <div className="flex items-center gap-2">
@@ -620,14 +633,14 @@ export function QuotexHomePage() {
               </div>
             </aside>
 
-            <section className="p-5 sm:p-6 lg:p-8">
+            <section className="invisible-scroll-pane max-h-[calc(100dvh-1.5rem)] min-h-0 overflow-y-auto p-5 sm:max-h-[calc(100dvh-3rem)] sm:p-6 lg:p-8">
               <div className="mb-4 pr-12 lg:hidden">
                 <div className="font-display text-2xl text-black">Quotex Insurance</div>
                 <h2 className="mt-5 font-display text-4xl leading-tight text-black">
                   See Quotex in action.
                 </h2>
                 <p className="mt-3 text-sm leading-relaxed text-ink-600">
-                  Submit your details and your team can route the right demo follow-up.
+                  Submit your details and our team will route the right follow-up.
                 </p>
               </div>
 
@@ -638,50 +651,40 @@ export function QuotexHomePage() {
                       <CheckCircle2 className="h-4 w-4" />
                       Details received
                     </div>
-                    <h3 id="quotex-demo-lead-title" className="mt-5 font-display text-4xl leading-tight text-black">
-                      Choose a demo to view now.
+                    <h3 id="quotex-sales-lead-title" className="mt-5 font-display text-4xl leading-tight text-black">
+                      Request received.
                     </h3>
                     <p className="mt-3 max-w-2xl text-sm leading-relaxed text-ink-600">
-                      Thanks{demoLeadForm.firstName.trim() ? `, ${demoLeadForm.firstName.trim()}` : ""}. Pick the demo path you want to open.
-                      Your request is still saved so the team can follow up with the right context.
+                      Thanks{demoLeadForm.firstName.trim() ? `, ${demoLeadForm.firstName.trim()}` : ""}. Your request is saved so the team can follow up with the right context.
                     </p>
                   </div>
 
-                  <div className="mt-6 grid flex-1 gap-3 sm:grid-cols-2">
-                    {DEMO_ACCESS_CHOICES.map((choice) => (
-                      <Link
-                        key={choice.id}
-                        to={choice.to}
-                        className="group flex min-h-[8.75rem] flex-col justify-between rounded-lg border border-stone-200 bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-gold-300 hover:shadow-md"
-                        onClick={closeDemoLead}
-                      >
-                        <span>
-                          <span className="inline-flex h-10 w-10 items-center justify-center rounded-md border border-gold-200 bg-gold-50 text-gold-800">
-                            {choice.icon}
-                          </span>
-                          <span className="mt-3 block text-base font-bold text-black">{choice.label}</span>
-                          <span className="mt-1.5 block text-xs leading-relaxed text-ink-600">{choice.body}</span>
-                        </span>
-                        <span className="mt-4 inline-flex items-center gap-2 text-sm font-bold text-gold-800 group-hover:text-black">
-                          {choice.cta}
-                          <ArrowRight className="h-4 w-4" />
-                        </span>
-                      </Link>
-                    ))}
+                  <div className="mt-6 flex flex-1 flex-col justify-end gap-3">
+                    <Link
+                      to="/checkout"
+                      className="btn-gold h-12 justify-center"
+                      onClick={closeDemoLead}
+                    >
+                      Build my plan
+                      <ArrowRight className="h-4 w-4" />
+                    </Link>
+                    <button type="button" className="btn-outline h-12 justify-center" onClick={closeDemoLead}>
+                      Close
+                    </button>
                   </div>
                 </div>
               ) : (
                 <form onSubmit={submitDemoLead} className="space-y-4">
                   <div>
                     <div className="text-sm font-semibold uppercase tracking-[0.16em] text-gold-700">
-                      View demo
+                      Product walkthrough
                     </div>
-                    <h2 id="quotex-demo-lead-title" className="mt-2 font-display text-4xl leading-tight text-black">
+                    <h2 id="quotex-sales-lead-title" className="mt-2 font-display text-4xl leading-tight text-black">
                       Book a guided Quotex walkthrough.
                     </h2>
                     <p className="mt-2 max-w-2xl text-sm leading-relaxed text-ink-600">
                       Capture the agency details first, then follow up with the right software,
-                      website, and app demo path.
+                      website, and app path.
                     </p>
                   </div>
 
@@ -745,10 +748,10 @@ export function QuotexHomePage() {
                         value={demoLeadForm.interest}
                         onChange={(event) => setDemoLeadField("interest", event.target.value)}
                       >
-                        <option>Full Quotex software demo</option>
-                        <option>Software workspace demo</option>
-                        <option>Agency website demo</option>
-                        <option>Quotex app demo</option>
+                        <option>Full Quotex walkthrough</option>
+                        <option>Software workspace walkthrough</option>
+                        <option>Agency website walkthrough</option>
+                        <option>Quotex app walkthrough</option>
                         <option>Pricing and onboarding review</option>
                       </select>
                     </label>
@@ -772,17 +775,16 @@ export function QuotexHomePage() {
                       onChange={(event) => setDemoLeadField("marketingOptIn", event.target.checked)}
                     />
                     <span>
-                      Yes, I would like to receive Quotex product, pricing, and demo follow-up
+                      Yes, I would like to receive Quotex product, pricing, and follow-up
                       communications. I can unsubscribe at any time.
                     </span>
                   </label>
 
                   <button type="submit" className="btn h-12 w-full bg-black text-base text-white hover:bg-ink-800">
-                    View demo
+                    Submit request
                   </button>
                   <p className="text-center text-[11px] leading-relaxed text-ink-500">
-                    Demo mode stores this request locally. Production can send it to the master
-                    portal, CRM, and notification workflow.
+                    Your request is routed to the sales and onboarding workflow.
                   </p>
                 </form>
               )}
@@ -875,9 +877,9 @@ export function QuotexHomePage() {
                 <button
                   type="button"
                   className="btn border-white bg-white text-ink-950 hover:bg-white/90"
-                  onClick={() => openDemoLead(`${publicPreviewLabel(activeVideo.id)} demo`)}
+                  onClick={() => openDemoLead(`${publicPreviewLabel(activeVideo.id)} walkthrough`)}
                 >
-                  View demo
+                  Request walkthrough
                 </button>
                 <button
                   type="button"
@@ -1022,7 +1024,6 @@ function PublicPreviewAction({
     return (
       <button type="button" className="btn-gold px-4 py-2 text-sm" onClick={onViewDemo}>
         View demo
-        <ArrowRight className="h-4 w-4" />
       </button>
     );
   }
@@ -1030,7 +1031,6 @@ function PublicPreviewAction({
     <div className="flex flex-wrap gap-2">
       <button type="button" className="btn-gold px-4 py-2 text-sm" onClick={onViewDemo}>
         View demo
-        <ArrowRight className="h-4 w-4" />
       </button>
       <button
         type="button"
@@ -1126,7 +1126,7 @@ function ProductSnippet({ snippet }: { snippet: string }) {
           <div className="space-y-3">
             <div>
               <div className="font-display text-xl text-black">Alexandra Whitford</div>
-              <div className="text-[10px] text-stone-500">Palm Coast Private Client - customer@demo.example</div>
+              <div className="text-[10px] text-stone-500">Palm Coast Private Client - client@example.com</div>
             </div>
             <div className="grid grid-cols-3 gap-2">
               {[
@@ -1397,7 +1397,7 @@ function ProductSnippet({ snippet }: { snippet: string }) {
             <div className="mt-1 text-[10px] text-white/50">Policies, documents, claims, and service updates.</div>
             <div className="mt-4 space-y-2">
               <div className="rounded-md border border-white/10 bg-black/20 px-3 py-2 text-[10px] text-white/70">
-                customer@demo.example
+                client@example.com
               </div>
               <div className="rounded-md border border-white/10 bg-black/20 px-3 py-2 text-[10px] text-white/70">
                 Password

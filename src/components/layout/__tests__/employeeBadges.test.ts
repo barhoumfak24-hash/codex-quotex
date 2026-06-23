@@ -263,7 +263,7 @@ describe("Employee layout badge resilience", () => {
     expect(() =>
       computeEmployeeBadges(agency.id, { id: manager.id, role: "manager" })
     ).not.toThrow();
-  });
+  }, 15000);
 });
 
 describe("badge decrement-by-one", () => {

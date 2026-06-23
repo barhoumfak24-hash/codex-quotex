@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
-import { Archive, ArrowLeft, Bot, Download, Lock, Sparkles, Undo2 } from "lucide-react";
+import { Archive, ArrowLeft, Download, Lock, Sparkles, Undo2 } from "lucide-react";
 import { Card, CardHeader, EmptyState } from "@/components/ui/Card";
 import { ExpandableCard } from "@/components/ui/ExpandableCard";
 import { CreateActivityModal } from "@/components/tasks/CreateActivityModal";
@@ -17,7 +17,7 @@ import { fmt } from "@/lib/format";
 import { isRoutingManagerRole } from "@/lib/roles";
 import { downloadContactDossier } from "@/lib/contactDossier";
 import { ContactMessageThread } from "@/components/messages/ContactMessageThread";
-import { AiQuotingWorkspace } from "@/components/quoting/AiQuotingWorkspace";
+import { ProspectQuotingCard } from "@/components/quoting/ClientQuotingCard";
 import type { ProspectStatus } from "@/types";
 
 const STATUSES: ProspectStatus[] = ["new", "contacted", "quote_in_progress", "abandoned", "nurturing", "converted", "lost"];
@@ -30,7 +30,6 @@ export function ProspectDetailPage() {
   const location = useLocation();
   const [, setRev] = useState(0);
   const [createActivityOpen, setCreateActivityOpen] = useState(false);
-  const [showImplementedQuoteAudit, setShowImplementedQuoteAudit] = useState(false);
 
   // Hash-based deep-link (e.g. #messages-thread from the Activity
   // timeline detail modal). Scroll the target card into view once
@@ -57,27 +56,18 @@ export function ProspectDetailPage() {
   const docs = prospect.quoteRequestId
     ? api.documents.listByEntity({ quoteRequestId: prospect.quoteRequestId })
     : [];
-  const carrierMatch = prospect.quoteRequestId ? api.quotes.get(prospect.quoteRequestId) : undefined;
   const openActivities = api.tasks
     .listOpen(agency.id)
     .filter((t) => t.prospectId === prospect.id);
   const resolvedActivities = api.tasks
     .listCompleted(agency.id)
     .filter((t) => t.prospectId === prospect.id);
-  const recommendedCarrier = carrierMatch?.aiRecommendedCarrierId ? api.carriers.get(carrierMatch.aiRecommendedCarrierId) : null;
   const events = api.status.listFor({ prospectId: prospect.id });
   const agentOptions = api.users
     .list(agency.id)
     .filter((u) => u.role === "agent" || u.role === "manager" || u.role === "csr");
   const csrOptions = api.users.list(agency.id).filter((u) => u.role === "csr");
   const refresh = () => setRev((r) => r + 1);
-  const quoteSession = api.quoting.getForProspect(prospect.id);
-  const implementedQuote = quoteSession?.quotes.find((quote) => quote.implementation?.policyId);
-  const implementedPolicy = implementedQuote?.implementation?.policyId
-    ? api.policies.get(implementedQuote.implementation.policyId)
-    : undefined;
-  const shouldCollapseImplementedWorkspace =
-    !!implementedQuote?.implementation?.policyId && !showImplementedQuoteAudit;
 
   // Only managers + the prospect's primary or co-assigned agents
   // can flip the conversion state. Agents who aren't on the
@@ -404,92 +394,15 @@ export function ProspectDetailPage() {
           onCreated={refresh}
         />
 
-        {/* AI summary — full-width below the action row */}
-        <Card id="ai-quoting-workspace" className="lg:col-span-3">
-          <CardHeader title="AI summary" subtitle="Generated from quote intake and behavior signals." />
-          <div className="rounded-md bg-ink-50 border border-ink-100 p-4 text-sm text-ink-800">
-            <Bot className="inline h-4 w-4 text-gold-600 mr-1.5" />
-            {prospect.aiSummary}
-          </div>
-          <div className="mt-4 text-sm">
-            <div className="text-xs uppercase tracking-wider text-ink-500">Recommended follow-up</div>
-            <p className="mt-1 text-ink-800">{prospect.recommendedFollowUp}</p>
-          </div>
-
-          {recommendedCarrier && (
-            <div className="mt-4 rounded-md border border-ink-100 p-4">
-              <div className="text-xs uppercase tracking-wider text-ink-500">AI-recommended carrier</div>
-              <div className="mt-1 font-semibold">{recommendedCarrier.name}</div>
-              <div className="text-sm text-ink-600 mt-1">{carrierMatch?.aiRecommendationReason}</div>
-            </div>
-          )}
-        </Card>
-
-        <Card className="relative lg:col-span-3">
-          <CardHeader
-            title="AI quoting workspace"
-            subtitle="Pulls public records, drafts a questionnaire for anything it can't find, and ranks every linked carrier's quote against this risk."
+        {/* AI quoting workspace - full-width below the action row */}
+        <div className="lg:col-span-3">
+          <ProspectQuotingCard
+            tenantId={agency.id}
+            userId={user.id}
+            prospect={prospect}
+            onChanged={refresh}
           />
-          {shouldCollapseImplementedWorkspace ? (
-            <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3">
-              <div className="flex items-start justify-between gap-3 flex-wrap">
-                <div>
-                  <div className="text-xs font-semibold uppercase tracking-wider text-emerald-800">
-                    Policy implemented
-                  </div>
-                  <div className="mt-1 text-sm text-ink-800">
-                    {implementedPolicy?.policyNumber
-                      ? `Policy #${implementedPolicy.policyNumber}`
-                      : "The selected carrier quote"}{" "}
-                    has been added to Policies and Billing.
-                  </div>
-                  <div className="mt-1 text-xs text-ink-500">
-                    The quoting workspace closed automatically so the bound
-                    policy record becomes the source of truth.
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  {implementedPolicy && (
-                    <>
-                      <Link
-                        className="btn-outline text-sm"
-                        to={`/employee/policies/${implementedPolicy.id}`}
-                      >
-                        Open policy
-                      </Link>
-                      <Link
-                        className="btn-outline text-sm"
-                        to={`/employee/billing/${implementedPolicy.id}`}
-                      >
-                        Open billing
-                      </Link>
-                    </>
-                  )}
-                  <button
-                    type="button"
-                    className="btn-outline text-sm"
-                    onClick={() => setShowImplementedQuoteAudit(true)}
-                  >
-                    View quote audit
-                  </button>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <AiQuotingWorkspace
-              tenantId={agency.id}
-              userId={user.id}
-              contact={{
-                kind: "prospect",
-                id: prospect.id,
-                name: prospect.name,
-                assetType: prospect.assetType,
-                estimatedValue: prospect.estimatedValue,
-              }}
-              onChanged={refresh}
-            />
-          )}
-        </Card>
+        </div>
 
         <Card className="lg:col-span-3">
           <CardHeader title="Uploaded documents" />

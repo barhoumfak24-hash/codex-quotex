@@ -72,7 +72,7 @@ export function CustomerSettingsPage() {
         {!locked && (
           <div className="mb-4">
             <Disclaimer>
-              Demo only — do not enter real phone, email, or address. Use placeholder values.
+              Keep your current phone, email, and address accurate so your agency can service your policies.
             </Disclaimer>
           </div>
         )}

@@ -21,6 +21,7 @@ import { api } from "@/lib/api";
 import {
   sendSoftwareSaleInvoiceEmail,
   sendSoftwareSaleSigningEmail,
+  softwareSaleInvoicePatchFromResult,
   type CommunicationResult,
 } from "@/lib/communications";
 import { fmt } from "@/lib/format";
@@ -89,6 +90,8 @@ export function MasterPlanBuilderPage() {
   const [packetId, setPacketId] = useState<string | null>(null);
   const [shareStatus, setShareStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [invoiceSending, setInvoiceSending] = useState(false);
+  const [autoInvoiceSaleId, setAutoInvoiceSaleId] = useState<string | null>(null);
   const [customPriceEditing, setCustomPriceEditing] = useState(false);
   const [customPriceActive, setCustomPriceActive] = useState(false);
   const [customPriceValue, setCustomPriceValue] = useState("");
@@ -124,6 +127,7 @@ export function MasterPlanBuilderPage() {
     ? REQUIRED_CHECKOUT_FORMS.filter((requiredForm) => packet.signatures[requiredForm.id]?.signedAt).length
     : 0;
   const allSigned = signedCount === REQUIRED_CHECKOUT_FORMS.length;
+  const invoiceSent = !!sale?.invoiceEmailSentAt || sale?.invoiceEmailStatus === "sent";
 
   useEffect(() => {
     if (!packetId || !sale) return;
@@ -138,14 +142,31 @@ export function MasterPlanBuilderPage() {
       const signedAgreements = signedAgreementsFromPacket(nextPacket);
       const signedAtValues = signedAgreements.map((agreement) => agreement.signedAt).sort();
       const signedAt = signedAtValues[signedAtValues.length - 1];
-      const updated = api.softwareSales.update(sale.id, {
-        signedAgreementNames: signedAgreements.map((agreement) => agreement.title),
-        signedAgreements,
-        signedByName: signedAgreements[0]?.signedByName,
-        signedByEmail: signedAgreements[0]?.signedByEmail,
-        signedAt,
-      });
-      if (updated) setSale(updated);
+      const signedAgreementNames = signedAgreements.map((agreement) => agreement.title);
+      const existingSale = api.softwareSales.get(sale.id) ?? sale;
+      const alreadySynced =
+        existingSale.signedAt === signedAt &&
+        signedAgreementNames.length === (existingSale.signedAgreementNames ?? []).length &&
+        signedAgreementNames.every((title, index) => title === existingSale.signedAgreementNames?.[index]);
+      const updated = alreadySynced
+        ? existingSale
+        : api.softwareSales.update(sale.id, {
+            signedAgreementNames,
+            signedAgreements,
+            signedByName: signedAgreements[0]?.signedByName,
+            signedByEmail: signedAgreements[0]?.signedByEmail,
+            signedAt,
+          });
+      if (!updated) return;
+      if (!alreadySynced) setSale(updated);
+      if (
+        autoInvoiceSaleId !== updated.id &&
+        !updated.invoiceEmailSentAt &&
+        updated.invoiceEmailStatus !== "sent"
+      ) {
+        setAutoInvoiceSaleId(updated.id);
+        void sendInvoiceForSale(updated, nextPacket, true);
+      }
     };
 
     syncSignedSale();
@@ -155,7 +176,7 @@ export function MasterPlanBuilderPage() {
       window.clearInterval(interval);
       window.removeEventListener("storage", syncSignedSale);
     };
-  }, [packetId, sale]);
+  }, [autoInvoiceSaleId, packetId, sale]);
 
   function setField<K extends keyof MasterPlanForm>(key: K, value: MasterPlanForm[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
@@ -206,8 +227,8 @@ export function MasterPlanBuilderPage() {
       standardEstimatedMonthly,
       customMonthlyPriceUsd: hasCustomPrice ? estimatedMonthly : undefined,
       customMonthlyPriceReason: hasCustomPrice ? customPriceReason.trim() || undefined : undefined,
-      source: "transaction_site" as const,
-      paymentMode: "demo_invoice" as const,
+      source: "master_portal" as const,
+      paymentMode: "manual_invoice" as const,
       notes: form.notes.trim() || undefined,
       stripeCheckoutSessionId: `master_plan_${Date.now()}`,
     };
@@ -313,19 +334,46 @@ export function MasterPlanBuilderPage() {
     if (!allSigned || !packet) {
       return setShareStatus("Complete all document signatures before sending the invoice.");
     }
+    await sendInvoiceForSale(sale, packet, false);
+  }
+
+  async function sendInvoiceForSale(targetSale: SoftwareSale, targetPacket: RemoteCheckoutPacket, automatic: boolean) {
+    if (invoiceSending) return;
+    if (
+      targetSale.invoiceEmailSentAt ||
+      targetSale.invoiceEmailStatus === "sent"
+    ) {
+      if (!automatic) setShareStatus("Invoice email has already been sent for this purchase.");
+      return;
+    }
     setShareStatus("Sending invoice email...");
-    const signedAgreements = signedAgreementsFromPacket(packet);
+    setInvoiceSending(true);
+    const signedAgreements = signedAgreementsFromPacket(targetPacket);
     const signedAtValues = signedAgreements.map((agreement) => agreement.signedAt).sort();
     const signedAt = signedAtValues[signedAtValues.length - 1];
-    const result = await sendSoftwareSaleInvoiceEmail({
-      ...sale,
+    const saleForEmail = {
+      ...targetSale,
       signedAgreementNames: signedAgreements.map((agreement) => agreement.title),
       signedAgreements,
       signedByName: signedAgreements[0]?.signedByName,
       signedByEmail: signedAgreements[0]?.signedByEmail,
       signedAt,
-    });
-    setShareStatus(formatCommunicationStatus(result, "Invoice email"));
+    };
+    try {
+      const result = await sendSoftwareSaleInvoiceEmail(saleForEmail);
+      const updated = api.softwareSales.update(targetSale.id, {
+        signedAgreementNames: saleForEmail.signedAgreementNames,
+        signedAgreements: saleForEmail.signedAgreements,
+        signedByName: saleForEmail.signedByName,
+        signedByEmail: saleForEmail.signedByEmail,
+        signedAt: saleForEmail.signedAt,
+        ...softwareSaleInvoicePatchFromResult(result),
+      });
+      if (updated) setSale(updated);
+      setShareStatus(formatCommunicationStatus(result, "Invoice email"));
+    } finally {
+      setInvoiceSending(false);
+    }
   }
 
   function openSigner() {
@@ -636,11 +684,12 @@ export function MasterPlanBuilderPage() {
                 </div>
                 <button
                   type="button"
-                  className={`btn-gold w-full justify-center text-xs ${allSigned ? "" : "cursor-not-allowed opacity-50"}`}
-                  disabled={!allSigned}
+                  className={`btn-gold w-full justify-center text-xs ${allSigned && !invoiceSending ? "" : "cursor-not-allowed opacity-50"}`}
+                  disabled={!allSigned || invoiceSending}
                   onClick={sendInvoice}
                 >
-                  <ReceiptText className="h-4 w-4" /> Send invoice and agency code
+                  <ReceiptText className="h-4 w-4" />{" "}
+                  {invoiceSent ? "Invoice and agency code sent" : invoiceSending ? "Sending invoice..." : "Send invoice and agency code"}
                 </button>
 
                 {shareStatus && (
@@ -746,9 +795,6 @@ function signedAgreementsFromPacket(packet: RemoteCheckoutPacket): SoftwareSaleS
 function formatCommunicationStatus(result: CommunicationResult, label: string) {
   if (result.ok && result.result?.status === "sent") {
     return `${label} sent through ${result.result.provider}.`;
-  }
-  if (result.ok && result.result?.status === "demo_queued") {
-    return `${label} queued in demo mode. Add provider credentials to send it for real.`;
   }
   return result.result?.error ?? result.error ?? `${label} could not be sent.`;
 }

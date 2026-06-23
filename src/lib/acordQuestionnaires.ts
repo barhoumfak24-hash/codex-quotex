@@ -1,4 +1,8 @@
 import type { PublicDataEvidenceMap, QuotingQuestion, TemplateFieldMap } from "@/types";
+import {
+  aiEvidenceAllowsDocumentAutofill,
+  findAiPublicEvidence,
+} from "./aiProductionGuards";
 
 type AcordValueSource =
   | "questionnaire"
@@ -1117,22 +1121,9 @@ function evidenceAllowsAcordAutofill(
   fieldKey: string,
   source: "asset_detail" | "public_record"
 ): boolean {
-  const match = findEvidenceForField(evidence, fieldKey);
+  const match = findAiPublicEvidence(evidence, fieldKey);
   if (!match) return source !== "public_record";
-  return match.allowDocumentAutofill && match.verified && match.confidence >= 0.8;
-}
-
-function findEvidenceForField(
-  evidence: PublicDataEvidenceMap | undefined,
-  fieldKey: string
-): PublicDataEvidenceMap[string] | undefined {
-  if (!evidence) return undefined;
-  const normalizedFieldKey = normalize(fieldKey);
-  return Object.entries(evidence).find(([key, item]) => {
-    const normalizedKey = normalize(key);
-    const normalizedItemKey = normalize(item.fieldKey);
-    return normalizedKey === normalizedFieldKey || normalizedItemKey === normalizedFieldKey;
-  })?.[1];
+  return aiEvidenceAllowsDocumentAutofill(match);
 }
 
 function stringifyValue(value: unknown): string {

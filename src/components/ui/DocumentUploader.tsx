@@ -365,8 +365,7 @@ export function DocumentUploader({
         </div>
       )}
       <p className="mt-2 text-[11px] text-ink-400">
-        Demo only - filename and metadata are stored locally. In production the file is uploaded
-        to encrypted S3 and a signed URL is returned for download.
+        Files are uploaded to encrypted storage and served through signed download URLs.
       </p>
       <UploadPreviewModal
         open={previewOpen}

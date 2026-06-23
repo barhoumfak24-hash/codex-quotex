@@ -80,7 +80,7 @@ export function AgencyAppDemoPage() {
               <span>
                 <span className="block font-display text-xl leading-none">Quotex Insurance</span>
                 <span className="mt-1.5 block text-[11px] font-medium leading-none text-white/45">
-                  Quotex app demo
+                  Quotex client app
                 </span>
               </span>
             </Link>
@@ -291,7 +291,7 @@ function AppScreen({
       }))
     : [
         {
-          id: "demo",
+          id: "sample-claim",
           carrierId: primaryPolicy?.carrierId,
           status: "open",
         },

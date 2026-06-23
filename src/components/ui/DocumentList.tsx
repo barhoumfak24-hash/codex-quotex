@@ -843,9 +843,8 @@ function RenewalDraftPublishModal({
             The original document stays on file as the prior term record until this draft is published.
           </p>
           <p className="hidden">
-            Demo — in production the AI also rewrites declared values (premium, dates,
-            insureds) and a viewer renders the merged document. Here, fileName covers the
-            edit surface.
+            AI rewrite support updates declared values such as premium, dates, and insureds,
+            then renders the merged document through the document viewer.
           </p>
         </div>
 

@@ -2,10 +2,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 // =====================================================================
-// Activity Center inbox removal + start-activity auto-text.
+// Activity Center inbox removal + start-activity customer notice.
 //  - Customer-driven AI notifications promote straight into Tasks via
 //    api.aiNotifications.autoPromote (no manual "Acknowledge" inbox).
-//  - Starting an activity (markInProgress) auto-texts the customer that
+//  - Starting an activity (markInProgress) notifies the customer that
 //    an agent is on it — once, on the first start.
 // =====================================================================
 
@@ -83,8 +83,8 @@ describe("aiNotifications.autoPromote", () => {
   });
 });
 
-describe("tasks.markInProgress auto-texts the customer", () => {
-  it("sends one SMS on the first start, none on a re-start", async () => {
+describe("tasks.markInProgress notifies the customer", () => {
+  it("sends one email on the first start, none on a re-start", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     const customer = api.customers.list(agency.id)[0];
@@ -103,10 +103,10 @@ describe("tasks.markInProgress auto-texts the customer", () => {
     expect(afterFirst.filter((c) => startedText.test(c.body)).length).toBe(
       beforeStartedTexts + 1
     );
-    const sms = afterFirst.find((c) => startedText.test(c.body))!;
-    expect(sms).toBeTruthy();
-    expect(sms.channel).toBe("sms");
-    expect(sms.direction).toBe("outbound");
+    const notice = afterFirst.find((c) => startedText.test(c.body))!;
+    expect(notice).toBeTruthy();
+    expect(notice.channel).toBe("email");
+    expect(notice.direction).toBe("outbound");
 
     // Snooze then resume — no duplicate text.
     api.tasks.snooze(task.id, 1, agent.id);

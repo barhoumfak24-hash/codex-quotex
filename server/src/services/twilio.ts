@@ -4,8 +4,8 @@
 
 export type SmsSendResult = {
   sid: string;
-  status: "sent" | "demo_queued" | "opted_out" | "failed";
-  provider: "twilio" | "demo";
+  status: "sent" | "opted_out" | "failed";
+  provider: "twilio" | "unconfigured";
   configured: boolean;
   error?: string;
 };
@@ -31,10 +31,12 @@ export async function sendSms(args: {
 
   if (!accountSid || !authToken || (!fromNumber && !messagingServiceSid)) {
     return {
-      sid: `sms_demo_${Date.now()}`,
-      status: "demo_queued",
-      provider: "demo",
+      sid: `sms_not_configured_${Date.now()}`,
+      status: "failed",
+      provider: "unconfigured",
       configured: false,
+      error:
+        "No SMS provider is configured. Add TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and a Twilio sender before sending.",
     };
   }
 

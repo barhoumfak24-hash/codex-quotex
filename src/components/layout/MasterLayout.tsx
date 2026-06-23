@@ -9,6 +9,7 @@ import {
   History,
   LayoutDashboard,
   LayoutGrid,
+  MonitorPlay,
   ReceiptText,
   Settings2,
   ShieldCheck,
@@ -25,6 +26,7 @@ export function MasterLayout() {
       nav={[
         { to: "/master", label: "Dashboard", icon: <LayoutDashboard />, end: true },
         { to: "/master/leads", label: "Leads", icon: <UserPlus /> },
+        { to: "/master/demos", label: "Demos", icon: <MonitorPlay /> },
         { to: "/master/agencies", label: "Agencies", icon: <Building2 /> },
         { to: "/master/carriers", label: "Carrier library", icon: <ShieldCheck /> },
         { to: "/master/categories", label: "Insurance categories", icon: <LayoutGrid /> },

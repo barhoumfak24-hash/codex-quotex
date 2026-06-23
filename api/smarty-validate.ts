@@ -26,6 +26,8 @@
 //         the credential or stack trace)
 // =====================================================================
 
+import { applyRateLimit } from "./_rateLimit";
+
 const SMARTY_US_STREET_BASE = "https://us-street.api.smarty.com/street-address";
 
 interface SmartyCandidate {
@@ -172,6 +174,7 @@ export default async function handler(req: any, res: any) {
     res.status(405).json({ error: "method_not_allowed" });
     return;
   }
+  if (!(await applyRateLimit(req, res, "smarty-validate", { windowMs: 60_000, limit: 60 }))) return;
 
   const authId = process.env.SMARTY_AUTH_ID;
   const authToken = process.env.SMARTY_AUTH_TOKEN;

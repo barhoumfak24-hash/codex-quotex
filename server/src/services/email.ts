@@ -1,12 +1,11 @@
 // Email service. Uses SendGrid by default when SENDGRID_API_KEY is present,
-// or Resend when RESEND_API_KEY is present. Without credentials it returns a
-// demo queue result so local demos keep working without pretending a message
-// was actually delivered.
+// or Resend when RESEND_API_KEY is present. Missing provider credentials fail
+// loudly so production cannot silently pretend a message was delivered.
 
 export type EmailSendResult = {
   id: string;
-  status: "sent" | "demo_queued" | "failed";
-  provider: "sendgrid" | "resend" | "demo";
+  status: "sent" | "failed";
+  provider: "sendgrid" | "resend" | "unconfigured";
   configured: boolean;
   error?: string;
 };
@@ -17,6 +16,7 @@ export async function sendEmail(args: {
   html: string;
   text?: string;
   from?: string;
+  replyTo?: string;
   categories?: string[];
 }): Promise<EmailSendResult> {
   const provider = preferredEmailProvider();
@@ -26,25 +26,26 @@ export async function sendEmail(args: {
   if (provider === "resend") return sendWithResend({ ...args, from });
 
   return {
-    id: `email_demo_${Date.now()}`,
-    status: "demo_queued",
-    provider: "demo",
+    id: `email_not_configured_${Date.now()}`,
+    status: "failed",
+    provider: "unconfigured",
     configured: false,
+    error: "No email provider is configured. Add SENDGRID_API_KEY or RESEND_API_KEY before sending.",
   };
 }
 
 export function unsubscribeUrl(email: string, kind: "marketing" | "all" = "marketing") {
-  const base = process.env.FRONTEND_ORIGIN ?? "https://quotex.example";
+  const base = process.env.FRONTEND_ORIGIN ?? "https://quotexinsurance.com";
   return `${base}/unsubscribe?email=${encodeURIComponent(email)}&kind=${kind}`;
 }
 
-function preferredEmailProvider(): "sendgrid" | "resend" | "demo" {
+function preferredEmailProvider(): "sendgrid" | "resend" | null {
   const explicit = env("EMAIL_PROVIDER").toLowerCase();
   if (explicit === "sendgrid" && env("SENDGRID_API_KEY")) return "sendgrid";
   if (explicit === "resend" && env("RESEND_API_KEY")) return "resend";
   if (env("SENDGRID_API_KEY")) return "sendgrid";
   if (env("RESEND_API_KEY")) return "resend";
-  return "demo";
+  return null;
 }
 
 function emailFromAddress() {
@@ -52,7 +53,7 @@ function emailFromAddress() {
     env("EMAIL_FROM") ||
     env("SENDGRID_FROM_EMAIL") ||
     env("RESEND_FROM_EMAIL") ||
-    "Quotex Insurance <no-reply@quotex.example>"
+    "Quotex Insurance <no-reply@quotexinsurance.com>"
   );
 }
 
@@ -66,6 +67,7 @@ async function sendWithSendGrid(args: {
   html: string;
   text?: string;
   from: string;
+  replyTo?: string;
   categories?: string[];
 }): Promise<EmailSendResult> {
   try {
@@ -78,6 +80,7 @@ async function sendWithSendGrid(args: {
       body: JSON.stringify({
         personalizations: [{ to: [{ email: args.to }] }],
         from: parseEmailAddress(args.from),
+        ...(args.replyTo ? { reply_to: parseEmailAddress(args.replyTo) } : {}),
         subject: args.subject,
         content: [
           ...(args.text ? [{ type: "text/plain", value: args.text }] : []),
@@ -120,6 +123,7 @@ async function sendWithResend(args: {
   html: string;
   text?: string;
   from: string;
+  replyTo?: string;
 }): Promise<EmailSendResult> {
   try {
     const res = await fetch("https://api.resend.com/emails", {
@@ -131,6 +135,7 @@ async function sendWithResend(args: {
       body: JSON.stringify({
         from: args.from,
         to: args.to,
+        ...(args.replyTo ? { reply_to: args.replyTo } : {}),
         subject: args.subject,
         html: args.html,
         text: args.text,

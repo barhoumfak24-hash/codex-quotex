@@ -75,7 +75,7 @@ export const SEED_AGENCIES: Agency[] = [
     carrierRunnerContactEmail: "downloads@palmcoastpc.example",
     carrierRunnerContactPhone: "+1 (555) 312-0099",
     carrierRunnerLastTestStatus: "not_tested",
-    carrierRunnerNotes: "Demo placeholder. Store carrier portal credentials in the vault, run a supervised sign-in/download test, then activate production sync.",
+    carrierRunnerNotes: "Configuration placeholder. Store carrier portal credentials in the vault, run a supervised sign-in/download test, then activate production sync.",
     serviceAreas: ["FL", "GA", "SC"],
     ...palmCoastAgencyCode,
     tier: "mid",
@@ -213,7 +213,7 @@ export const SEED_USERS: User[] = [
     id: id("user_master"),
     tenantId: null,
     role: "master_admin",
-    email: "founder@quotex.example",
+    email: "founder@quotexinsurance.com",
     name: "Quotex Founder",
     active: true,
     createdAt: now(365),
@@ -279,7 +279,7 @@ export const SEED_USERS: User[] = [
     id: id("user_customer_demo"),
     tenantId: "agency_palmcoast",
     role: "customer",
-    email: "customer@demo.example",
+    email: "alexandra.whitford@example.com",
     name: "Alexandra Whitford",
     phone: "+1 (555) 902-0431",
     active: true,
@@ -293,7 +293,7 @@ export const SEED_CUSTOMERS: CustomerProfile[] = [
     tenantId: "agency_palmcoast",
     userId: "user_customer_demo",
     name: "Alexandra Whitford",
-    email: "customer@demo.example",
+    email: "alexandra.whitford@example.com",
     phone: "+1 (555) 902-0431",
     mailingAddress: "44 Sea Breeze Ln, Palm Beach, FL 33480",
     garagingAddress: "44 Sea Breeze Ln, Palm Beach, FL 33480",
@@ -302,9 +302,8 @@ export const SEED_CUSTOMERS: CustomerProfile[] = [
     ],
     marketingOptInEmail: true,
     marketingOptInSms: true,
-    // Demo seed: this client is owned by the Palm Coast agent so
-    // the agent-portal demo isn't empty. Agents only see clients
-    // their manager has assigned to them; managers see everyone.
+    // Seed ownership keeps the Palm Coast customer scoped to the assigned
+    // staff member; managers can still see all agency customers.
     assignedAgentId: "user_agent_pc",
     assignedCsrId: "user_csr_pc",
     createdAt: now(90),
@@ -632,11 +631,11 @@ export const SEED_CARRIERS: Carrier[] = [
     quotingAutomation: {
       provider: "AI carrier portal runner",
       agentPortalUrl: "https://progressivecommercial.com/agent-login/",
-      credentialReference: "vault://demo/progressive/agency-rater",
+      credentialReference: "vault://carrier/progressive/agency-rater",
       status: "configured",
       mfaMode: "staff_prompt",
       notes:
-        "Demo placeholder for carrier-approved web rater automation. Production stores credentials in a vault and runs from the server worker.",
+        "Configuration placeholder for carrier-approved web rater automation. Production stores credentials in a vault and runs from the server worker.",
     },
     appetiteNotes: "Auto-heavy. Home via partner programs.",
     tendencyNotes: "Aggressive on auto.",
@@ -656,11 +655,11 @@ export const SEED_CARRIERS: Carrier[] = [
     quotingAutomation: {
       provider: "AI carrier portal runner",
       agentPortalUrl: "https://agents.allstate.com",
-      credentialReference: "vault://demo/allstate/agency-rater",
+      credentialReference: "vault://carrier/allstate/agency-rater",
       status: "configured",
       mfaMode: "staff_prompt",
       notes:
-        "Demo placeholder for carrier-approved web rater automation. Production stores credentials in a vault and runs from the server worker.",
+        "Configuration placeholder for carrier-approved web rater automation. Production stores credentials in a vault and runs from the server worker.",
     },
     appetiteNotes: "Home, auto, umbrella. Standard market.",
     tendencyNotes: "At-market pricing.",
@@ -682,11 +681,11 @@ export const SEED_CARRIERS: Carrier[] = [
     quotingAutomation: {
       provider: "AI carrier portal runner",
       agentPortalUrl: "https://agents.farmers.com",
-      credentialReference: "vault://demo/farmers/agency-rater",
+      credentialReference: "vault://carrier/farmers/agency-rater",
       status: "configured",
       mfaMode: "staff_prompt",
       notes:
-        "Demo placeholder for carrier-approved web rater automation. Production stores credentials in a vault and runs from the server worker.",
+        "Configuration placeholder for carrier-approved web rater automation. Production stores credentials in a vault and runs from the server worker.",
     },
     appetiteNotes: "Home, auto, umbrella, jewelry.",
     tendencyNotes: "Slightly above market on home.",
@@ -1987,7 +1986,7 @@ const ACORD_FORM_CATALOG: AcordFormSeed[] = [
     fileName: "ACORD-Exercise-download-files.pdf",
     sourceFileName: "exercise-20-download-20-files.pdf",
     line: "Claims / servicing",
-    use: "Reference the downloaded ACORD packet supplied for the demo.",
+    use: "Reference the downloaded ACORD packet supplied for the production form library.",
   },
   {
     number: "Packet 2",
@@ -1995,7 +1994,7 @@ const ACORD_FORM_CATALOG: AcordFormSeed[] = [
     fileName: "ACORD-Exercise-download-files-1.pdf",
     sourceFileName: "exercise-20-download-20-files (1).pdf",
     line: "Claims / servicing",
-    use: "Reference the second downloaded ACORD packet supplied for the demo.",
+    use: "Reference the second downloaded ACORD packet supplied for the production form library.",
   },
   {
     number: "Untitled 11",
@@ -2003,7 +2002,7 @@ const ACORD_FORM_CATALOG: AcordFormSeed[] = [
     fileName: "ACORD-Untitled-document-11.pdf",
     sourceFileName: "Untitled document (11).pdf",
     line: "Claims / servicing",
-    use: "Reference the imported PDF packet supplied for the demo.",
+    use: "Reference the imported PDF packet supplied for the production form library.",
   },
 ];
 

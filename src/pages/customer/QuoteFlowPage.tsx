@@ -1025,7 +1025,7 @@ function DriverLicenseCameraScanner({
       {scanError && <div className="mt-2 text-[11px] text-alert">{scanError}</div>}
       <canvas ref={canvasRef} className="hidden" />
       <div className="mt-2 text-[11px] text-ink-400">
-        Demo stores the scan label only. Production should upload the encrypted image and retain only the minimum required ID fields.
+        Upload only the minimum required ID details. Files are handled through the encrypted document service.
       </div>
     </div>
   );

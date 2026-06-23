@@ -16,12 +16,12 @@ import { CustomerPolicyPage } from "@/pages/customer/CustomerPolicyPage";
 import { CustomerSettingsPage } from "@/pages/customer/CustomerSettingsPage";
 import { QuoteFlowPage } from "@/pages/customer/QuoteFlowPage";
 import { AboutPage } from "@/pages/public/AboutPage";
-import { AgencyAppDemoPage } from "@/pages/public/AgencyAppDemoPage";
 import { ContactPage } from "@/pages/public/ContactPage";
 import { HomePage } from "@/pages/public/HomePage";
 import { MarketingSmartContactPage } from "@/pages/public/MarketingSmartContactPage";
 import { NotFoundPage } from "@/pages/public/NotFoundPage";
 import { PrivateClientPage } from "@/pages/public/PrivateClientPage";
+import { PrivacyPage, TermsPage } from "@/pages/public/LegalPages";
 import { ServicesPage } from "@/pages/public/ServicesPage";
 
 export function AgencyWebsiteApp() {
@@ -33,13 +33,15 @@ export function AgencyWebsiteApp() {
         <Route path="/private-client" element={<PrivateClientPage />} />
         <Route path="/about" element={<AboutPage />} />
         <Route path="/contact" element={<ContactPage />} />
+        <Route path="/privacy" element={<PrivacyPage />} />
+        <Route path="/terms" element={<TermsPage />} />
       </Route>
 
       <Route path="/login" element={<CustomerLoginPage />} />
       <Route path="/signup" element={<CustomerSignupPage />} />
       <Route path="/quote/start" element={<QuoteStartGate />} />
       <Route path="/marketing/contact" element={<MarketingSmartContactPage />} />
-      <Route path="/app" element={<AgencyAppDemoPage />} />
+      <Route path="/app" element={<Navigate to="/login" replace />} />
 
       <Route
         element={

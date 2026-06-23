@@ -34,7 +34,7 @@ const EMPTY_LEAD_FORM = {
   role: "",
   staffSize: "",
   phone: "",
-  interest: "Full Quotex software demo",
+  interest: "Full Quotex software walkthrough",
   notes: "",
   marketingOptIn: true,
 };
@@ -73,7 +73,7 @@ export function MasterLeadsPage() {
     [leads, search, status]
   );
   const newCount = leads.filter((lead) => lead.status === "new").length;
-  const demoLeadCount = leads.filter((lead) => lead.source === "view_demo").length;
+  const walkthroughLeadCount = leads.filter((lead) => lead.source === "walkthrough_request").length;
   const qualifiedCount = leads.filter((lead) => lead.status === "qualified").length;
 
   function refresh() {
@@ -94,7 +94,7 @@ export function MasterLeadsPage() {
       role: form.role.trim(),
       staffSize: form.staffSize.trim(),
       phone: form.phone.trim() || undefined,
-      interest: form.interest.trim() || "Full Quotex software demo",
+      interest: form.interest.trim() || "Full Quotex software walkthrough",
       notes: form.notes.trim() || undefined,
       marketingOptIn: form.marketingOptIn,
       source: "manual",
@@ -116,7 +116,7 @@ export function MasterLeadsPage() {
         <div>
           <h1 className="font-display text-3xl">Leads</h1>
           <p className="mt-1 text-sm text-ink-500">
-            Demo-view requests from the public site, plus manually added sales leads.
+            Walkthrough requests from the public site, plus manually added sales leads.
           </p>
         </div>
         <button
@@ -133,7 +133,7 @@ export function MasterLeadsPage() {
         <StatCard
           label="Total leads"
           value={leads.length}
-          hint={`${demoLeadCount} from View demo`}
+          hint={`${walkthroughLeadCount} from walkthrough requests`}
           icon={<Users className="h-5 w-5" />}
         />
         <StatCard
@@ -177,10 +177,10 @@ export function MasterLeadsPage() {
                 value={form.interest}
                 onChange={(event) => setField("interest", event.target.value)}
               >
-                <option>Full Quotex software demo</option>
-                <option>Software workspace demo</option>
-                <option>Agency website demo</option>
-                <option>Quotex app demo</option>
+                <option>Full Quotex software walkthrough</option>
+                <option>Software workspace walkthrough</option>
+                <option>Agency website walkthrough</option>
+                <option>Quotex app walkthrough</option>
                 <option>Pricing and onboarding review</option>
               </select>
             </label>
@@ -190,7 +190,7 @@ export function MasterLeadsPage() {
                 className="input min-h-24 py-3"
                 value={form.notes}
                 onChange={(event) => setField("notes", event.target.value)}
-                placeholder="Lead source, pain points, demo preference, timing, or follow-up notes..."
+                placeholder="Lead source, pain points, walkthrough preference, timing, or follow-up notes..."
               />
             </label>
             <div className="flex flex-wrap items-center justify-between gap-3 lg:col-span-2">
@@ -245,7 +245,7 @@ export function MasterLeadsPage() {
           {filtered.length === 0 ? (
             <EmptyState
               title="No leads found"
-              description="View demo submissions and manually added leads will appear here."
+              description="Walkthrough submissions and manually added leads will appear here."
             />
           ) : (
             <table className="w-full min-w-[1100px] text-sm">
@@ -311,8 +311,8 @@ function LeadRow({
         </div>
       </td>
       <td className="px-4 py-4">
-        <Badge tone={lead.source === "view_demo" ? "gold" : "neutral"}>
-          {lead.source === "view_demo" ? "View demo" : "Manual"}
+        <Badge tone={lead.source === "walkthrough_request" ? "gold" : "neutral"}>
+          {lead.source === "walkthrough_request" ? "Walkthrough" : "Manual"}
         </Badge>
       </td>
       <td className="whitespace-nowrap px-4 py-4">

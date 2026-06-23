@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { aiCarrierMatch } from "../ai";
 import type { Carrier } from "@/types";
 
@@ -49,6 +49,14 @@ const carriers: Carrier[] = [
 ];
 
 describe("aiCarrierMatch", () => {
+  beforeEach(() => {
+    vi.stubEnv("VITE_AI_MODE", "");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("prefers exact appetite rows over broad preferred-asset matches", async () => {
     const out = await aiCarrierMatch(
       {
