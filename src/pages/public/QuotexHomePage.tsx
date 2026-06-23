@@ -456,7 +456,7 @@ export function QuotexHomePage() {
             <Link to="/contact" className="transition hover:text-white">
               Contact
             </Link>
-            <Link to="/contact" className="transition hover:text-white">
+            <Link to="/support" className="transition hover:text-white">
               Support
             </Link>
           </nav>

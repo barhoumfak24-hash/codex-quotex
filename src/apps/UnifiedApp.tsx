@@ -96,7 +96,8 @@ export function UnifiedApp() {
         <Route path="/app/*" element={<AgencyMobileApp />} />
       <Route path="/checkout" element={<TransactionSitePage />} />
       <Route path="/checkout/sign/:packetId" element={<CheckoutRemoteSignPage />} />
-      <Route path="/contact" element={<QuotexContactPage />} />
+      <Route path="/contact" element={<QuotexContactPage mode="sales" />} />
+      <Route path="/support" element={<QuotexContactPage mode="support" />} />
       <Route path="/marketing/contact" element={<MarketingSmartContactPage />} />
 
       <Route element={<PublicLayout />}>

@@ -10,6 +10,7 @@ export interface WebsiteLeadInput {
   email?: string;
   phone?: string;
   message?: string;
+  department?: "sales" | "support";
 }
 
 export async function submitWebsiteLead(input: WebsiteLeadInput): Promise<boolean> {

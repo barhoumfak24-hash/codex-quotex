@@ -15,6 +15,7 @@ const websiteProspectSchema = z.object({
   email: z.string().email().optional(),
   phone: z.string().max(40).optional(),
   message: z.string().max(4000).optional(),
+  department: z.enum(["sales", "support"]).optional(),
 });
 
 const websiteSyncSchema = z.object({
@@ -90,7 +91,7 @@ websiteRoutes.post("/prospects", async (req, res) => {
   }
 
   const lead = parsed.data;
-  const recipients = websiteLeadNotificationRecipients();
+  const recipients = websiteLeadNotificationRecipients(lead.department);
   const subject = websiteLeadSubject(lead);
   const html = websiteLeadHtml(lead);
   const text = websiteLeadText(lead);
@@ -102,7 +103,7 @@ websiteRoutes.post("/prospects", async (req, res) => {
         html,
         text,
         replyTo: lead.email,
-        categories: ["website", "lead", lead.source],
+        categories: ["website", "lead", lead.source, lead.department ?? "general"],
       })
     )
   );
@@ -177,11 +178,27 @@ function constantTimeEqualHex(left: string, right: string): boolean {
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
-function websiteLeadNotificationRecipients(): string[] {
+function websiteLeadNotificationRecipients(department?: "sales" | "support"): string[] {
+  if (department === "support") {
+    return parseEmailList(process.env.WEBSITE_SUPPORT_NOTIFY_TO?.trim() || "support@quotexinsurance.com");
+  }
+
+  if (department === "sales") {
+    return parseEmailList(
+      process.env.WEBSITE_SALES_NOTIFY_TO?.trim() ||
+        process.env.WEBSITE_LEAD_NOTIFY_TO?.trim() ||
+        "contact@quotexinsurance.com"
+    );
+  }
+
   const configured =
     process.env.WEBSITE_LEAD_NOTIFY_TO?.trim() ||
     process.env.CONTACT_FORM_NOTIFY_TO?.trim() ||
     "contact@quotexinsurance.com,support@quotexinsurance.com";
+  return parseEmailList(configured);
+}
+
+function parseEmailList(configured: string): string[] {
   return Array.from(
     new Set(
       configured
@@ -193,12 +210,12 @@ function websiteLeadNotificationRecipients(): string[] {
 }
 
 function websiteLeadSubject(lead: z.infer<typeof websiteProspectSchema>) {
-  const sourceLabel =
-    lead.source === "quote_start"
-      ? "Quote request"
-      : lead.source === "customer_signup"
-        ? "Customer signup"
-        : "Website contact";
+  let sourceLabel = "Website contact";
+  if (lead.department === "support") sourceLabel = "Support request";
+  else if (lead.department === "sales") sourceLabel = "Sales inquiry";
+  else if (lead.source === "quote_start") sourceLabel = "Quote request";
+  else if (lead.source === "customer_signup") sourceLabel = "Customer signup";
+
   const name = lead.name?.trim() || "New prospect";
   return `${sourceLabel}: ${name}`;
 }
@@ -206,6 +223,7 @@ function websiteLeadSubject(lead: z.infer<typeof websiteProspectSchema>) {
 function websiteLeadHtml(lead: z.infer<typeof websiteProspectSchema>) {
   const rows = [
     ["Source", lead.source],
+    ["Department", lead.department],
     ["Name", lead.name],
     ["Email", lead.email],
     ["Phone", lead.phone],
@@ -244,6 +262,7 @@ function websiteLeadText(lead: z.infer<typeof websiteProspectSchema>) {
     "New Quotex website inquiry",
     "",
     `Source: ${lead.source}`,
+    lead.department ? `Department: ${lead.department}` : "",
     lead.name ? `Name: ${lead.name}` : "",
     lead.email ? `Email: ${lead.email}` : "",
     lead.phone ? `Phone: ${lead.phone}` : "",

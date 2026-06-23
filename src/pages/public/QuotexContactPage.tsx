@@ -13,36 +13,80 @@ import {
 } from "@/lib/quotexContact";
 import { submitWebsiteLead } from "@/lib/websiteApi";
 
-const CONTACT_METHODS: Array<{
+type ContactPageMode = "sales" | "support";
+
+const CONTACT_METHODS_BY_MODE: Record<ContactPageMode, Array<{
   icon: ReactNode;
   label: string;
   value: string;
   href?: string;
-}> = [
-  {
-    icon: <Mail className="h-5 w-5" />,
-    label: "Sales",
-    value: QUOTEX_CONTACT_EMAIL,
-    href: QUOTEX_CONTACT_EMAIL_HREF,
-  },
-  {
-    icon: <Mail className="h-5 w-5" />,
-    label: "Support",
-    value: QUOTEX_SUPPORT_EMAIL,
-    href: QUOTEX_SUPPORT_EMAIL_HREF,
-  },
-  {
-    icon: <Phone className="h-5 w-5" />,
-    label: "Phone",
-    value: QUOTEX_CONTACT_PHONE,
-    href: QUOTEX_CONTACT_PHONE_HREF,
-  },
-];
+}>> = {
+  sales: [
+    {
+      icon: <Mail className="h-5 w-5" />,
+      label: "Sales",
+      value: QUOTEX_CONTACT_EMAIL,
+      href: QUOTEX_CONTACT_EMAIL_HREF,
+    },
+    {
+      icon: <Phone className="h-5 w-5" />,
+      label: "Phone",
+      value: QUOTEX_CONTACT_PHONE,
+      href: QUOTEX_CONTACT_PHONE_HREF,
+    },
+  ],
+  support: [
+    {
+      icon: <Mail className="h-5 w-5" />,
+      label: "Support",
+      value: QUOTEX_SUPPORT_EMAIL,
+      href: QUOTEX_SUPPORT_EMAIL_HREF,
+    },
+    {
+      icon: <Phone className="h-5 w-5" />,
+      label: "Phone",
+      value: QUOTEX_CONTACT_PHONE,
+      href: QUOTEX_CONTACT_PHONE_HREF,
+    },
+  ],
+};
 
-export function QuotexContactPage() {
+const PAGE_COPY: Record<ContactPageMode, {
+  badge: string;
+  brand: string;
+  subtitle: string;
+  headline: string;
+  intro: string;
+  formTitle: string;
+  formIntro: string;
+}> = {
+  sales: {
+    badge: "Contact",
+    brand: "Quotex Insurance",
+    subtitle: "Contact",
+    headline: "Talk to Quotex Insurance.",
+    intro: "Reach the Quotex team for sales, onboarding, or deployment questions.",
+    formTitle: "Contact sales",
+    formIntro: "Tell us where to follow up and what you want Quotex to handle.",
+  },
+  support: {
+    badge: "Support",
+    brand: "Quotex Insurance Support",
+    subtitle: "Support",
+    headline: "Quotex Insurance Support.",
+    intro: "Reach the Quotex support team for account, billing, technical, or deployment help.",
+    formTitle: "Contact Support",
+    formIntro: "Tell support what is happening and where to follow up.",
+  },
+};
+
+export function QuotexContactPage({ mode = "sales" }: { mode?: ContactPageMode }) {
   const [submitted, setSubmitted] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const copy = PAGE_COPY[mode];
+  const contactMethods = CONTACT_METHODS_BY_MODE[mode];
+  const targetEmail = mode === "support" ? QUOTEX_SUPPORT_EMAIL : QUOTEX_CONTACT_EMAIL;
 
   async function submitContact(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -54,6 +98,7 @@ export function QuotexContactPage() {
       name: String(form.get("name") ?? ""),
       email: String(form.get("email") ?? ""),
       phone: String(form.get("phone") ?? ""),
+      department: mode,
       message: [
         `Agency: ${String(form.get("agencyName") ?? "")}`,
         String(form.get("message") ?? ""),
@@ -64,7 +109,7 @@ export function QuotexContactPage() {
     setSubmitting(false);
     if (!delivered) {
       setError(
-        `The message could not be delivered automatically. Please email ${QUOTEX_CONTACT_EMAIL} or ${QUOTEX_SUPPORT_EMAIL} directly.`
+        `The message could not be delivered automatically. Please email ${targetEmail} directly.`
       );
       return;
     }
@@ -81,9 +126,9 @@ export function QuotexContactPage() {
               letterClassName="text-[25px]"
             />
             <span>
-              <span className="block font-display text-xl leading-none">Quotex Insurance</span>
+              <span className="block font-display text-xl leading-none">{copy.brand}</span>
               <span className="block text-xs uppercase tracking-[0.18em] text-white/45">
-                Contact
+                {copy.subtitle}
               </span>
             </span>
           </Link>
@@ -105,17 +150,17 @@ export function QuotexContactPage() {
       <main className="mx-auto grid max-w-7xl gap-8 px-5 py-12 md:grid-cols-[0.9fr_1.1fr] md:px-8 md:py-16">
         <section>
           <div className="inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.08] px-3 py-1 text-xs font-semibold uppercase tracking-[0.18em] text-gold-200">
-            Contact
+            {copy.badge}
           </div>
           <h1 className="mt-5 font-display text-5xl leading-tight md:text-6xl">
-            Talk to Quotex Insurance.
+            {copy.headline}
           </h1>
           <p className="mt-4 max-w-xl text-lg leading-relaxed text-white/64">
-            Reach the Quotex team for sales, onboarding, support, or deployment questions.
+            {copy.intro}
           </p>
 
           <div className="mt-8 grid gap-3">
-            {CONTACT_METHODS.map((method) => {
+            {contactMethods.map((method) => {
               const cardContent = (
                 <>
                 <div className="grid h-11 w-11 place-items-center rounded-md border border-gold-300/30 bg-gold-300/10 text-gold-200">
@@ -159,7 +204,7 @@ export function QuotexContactPage() {
                 </div>
                 <h2 className="mt-5 text-3xl text-white">Message received</h2>
                 <p className="mt-3 max-w-sm text-sm leading-relaxed text-white/58">
-                  Your request was recorded for follow-up. The team will respond from {QUOTEX_SUPPORT_EMAIL}.
+                  Your request was recorded for follow-up. The team will respond from {targetEmail}.
                 </p>
                 <button
                   type="button"
@@ -176,9 +221,9 @@ export function QuotexContactPage() {
           ) : (
             <form className="space-y-4" onSubmit={submitContact}>
               <div>
-                <h2 className="text-3xl text-white">Contact sales</h2>
+                <h2 className="text-3xl text-white">{copy.formTitle}</h2>
                 <p className="mt-2 text-sm leading-relaxed text-white/55">
-                  Tell us where to follow up and what you want Quotex to handle.
+                  {copy.formIntro}
                 </p>
               </div>
               <div className="grid gap-4 sm:grid-cols-2">

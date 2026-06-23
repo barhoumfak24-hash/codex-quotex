@@ -45,7 +45,8 @@ export function CheckoutApp() {
           </Suspense>
         }
       />
-      <Route path="/contact" element={<QuotexContactPage />} />
+      <Route path="/contact" element={<QuotexContactPage mode="sales" />} />
+      <Route path="/support" element={<QuotexContactPage mode="support" />} />
       <Route path="/privacy" element={<PrivacyPage />} />
       <Route path="/terms" element={<TermsPage />} />
       <Route path="/404" element={<NotFoundPage />} />
