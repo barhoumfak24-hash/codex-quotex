@@ -14,8 +14,12 @@ writeHook(
   "pre-push",
   `#!/bin/sh
 echo "Running Quotex pre-push gate..."
-pnpm run typecheck || exit 1
-pnpm run build || exit 1
+if command -v pnpm >/dev/null 2>&1; then
+  pnpm run typecheck || exit 1
+  pnpm run build || exit 1
+else
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "\\$env:PATH='C:\\Program Files\\Git\\cmd;C:\\Program Files\\Git\\bin;C:\\Users\\barho\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\node\\bin;C:\\Users\\barho\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\bin;' + \\$env:PATH; pnpm run typecheck; if (\\$LASTEXITCODE -ne 0) { exit \\$LASTEXITCODE }; pnpm run build; exit \\$LASTEXITCODE" || exit 1
+fi
 `
 );
 
