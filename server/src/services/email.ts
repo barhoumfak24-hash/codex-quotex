@@ -1,11 +1,13 @@
-// Email service. Uses SendGrid by default when SENDGRID_API_KEY is present,
-// or Resend when RESEND_API_KEY is present. Missing provider credentials fail
-// loudly so production cannot silently pretend a message was delivered.
+import nodemailer from "nodemailer";
+
+// Email service. Uses SendGrid, Resend, or SMTP when configured. Missing
+// provider credentials fail loudly so production cannot silently pretend a
+// message was delivered.
 
 export type EmailSendResult = {
   id: string;
   status: "sent" | "failed";
-  provider: "sendgrid" | "resend" | "unconfigured";
+  provider: "sendgrid" | "resend" | "smtp" | "unconfigured";
   configured: boolean;
   error?: string;
 };
@@ -24,13 +26,24 @@ export async function sendEmail(args: {
 
   if (provider === "sendgrid") return sendWithSendGrid({ ...args, from });
   if (provider === "resend") return sendWithResend({ ...args, from });
+  if (provider === "smtp") return sendWithSmtp({ ...args, from });
 
   return {
     id: `email_not_configured_${Date.now()}`,
     status: "failed",
     provider: "unconfigured",
     configured: false,
-    error: "No email provider is configured. Add SENDGRID_API_KEY or RESEND_API_KEY before sending.",
+    error:
+      "No email provider is configured. Add SENDGRID_API_KEY, RESEND_API_KEY, or SMTP credentials before sending.",
+  };
+}
+
+export function emailDeliveryConfiguration() {
+  const provider = preferredEmailProvider();
+  return {
+    configured: provider !== null,
+    provider: provider ?? "unconfigured",
+    from: provider ? emailFromAddress() : null,
   };
 }
 
@@ -39,12 +52,14 @@ export function unsubscribeUrl(email: string, kind: "marketing" | "all" = "marke
   return `${base}/unsubscribe?email=${encodeURIComponent(email)}&kind=${kind}`;
 }
 
-function preferredEmailProvider(): "sendgrid" | "resend" | null {
+function preferredEmailProvider(): "sendgrid" | "resend" | "smtp" | null {
   const explicit = env("EMAIL_PROVIDER").toLowerCase();
   if (explicit === "sendgrid" && env("SENDGRID_API_KEY")) return "sendgrid";
   if (explicit === "resend" && env("RESEND_API_KEY")) return "resend";
+  if (explicit === "smtp" && smtpConfigured()) return "smtp";
   if (env("SENDGRID_API_KEY")) return "sendgrid";
   if (env("RESEND_API_KEY")) return "resend";
+  if (smtpConfigured()) return "smtp";
   return null;
 }
 
@@ -53,6 +68,7 @@ function emailFromAddress() {
     env("EMAIL_FROM") ||
     env("SENDGRID_FROM_EMAIL") ||
     env("RESEND_FROM_EMAIL") ||
+    env("SMTP_FROM_EMAIL") ||
     "Quotex Insurance <no-reply@quotexinsurance.com>"
   );
 }
@@ -168,6 +184,73 @@ async function sendWithResend(args: {
       error: error instanceof Error ? error.message : "Unknown Resend error",
     };
   }
+}
+
+async function sendWithSmtp(args: {
+  to: string;
+  subject: string;
+  html: string;
+  text?: string;
+  from: string;
+  replyTo?: string;
+}): Promise<EmailSendResult> {
+  try {
+    const transporter = nodemailer.createTransport({
+      host: env("SMTP_HOST"),
+      port: smtpPort(),
+      secure: smtpSecure(),
+      auth: {
+        user: env("SMTP_USER"),
+        pass: env("SMTP_PASS"),
+      },
+      requireTLS: smtpRequireTls(),
+    });
+    const result = await transporter.sendMail({
+      from: args.from,
+      to: args.to,
+      replyTo: args.replyTo,
+      subject: args.subject,
+      html: args.html,
+      text: args.text,
+    });
+
+    return {
+      id: result.messageId || `smtp_${Date.now()}`,
+      status: "sent",
+      provider: "smtp",
+      configured: true,
+    };
+  } catch (error) {
+    return {
+      id: `email_failed_${Date.now()}`,
+      status: "failed",
+      provider: "smtp",
+      configured: true,
+      error: error instanceof Error ? error.message : "Unknown SMTP error",
+    };
+  }
+}
+
+function smtpConfigured() {
+  return Boolean(env("SMTP_HOST") && env("SMTP_USER") && env("SMTP_PASS"));
+}
+
+function smtpPort() {
+  const raw = Number.parseInt(env("SMTP_PORT"), 10);
+  if (Number.isFinite(raw) && raw > 0) return raw;
+  return smtpSecure() ? 465 : 587;
+}
+
+function smtpSecure() {
+  const raw = env("SMTP_SECURE").toLowerCase();
+  if (raw === "true" || raw === "1" || raw === "yes") return true;
+  if (raw === "false" || raw === "0" || raw === "no") return false;
+  return env("SMTP_PORT") === "465";
+}
+
+function smtpRequireTls() {
+  const raw = env("SMTP_REQUIRE_TLS").toLowerCase();
+  return raw === "true" || raw === "1" || raw === "yes";
 }
 
 function parseEmailAddress(from: string): { email: string; name?: string } {

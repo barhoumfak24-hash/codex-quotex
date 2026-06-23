@@ -98,6 +98,7 @@ export function validateServerEnv(): EnvValidationResult {
   validateSharedRateLimit(errors, warnings, production);
   validateStripe(errors);
   validateMailboxOAuth(errors, warnings, production);
+  validateEmailDelivery(warnings, production);
   validateSentry(errors, warnings, production);
   validateDisasterRecovery(errors, warnings, production);
   validateNoPublicSecrets(errors);
@@ -225,6 +226,19 @@ function validateMailboxOAuth(errors: string[], warnings: string[], production: 
   } catch {
     errors.push("MAILBOX_OAUTH_PUBLIC_API_ORIGIN must be a valid URL.");
   }
+}
+
+function validateEmailDelivery(warnings: string[], production: boolean) {
+  const hasSendGrid = Boolean(process.env.SENDGRID_API_KEY?.trim());
+  const hasResend = Boolean(process.env.RESEND_API_KEY?.trim());
+  const hasSmtp = Boolean(
+    process.env.SMTP_HOST?.trim() && process.env.SMTP_USER?.trim() && process.env.SMTP_PASS?.trim()
+  );
+  if (hasSendGrid || hasResend || hasSmtp) return;
+
+  const message =
+    "No transactional email provider is configured. Add SENDGRID_API_KEY, RESEND_API_KEY, or SMTP_HOST/SMTP_USER/SMTP_PASS before relying on website forms, invoices, or e-sign emails.";
+  warnings.push(production ? `${message} Contact forms will fail closed until this is configured.` : message);
 }
 
 function validateSentry(errors: string[], warnings: string[], production: boolean) {

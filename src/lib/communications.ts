@@ -8,7 +8,7 @@ export type CommunicationResult = {
     id?: string;
     sid?: string;
     status: "sent" | "opted_out" | "failed";
-    provider: "sendgrid" | "resend" | "twilio" | "unconfigured";
+    provider: "sendgrid" | "resend" | "smtp" | "twilio" | "unconfigured";
     configured: boolean;
     error?: string;
   };

@@ -95,7 +95,7 @@ export interface SoftwareSale {
   stripeCheckoutSessionId?: string;
   invoiceEmailSentAt?: string;
   invoiceEmailStatus?: "sent" | "failed";
-  invoiceEmailProvider?: "sendgrid" | "resend" | "twilio" | "unconfigured";
+  invoiceEmailProvider?: "sendgrid" | "resend" | "smtp" | "twilio" | "unconfigured";
   invoiceEmailError?: string;
   createdAt: string;
   updatedAt: string;

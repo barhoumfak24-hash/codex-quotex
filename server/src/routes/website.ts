@@ -99,6 +99,7 @@ websiteRoutes.post("/prospects", async (req, res) => {
     recipients.map((to) =>
       sendEmail({
         to,
+        from: websiteLeadFrom(lead.department),
         subject,
         html,
         text,
@@ -196,6 +197,24 @@ function websiteLeadNotificationRecipients(department?: "sales" | "support"): st
     process.env.CONTACT_FORM_NOTIFY_TO?.trim() ||
     "contact@quotexinsurance.com,support@quotexinsurance.com";
   return parseEmailList(configured);
+}
+
+function websiteLeadFrom(department?: "sales" | "support") {
+  if (department === "support") {
+    return (
+      process.env.WEBSITE_SUPPORT_EMAIL_FROM?.trim() ||
+      process.env.EMAIL_FROM?.trim() ||
+      "Quotex Insurance Support <support@quotexinsurance.com>"
+    );
+  }
+  if (department === "sales") {
+    return (
+      process.env.WEBSITE_SALES_EMAIL_FROM?.trim() ||
+      process.env.EMAIL_FROM?.trim() ||
+      "Quotex Insurance <contact@quotexinsurance.com>"
+    );
+  }
+  return process.env.EMAIL_FROM?.trim() || "Quotex Insurance <contact@quotexinsurance.com>";
 }
 
 function parseEmailList(configured: string): string[] {
