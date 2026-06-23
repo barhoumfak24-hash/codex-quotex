@@ -1,6 +1,6 @@
 import { type FormEvent, type ReactNode, useState } from "react";
 import { Link } from "react-router-dom";
-import { ArrowLeft, Building2, CheckCircle2, Mail, Phone, Send } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Mail, Phone, Send } from "lucide-react";
 import { QuotexMark } from "@/components/layout/Logo";
 import { QuotexSiteFooter } from "@/components/layout/QuotexSiteFooter";
 import {
@@ -28,11 +28,6 @@ const CONTACT_METHODS: Array<{
     label: "Phone",
     value: QUOTEX_CONTACT_PHONE,
     href: QUOTEX_CONTACT_PHONE_HREF,
-  },
-  {
-    icon: <Building2 className="h-5 w-5" />,
-    label: "Office",
-    value: "Palm Coast, FL",
   },
 ];
 
@@ -172,7 +167,6 @@ export function QuotexContactPage() {
                   <input
                     name="name"
                     className="w-full rounded-md border border-white/10 bg-white/[0.07] px-3 py-2 text-sm text-white placeholder:text-white/28 focus:border-gold-300 focus:outline-none focus:ring-2 focus:ring-gold-300/20"
-                    placeholder="Your name"
                     required
                   />
                 </div>
@@ -184,7 +178,6 @@ export function QuotexContactPage() {
                     type="email"
                     name="email"
                     className="w-full rounded-md border border-white/10 bg-white/[0.07] px-3 py-2 text-sm text-white placeholder:text-white/28 focus:border-gold-300 focus:outline-none focus:ring-2 focus:ring-gold-300/20"
-                    placeholder="you@agency.com"
                     required
                   />
                 </div>
@@ -196,7 +189,6 @@ export function QuotexContactPage() {
                 <input
                   name="agencyName"
                   className="w-full rounded-md border border-white/10 bg-white/[0.07] px-3 py-2 text-sm text-white placeholder:text-white/28 focus:border-gold-300 focus:outline-none focus:ring-2 focus:ring-gold-300/20"
-                  placeholder="Palm Coast Private Client"
                 />
               </div>
               <div>
@@ -206,7 +198,6 @@ export function QuotexContactPage() {
                   <input
                     name="phone"
                     className="w-full rounded-md border border-white/10 bg-white/[0.07] px-3 py-2 text-sm text-white placeholder:text-white/28 focus:border-gold-300 focus:outline-none focus:ring-2 focus:ring-gold-300/20"
-                    placeholder={QUOTEX_CONTACT_PHONE}
                   />
               </div>
               <div>
@@ -216,7 +207,6 @@ export function QuotexContactPage() {
                 <textarea
                   name="message"
                   className="min-h-[140px] w-full resize-none rounded-md border border-white/10 bg-white/[0.07] px-3 py-2 text-sm text-white placeholder:text-white/28 focus:border-gold-300 focus:outline-none focus:ring-2 focus:ring-gold-300/20"
-                  placeholder="Tell us what you want Quotex to handle for your agency."
                   required
                 />
               </div>

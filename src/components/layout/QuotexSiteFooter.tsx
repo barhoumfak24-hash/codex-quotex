@@ -77,7 +77,6 @@ export function QuotexSiteFooter() {
                 {QUOTEX_CONTACT_PHONE}
               </a>
             </li>
-            <li>Palm Coast, FL</li>
           </ul>
         </div>
       </div>
