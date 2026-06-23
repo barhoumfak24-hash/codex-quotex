@@ -10,7 +10,11 @@ type Mode = "sign-in" | "create";
 export function MasterLoginPage() {
   const { createMasterAccount, signInMaster } = useAuth();
   const nav = useNavigate();
-  const [mode, setMode] = useState<Mode>("sign-in");
+  const masterExists = useMemo(
+    () => api.users.list().some((user) => user.role === "master_admin"),
+    []
+  );
+  const [mode, setMode] = useState<Mode>(() => (masterExists ? "sign-in" : "create"));
   const [signInEmail, setSignInEmail] = useState("");
   const [signInPassword, setSignInPassword] = useState("");
   const [createName, setCreateName] = useState("");
@@ -18,11 +22,6 @@ export function MasterLoginPage() {
   const [createPassword, setCreatePassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [message, setMessage] = useState<string | null>(null);
-
-  const masterExists = useMemo(
-    () => api.users.list().some((user) => user.role === "master_admin"),
-    []
-  );
 
   function submitSignIn(event: React.FormEvent) {
     event.preventDefault();

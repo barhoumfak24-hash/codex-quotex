@@ -84,9 +84,18 @@ describe("softwareSales", () => {
     expect(sale.paymentMode).toBe("manual_invoice");
   });
 
-  it("blocks creation of a second master portal user", () => {
-    const seededMaster = api.users.list().find((user) => user.role === "master_admin");
-    expect(seededMaster).toBeTruthy();
+  it("allows the first real master portal user and blocks a second one", () => {
+    expect(api.users.list().some((user) => user.role === "master_admin")).toBe(false);
+
+    const firstMaster = api.users.create({
+      role: "master_admin",
+      tenantId: null,
+      email: "founder@example.com",
+      name: "Founder",
+      generatedPassword: "correct horse battery staple",
+      profileCompleted: true,
+    });
+    expect(firstMaster.role).toBe("master_admin");
 
     expect(() =>
       api.users.create({
@@ -97,8 +106,8 @@ describe("softwareSales", () => {
       })
     ).toThrow("master_admin_limit_reached");
 
-    const updated = api.users.update(seededMaster!.id, { name: "Founder" });
-    expect(updated?.name).toBe("Founder");
+    const updated = api.users.update(firstMaster.id, { name: "Founder Updated" });
+    expect(updated?.name).toBe("Founder Updated");
   });
 
   it("applies website and Quotex app bundle savings without user-volume discounting", () => {

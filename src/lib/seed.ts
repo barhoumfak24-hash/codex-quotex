@@ -210,15 +210,6 @@ export const SEED_MASTER_AGENCY_ACTIVITIES: MasterAgencyActivity[] = [
 
 export const SEED_USERS: User[] = [
   {
-    id: id("user_master"),
-    tenantId: null,
-    role: "master_admin",
-    email: "founder@quotexinsurance.com",
-    name: "Quotex Founder",
-    active: true,
-    createdAt: now(365),
-  },
-  {
     id: id("user_agent_pc"),
     tenantId: "agency_palmcoast",
     role: "agent",

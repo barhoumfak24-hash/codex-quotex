@@ -247,6 +247,20 @@ function withAgencyCodes(data: DbShape): DbShape {
   return data;
 }
 
+function withoutLegacySeededMasterAccount(data: DbShape): DbShape {
+  data.users = (data.users ?? []).filter((user) => {
+    const isLegacyPlaceholder =
+      user.id === "user_master" &&
+      user.role === "master_admin" &&
+      user.tenantId === null &&
+      user.email.toLowerCase() === "founder@quotexinsurance.com" &&
+      user.name === "Quotex Founder" &&
+      !user.generatedPassword;
+    return !isLegacyPlaceholder;
+  });
+  return data;
+}
+
 function withAgencyWebsiteConnections(data: DbShape): DbShape {
   data.agencies = data.agencies.map((agency) => ensureWebsiteConnection(agency));
   return data;
@@ -889,15 +903,17 @@ function withStaffAdministrationDefaults(data: DbShape): DbShape {
 }
 
 function withDefaultMigrations(data: DbShape): DbShape {
-  return withCarrierRunnerMigrations(
-    withMailboxConnectionDefaults(
-      withStaffAdministrationDefaults(
-        withBillingDefaults(
-          withAcordTemplateDefaults(
-            withCategoryLibraryDefaults(
-              withCarrierLibraryDefaults(
-                withCarrierDownloadRunnerDefaults(
-                  withAgencyContractDefaults(withAgencyWebsiteConnections(withAgencyCodes(data)))
+  return withoutLegacySeededMasterAccount(
+    withCarrierRunnerMigrations(
+      withMailboxConnectionDefaults(
+        withStaffAdministrationDefaults(
+          withBillingDefaults(
+            withAcordTemplateDefaults(
+              withCategoryLibraryDefaults(
+                withCarrierLibraryDefaults(
+                  withCarrierDownloadRunnerDefaults(
+                    withAgencyContractDefaults(withAgencyWebsiteConnections(withAgencyCodes(data)))
+                  )
                 )
               )
             )

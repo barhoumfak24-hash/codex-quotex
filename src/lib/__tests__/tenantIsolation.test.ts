@@ -32,7 +32,14 @@ describe("browser tenant isolation guard", () => {
 
   it("does not lock the master admin tenant browser", async () => {
     const { api } = await import("../api");
-    const master = api.users.list().find((user) => user.role === "master_admin")!;
+    const master = api.users.create({
+      role: "master_admin",
+      tenantId: null,
+      email: "founder@example.com",
+      name: "Founder",
+      generatedPassword: "correct horse battery staple",
+      profileCompleted: true,
+    });
 
     window.localStorage.setItem(AUTH_STORAGE_KEY, master.id);
 
