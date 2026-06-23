@@ -1,4 +1,10 @@
 import { Link } from "react-router-dom";
+import {
+  QUOTEX_CONTACT_EMAIL,
+  QUOTEX_CONTACT_EMAIL_HREF,
+  QUOTEX_CONTACT_PHONE,
+  QUOTEX_CONTACT_PHONE_HREF,
+} from "@/lib/quotexContact";
 import { QuotexMark } from "./Logo";
 
 export function QuotexSiteFooter() {
@@ -19,8 +25,7 @@ export function QuotexSiteFooter() {
             </span>
           </Link>
           <p className="mt-4 max-w-md text-sm leading-relaxed text-white/55">
-            AI-powered agency software for private-client insurance teams. Demo content is
-            placeholder only until final Quotex contact details are added.
+            AI-powered agency software for private-client insurance teams.
           </p>
         </div>
 
@@ -44,16 +49,34 @@ export function QuotexSiteFooter() {
                 Agency sign in
               </Link>
             </li>
+            <li>
+              <Link className="hover:text-white" to="/privacy">
+                Privacy Policy
+              </Link>
+            </li>
+            <li>
+              <Link className="hover:text-white" to="/terms">
+                Terms
+              </Link>
+            </li>
           </ul>
         </div>
 
         <div>
           <div className="text-xs font-semibold uppercase tracking-[0.18em] text-white/45">
-            Demo contact
+            Contact
           </div>
           <ul className="mt-3 space-y-2 text-white/70">
-            <li>hello@quotexinsurance.example</li>
-            <li>+1 (555) 300-0300</li>
+            <li>
+              <a className="hover:text-white" href={QUOTEX_CONTACT_EMAIL_HREF}>
+                {QUOTEX_CONTACT_EMAIL}
+              </a>
+            </li>
+            <li>
+              <a className="hover:text-white" href={QUOTEX_CONTACT_PHONE_HREF}>
+                {QUOTEX_CONTACT_PHONE}
+              </a>
+            </li>
             <li>Palm Coast, FL</li>
           </ul>
         </div>
@@ -61,7 +84,7 @@ export function QuotexSiteFooter() {
 
       <div className="border-t border-white/10">
         <div className="mx-auto flex max-w-7xl flex-col gap-2 px-5 py-4 text-xs text-white/35 sm:flex-row sm:items-center sm:justify-between md:px-8">
-          <span>Copyright {new Date().getFullYear()} Quotex Insurance. Demo site.</span>
+          <span>Copyright {new Date().getFullYear()} Quotex Insurance.</span>
           <Link
             to="/master/login"
             className="w-fit text-[10px] uppercase tracking-[0.22em] text-white/20 transition hover:text-white/45"

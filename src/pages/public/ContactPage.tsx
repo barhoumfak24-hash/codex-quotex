@@ -1,25 +1,23 @@
 import { type FormEvent, useState } from "react";
 import { Link } from "react-router-dom";
 import { ArrowLeft, Mail, MapPin, Phone, Send } from "lucide-react";
-import { Disclaimer } from "@/components/ui/Disclaimer";
 import { api } from "@/lib/api";
 import { getAppSurface } from "@/lib/appSurface";
-import { useDemoNotice } from "@/lib/demo";
 import { toTelHref } from "@/lib/phone";
+import { QUOTEX_CONTACT_EMAIL, QUOTEX_CONTACT_PHONE } from "@/lib/quotexContact";
 import { useTenant } from "@/lib/tenant";
 import { useCustomer } from "@/lib/useCustomer";
 import { submitWebsiteLead } from "@/lib/websiteApi";
 
 export function ContactPage() {
   const [sent, setSent] = useState(false);
-  const showDemoNotice = useDemoNotice();
   const { agency } = useTenant();
   const customer = useCustomer();
   const isAppSurface = getAppSurface() === "agencyApp";
   const assignedAgent = customer?.assignedAgentId
     ? api.users.get(customer.assignedAgentId)
     : undefined;
-  const agencyPhone = agency?.phone ?? "+1 (555) 010-0000";
+  const agencyPhone = agency?.phone ?? QUOTEX_CONTACT_PHONE;
   const agentPhone = assignedAgent?.phone;
   const agentContactPhone = agentPhone ?? agencyPhone;
   const agentContactHref = toTelHref(agentContactPhone);
@@ -28,25 +26,20 @@ export function ContactPage() {
   const agentName = assignedAgent?.name ?? "Your assigned agent";
   const agentEmail = assignedAgent?.businessEmail ?? assignedAgent?.email ?? agency?.contactEmail;
   const agentEmailHref = agentEmail ? `mailto:${agentEmail}` : undefined;
-  const contactEmail = agency?.contactEmail ?? "hello@example-agency.example";
-  const contactAddress = agency?.address ?? "100 Demo Lane, Sample City, ST 00000";
+  const contactEmail = agency?.contactEmail ?? QUOTEX_CONTACT_EMAIL;
+  const contactAddress = agency?.address ?? "Agency address on file";
   const emailHref = `mailto:${contactEmail}`;
   const mapsHref = `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(contactAddress)}`;
 
   function handleContactSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     const data = new FormData(e.currentTarget);
-    void submitWebsiteLead({
+    submitWebsiteLead({
       agencyId: agency?.id,
       source: "contact",
       name: String(data.get("name") ?? ""),
       email: String(data.get("email") ?? ""),
       message: String(data.get("message") ?? ""),
-    });
-    showDemoNotice({
-      feature: "Contact form",
-      title: "Contact form delivery is disabled in the demo",
-      body: "In production this posts to /api/website/prospects, creates a tenant-scoped prospect, and routes the activity into the agency workspace.",
     });
     setSent(true);
   }
@@ -239,17 +232,11 @@ export function ContactPage() {
             <div className="text-center py-8">
               <div className="font-display text-xl text-ink-900">Thank you - message recorded</div>
               <p className="mt-2 text-sm text-ink-600">
-                Demo only. No message was actually sent.
+                Your message has been routed to the agency workspace.
               </p>
             </div>
           ) : (
             <>
-              <div className="mb-4">
-                <Disclaimer>
-                  Demo only - please do not enter real personal information. Submissions are not
-                  delivered unless the website API is configured.
-                </Disclaimer>
-              </div>
               <form
                 className="space-y-3"
                 onSubmit={handleContactSubmit}
@@ -257,11 +244,11 @@ export function ContactPage() {
                 <div className="grid sm:grid-cols-2 gap-3">
                   <div>
                     <label className="label">Name</label>
-                    <input name="name" className="input" placeholder="Demo Name" required />
+                    <input name="name" className="input" placeholder="Your name" required />
                   </div>
                   <div>
                     <label className="label">Email</label>
-                    <input name="email" type="email" className="input" placeholder="demo@example.com" required />
+                    <input name="email" type="email" className="input" placeholder="you@example.com" required />
                   </div>
                 </div>
                 <div>

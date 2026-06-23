@@ -1,22 +1,16 @@
-import { Link, Outlet, useLocation, useSearchParams } from "react-router-dom";
+import { Link, Outlet, useLocation } from "react-router-dom";
 import { Logo } from "./Logo";
-import { DemoBanner, DemoModeBadge } from "@/components/ui/DemoBanner";
 import { buildAgencyWebsiteProfile } from "@/lib/agencyWebsite";
 import { getAppSurface, toSurfaceRoute } from "@/lib/appSurface";
+import { QUOTEX_CONTACT_EMAIL, QUOTEX_CONTACT_PHONE } from "@/lib/quotexContact";
 import { useTenant } from "@/lib/tenant";
 
 export function PublicLayout() {
   const { pathname } = useLocation();
-  const [searchParams] = useSearchParams();
   const { agency } = useTenant();
   const profile = agency ? buildAgencyWebsiteProfile(agency) : null;
   const brandName = profile?.agencyName ?? "Quotex Insurance";
   const isAppSurface = getAppSurface() === "agencyApp";
-  const needsDemoBackSpace =
-    !isAppSurface &&
-    (searchParams.get("demoBack") === "1" ||
-      pathname === "/agency" ||
-      pathname.startsWith("/agency/"));
   const navLinkClass = isAppSurface
     ? "shrink-0 rounded-full border border-ink-100 bg-white px-3 py-2 text-xs font-semibold text-ink-700 hover:text-ink-900"
     : "px-3 py-2 text-ink-700 hover:text-ink-900";
@@ -27,10 +21,9 @@ export function PublicLayout() {
       className={
         isAppSurface
           ? "flex h-full min-h-full flex-col"
-          : `min-h-screen flex flex-col${needsDemoBackSpace ? " pt-16 md:pt-20" : ""}`
+          : "min-h-screen flex flex-col"
       }
     >
-      {!isAppSurface && <DemoBanner />}
       {!isAppSurface && <header className="bg-white border-b border-ink-100">
         <div
           className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between gap-4"
@@ -41,7 +34,6 @@ export function PublicLayout() {
               brandColor={profile?.brandColor}
               logoUrl={profile?.logoUrl}
             />
-            {!isAppSurface && <DemoModeBadge />}
           </div>
           {!isAppSurface && (
             <nav className="flex items-center gap-0.5 text-sm flex-wrap justify-end">
@@ -90,6 +82,8 @@ export function PublicLayout() {
               <li><Link className="hover:text-ink-900" to={route("/contact")}>Contact</Link></li>
               <li><Link className="hover:text-ink-900" to={route("/login")}>Sign in</Link></li>
               <li><Link className="hover:text-ink-900" to={route("/quote/start")}>Get a Quote</Link></li>
+              <li><Link className="hover:text-ink-900" to={route("/privacy")}>Privacy Policy</Link></li>
+              <li><Link className="hover:text-ink-900" to={route("/terms")}>Terms</Link></li>
             </ul>
           </div>
           <div>
@@ -97,8 +91,8 @@ export function PublicLayout() {
               Client support
             </div>
             <ul className="space-y-1.5 text-ink-700">
-              <li>{profile?.contactEmail ?? "concierge@demo.example"}</li>
-              <li>{profile?.phone ?? "+1 (555) 902-0431"}</li>
+              <li>{profile?.contactEmail ?? QUOTEX_CONTACT_EMAIL}</li>
+              <li>{profile?.phone ?? QUOTEX_CONTACT_PHONE}</li>
               <li><Link className="hover:text-ink-900" to={route("/customer")}>Client dashboard</Link></li>
             </ul>
             <p className="mt-3 text-[11px] text-ink-400 leading-relaxed">
