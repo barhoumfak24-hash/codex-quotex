@@ -3,6 +3,7 @@ import type { NextFunction, Request, Response } from "express";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { isProduction } from "../env.js";
+import { sendEmail } from "../services/email.js";
 
 export const websiteRoutes = Router();
 
@@ -79,7 +80,7 @@ websiteRoutes.get("/config/:agencyId", (req, res) => {
   });
 });
 
-websiteRoutes.post("/prospects", requireWebsiteSignature, (req, res) => {
+websiteRoutes.post("/prospects", async (req, res) => {
   const parsed = websiteProspectSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({
@@ -88,10 +89,42 @@ websiteRoutes.post("/prospects", requireWebsiteSignature, (req, res) => {
     });
   }
 
-  res.status(202).json({
+  const lead = parsed.data;
+  const recipients = websiteLeadNotificationRecipients();
+  const subject = websiteLeadSubject(lead);
+  const html = websiteLeadHtml(lead);
+  const text = websiteLeadText(lead);
+  const results = await Promise.all(
+    recipients.map((to) =>
+      sendEmail({
+        to,
+        subject,
+        html,
+        text,
+        replyTo: lead.email,
+        categories: ["website", "lead", lead.source],
+      })
+    )
+  );
+  const failed = results.filter((result) => result.status === "failed");
+
+  if (failed.length > 0) {
+    return res.status(502).json({
+      accepted: false,
+      error: "website_lead_email_failed",
+      recipients,
+      results,
+    });
+  }
+
+  return res.status(202).json({
     accepted: true,
     contractVersion: 1,
-    next: "Production resolves the connection key, writes the lead into Prospect, Communication, StatusEvent, and AuditLog, then notifies the agency workspace.",
+    notification: {
+      recipients,
+      provider: results[0]?.provider ?? "unconfigured",
+      ids: results.map((result) => result.id),
+    },
   });
 });
 
@@ -142,4 +175,91 @@ function constantTimeEqualHex(left: string, right: string): boolean {
   const leftBuffer = Buffer.from(left, "hex");
   const rightBuffer = Buffer.from(right, "hex");
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function websiteLeadNotificationRecipients(): string[] {
+  const configured =
+    process.env.WEBSITE_LEAD_NOTIFY_TO?.trim() ||
+    process.env.CONTACT_FORM_NOTIFY_TO?.trim() ||
+    "contact@quotexinsurance.com,support@quotexinsurance.com";
+  return Array.from(
+    new Set(
+      configured
+        .split(/[,\n;]/)
+        .map((item) => item.trim())
+        .filter(Boolean)
+    )
+  );
+}
+
+function websiteLeadSubject(lead: z.infer<typeof websiteProspectSchema>) {
+  const sourceLabel =
+    lead.source === "quote_start"
+      ? "Quote request"
+      : lead.source === "customer_signup"
+        ? "Customer signup"
+        : "Website contact";
+  const name = lead.name?.trim() || "New prospect";
+  return `${sourceLabel}: ${name}`;
+}
+
+function websiteLeadHtml(lead: z.infer<typeof websiteProspectSchema>) {
+  const rows = [
+    ["Source", lead.source],
+    ["Name", lead.name],
+    ["Email", lead.email],
+    ["Phone", lead.phone],
+    ["Agency ID", lead.agencyId],
+    ["Connection ID", lead.connectionId],
+  ]
+    .filter(([, value]) => Boolean(value))
+    .map(
+      ([label, value]) => `
+        <tr>
+          <td style="padding:8px 12px;border-bottom:1px solid #eee;color:#6b6256;font-size:12px;text-transform:uppercase;letter-spacing:.08em;">${escapeHtml(label ?? "")}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #eee;color:#111;">${escapeHtml(value ?? "")}</td>
+        </tr>`
+    )
+    .join("");
+
+  return `
+    <div style="font-family:Arial,sans-serif;line-height:1.5;color:#111;background:#f8f6f1;padding:24px;">
+      <div style="max-width:640px;margin:0 auto;background:#fff;border:1px solid #e2ded6;border-radius:10px;overflow:hidden;">
+        <div style="padding:20px 24px;border-bottom:1px solid #eee;">
+          <div style="font-size:12px;text-transform:uppercase;letter-spacing:.14em;color:#8a6f2b;font-weight:700;">Quotex Insurance</div>
+          <h1 style="margin:8px 0 0;font-size:22px;line-height:1.25;">New website inquiry</h1>
+        </div>
+        <table style="width:100%;border-collapse:collapse;">${rows}</table>
+        ${
+          lead.message
+            ? `<div style="padding:20px 24px;"><div style="font-size:12px;text-transform:uppercase;letter-spacing:.12em;color:#6b6256;font-weight:700;">Message</div><div style="white-space:pre-wrap;margin-top:8px;">${escapeHtml(lead.message)}</div></div>`
+            : ""
+        }
+      </div>
+    </div>`;
+}
+
+function websiteLeadText(lead: z.infer<typeof websiteProspectSchema>) {
+  return [
+    "New Quotex website inquiry",
+    "",
+    `Source: ${lead.source}`,
+    lead.name ? `Name: ${lead.name}` : "",
+    lead.email ? `Email: ${lead.email}` : "",
+    lead.phone ? `Phone: ${lead.phone}` : "",
+    lead.agencyId ? `Agency ID: ${lead.agencyId}` : "",
+    lead.connectionId ? `Connection ID: ${lead.connectionId}` : "",
+    lead.message ? `\nMessage:\n${lead.message}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }

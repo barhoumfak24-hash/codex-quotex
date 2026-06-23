@@ -41,11 +41,15 @@ const CONTACT_METHODS: Array<{
 
 export function QuotexContactPage() {
   const [submitted, setSubmitted] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
 
   async function submitContact(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setSubmitting(true);
+    setError("");
     const form = new FormData(event.currentTarget);
-    await submitWebsiteLead({
+    const delivered = await submitWebsiteLead({
       source: "contact",
       name: String(form.get("name") ?? ""),
       email: String(form.get("email") ?? ""),
@@ -57,6 +61,13 @@ export function QuotexContactPage() {
         .filter(Boolean)
         .join("\n\n"),
     });
+    setSubmitting(false);
+    if (!delivered) {
+      setError(
+        `The message could not be delivered automatically. Please email ${QUOTEX_CONTACT_EMAIL} or ${QUOTEX_SUPPORT_EMAIL} directly.`
+      );
+      return;
+    }
     setSubmitted(true);
   }
 
@@ -152,7 +163,10 @@ export function QuotexContactPage() {
                 </p>
                 <button
                   type="button"
-                  onClick={() => setSubmitted(false)}
+                  onClick={() => {
+                    setSubmitted(false);
+                    setError("");
+                  }}
                   className="btn border-white/15 bg-white text-ink-900 hover:bg-white/90 mt-6"
                 >
                   Send another
@@ -218,9 +232,14 @@ export function QuotexContactPage() {
                   required
                 />
               </div>
-              <button type="submit" className="btn-gold w-full py-3 text-base">
+              {error && (
+                <div className="rounded-md border border-red-400/35 bg-red-500/10 px-3 py-2 text-sm leading-relaxed text-red-100">
+                  {error}
+                </div>
+              )}
+              <button type="submit" className="btn-gold w-full py-3 text-base" disabled={submitting}>
                 <Send className="h-5 w-5" />
-                Send message
+                {submitting ? "Sending..." : "Send message"}
               </button>
             </form>
           )}
