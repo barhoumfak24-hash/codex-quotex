@@ -476,6 +476,14 @@ type ServerSessionUser = {
   name: string;
 };
 
+type AuthRouteJson = {
+  ok?: boolean;
+  token?: string;
+  error?: string;
+  reason?: string;
+  user?: Partial<ServerSessionUser>;
+};
+
 function localStaffWithMatchingPassword(identifier: string, password: string): User | null {
   const u = localStaffByIdentifier(identifier);
   if (!u || !isStaffRole(u.role)) return null;
@@ -550,11 +558,9 @@ async function establishServerStaffSession(identifier: string, password: string)
         headers: { "content-type": "application/json" },
         body: payload,
       });
-      if (response.status === 404 || response.status === 405) continue;
+      const json = await readAuthRouteJson(response);
+      if (isMissingAuthRoute(response, json)) continue;
       sawReachableAuthRoute = true;
-      const json = (await response.json().catch(() => null)) as
-        | { ok?: boolean; token?: string; error?: string; reason?: string; user?: Partial<ServerSessionUser> }
-        | null;
       if (response.ok && json?.ok && typeof json.token === "string" && json.token.trim() && isServerStaffUser(json.user)) {
         storeServerSessionToken(json.token);
         return { ok: true, user: json.user };
@@ -604,11 +610,9 @@ async function establishServerStaffRegistration(input: {
         headers: { "content-type": "application/json" },
         body: payload,
       });
-      if (response.status === 404 || response.status === 405) continue;
+      const json = await readAuthRouteJson(response);
+      if (isMissingAuthRoute(response, json)) continue;
       sawReachableAuthRoute = true;
-      const json = (await response.json().catch(() => null)) as
-        | { ok?: boolean; token?: string; error?: string; reason?: string; user?: Partial<ServerSessionUser> }
-        | null;
       if (response.ok && json?.ok && typeof json.token === "string" && json.token.trim() && isServerStaffUser(json.user)) {
         storeServerSessionToken(json.token);
         return { ok: true, user: json.user };
@@ -678,11 +682,9 @@ async function establishServerStaffLocalPromotion(localUser: User, password: str
         headers,
         body: payload,
       });
-      if (response.status === 404 || response.status === 405) continue;
+      const json = await readAuthRouteJson(response);
+      if (isMissingAuthRoute(response, json)) continue;
       sawReachableAuthRoute = true;
-      const json = (await response.json().catch(() => null)) as
-        | { ok?: boolean; token?: string; error?: string; reason?: string; user?: Partial<ServerSessionUser> }
-        | null;
       if (response.ok && json?.ok && typeof json.token === "string" && json.token.trim() && isServerStaffUser(json.user)) {
         storeServerSessionToken(json.token);
         return { ok: true, user: json.user };
@@ -819,6 +821,18 @@ function uniqueAuthUrls(values: string[]): string[] {
     seen.add(normalized);
     return true;
   });
+}
+
+async function readAuthRouteJson(response: Response): Promise<AuthRouteJson | null> {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().includes("application/json")) return null;
+  return (await response.json().catch(() => null)) as AuthRouteJson | null;
+}
+
+function isMissingAuthRoute(response: Response, json: AuthRouteJson | null): boolean {
+  if (response.status === 405) return !json?.error && !json?.reason;
+  if (response.status !== 404) return false;
+  return !json?.error && !json?.reason;
 }
 
 export function useAuth() {

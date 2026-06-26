@@ -35,12 +35,18 @@ export function EmployeeLoginPage() {
     : [];
 
   function registrationError(reason: string): string {
+    if (reason === "missing_fields") return "Please fill in every required field.";
     if (reason === "agency_not_found") return "Agency code wasn't recognized.";
     if (reason === "inactive_agency") return "That agency is inactive. Contact the master admin.";
     if (reason === "duplicate_email") return "That email already has an account.";
     if (reason === "slot_limit") return "This agency has used all purchased user slots.";
     if (reason === "weak_password") return "Password must be at least 8 characters.";
-    return "Please fill in every required field.";
+    if (reason === "invalid_email") return "Enter a valid business email address.";
+    if (reason === "database_unavailable") return "Account creation is not connected to the production database yet.";
+    if (reason === "auth_route_unavailable") return "Account creation is temporarily unavailable. Refresh and try again.";
+    if (reason === "server_session_invalid") return "The account was created, but the sign-in session was invalid. Please sign in.";
+    if (reason === "access_blocked") return "This account is blocked from signing in. Contact support.";
+    return "Account creation could not be completed. Please try again.";
   }
 
   return (
@@ -97,6 +103,10 @@ export function EmployeeLoginPage() {
               }
               const password = String(data.get("password"));
               const confirmPassword = String(data.get("confirmPassword"));
+              if (password.length < 8) {
+                setError("Password must be at least 8 characters.");
+                return;
+              }
               if (password !== confirmPassword) {
                 setError("Passwords don't match.");
                 return;
@@ -108,7 +118,7 @@ export function EmployeeLoginPage() {
                 firstName: String(data.get("firstName")),
                 lastName: String(data.get("lastName")),
                 phone: String(data.get("phone")),
-                businessEmail: String(data.get("businessEmail")),
+                businessEmail: String(data.get("businessEmail")).trim().toLowerCase(),
                 password,
               });
               if (!result.ok) {
@@ -227,6 +237,7 @@ export function EmployeeLoginPage() {
                   name="password"
                   type="password"
                   required
+                  minLength={8}
                   autoComplete="new-password"
                   placeholder="At least 8 characters"
                 />
@@ -238,6 +249,7 @@ export function EmployeeLoginPage() {
                   name="confirmPassword"
                   type="password"
                   required
+                  minLength={8}
                   autoComplete="new-password"
                 />
               </div>

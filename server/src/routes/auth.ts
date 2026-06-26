@@ -222,7 +222,10 @@ authRoutes.post("/employee/register", async (req, res) => {
     });
   }
   const parsed = employeeRegisterSchema.safeParse(req.body ?? {});
-  if (!parsed.success) return res.status(400).json({ ok: false, error: "missing_fields", details: parsed.error.flatten() });
+  if (!parsed.success) {
+    const error = employeeRegisterErrorCode(req.body, parsed.error);
+    return res.status(400).json({ ok: false, error, details: parsed.error.flatten() });
+  }
 
   const result = await createServerStaffAccount(parsed.data);
   if (!result.ok) {
@@ -274,7 +277,8 @@ authRoutes.post("/employee/promote-local", async (req, res) => {
   }
   const parsed = employeeLocalPromotionSchema.safeParse(req.body ?? {});
   if (!parsed.success) {
-    return res.status(400).json({ ok: false, error: "missing_fields", details: parsed.error.flatten() });
+    const error = localPromotionErrorCode(req.body, parsed.error);
+    return res.status(400).json({ ok: false, error, details: parsed.error.flatten() });
   }
 
   const result = await promoteLocalStaffAccount(parsed.data);
@@ -447,12 +451,40 @@ for (const endpoint of endpoints) {
 type SnapshotRecord = Record<string, unknown>;
 type StaffRegisterInput = z.infer<typeof employeeRegisterSchema>;
 type LocalStaffPromotionInput = z.infer<typeof employeeLocalPromotionSchema>;
+type StaffInputErrorCode = "missing_fields" | "invalid_email" | "weak_password";
 type StaffAccountResult =
   | { ok: true; user: Awaited<ReturnType<typeof prisma.user.findFirst>> & { agency: NonNullable<Awaited<ReturnType<typeof prisma.agency.findFirst>>> } }
   | { ok: false; error: "agency_not_found" | "inactive_agency" | "duplicate_email" | "slot_limit" | "weak_password" | "missing_fields" | "invalid_credentials" };
 
 const SNAPSHOT_STAFF_ROLES = new Set(["agent", "manager", "csr"]);
 const ACTIVE_STAFF_ROLES = ["agent", "manager", "csr", "agency_owner", "agency_admin"] as const;
+
+function employeeRegisterErrorCode(input: unknown, error: z.ZodError<z.infer<typeof employeeRegisterSchema>>): StaffInputErrorCode {
+  const body = isRecord(input) ? input : {};
+  if (
+    !fieldString(body.agencyCode) ||
+    !fieldString(body.role) ||
+    !fieldString(body.firstName) ||
+    !fieldString(body.lastName) ||
+    !fieldString(body.phone) ||
+    !fieldString(body.businessEmail) ||
+    !fieldString(body.password)
+  ) {
+    return "missing_fields";
+  }
+  const fields = error.flatten().fieldErrors;
+  if (fields.businessEmail?.length) return "invalid_email";
+  if (fields.password?.length) return "weak_password";
+  return "missing_fields";
+}
+
+function localPromotionErrorCode(input: unknown, error: z.ZodError<z.infer<typeof employeeLocalPromotionSchema>>): StaffInputErrorCode {
+  const body = isRecord(input) ? input : {};
+  if (!fieldString(body.password)) return "missing_fields";
+  const fields = error.flatten().fieldErrors;
+  if (fields.password?.length) return "weak_password";
+  return "missing_fields";
+}
 
 async function createServerStaffAccount(input: StaffRegisterInput): Promise<StaffAccountResult> {
   const firstName = fieldString(input.firstName);
