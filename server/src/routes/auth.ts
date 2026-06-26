@@ -547,7 +547,7 @@ async function promoteLocalStaffAccount(input: LocalStaffPromotionInput): Promis
   }
   if (input.agency.active === false) return { ok: false, error: "inactive_agency" };
 
-  const agency = await upsertAgencyFromLocalPromotion(input.agency, normalizedEmail);
+  const agency = await resolveExistingAgencyForLocalPromotion(input.agency, input.user.tenantId, normalizedEmail);
   if (!agency?.active) return { ok: false, error: "inactive_agency" };
 
   const branchId = await upsertBranchFromLocalPromotion(input.branch, agency.id, input.user.branchId ?? undefined);
@@ -739,15 +739,29 @@ async function upsertAgencyFromSnapshot(snapshotAgency: SnapshotRecord, agencyCo
   });
 }
 
-async function upsertAgencyFromLocalPromotion(
+async function resolveExistingAgencyForLocalPromotion(
   input: LocalStaffPromotionInput["agency"],
+  tenantId: string,
   fallbackEmail: string
 ) {
   const agencyCode = normalizeAgencyCode(
     fieldString(input.agencyCode) || decryptSnapshotAgencyCode(fieldString(input.agencyCodeEncrypted)) || ""
   );
   const codeHash = agencyCode ? agencyCodeHashForStorage(agencyCode) : null;
-  const id = fieldString(input.id) || `agency_${randomUUID()}`;
+  const id = fieldString(input.id);
+  if (!id || id !== fieldString(tenantId)) return null;
+  const hashLookups = codeHash ? [codeHash, codeHash.replace(/^hmac\$sha256\$/, "")] : [];
+  const existing = await prisma.agency.findFirst({
+    where: {
+      OR: [
+        { id },
+        ...hashLookups.map((agencyCodeHash) => ({ agencyCodeHash })),
+      ],
+    },
+  });
+  if (!existing || existing.id !== id) return null;
+  if (!existing.active || input.active === false) return existing;
+
   const name = fieldString(input.name) || "Agency";
   const base = {
     name,
@@ -757,9 +771,6 @@ async function upsertAgencyFromLocalPromotion(
     website: nullableFieldString(input.website),
     websiteSlug: nullableFieldString(input.websiteSlug),
     websiteEnabled: booleanField(input.websiteEnabled, false),
-    tier: fieldString(input.tier) || "minimum",
-    active: input.active !== false,
-    allowedUsers: boundedInteger(input.allowedUsers, 1, 1000, 1),
   };
   const codeFields = codeHash
     ? {
@@ -767,17 +778,11 @@ async function upsertAgencyFromLocalPromotion(
         agencyCodePreview: agencyCode.slice(-4),
       }
     : {};
-  return prisma.agency.upsert({
+  return prisma.agency.update({
     where: { id },
-    update: {
+    data: {
       ...base,
       ...codeFields,
-    },
-    create: {
-      id,
-      ...base,
-      agencyCodeHash: codeHash,
-      agencyCodePreview: agencyCode ? agencyCode.slice(-4) : nullableFieldString(input.agencyCodePreview),
     },
   });
 }
