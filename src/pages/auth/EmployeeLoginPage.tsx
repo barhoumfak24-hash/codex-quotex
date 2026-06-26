@@ -96,11 +96,6 @@ export function EmployeeLoginPage() {
           try {
             if (mode === "create") {
               const code = String(data.get("agencyCode")).trim();
-              const agency = api.agencies.byCode(code);
-              if (!agency) {
-                setError("Agency code wasn't recognized. Check the code from your master admin.");
-                return;
-              }
               const password = String(data.get("password"));
               const confirmPassword = String(data.get("confirmPassword"));
               if (password.length < 8) {
