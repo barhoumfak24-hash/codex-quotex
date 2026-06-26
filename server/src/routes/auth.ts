@@ -48,6 +48,7 @@ const endpoints = [
   { method: "POST", path: "/email/verify", description: "Verify magic link token, create session" },
   { method: "POST", path: "/employee/login", description: "Agency user login (email+password+MFA)" },
   { method: "POST", path: "/employee/register", description: "Create a hashed agency staff account" },
+  { method: "POST", path: "/employee/promote-local", description: "Migrate a verified legacy staff account into hashed server auth" },
   { method: "POST", path: "/master/login", description: "Master admin login (SSO + hardware MFA required)" },
   { method: "POST", path: "/manager-2fa/request", description: "Email a manager step-up verification code" },
   { method: "POST", path: "/manager-2fa/verify", description: "Verify a manager step-up code" },
@@ -82,6 +83,53 @@ const employeeRegisterSchema = z.object({
   phone: z.string().min(1).max(80),
   businessEmail: z.string().email().max(254),
   password: z.string().min(8).max(500),
+});
+
+const employeeLocalPromotionSchema = z.object({
+  password: z.string().min(8).max(500),
+  user: z.object({
+    id: z.string().min(1).max(120).optional(),
+    tenantId: z.string().min(1).max(120),
+    branchId: z.string().max(120).optional().nullable(),
+    role: z.enum(["agent", "manager", "csr"]),
+    email: z.string().email().max(254),
+    businessEmail: z.string().email().max(254).optional(),
+    firstName: z.string().max(120).optional(),
+    lastName: z.string().max(120).optional(),
+    name: z.string().min(1).max(240),
+    phone: z.string().max(80).optional(),
+    active: z.boolean().optional(),
+    staffAccessStatus: z.enum(["active", "banned", "deleted", "inactive"]).optional(),
+  }),
+  agency: z.object({
+    id: z.string().min(1).max(120),
+    name: z.string().min(1).max(240),
+    contactEmail: z.string().email().max(254).optional(),
+    phone: z.string().max(80).optional(),
+    address: z.string().max(500).optional(),
+    website: z.string().max(500).optional(),
+    websiteSlug: z.string().max(120).optional(),
+    websiteEnabled: z.boolean().optional(),
+    tier: z.string().max(80).optional(),
+    active: z.boolean().optional(),
+    allowedUsers: z.number().int().min(1).max(1000).optional(),
+    agencyCode: z.string().max(80).optional(),
+    agencyCodeEncrypted: z.string().max(500).optional(),
+    agencyCodePreview: z.string().max(40).optional(),
+  }),
+  branch: z
+    .object({
+      id: z.string().min(1).max(120),
+      agencyId: z.string().min(1).max(120),
+      name: z.string().min(1).max(120),
+      address: z.string().max(500).optional(),
+      city: z.string().max(120).optional(),
+      state: z.string().max(40).optional(),
+      zip: z.string().max(40).optional(),
+      phone: z.string().max(80).optional(),
+    })
+    .optional()
+    .nullable(),
 });
 
 authRoutes.get("/", (_req, res) => res.json({ resource: "auth", endpoints }));
@@ -174,6 +222,58 @@ authRoutes.post("/employee/register", async (req, res) => {
       result.error === "weak_password" ? 400 :
       result.error === "missing_fields" ? 400 :
       404;
+    return res.status(status).json({ ok: false, error: result.error });
+  }
+
+  const { user } = result;
+  const token = issueSessionJwt({
+    userId: user.id,
+    role: user.role,
+    tenantId: user.tenantId,
+    branchId: user.branchId,
+    permissions: permissionsFromJson(user.permissions),
+  });
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { lastLoginAt: new Date() },
+  }).catch(() => null);
+
+  return res.json({
+    ok: true,
+    token,
+    expiresIn: SESSION_TTL,
+    user: {
+      id: user.id,
+      tenantId: user.tenantId,
+      branchId: user.branchId,
+      role: user.role,
+      email: user.email,
+      name: user.name,
+    },
+  });
+});
+
+authRoutes.post("/employee/promote-local", async (req, res) => {
+  if (!databaseConfigured()) {
+    return res.status(503).json({
+      ok: false,
+      error: "database_unavailable",
+      message: "Server authentication is not connected to the production database.",
+    });
+  }
+  const parsed = employeeLocalPromotionSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return res.status(400).json({ ok: false, error: "missing_fields", details: parsed.error.flatten() });
+  }
+
+  const result = await promoteLocalStaffAccount(parsed.data);
+  if (!result.ok) {
+    const status =
+      result.error === "inactive_agency" ? 403 :
+      result.error === "duplicate_email" ? 409 :
+      result.error === "weak_password" ? 400 :
+      result.error === "missing_fields" ? 400 :
+      401;
     return res.status(status).json({ ok: false, error: result.error });
   }
 
@@ -335,9 +435,10 @@ for (const endpoint of endpoints) {
 
 type SnapshotRecord = Record<string, unknown>;
 type StaffRegisterInput = z.infer<typeof employeeRegisterSchema>;
+type LocalStaffPromotionInput = z.infer<typeof employeeLocalPromotionSchema>;
 type StaffAccountResult =
   | { ok: true; user: Awaited<ReturnType<typeof prisma.user.findFirst>> & { agency: NonNullable<Awaited<ReturnType<typeof prisma.agency.findFirst>>> } }
-  | { ok: false; error: "agency_not_found" | "inactive_agency" | "duplicate_email" | "slot_limit" | "weak_password" | "missing_fields" };
+  | { ok: false; error: "agency_not_found" | "inactive_agency" | "duplicate_email" | "slot_limit" | "weak_password" | "missing_fields" | "invalid_credentials" };
 
 const SNAPSHOT_STAFF_ROLES = new Set(["agent", "manager", "csr"]);
 const ACTIVE_STAFF_ROLES = ["agent", "manager", "csr", "agency_owner", "agency_admin"] as const;
@@ -416,6 +517,87 @@ async function createServerStaffAccount(input: StaffRegisterInput): Promise<Staf
             businessEmail: email,
             profileCompleted: true,
           },
+          permissions: {},
+        },
+        include: { agency: true },
+      });
+
+  return { ok: true, user };
+}
+
+async function promoteLocalStaffAccount(input: LocalStaffPromotionInput): Promise<StaffAccountResult> {
+  const email = fieldString(input.user.businessEmail) || fieldString(input.user.email);
+  const normalizedEmail = email.toLowerCase();
+  const name = fieldString(input.user.name) || normalizedEmail;
+  if (
+    !normalizedEmail ||
+    input.password.length < 8 ||
+    !SNAPSHOT_STAFF_ROLES.has(input.user.role) ||
+    fieldString(input.user.tenantId) !== fieldString(input.agency.id)
+  ) {
+    return { ok: false, error: "missing_fields" };
+  }
+  if (
+    input.user.active === false ||
+    input.user.staffAccessStatus === "banned" ||
+    input.user.staffAccessStatus === "deleted" ||
+    input.user.staffAccessStatus === "inactive"
+  ) {
+    return { ok: false, error: "invalid_credentials" };
+  }
+  if (input.agency.active === false) return { ok: false, error: "inactive_agency" };
+
+  const agency = await upsertAgencyFromLocalPromotion(input.agency, normalizedEmail);
+  if (!agency?.active) return { ok: false, error: "inactive_agency" };
+
+  const branchId = await upsertBranchFromLocalPromotion(input.branch, agency.id, input.user.branchId ?? undefined);
+  const existing = await prisma.user.findFirst({
+    where: { email: { equals: normalizedEmail, mode: "insensitive" } },
+    include: { agency: true },
+  });
+  if (existing && existing.tenantId !== agency.id) return { ok: false, error: "duplicate_email" };
+  if (existing && blockedStaffStatus(existing.status)) return { ok: false, error: "invalid_credentials" };
+
+  const firstName = fieldString(input.user.firstName) || firstNameFromFullName(name);
+  const lastName = fieldString(input.user.lastName) || lastNameFromFullName(name);
+  const profile = {
+    ...(existing && isRecord(existing.profile) ? existing.profile : {}),
+    firstName,
+    lastName,
+    businessEmail: normalizedEmail,
+    profileCompleted: true,
+    legacyLocalAuthPromotedAt: new Date().toISOString(),
+  };
+  const passwordHash = hashPasswordForStorage(input.password);
+  const user = existing
+    ? await prisma.user.update({
+        where: { id: existing.id },
+        data: {
+          tenantId: agency.id,
+          branchId,
+          name,
+          phone: nullableFieldString(input.user.phone) ?? existing.phone,
+          role: input.user.role,
+          status: "active",
+          passwordHash,
+          passwordChangedAt: new Date(),
+          profile,
+        },
+        include: { agency: true },
+      })
+    : await prisma.user.create({
+        data: {
+          id: fieldString(input.user.id) || `user_${randomUUID()}`,
+          tenantId: agency.id,
+          branchId,
+          name,
+          email: normalizedEmail,
+          phone: nullableFieldString(input.user.phone),
+          role: input.user.role,
+          status: "active",
+          passwordHash,
+          passwordChangedAt: new Date(),
+          profile,
           permissions: {},
         },
         include: { agency: true },
@@ -557,6 +739,84 @@ async function upsertAgencyFromSnapshot(snapshotAgency: SnapshotRecord, agencyCo
   });
 }
 
+async function upsertAgencyFromLocalPromotion(
+  input: LocalStaffPromotionInput["agency"],
+  fallbackEmail: string
+) {
+  const agencyCode = normalizeAgencyCode(
+    fieldString(input.agencyCode) || decryptSnapshotAgencyCode(fieldString(input.agencyCodeEncrypted)) || ""
+  );
+  const codeHash = agencyCode ? agencyCodeHashForStorage(agencyCode) : null;
+  const id = fieldString(input.id) || `agency_${randomUUID()}`;
+  const name = fieldString(input.name) || "Agency";
+  const base = {
+    name,
+    contactEmail: fieldString(input.contactEmail) || fallbackEmail || "support@quotexinsurance.com",
+    phone: nullableFieldString(input.phone),
+    address: nullableFieldString(input.address),
+    website: nullableFieldString(input.website),
+    websiteSlug: nullableFieldString(input.websiteSlug),
+    websiteEnabled: booleanField(input.websiteEnabled, false),
+    tier: fieldString(input.tier) || "minimum",
+    active: input.active !== false,
+    allowedUsers: boundedInteger(input.allowedUsers, 1, 1000, 1),
+  };
+  const codeFields = codeHash
+    ? {
+        agencyCodeHash: codeHash,
+        agencyCodePreview: agencyCode.slice(-4),
+      }
+    : {};
+  return prisma.agency.upsert({
+    where: { id },
+    update: {
+      ...base,
+      ...codeFields,
+    },
+    create: {
+      id,
+      ...base,
+      agencyCodeHash: codeHash,
+      agencyCodePreview: agencyCode ? agencyCode.slice(-4) : nullableFieldString(input.agencyCodePreview),
+    },
+  });
+}
+
+async function upsertBranchFromLocalPromotion(
+  input: LocalStaffPromotionInput["branch"],
+  agencyId: string,
+  requestedBranchId?: string | null
+): Promise<string | null> {
+  const id = fieldString(input?.id) || fieldString(requestedBranchId);
+  if (!id) return null;
+  const existing = await prisma.branch.findFirst({ where: { id, tenantId: agencyId } });
+  if (!input) return existing?.id ?? null;
+  if (fieldString(input.agencyId) && fieldString(input.agencyId) !== agencyId) return existing?.id ?? null;
+  const branch = await prisma.branch.upsert({
+    where: { id },
+    update: {
+      tenantId: agencyId,
+      name: fieldString(input.name) || existing?.name || "Branch",
+      address: nullableFieldString(input.address),
+      city: nullableFieldString(input.city),
+      state: nullableFieldString(input.state),
+      zip: nullableFieldString(input.zip),
+      phone: nullableFieldString(input.phone),
+    },
+    create: {
+      id,
+      tenantId: agencyId,
+      name: fieldString(input.name) || "Branch",
+      address: nullableFieldString(input.address),
+      city: nullableFieldString(input.city),
+      state: nullableFieldString(input.state),
+      zip: nullableFieldString(input.zip),
+      phone: nullableFieldString(input.phone),
+    },
+  });
+  return branch.id;
+}
+
 async function resolveBranchForStaff(branchId: string | undefined, agencyId: string, snapshot?: SnapshotRecord): Promise<string | null> {
   const id = fieldString(branchId);
   if (!id) return null;
@@ -695,6 +955,15 @@ function snapshotArray(snapshot: SnapshotRecord, key: string): SnapshotRecord[] 
 
 function fieldString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
+}
+
+function firstNameFromFullName(value: string): string {
+  return value.trim().split(/\s+/)[0] || "";
+}
+
+function lastNameFromFullName(value: string): string {
+  const parts = value.trim().split(/\s+/).filter(Boolean);
+  return parts.length > 1 ? parts.slice(1).join(" ") : "";
 }
 
 function nullableFieldString(value: unknown): string | null {

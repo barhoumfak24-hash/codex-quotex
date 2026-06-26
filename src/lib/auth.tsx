@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import type { Role, User } from "@/types";
+import type { Agency, Branch, Role, User } from "@/types";
 import { api } from "./api";
-import { apiBaseUrl } from "./apiBase";
+import { apiBaseUrl, envValue } from "./apiBase";
 import { subscribeToDbChanges } from "./db";
 import { isLockingMasterAccount } from "./masterAccount";
 import { isStaffRole, type StaffRole } from "./roles";
@@ -290,8 +290,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return signedIn;
       }
 
+      const legacyStaff = localStaffWithMatchingPassword(normalizedIdentifier, password);
+      if (legacyStaff) {
+        const promotedSession = await establishServerStaffLocalPromotion(legacyStaff, password);
+        if (promotedSession.ok) {
+          const serverUser = resolveServerStaffUser(promotedSession.user, normalizedIdentifier);
+          if (!serverUser) return null;
+          const signedIn = persistIfAllowed(serverUser);
+          if (signedIn) {
+            api.users.update(legacyStaff.id, { generatedPassword: undefined });
+            storeServerSessionUser(signedIn);
+          }
+          return signedIn;
+        }
+      }
+
       if (!serverSession.allowLocalFallback) return null;
-      const u = api.users.byIdentifier(normalizedIdentifier);
+      const u = legacyStaff ?? api.users.byIdentifier(normalizedIdentifier);
       if (!u || !isStaffRole(u.role)) return null;
       const agency = u.tenantId ? api.agencies.get(u.tenantId) : undefined;
       if (!agency || !agency.active) return null;
@@ -461,6 +476,48 @@ type ServerSessionUser = {
   name: string;
 };
 
+function localStaffWithMatchingPassword(identifier: string, password: string): User | null {
+  const u = api.users.byIdentifier(identifier);
+  if (!u || !isStaffRole(u.role)) return null;
+  const agency = u.tenantId ? api.agencies.get(u.tenantId) : undefined;
+  if (!agency || !agency.active) return null;
+  if (accessBlockForUser(u)) return null;
+  if (!u.generatedPassword || u.generatedPassword !== password) return null;
+  return u;
+}
+
+function serializeAgencyForStaffPromotion(agency: Agency) {
+  return {
+    id: agency.id,
+    name: agency.name,
+    contactEmail: agency.contactEmail,
+    phone: agency.phone,
+    address: agency.address,
+    website: agency.website,
+    websiteSlug: agency.websiteSlug,
+    websiteEnabled: agency.websiteEnabled,
+    tier: agency.tier,
+    active: agency.active,
+    allowedUsers: agency.allowedUsers,
+    agencyCode: agency.agencyCode,
+    agencyCodeEncrypted: agency.agencyCodeEncrypted,
+    agencyCodePreview: agency.agencyCodePreview,
+  };
+}
+
+function serializeBranchForStaffPromotion(branch: Branch) {
+  return {
+    id: branch.id,
+    agencyId: branch.agencyId,
+    name: branch.name,
+    address: branch.address,
+    city: branch.city,
+    state: branch.state,
+    zip: branch.zip,
+    phone: branch.phone,
+  };
+}
+
 async function establishServerStaffSession(identifier: string, password: string): Promise<ServerSessionResult> {
   if (typeof window === "undefined") return { ok: false, allowLocalFallback: false, reason: "browser_unavailable" };
   const payload = JSON.stringify({ identifier, password });
@@ -529,6 +586,80 @@ async function establishServerStaffRegistration(input: {
       const response = await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
+        body: payload,
+      });
+      if (response.status === 404 || response.status === 405) continue;
+      sawReachableAuthRoute = true;
+      const json = (await response.json().catch(() => null)) as
+        | { ok?: boolean; token?: string; error?: string; reason?: string; user?: Partial<ServerSessionUser> }
+        | null;
+      if (response.ok && json?.ok && typeof json.token === "string" && json.token.trim() && isServerStaffUser(json.user)) {
+        storeServerSessionToken(json.token);
+        return { ok: true, user: json.user };
+      }
+      clearServerSessionToken();
+      clearServerSessionUser();
+      return {
+        ok: false,
+        allowLocalFallback: import.meta.env.DEV,
+        reason: json?.error || json?.reason || `auth_http_${response.status}`,
+      };
+    } catch {
+      continue;
+    }
+  }
+  clearServerSessionToken();
+  clearServerSessionUser();
+  return {
+    ok: false,
+    allowLocalFallback: import.meta.env.DEV && !sawReachableAuthRoute,
+    reason: "auth_route_unavailable",
+  };
+}
+
+async function establishServerStaffLocalPromotion(localUser: User, password: string): Promise<ServerSessionResult> {
+  if (typeof window === "undefined") return { ok: false, allowLocalFallback: false, reason: "browser_unavailable" };
+  if (!localUser.tenantId || !isStaffRole(localUser.role)) {
+    return { ok: false, allowLocalFallback: false, reason: "missing_fields" };
+  }
+  const agency = api.agencies.get(localUser.tenantId);
+  if (!agency) return { ok: false, allowLocalFallback: false, reason: "agency_not_found" };
+  const branch = localUser.branchId
+    ? api.branches.listByAgency(agency.id).find((candidate) => candidate.id === localUser.branchId)
+    : undefined;
+  const payload = JSON.stringify({
+    password,
+    user: {
+      id: localUser.id,
+      tenantId: localUser.tenantId,
+      branchId: localUser.branchId ?? null,
+      role: localUser.role,
+      email: localUser.email,
+      businessEmail: localUser.businessEmail ?? localUser.email,
+      firstName: localUser.firstName,
+      lastName: localUser.lastName,
+      name: localUser.name,
+      phone: localUser.phone,
+      active: localUser.active !== false,
+      staffAccessStatus: localUser.staffAccessStatus ?? "active",
+    },
+    agency: serializeAgencyForStaffPromotion(agency),
+    branch: branch ? serializeBranchForStaffPromotion(branch) : null,
+  });
+  const candidates = uniqueAuthUrls([
+    `${apiBaseUrl()}/auth/employee/promote-local`,
+    "/api/auth/employee/promote-local",
+    "/api/app/api/auth/employee/promote-local",
+  ]);
+  const stateToken = envValue("VITE_STATE_SYNC_TOKEN");
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (stateToken) headers["x-state-sync-token"] = stateToken;
+  let sawReachableAuthRoute = false;
+  for (const url of candidates) {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers,
         body: payload,
       });
       if (response.status === 404 || response.status === 405) continue;
