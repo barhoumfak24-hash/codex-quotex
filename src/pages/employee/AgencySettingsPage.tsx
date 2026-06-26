@@ -42,15 +42,9 @@ import { subscribeToDbChanges } from "@/lib/db";
 import { fmt } from "@/lib/format";
 import { mailboxUrl, mailProviderLabel } from "@/lib/mailProvider";
 import {
-  COMPANY_APP_MONTHLY_ADD_ON_USD,
-  COMPANY_WEBSITE_AND_APP_BUNDLE_DISCOUNT_USD,
-  COMPANY_WEBSITE_MONTHLY_ADD_ON_USD,
   SOFTWARE_USER_MONTHLY_PRICE_USD,
   TIER_LIMITS,
   WEBSITE_APP_ADD_ON_OPTIONS,
-  agencyMonthlyPriceUsd,
-  standardAgencyMonthlyPriceUsd,
-  websiteAppAddOnMonthlyUsd,
 } from "@/lib/tiers";
 import type {
   Agency,
@@ -60,18 +54,11 @@ import type {
   SecurityIncident,
   SecurityIncidentSeverity,
   SecurityIncidentStatus,
-  SoftwareSaleWebsiteAppAddOn,
   SubscriptionTier,
   User,
 } from "@/types";
 
 const USER_PRESETS = [10, 25, 50];
-const WEBSITE_APP_ADD_ON_ORDER: SoftwareSaleWebsiteAppAddOn[] = [
-  "none",
-  "website",
-  "app",
-  "website_app",
-];
 
 type MigrationRecordKey =
   | "clients"
@@ -812,8 +799,6 @@ export function AgencySettingsPage() {
   const [planLocked, setPlanLocked] = useState(true);
   const [planError, setPlanError] = useState<string | null>(null);
   const [draftUsers, setDraftUsers] = useState(TIER_LIMITS.mid.allowedUsers);
-  const [draftWebsiteAppAddOn, setDraftWebsiteAppAddOn] =
-    useState<SoftwareSaleWebsiteAppAddOn>("none");
 
   const [profileLocked, setProfileLocked] = useState(true);
   const [profileError, setProfileError] = useState<string | null>(null);
@@ -833,8 +818,7 @@ export function AgencySettingsPage() {
   useEffect(() => {
     if (!agency || !planLocked) return;
     setDraftUsers(agency.allowedUsers);
-    setDraftWebsiteAppAddOn(agency.websiteAppAddOn ?? "none");
-  }, [agency?.id, agency?.allowedUsers, agency?.websiteAppAddOn, planLocked]);
+  }, [agency?.id, agency?.allowedUsers, planLocked]);
 
   useEffect(() => {
     if (!agency || !profileLocked) return;
@@ -870,7 +854,7 @@ export function AgencySettingsPage() {
   const activeStaffUsers = staffUsers.filter((u) => u.active);
   const disabledStaffUsers = staffUsers.filter((u) => !u.active);
   const securityIncidents = api.security.listIncidents(agency.id);
-  const activeSecurityBans = api.security.listBans(agency.id, true);
+  const activeSecurityBans = api.security.listBans(agency.id, true).filter((ban) => ban.kind === "user");
   const managerCount = activeStaffUsers.filter((u) => u.role === "manager").length;
   const agentCount = activeStaffUsers.filter((u) => u.role === "agent" || u.role === "csr").length;
   const branches = api.branches.listByAgency(agency.id);
@@ -922,32 +906,18 @@ export function AgencySettingsPage() {
   const minUserSlots = Math.max(1, activeStaffUsers.length);
   const draftAllowedUsers = Math.max(minUserSlots, draftUsers);
   const draftTier = billingTierForUserSlots(draftAllowedUsers);
-  const currentMonthly = agencyMonthlyPriceUsd(agency);
-  const currentStandardMonthly = standardAgencyMonthlyPriceUsd(agency);
-  const draftPlan: Pick<
-    Agency,
-    "tier" | "allowedUsers" | "allowedCarriers" | "allowedAiMessagesPerMonth" | "websiteAppAddOn"
-  > = {
+  const currentUserMonthly = activeAgency.allowedUsers * SOFTWARE_USER_MONTHLY_PRICE_USD;
+  const draftUserMonthly = draftAllowedUsers * SOFTWARE_USER_MONTHLY_PRICE_USD;
+  const priceDelta = draftUserMonthly - currentUserMonthly;
+  const draftPlan: Pick<Agency, "tier" | "allowedUsers" | "allowedCarriers" | "allowedAiMessagesPerMonth"> = {
     tier: draftTier,
     allowedUsers: draftAllowedUsers,
     allowedCarriers: activeAgency.allowedCarriers,
     allowedAiMessagesPerMonth: activeAgency.allowedAiMessagesPerMonth,
-    websiteAppAddOn: draftWebsiteAppAddOn,
   };
-  const draftMonthly = standardAgencyMonthlyPriceUsd(draftPlan);
-  const priceDelta = draftMonthly - currentStandardMonthly;
-  const websiteAppAddOnMonthly = websiteAppAddOnMonthlyUsd(draftWebsiteAppAddOn);
-  const websiteAppRetailMonthly =
-    draftWebsiteAppAddOn === "website_app"
-      ? COMPANY_WEBSITE_MONTHLY_ADD_ON_USD + COMPANY_APP_MONTHLY_ADD_ON_USD
-      : websiteAppAddOnMonthly;
-  const bundleDiscount =
-    draftWebsiteAppAddOn === "website_app" ? COMPANY_WEBSITE_AND_APP_BUNDLE_DISCOUNT_USD : 0;
-  const hasMasterPriceOverride = typeof agency.monthlyPriceOverrideUsd === "number";
 
   function resetPlanDraft(source: Agency = activeAgency) {
     setDraftUsers(source.allowedUsers);
-    setDraftWebsiteAppAddOn(source.websiteAppAddOn ?? "none");
     setPlanError(null);
   }
 
@@ -1055,8 +1025,8 @@ export function AgencySettingsPage() {
           }
           subtitle={
             planLocked
-              ? "Locked. Click Edit plan to change staff seats, website, or Quotex app activation."
-              : "Pricing changes only when staff seats, website, or Quotex app activation changes."
+              ? "Locked. Click Edit plan to change staff user capacity."
+              : "Plan changes only adjust staff user capacity."
           }
           action={
             planLocked ? (
@@ -1091,101 +1061,66 @@ export function AgencySettingsPage() {
         />
         {planError && <div className="mb-3 rounded-md bg-rose-50 px-3 py-2 text-xs text-rose-700">{planError}</div>}
         <div className="grid gap-5 lg:grid-cols-[minmax(0,1.35fr)_minmax(20rem,0.65fr)]">
-          <div className="space-y-5">
-            <section className="rounded-lg border border-ink-100 bg-white p-4">
-              <div className="grid gap-4 md:grid-cols-[minmax(12rem,18rem)_1fr]">
-                <div>
-                  <label className="label" htmlFor="plan-user-slots">Staff users</label>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      className="btn-outline h-11 w-11 justify-center px-0"
-                      disabled={planLocked}
-                      onClick={() => setDraftUserSlots(draftAllowedUsers - 1)}
-                    >
-                      -
-                    </button>
-                    <input
-                      id="plan-user-slots"
-                      type="number"
-                      min={minUserSlots}
-                      className={`${lockedInputClass(planLocked)} h-11 w-24 text-center font-semibold`}
-                      value={draftUsers}
-                      disabled={planLocked}
-                      tabIndex={planLocked ? -1 : 0}
-                      onChange={(e) => setDraftUserSlots(safeNumber(e.target.value, minUserSlots))}
-                    />
-                    <button
-                      type="button"
-                      className="btn-outline h-11 w-11 justify-center px-0"
-                      disabled={planLocked}
-                      onClick={() => setDraftUserSlots(draftAllowedUsers + 1)}
-                    >
-                      +
-                    </button>
-                  </div>
-                  <div className="mt-2 text-[11px] text-ink-500">
-                    {staffUsers.length}/{draftPlan.allowedUsers} seats currently used
-                  </div>
+          <section className="rounded-lg border border-ink-100 bg-white p-4">
+            <div className="grid gap-4 md:grid-cols-[minmax(12rem,18rem)_1fr]">
+              <div>
+                <label className="label" htmlFor="plan-user-slots">Staff users</label>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="btn-outline h-11 w-11 justify-center px-0"
+                    disabled={planLocked}
+                    onClick={() => setDraftUserSlots(draftAllowedUsers - 1)}
+                  >
+                    -
+                  </button>
+                  <input
+                    id="plan-user-slots"
+                    type="number"
+                    min={minUserSlots}
+                    className={`${lockedInputClass(planLocked)} h-11 w-24 text-center font-semibold`}
+                    value={draftUsers}
+                    disabled={planLocked}
+                    tabIndex={planLocked ? -1 : 0}
+                    onChange={(e) => setDraftUserSlots(safeNumber(e.target.value, minUserSlots))}
+                  />
+                  <button
+                    type="button"
+                    className="btn-outline h-11 w-11 justify-center px-0"
+                    disabled={planLocked}
+                    onClick={() => setDraftUserSlots(draftAllowedUsers + 1)}
+                  >
+                    +
+                  </button>
                 </div>
-                <div>
-                  <div className="label">Quick seat counts</div>
-                  <div className="flex flex-wrap gap-2">
-                    {USER_PRESETS.map((preset) => (
-                      <button
-                        key={preset}
-                        type="button"
-                        disabled={planLocked}
-                        onClick={() => setDraftUserSlots(preset)}
-                        className={`btn-outline text-xs ${
-                          draftAllowedUsers === preset ? "border-gold-500 bg-gold-100 text-ink-900" : ""
-                        } ${planLocked ? "pointer-events-none select-none cursor-default opacity-100" : ""}`}
-                      >
-                        {preset} users
-                      </button>
-                    ))}
-                  </div>
-                  <p className="mt-3 text-xs leading-relaxed text-ink-500">
-                    Each staff user is {fmt.money(SOFTWARE_USER_MONTHLY_PRICE_USD)}/mo. Users can be
-                    added later as the agency grows.
-                  </p>
+                <div className="mt-2 text-[11px] text-ink-500">
+                  {staffUsers.length}/{draftPlan.allowedUsers} seats currently used
                 </div>
               </div>
-            </section>
-
-            <section>
-              <div className="label">Website / Quotex app package</div>
-              <div className="grid gap-2 md:grid-cols-2">
-                {WEBSITE_APP_ADD_ON_ORDER.map((addOn) => {
-                  const option = WEBSITE_APP_ADD_ON_OPTIONS[addOn];
-                  const selected = draftWebsiteAppAddOn === addOn;
-                  return (
+              <div>
+                <div className="label">Quick seat counts</div>
+                <div className="flex flex-wrap gap-2">
+                  {USER_PRESETS.map((preset) => (
                     <button
-                      key={addOn}
+                      key={preset}
                       type="button"
                       disabled={planLocked}
-                      onClick={() => setDraftWebsiteAppAddOn(addOn)}
-                      className={`rounded-md border px-3 py-3 text-left transition ${
-                        selected
-                          ? "border-gold-500 bg-gold-50 text-ink-900"
-                          : "border-ink-200 bg-white text-ink-700 hover:border-gold-300"
+                      onClick={() => setDraftUserSlots(preset)}
+                      className={`btn-outline text-xs ${
+                        draftAllowedUsers === preset ? "border-gold-500 bg-gold-100 text-ink-900" : ""
                       } ${planLocked ? "pointer-events-none select-none cursor-default opacity-100" : ""}`}
                     >
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="text-sm font-semibold">{option.label}</div>
-                          <div className="mt-1 text-xs leading-relaxed text-ink-500">{option.description}</div>
-                        </div>
-                        <div className="shrink-0 text-sm font-semibold">
-                          {option.monthlyPriceUsd > 0 ? `${fmt.money(option.monthlyPriceUsd)}/mo` : "No add-on"}
-                        </div>
-                      </div>
+                      {preset} users
                     </button>
-                  );
-                })}
+                  ))}
+                </div>
+                <p className="mt-3 text-xs leading-relaxed text-ink-500">
+                  Each staff user is {fmt.money(SOFTWARE_USER_MONTHLY_PRICE_USD)}/mo. Users can be
+                  added later as the agency grows.
+                </p>
               </div>
-            </section>
-          </div>
+            </div>
+          </section>
 
           <div className="rounded-lg border border-ink-100 bg-ink-50 p-4">
             <div className="flex items-start justify-between gap-3">
@@ -1194,18 +1129,13 @@ export function AgencySettingsPage() {
                   {planLocked ? "Monthly subscription" : "Preview monthly"}
                 </div>
                 <div className="mt-1 text-2xl font-semibold text-ink-900">
-                  {fmt.money(planLocked ? currentMonthly : draftMonthly)}
+                  {fmt.money(planLocked ? currentUserMonthly : draftUserMonthly)}
                 </div>
               </div>
               <Badge tone={planLocked ? "neutral" : "gold"}>
                 {planLocked ? "Locked" : priceDelta === 0 ? "No change" : `${priceDelta > 0 ? "+" : ""}${fmt.money(priceDelta)}`}
               </Badge>
             </div>
-            {hasMasterPriceOverride && planLocked && (
-              <div className="mt-3 rounded-md border border-gold-200 bg-gold-50 px-3 py-2 text-xs text-ink-700">
-                Master price override active. Standard plan value is {fmt.money(currentStandardMonthly)}/mo.
-              </div>
-            )}
             <dl className="mt-4 space-y-2 text-sm">
               <div className="flex justify-between gap-3">
                 <dt className="text-ink-500">Staff users</dt>
@@ -1219,25 +1149,13 @@ export function AgencySettingsPage() {
                   {fmt.money(draftPlan.allowedUsers * SOFTWARE_USER_MONTHLY_PRICE_USD)}
                 </dd>
               </div>
-              <div className="flex justify-between gap-3">
-                <dt className="text-ink-500">Website / Quotex app package</dt>
-                <dd className="font-medium">
-                  {websiteAppRetailMonthly > 0 ? fmt.money(websiteAppRetailMonthly) : "None"}
-                </dd>
-              </div>
-              {bundleDiscount > 0 && (
-                <div className="flex justify-between gap-3 text-emerald-700">
-                  <dt>Bundle savings</dt>
-                  <dd className="font-medium">-{fmt.money(bundleDiscount)}</dd>
-                </div>
-              )}
               <div className="flex justify-between gap-3 border-t border-ink-200 pt-2">
                 <dt className="font-semibold text-ink-800">Plan monthly</dt>
-                <dd className="font-semibold text-ink-900">{fmt.money(draftMonthly)}</dd>
+                <dd className="font-semibold text-ink-900">{fmt.money(draftUserMonthly)}</dd>
               </div>
             </dl>
             <p className="mt-3 text-[11px] leading-relaxed text-ink-500">
-              Plan pricing is based on staff seats plus the selected website and Quotex app package only.
+              Plan pricing is based on staff user seats only.
             </p>
           </div>
         </div>
@@ -2259,7 +2177,6 @@ function SecurityControlsCard({
   onChanged: () => void;
 }) {
   const [selectedUserId, setSelectedUserId] = useState("");
-  const [ipAddress, setIpAddress] = useState("");
   const [severity, setSeverity] = useState<SecurityIncidentSeverity>("medium");
   const [reason, setReason] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
@@ -2275,15 +2192,13 @@ function SecurityControlsCard({
     setSeverity("medium");
     if (!keepSubject) {
       setSelectedUserId("");
-      setIpAddress("");
     }
   }
 
   function flagSuspiciousBehavior() {
-    const normalizedIp = api.security.normalizeIpAddress(ipAddress);
     if (!currentUserId) return;
-    if (!selectedUser && !normalizedIp) {
-      setNotice("Select a user or enter an IP address before flagging behavior.");
+    if (!selectedUser) {
+      setNotice("Select a user before flagging behavior.");
       return;
     }
     if (!trimmedReason()) {
@@ -2293,10 +2208,8 @@ function SecurityControlsCard({
     const incident = api.security.flag({
       tenantId: agencyId,
       reportedById: currentUserId,
-      subjectKind: selectedUser ? undefined : "ip",
-      subjectUserId: selectedUser?.id,
-      subjectLabel: selectedUser?.name || normalizedIp,
-      ipAddress: normalizedIp,
+      subjectUserId: selectedUser.id,
+      subjectLabel: selectedUser.name,
       severity,
       reason: trimmedReason(),
     });
@@ -2329,27 +2242,6 @@ function SecurityControlsCard({
     onChanged();
   }
 
-  function banEnteredIp() {
-    const normalizedIp = api.security.normalizeIpAddress(ipAddress);
-    if (!currentUserId || !normalizedIp) {
-      setNotice("Enter an IP address before creating an IP ban.");
-      return;
-    }
-    const ban = api.security.banIp({
-      tenantId: agencyId,
-      ipAddress: normalizedIp,
-      createdById: currentUserId,
-      reason: trimmedReason() || `Suspicious traffic from ${normalizedIp}.`,
-    });
-    if (!ban) {
-      setNotice("That IP address could not be banned.");
-      return;
-    }
-    setNotice(`${normalizedIp} is now on the active IP ban list.`);
-    resetSecurityForm(false);
-    onChanged();
-  }
-
   function markIncident(id: string, status: SecurityIncidentStatus) {
     if (!currentUserId) return;
     api.security.updateIncidentStatus(id, status, currentUserId);
@@ -2371,7 +2263,7 @@ function SecurityControlsCard({
             <ShieldCheck className="h-4 w-4 text-gold-600" /> Security controls
           </span>
         }
-        subtitle="Flag suspicious behavior, ban a user account, or block an IP address."
+        subtitle="Flag suspicious behavior or ban a user account."
       />
 
       {notice && (
@@ -2380,7 +2272,7 @@ function SecurityControlsCard({
         </div>
       )}
 
-      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_12rem]">
+      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_12rem]">
         <div>
           <label className="label" htmlFor="security-user">User/account</label>
           <select
@@ -2399,16 +2291,6 @@ function SecurityControlsCard({
           </select>
         </div>
         <div>
-          <label className="label" htmlFor="security-ip">IP address</label>
-          <input
-            id="security-ip"
-            className="input"
-            value={ipAddress}
-            placeholder="203.0.113.42"
-            onChange={(e) => setIpAddress(e.target.value)}
-          />
-        </div>
-        <div>
           <label className="label" htmlFor="security-severity">Severity</label>
           <select
             id="security-severity"
@@ -2423,7 +2305,7 @@ function SecurityControlsCard({
             ))}
           </select>
         </div>
-        <div className="lg:col-span-3">
+        <div className="lg:col-span-2">
           <label className="label" htmlFor="security-reason">Reason</label>
           <textarea
             id="security-reason"
@@ -2442,9 +2324,6 @@ function SecurityControlsCard({
         <button type="button" className="btn-outline" onClick={banSelectedUser}>
           <Ban className="h-4 w-4" /> Ban user
         </button>
-        <button type="button" className="btn-outline" onClick={banEnteredIp}>
-          <Ban className="h-4 w-4" /> Ban IP
-        </button>
       </div>
 
       <div className="mt-6 grid gap-4 lg:grid-cols-2">
@@ -2461,7 +2340,7 @@ function SecurityControlsCard({
                 <div key={ban.id} className="flex items-start justify-between gap-3 px-4 py-3 text-sm">
                   <div className="min-w-0">
                     <div className="font-semibold text-ink-900">
-                      {ban.kind === "ip" ? "IP ban" : "User ban"} - {ban.subjectLabel ?? ban.ipAddress ?? ban.userId}
+                      User ban - {ban.subjectLabel ?? ban.userId}
                     </div>
                     <div className="mt-1 line-clamp-2 text-xs text-ink-500">{ban.reason}</div>
                     <div className="mt-1 text-[11px] text-ink-400">
@@ -2492,7 +2371,7 @@ function SecurityControlsCard({
                 <div key={incident.id} className="px-4 py-3 text-sm">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="font-semibold text-ink-900">
-                      {incident.subjectLabel ?? incident.ipAddress ?? "Unknown subject"}
+                      {incident.subjectLabel ?? "Unknown subject"}
                     </div>
                     <div className="flex items-center gap-1.5">
                       <Badge tone={securitySeverityTone(incident.severity)}>
