@@ -40,8 +40,15 @@ export interface AiProductionGateDecision {
 
 export const AI_DOCUMENT_AUTOFILL_CONFIDENCE_FLOOR = 0.8;
 export const AI_AUTHORITATIVE_WRITE_CONFIDENCE_FLOOR = 0.85;
+export const AI_QUESTIONNAIRE_PREFILL_CONFIDENCE_FLOOR = 0.6;
 
 const UNSAFE_DOCUMENT_SOURCE_KINDS = new Set<PublicDataFieldSourceKind>([
+  "model_estimate",
+  "public_web",
+  "unknown",
+]);
+
+const UNSAFE_QUESTIONNAIRE_PREFILL_SOURCE_KINDS = new Set<PublicDataFieldSourceKind>([
   "model_estimate",
   "unknown",
 ]);
@@ -92,7 +99,9 @@ export function aiEvidenceAllowsQuestionnairePrefill(
   item?: PublicDataFieldEvidence
 ): boolean {
   if (!item) return true;
-  return aiEvidenceAllowsDocumentAutofill(item);
+  if (UNSAFE_QUESTIONNAIRE_PREFILL_SOURCE_KINDS.has(item.sourceKind)) return false;
+  if (item.confidence < AI_QUESTIONNAIRE_PREFILL_CONFIDENCE_FLOOR) return false;
+  return item.verified || item.sourceKind === "public_web" || item.sourceKind === "public_geocoder";
 }
 
 export function aiEvidenceAllowsAuthoritativeWrite(

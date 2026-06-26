@@ -4,14 +4,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 beforeEach(() => {
   vi.resetModules();
   window.localStorage.clear();
+  window.sessionStorage.clear();
 });
 
 afterEach(() => {
   window.localStorage.clear();
+  window.sessionStorage.clear();
 });
 
 function dbStorageKey(): string {
-  const key = Object.keys(window.localStorage).find((name) => name.startsWith("quotex.db."));
+  const key = Object.keys(window.localStorage).find((name) => /^quotex\.db\.v\d+$/.test(name));
   if (!key) throw new Error("Expected Quotex db storage key");
   return key;
 }

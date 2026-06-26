@@ -32,7 +32,7 @@ const validPayload = {
     id: "carrier_progressive",
     name: "Progressive",
     entryUrl: "https://foragentsonly.progressive.com",
-    credentialReference: "secret://carrier-runner/agency_palmcoast/user_agent/carrier_progressive",
+    browserSessionReference: "browser-session://agency_palmcoast/user_agent/carrier_progressive",
     mfaMode: "staff_prompt",
   },
   session: {
@@ -73,7 +73,7 @@ afterEach(() => {
 });
 
 describe("carrier automation worker guardrails", () => {
-  it("detects raw credentials while allowing credential references", () => {
+  it("detects raw credentials while allowing browser-session references", () => {
     expect(jsonContainsRawCredential(validPayload)).toBe(false);
     expect(
       jsonContainsRawCredential({
@@ -108,11 +108,30 @@ describe("carrier automation worker guardrails", () => {
     });
 
     expect(plan.status).toBe("ready");
+    expect(plan.steps.map((step) => step.action)).toContain("verify_browser_session");
     expect(plan.steps.map((step) => step.action)).toContain("submit_for_rating");
     expect(plan.steps.map((step) => step.action)).toContain("extract_quote");
     expect(plan.blockedActions).toContain("bind coverage");
     expect(plan.blockedActions).toContain("make payment");
     expect(plan.reviewRequiredFor).toContain("coverage changes");
+  });
+
+  it("blocks runner jobs until the agent has a signed-in browser session", () => {
+    const plan = buildCarrierAutomationPlan(
+      {
+        ...validPayload,
+        carrier: {
+          ...validPayload.carrier,
+          browserSessionReference: undefined,
+        },
+      },
+      {
+        allowedHosts: ["foragentsonly.progressive.com"],
+      }
+    );
+
+    expect(plan.status).toBe("blocked");
+    expect(plan.blockingReasons.join(" ")).toContain("Sign in to the carrier agent portal");
   });
 
   it("separates document retrieval from quote submission", () => {

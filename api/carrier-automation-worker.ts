@@ -1,4 +1,4 @@
-import { applyRateLimit } from "./_rateLimit";
+import { applyRateLimit } from "./_rateLimit.js";
 import {
   executeCarrierAutomationJob,
   type CarrierAutomationJobPayload,

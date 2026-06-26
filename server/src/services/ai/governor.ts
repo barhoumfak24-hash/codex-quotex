@@ -143,6 +143,7 @@ function configuredMaxPerMinute(): number {
 function cacheTtlFor(feature: string): number {
   const configured = Number(process.env.AI_CACHE_TTL_MS);
   if (Number.isFinite(configured) && configured >= 0) return configured;
+  if (/acord_field_mapping/i.test(feature)) return 0;
   if (/portal_assistant/i.test(feature)) return 20_000;
   if (/extract|parse|pamphlet|campaign|premium|carrier/i.test(feature)) return 5 * 60_000;
   return DEFAULT_CACHE_TTL_MS;
@@ -197,6 +198,9 @@ function hashArgs(args: CompleteArgs): string {
     schemaName: args.schemaName,
     schema: args.schema,
     model: args.model,
+    reasoningEffort: args.reasoningEffort,
+    tools: args.tools,
+    toolChoice: args.toolChoice,
     quality: args.quality,
     maxOutputTokens: args.maxOutputTokens,
   });

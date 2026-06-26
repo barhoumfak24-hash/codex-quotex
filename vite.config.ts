@@ -46,6 +46,73 @@ export default defineConfig(({ mode }) => {
       port: 5173,
       host: "127.0.0.1",
       strictPort: true,
+      proxy: {
+        "/api/app/api": {
+          target: "https://quotexinsurance.com",
+          changeOrigin: true,
+          secure: true,
+        },
+        "/api/auth": {
+          target: "https://quotexinsurance.com",
+          changeOrigin: true,
+          secure: true,
+        },
+        "/api/ai": {
+          target: "https://quotexinsurance.com",
+          changeOrigin: true,
+          secure: true,
+        },
+        "/api/website": {
+          target: "https://quotexinsurance.com",
+          changeOrigin: true,
+          secure: true,
+        },
+        "/api/communications": {
+          target: "https://quotexinsurance.com",
+          changeOrigin: true,
+          secure: true,
+        },
+        "/api/signing-packets": {
+          target: "https://quotexinsurance.com",
+          changeOrigin: true,
+          secure: true,
+        },
+        "/api/state": {
+          target: "https://quotexinsurance.com",
+          changeOrigin: true,
+          secure: true,
+        },
+        "/api/smarty-autocomplete": {
+          target: "https://quotexinsurance.com",
+          changeOrigin: true,
+          secure: true,
+        },
+        "/api/google-places-autocomplete": {
+          target: "https://quotexinsurance.com",
+          changeOrigin: true,
+          secure: true,
+        },
+        "/api/google-place-details": {
+          target: "https://quotexinsurance.com",
+          changeOrigin: true,
+          secure: true,
+        },
+        "/api/photon-autocomplete": {
+          target: "https://quotexinsurance.com",
+          changeOrigin: true,
+          secure: true,
+        },
+        "/api/census-geocode": {
+          target: "https://quotexinsurance.com",
+          changeOrigin: true,
+          secure: true,
+        },
+        "/api/smarty-validate": {
+          target: "https://quotexinsurance.com",
+          changeOrigin: true,
+          secure: true,
+        },
+      },
     },
     test: {
       testTimeout: 20_000,

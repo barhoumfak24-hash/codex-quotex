@@ -87,11 +87,15 @@ export interface SoftwareSale {
   source: "transaction_site" | "master_portal";
   paymentMode: "stripe_checkout" | "manual_invoice";
   notes?: string;
+  signingPacketId?: string;
   signedAgreementNames?: string[];
   signedAgreements?: SoftwareSaleSignedAgreement[];
   signedByName?: string;
   signedByEmail?: string;
   signedAt?: string;
+  signedPacketSubmittedAt?: string;
+  signedPacketSubmittedByName?: string;
+  signedPacketSubmittedByEmail?: string;
   stripeCheckoutSessionId?: string;
   invoiceEmailSentAt?: string;
   invoiceEmailStatus?: "sent" | "failed";
@@ -1164,15 +1168,14 @@ export interface Carrier {
     lastTestedAt?: string;
     notes?: string;
   };
-  // Carrier-approved browser automation. Production runs this from a secured
-  // server worker with encrypted credentials, MFA handling, audit
-  // screenshots, and per-carrier adapters. The frontend only queues
-  // the job and shows the trace.
+  // Carrier-approved browser automation. Production runners use an existing
+  // signed-in browser session and never receive or type carrier portal
+  // usernames/passwords. The frontend only queues the job and shows the trace.
   quotingAutomation?: {
     provider?: string;       // e.g. "AI portal runner", "Carrier RPA bridge"
     agentPortalUrl?: string; // agent/broker rater entry point
     customerPortalUrl?: string; // consumer quote entry point, if applicable
-    credentialReference?: string; // vault key, never a raw username/password
+    credentialReference?: string; // legacy/other integration reference; not used by AI quote runners
     status: "not_configured" | "configured" | "connected" | "error";
     mfaMode?: "none" | "staff_prompt" | "carrier_push" | "service_account";
     lastTestedAt?: string;
@@ -2036,7 +2039,8 @@ export interface CarrierPortalRunnerTrace {
   mode: "live_worker" | "configuration_trace";
   surface: "agent_portal" | "customer_portal";
   entryUrl: string;
-  credentialReference?: string;
+  browserSessionReference?: string;
+  signInNotice?: string;
   mfaMode?: "none" | "staff_prompt" | "carrier_push" | "service_account";
   parallelGroupKey: string;
   status: "queued" | "completed" | "blocked" | "failed";
@@ -2536,6 +2540,7 @@ export type PublicDataFieldSourceKind =
   | "client_intake"
   | "validated_address"
   | "public_geocoder"
+  | "public_web"
   | "government_api"
   | "commercial_provider"
   | "carrier_api"

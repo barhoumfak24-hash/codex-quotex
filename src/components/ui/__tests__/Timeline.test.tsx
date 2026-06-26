@@ -90,7 +90,9 @@ describe("Timeline", () => {
 
     const link = container.querySelector("a") as HTMLAnchorElement;
     expect(link?.textContent).toContain("Open to AI quoting workspace");
-    expect(link?.getAttribute("href")).toBe("/employee/clients/customer_2345#ai-quoting-workspace");
+    expect(link?.getAttribute("href")).toBe(
+      "/employee/clients/customer_2345?quoteWorkspace=expanded"
+    );
   });
 
   it("hides the same-page client fallback so the modal does not show a dead button", () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   aiEvidenceAllowsAuthoritativeWrite,
   aiEvidenceAllowsDocumentAutofill,
+  aiEvidenceAllowsQuestionnairePrefill,
   evaluateAiProductionGate,
   findAiPublicEvidence,
 } from "../aiProductionGuards";
@@ -26,6 +27,15 @@ const evidence: PublicDataEvidenceMap = {
     allowDocumentAutofill: true,
     collectedAt: "2026-06-22T12:00:00.000Z",
   },
+  "Website": {
+    fieldKey: "website",
+    sourceKind: "public_web",
+    sourceLabel: "Business website",
+    confidence: 0.72,
+    verified: false,
+    allowDocumentAutofill: false,
+    collectedAt: "2026-06-22T12:00:00.000Z",
+  },
 };
 
 describe("aiProductionGuards", () => {
@@ -33,6 +43,14 @@ describe("aiProductionGuards", () => {
     expect(aiEvidenceAllowsDocumentAutofill(findAiPublicEvidence(evidence, "year built"))).toBe(true);
     expect(aiEvidenceAllowsAuthoritativeWrite(findAiPublicEvidence(evidence, "yearBuilt"))).toBe(true);
     expect(aiEvidenceAllowsDocumentAutofill(findAiPublicEvidence(evidence, "roof year"))).toBe(false);
+  });
+
+  it("allows source-backed web facts to prefill questionnaires without allowing document autofill", () => {
+    const webEvidence = findAiPublicEvidence(evidence, "website");
+    const estimateEvidence = findAiPublicEvidence(evidence, "roof year");
+    expect(aiEvidenceAllowsQuestionnairePrefill(webEvidence)).toBe(true);
+    expect(aiEvidenceAllowsDocumentAutofill(webEvidence)).toBe(false);
+    expect(aiEvidenceAllowsQuestionnairePrefill(estimateEvidence)).toBe(false);
   });
 
   it("blocks unapproved outbound AI marketing sends", () => {

@@ -1,4 +1,4 @@
-import { applyRateLimit } from "./_rateLimit";
+import { applyRateLimit } from "./_rateLimit.js";
 
 // =====================================================================
 // Vercel Serverless Function — POST /api/carrier-quote-runner
@@ -15,11 +15,11 @@ import { applyRateLimit } from "./_rateLimit";
 //   CARRIER_AUTOMATION_WORKER_URL=https://...
 //   CARRIER_AUTOMATION_WORKER_TOKEN=...
 //
-// The worker receives only vault references, mapped fields, and the
-// carrier portal entry URL. It must resolve credentials server-side,
-// handle MFA, fill the quote portal, extract quote results, and return
-// an auditable result. This function fails closed when the worker is not
-// configured.
+// The worker receives mapped fields, a signed-in browser-session reference,
+// and the carrier portal entry URL. It must never receive carrier usernames,
+// passwords, credential vault references, cookies, or raw tokens. If the
+// agent is not already signed into the carrier portal, the worker fails
+// closed with a sign-in notice instead of attempting login.
 // =====================================================================
 
 interface RunnerFieldMapping {
@@ -43,6 +43,7 @@ interface RunnerJobPayload {
     agentPortalUrl?: string;
     customerPortalUrl?: string;
     credentialReference?: string;
+    browserSessionReference?: string;
     mfaMode?: string;
   };
   session?: {
@@ -80,15 +81,15 @@ function jsonContainsRawCredential(value: unknown): boolean {
     "token_value",
     "access_token",
     "refresh_token",
+    "cookie",
+    "session_cookie",
   ]);
-  const allowedReferenceKeys = new Set(["credentialreference"]);
 
   function visit(node: unknown): boolean {
     if (!node || typeof node !== "object") return false;
     if (Array.isArray(node)) return node.some(visit);
     return Object.entries(node as Record<string, unknown>).some(([key, child]) => {
       const normalized = key.toLowerCase().replace(/[^a-z0-9_]/g, "");
-      if (allowedReferenceKeys.has(normalized)) return false;
       if (blockedKeys.has(normalized)) return true;
       return visit(child);
     });
@@ -112,8 +113,11 @@ function validatePayload(payload: RunnerJobPayload): string[] {
   if (!entryUrl || !/^https:\/\//i.test(entryUrl)) {
     errors.push("carrier entry URL must be HTTPS");
   }
-  if (!payload.carrier?.credentialReference) {
-    errors.push("carrier.credentialReference is required");
+  if (payload.carrier?.credentialReference) {
+    errors.push("carrier.credentialReference is not accepted; AI runners use an existing signed-in browser session");
+  }
+  if (!payload.carrier?.browserSessionReference) {
+    errors.push("carrier.browserSessionReference is required; sign in to the carrier portal in your browser before running the AI runner");
   }
   if (!Array.isArray(payload.fieldMappings) || payload.fieldMappings.length === 0) {
     errors.push("fieldMappings are required");
@@ -139,7 +143,7 @@ function sanitizedForwardPayload(payload: RunnerJobPayload) {
         payload.carrier?.entryUrl ||
         payload.carrier?.agentPortalUrl ||
         payload.carrier?.customerPortalUrl,
-      credentialReference: payload.carrier?.credentialReference,
+      browserSessionReference: payload.carrier?.browserSessionReference,
       mfaMode: payload.carrier?.mfaMode ?? "staff_prompt",
     },
     session: payload.session,

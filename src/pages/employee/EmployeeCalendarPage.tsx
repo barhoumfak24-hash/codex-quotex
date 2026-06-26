@@ -1252,6 +1252,7 @@ function buildCalendarItems(tenantId: string, userId: string): CalendarItem[] {
   const tasks = api.tasks
     .listByTenant(tenantId)
     .filter((task) => !!task.dueAt && taskBelongsToUser(task, userId))
+    .filter((task) => api.tasks.statusOf(task) !== "snoozed")
     .map(taskToItem);
   const events = api.calendarEvents.listForUser(tenantId, userId).map((event) => eventToItem(event, userId));
   return [...reminders, ...tasks, ...events].sort((a, b) => (a.startsAt < b.startsAt ? -1 : 1));
@@ -1273,6 +1274,7 @@ function reminderToItem(reminder: Reminder): CalendarItem {
 }
 
 function taskToItem(task: Task): CalendarItem {
+  const status = api.tasks.statusOf(task);
   return {
     id: task.id,
     source: "activity",
@@ -1281,7 +1283,7 @@ function taskToItem(task: Task): CalendarItem {
     startsAt: task.dueAt!,
     importance: task.severity ?? "info",
     href: `/employee/tasks?focus=${task.id}`,
-    completedAt: task.completedAt,
+    completedAt: task.completedAt ?? (status === "resolved" ? task.createdAt : undefined),
   };
 }
 

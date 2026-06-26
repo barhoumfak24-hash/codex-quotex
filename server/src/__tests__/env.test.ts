@@ -43,6 +43,14 @@ describe("server environment validation", () => {
     expect(result.errors).toContain("WEBSITE_WEBHOOK_SECRET is required.");
     expect(result.errors).toContain("FRONTEND_ORIGIN must be set in production; wildcard CORS is not allowed.");
     expect(result.errors).toContain("DATABASE_URL is required for production shared API rate limits.");
+    expect(result.errors).toContain("UPSTASH_REDIS_REST_URL is required.");
+    expect(result.errors).toContain("UPSTASH_REDIS_REST_TOKEN is required.");
+    expect(result.errors).toContain(
+      "A production address autocomplete provider is required. Set GOOGLE_PLACES_API_KEY or SMARTY_AUTH_ID/SMARTY_AUTH_TOKEN server-side."
+    );
+    expect(result.errors).toContain(
+      "No transactional email provider is configured. Add SENDGRID_API_KEY, RESEND_API_KEY, or SMTP_HOST/SMTP_USER/SMTP_PASS before relying on website forms, invoices, or e-sign emails."
+    );
     expect(result.warnings).toContain(
       "SENTRY_DSN is not set; server errors will only be available in platform logs. Add Sentry before opening production traffic."
     );
@@ -92,8 +100,17 @@ describe("server environment validation", () => {
 
     expect(result.ok).toBe(false);
     expect(result.errors).toContain(
-      "AI_PROVIDER must be a real provider in production unless ALLOW_AI_STUB_IN_PRODUCTION=true."
+      "A real AI provider key is required in production unless ALLOW_AI_STUB_IN_PRODUCTION=true."
     );
+  });
+
+  it("uses OpenAI automatically when OPENAI_API_KEY is present and AI_PROVIDER is unset", () => {
+    stubGoodProductionEnv();
+    vi.stubEnv("AI_PROVIDER", "");
+
+    const result = validateServerEnv();
+
+    expect(result).toMatchObject({ ok: true, errors: [] });
   });
 
   it("rejects malformed Sentry DSNs", () => {
@@ -132,6 +149,16 @@ describe("server environment validation", () => {
     expect(result.errors).toContain("RATE_LIMIT_STORE=memory is not allowed in production.");
   });
 
+  it("rejects production memory-only manager 2FA challenges", () => {
+    stubGoodProductionEnv();
+    vi.stubEnv("MANAGER_2FA_STORE", "memory");
+
+    const result = validateServerEnv();
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toContain("MANAGER_2FA_STORE=memory is not allowed in production.");
+  });
+
   it("accepts a complete production environment", () => {
     stubGoodProductionEnv();
 
@@ -165,8 +192,12 @@ function stubGoodProductionEnv() {
   vi.stubEnv("DR_RESTORE_DRILL_MAX_DAYS", "90");
   vi.stubEnv("AI_PROVIDER", "openai");
   vi.stubEnv("OPENAI_API_KEY", "sk-test");
+  vi.stubEnv("GOOGLE_PLACES_API_KEY", "server-google-places-key");
   vi.stubEnv("STRIPE_SECRET_KEY", "");
   vi.stubEnv("STRIPE_WEBHOOK_SECRET", "");
+  vi.stubEnv("EMAIL_PROVIDER", "sendgrid");
+  vi.stubEnv("SENDGRID_API_KEY", LONG_SECRET);
+  vi.stubEnv("SENDGRID_FROM_EMAIL", "no-reply@example.com");
   vi.stubEnv("CARRIER_AUTOMATION_ENABLE_LIVE", "false");
   vi.stubEnv("SENTRY_DSN", "https://public@example.sentry.io/123456");
   vi.stubEnv("SENTRY_ENVIRONMENT", "production");

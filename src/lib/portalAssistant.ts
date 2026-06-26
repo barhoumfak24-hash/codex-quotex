@@ -1,11 +1,11 @@
 // =====================================================================
 // Portal assistant (frontend-side stub).
 //
-// PRODUCTION INTENT: same contract as src/lib/ai.ts â€” in production
+// PRODUCTION INTENT: same contract as src/lib/ai.ts - in production
 // this becomes a `fetch('/api/ai/portal-assistant', ...)` call to a
 // backend RAG endpoint grounded on the agency's help docs. The demo
 // answers from a local keyword-scored knowledge base so agents and
-// managers get useful "how do Iâ€¦?" answers without a model key.
+// managers get useful "how do I...?" answers without a model key.
 //
 // The matcher is intentionally simple: score every KB entry by how
 // many of its keywords appear in the question, return the best hit,
@@ -17,6 +17,7 @@ import { api } from "@/lib/api";
 import { postServerAi } from "@/lib/aiGateway";
 import { fmt } from "@/lib/format";
 import { isStaffRole, staffRoleLabel } from "@/lib/roles";
+import { isContactProfileActivity } from "@/lib/taskFilters";
 import { findVideoChapter, videoChapterPath } from "@/lib/trainingVideos";
 import type { QuotingSession, Role, Task, TaskSeverity, User } from "@/types";
 
@@ -175,7 +176,7 @@ const KB: KbEntry[] = [
       "task",
     ],
     answer:
-      "The Activity Center is your single source of truth for work that needs attention. Each card is an activity â€” an inbound customer request, a renewal nudge, an AI follow-up, or a manager assignment. Cards start in the To-do column; mark one In progress to move it across, then Mark resolved when it's handled.\n\nClicking View activity from a client profile jumps you straight to the matching card, auto-expanded.",
+      "The Activity Center is your single source of truth for work that needs attention. Each card is an activity - an inbound customer request, a renewal nudge, an AI follow-up, or a manager assignment. Cards start in the To-do column; mark one In progress to move it across, then Mark resolved when it's handled.\n\nClicking View activity from a client profile jumps you straight to the matching card, auto-expanded.",
     related: [
       "How do I mark an activity resolved?",
       "How do I set a reminder on an activity?",
@@ -245,7 +246,7 @@ const KB: KbEntry[] = [
       "make a client",
     ],
     answer:
-      "Open the prospect and use Convert to client. A manager must assign the prospect to an agent first â€” every new client lands owned by someone. On conversion the prospect's whole activity timeline transfers onto the new client record, the event is timestamped, and the prospect drops out of the Prospects category (it now lives under Clients). You can still see converted prospects via the Converted filter chip.",
+      "Open the prospect and use Convert to client. A manager must assign the prospect to an agent first - every new client lands owned by someone. On conversion the prospect's whole activity timeline transfers onto the new client record, the event is timestamped, and the prospect drops out of the Prospects category (it now lives under Clients). You can still see converted prospects via the Converted filter chip.",
     related: ["Where do converted prospects go?"],
   },
   {
@@ -275,7 +276,7 @@ const KB: KbEntry[] = [
       "view on carrier",
     ],
     answer:
-      "Click View on any policy (Policies card, Assets, or the Policies page) to open the full policy detail page â€” coverage, dates, premium, timeline, and documents. From there Download summary exports a text recap and View on carrier opens the carrier's agent portal (configured under Master â†’ Carriers).",
+      "Click View on any policy (Policies card, Assets, or the Policies page) to open the full policy detail page - coverage, dates, premium, timeline, and documents. From there Download summary exports a text recap and View on carrier opens the carrier's agent portal (configured under Master -> Carriers).",
     related: ["How do I view an asset's details?"],
   },
   {
@@ -289,7 +290,7 @@ const KB: KbEntry[] = [
       "asset page",
     ],
     answer:
-      "On a client profile, click View on any row in the Assets card to open that asset's detail page â€” structured details, the policies attached to it (each with its own View), documents, and the asset's activity timeline. Customers see the same per-asset view under My assets in their portal.",
+      "On a client profile, click View on any row in the Assets card to open that asset's detail page - structured details, the policies attached to it (each with its own View), documents, and the asset's activity timeline. Customers see the same per-asset view under My assets in their portal.",
     related: ["How do I view full policy details?"],
   },
   {
@@ -307,7 +308,7 @@ const KB: KbEntry[] = [
       "carrier library",
     ],
     answer:
-      "Go to Carrier library â†’ Carrier-specific documents. Pick a carrier, choose Personal or Commercial lines, and upload the underwriting manual, appetite guide, application, or supplemental. Documents are split into Personal and Commercial sections, and everything you upload also shows up on the Document review queue for the standard approval flow.",
+      "Go to Carrier library -> Carrier-specific documents. Pick a carrier, choose Personal or Commercial lines, and upload the underwriting manual, appetite guide, application, or supplemental. Documents are split into Personal and Commercial sections, and everything you upload also shows up on the Document review queue for the standard approval flow.",
     related: ["How do I add or remove carriers?"],
   },
   {
@@ -323,7 +324,7 @@ const KB: KbEntry[] = [
       "carrier contact",
     ],
     answer:
-      "Managers can use Add / remove carriers on the Carrier library page to toggle which carriers from the master library this agency works with. Tap a carrier card to manage its reps (underwriters, adjusters, claims reps) â€” those contacts surface on the Messages page so you can email them in one click.",
+      "Managers can use Add / remove carriers on the Carrier library page to toggle which carriers from the master library this agency works with. Tap a carrier card to manage its reps (underwriters, adjusters, claims reps) - those contacts surface on the Messages page so you can email them in one click.",
     related: ["How do I upload carrier-specific documents?"],
   },
   {
@@ -337,7 +338,7 @@ const KB: KbEntry[] = [
       "set a goal",
     ],
     answer:
-      "On the Analytics page (manager-only), the Performance goals card lets you set agency-wide targets per metric â€” premium written, new clients, activities resolved, policies bound â€” for a monthly / quarterly / annual period. The card plots actual vs. target and shows a progress meter for each goal.",
+      "On the Analytics page (manager-only), the Performance goals card lets you set agency-wide targets per metric - premium written, new clients, activities resolved, policies bound - for a monthly / quarterly / annual period. The card plots actual vs. target and shows a progress meter for each goal.",
     managerOnly: true,
     related: ["What is the performance leaderboard?"],
   },
@@ -352,7 +353,7 @@ const KB: KbEntry[] = [
       "who's best",
     ],
     answer:
-      "The Performance leaderboard on the Analytics page (manager-only) ranks the team on any metric â€” premium under management, bound policies, activities resolved, response rate, avg handle time, and more. Top three get a trophy / medals; click any row to open that agent's full drill-down.",
+      "The Performance leaderboard on the Analytics page (manager-only) ranks the team on any metric - premium under management, bound policies, activities resolved, response rate, avg handle time, and more. Top three get a trophy / medals; click any row to open that agent's full drill-down.",
     managerOnly: true,
     related: ["How do I set performance goals?"],
   },
@@ -369,7 +370,7 @@ const KB: KbEntry[] = [
       "carrier message",
     ],
     answer:
-      "The Messages page holds internal staff threads and carrier-rep threads. Customer-facing messages go through the marketing composer (Reply to customer pre-selects the client). Every message â€” including ones the AI sent on your behalf â€” is visible in the client's activity timeline; click View on a logged message to read it inline.",
+      "The Messages page holds internal staff threads and carrier-rep threads. Customer-facing messages go through the marketing composer (Reply to customer pre-selects the client). Every message - including ones the AI sent on your behalf - is visible in the client's activity timeline; click View on a logged message to read it inline.",
     related: ["How do I add or remove carriers?"],
   },
   {
@@ -400,7 +401,7 @@ const KB: KbEntry[] = [
       "questionnaire",
     ],
     answer:
-      "When a customer taps Get a private quote they pick personal vs. commercial, choose what to insure, and fill in five fields (name, phone, email, asset identifier, driver's license). The AI pulls public records, matches carriers, and gives a ballpark. An Activity Center task lands in the assigned agent's queue with a pre-drafted questionnaire reply â€” sending it auto-resolves the task.",
+      "When a customer taps Get a private quote they pick personal vs. commercial, choose what to insure, and fill in five fields (name, phone, email, asset identifier, driver's license). The AI pulls public records, matches carriers, and gives a ballpark. An Activity Center task lands in the assigned agent's queue with a pre-drafted questionnaire reply - sending it auto-resolves the task.",
     related: ["What is the Activity Center?"],
   },
   {
@@ -435,7 +436,7 @@ const KB: KbEntry[] = [
       "make an activity",
     ],
     answer:
-      "Click Create new activity in the Activity Center header (it opens a client/prospect search so you pick who it's for, then title, details, importance, and â€” for managers â€” an assignee). You can also create one straight from a client profile (card above Upcoming renewals) or a prospect profile (Quick actions card), where the contact is pre-filled.",
+      "Click Create new activity in the Activity Center header (it opens a client/prospect search so you pick who it's for, then title, details, importance, and - for managers - an assignee). You can also create one straight from a client profile (card above Upcoming renewals) or a prospect profile (Quick actions card), where the contact is pre-filled.",
     related: ["What is the Activity Center?"],
   },
   {
@@ -482,7 +483,7 @@ const KB: KbEntry[] = [
       "pay",
     ],
     answer:
-      "Deposits are taken to start a quote/bind workflow; payments track premium collection against a policy. A deposit doesn't constitute active coverage â€” binding requires a licensed agent. Receipts are stored as documents on the client record.",
+      "Deposits are taken to start a quote/bind workflow; payments track premium collection against a policy. A deposit doesn't constitute active coverage - binding requires a licensed agent. Receipts are stored as documents on the client record.",
     related: ["How do I view full policy details?"],
   },
   {
@@ -530,7 +531,7 @@ const KB: KbEntry[] = [
       "talk to manager",
     ],
     answer:
-      "The Messages page holds internal staff threads (1:1 or group) alongside carrier-rep threads. Open a thread, type, send â€” unread counts show on the Messages rail item. Customer-facing replies go through the marketing composer instead.",
+      "The Messages page holds internal staff threads (1:1 or group) alongside carrier-rep threads. Open a thread, type, send - unread counts show on the Messages rail item. Customer-facing replies go through the marketing composer instead.",
     related: ["How does messaging work?"],
   },
   {
@@ -538,7 +539,7 @@ const KB: KbEntry[] = [
     question: "How does the archive work?",
     keywords: ["archive", "archived", "restore", "soft delete", "deleted client"],
     answer:
-      "Archiving soft-deletes a client or prospect â€” they drop off the active rosters and stop receiving outreach, but nothing is destroyed. Find them under Archive and restore any record. Reverting a converted client to a prospect archives the client record automatically.",
+      "Archiving soft-deletes a client or prospect - they drop off the active rosters and stop receiving outreach, but nothing is destroyed. Find them under Archive and restore any record. Reverting a converted client to a prospect archives the client record automatically.",
     related: ["Where do converted prospects go?"],
   },
   {
@@ -598,7 +599,7 @@ const KB: KbEntry[] = [
       "portal for clients",
     ],
     answer:
-      "Clients get Overview, My assets (per-asset detail), Policies (expandable full detail + request a change), Documents (with e-sign), Claims, Get a quote, and Profile. They see only customer-visible timeline events and documents â€” internal notes stay staff-only.",
+      "Clients get Overview, My assets (per-asset detail), Policies (expandable full detail + request a change), Documents (with e-sign), Claims, Get a quote, and Profile. They see only customer-visible timeline events and documents - internal notes stay staff-only.",
     related: ["How do I view an asset's details?"],
   },
   {
@@ -615,7 +616,7 @@ const KB: KbEntry[] = [
       "tell me about",
     ],
     answer:
-      "Yes â€” ask me things like \"how many assets does <client> have?\", \"what's <client>'s total premium?\", \"who is <client>'s agent?\", \"when does <client> renew?\", \"tell me about <client>\", or agency-wide totals like \"how many open activities are there?\" and \"total premium under management\". I only surface records you're allowed to see.",
+      "Yes - ask me things like \"how many assets does <client> have?\", \"what's <client>'s total premium?\", \"who is <client>'s agent?\", \"when does <client> renew?\", \"tell me about <client>\", or agency-wide totals like \"how many open activities are there?\" and \"total premium under management\". I only surface records you're allowed to see.",
     related: [
       "How many open activities are there?",
       "What is the total premium under management?",
@@ -639,7 +640,7 @@ const KB: KbEntry[] = [
       "don't have a chat",
     ],
     answer:
-      'Open the Messages page. Each of the three cards â€” "Clients & prospects", "Internal", and "Carriers" â€” has a "+ New send" button in the top-right.\n\nClicking it opens one unified popup that:\n  1. Lists every recipient you don\'t already have a conversation with (scoped to that card\'s pool â€” visible clients/prospects, teammates, or carrier reps).\n  2. Lets you pick a channel: Email or SMS for client/prospect, email-only for carriers, none for internal.\n  3. Adds a Subject field (email) or Urgency picker (internal DM).\n  4. Has a Message textarea for the first message.\n\nHit Send and the conversation is created and opened in that card.',
+      'Open the Messages page. Each of the three cards - "Clients & prospects", "Internal", and "Carriers" - has a "+ New send" button in the top-right.\n\nClicking it opens one unified popup that:\n  1. Lists every recipient you don\'t already have a conversation with (scoped to that card\'s pool - visible clients/prospects, teammates, or carrier reps).\n  2. Lets you pick a channel: Email or SMS for client/prospect, email-only for carriers, none for internal.\n  3. Adds a Subject field (email) or Urgency picker (internal DM).\n  4. Has a Message textarea for the first message.\n\nHit Send and the conversation is created and opened in that card.',
     related: [
       "How do I view emails vs SMS separately?",
       "How do I pin or mute a conversation?",
@@ -660,14 +661,13 @@ const KB: KbEntry[] = [
       "mark as read",
       "three dots",
       "3 dots",
-      "â‹¯",
       "kebab",
       "message settings",
       "thread settings",
       "conversation settings",
     ],
     answer:
-      'Every conversation row in the Messages cards has a â‹¯ button on the right. Tapping it opens the message-settings menu with:\n  â€¢ Pin to top â€” floats this thread above the rest (up to 5 pins).\n  â€¢ Mute notifications â€” silences the unread badge for this thread (dims the row, shows a bell-off icon).\n  â€¢ Mark as read â€” clears unread inbound on a contact thread, or marks an internal thread read.\n  â€¢ Archive client / Archive prospect â€” soft-archives the contact (client/prospect only) so it drops off the active list; restore from the Archive page.\n  â€¢ Delete conversation / Delete thread â€” destructive; removes the message history (contact record is kept). Internal threads are deleted entirely.\n\nPinned threads show a Pin icon, muted threads show a BellOff icon, and dim slightly.',
+      'Every conversation row in the Messages cards has a Message settings button on the right. Tapping it opens the message-settings menu with:\n  - Pin to top - floats this thread above the rest (up to 5 pins).\n  - Mute notifications - silences the unread badge for this thread (dims the row, shows a bell-off icon).\n  - Mark as read - clears unread inbound on a contact thread, or marks an internal thread read.\n  - Archive client / Archive prospect - soft-archives the contact (client/prospect only) so it drops off the active list; restore from the Archive page.\n  - Delete conversation / Delete thread - destructive; removes the message history (contact record is kept). Internal threads are deleted entirely.\n\nPinned threads show a Pin icon, muted threads show a BellOff icon, and dim slightly.',
     related: [
       "How do I search archived clients?",
       "How do I expand a message card to full screen?",
@@ -688,7 +688,7 @@ const KB: KbEntry[] = [
       "collapse card",
     ],
     answer:
-      "Every messages card â€” the inline thread on a client/prospect profile, the three Messages inbox cards (Clients & prospects, Internal, Carriers), and the dashboard's Internal messages card â€” has a maximize icon in its top-right header.\n\nClick it and the card fills the screen as an overlay. Esc or clicking the backdrop collapses it back. Your draft is preserved across the toggle.\n\nIn the expanded inbox cards, the contacts list shrinks to a narrow names-only rail so the conversation gets the full width.",
+      "Every messages card - the inline thread on a client/prospect profile, the three Messages inbox cards (Clients & prospects, Internal, Carriers), and the dashboard's Internal messages card - has a maximize icon in its top-right header.\n\nClick it and the card fills the screen as an overlay. Esc or clicking the backdrop collapses it back. Your draft is preserved across the toggle.\n\nIn the expanded inbox cards, the contacts list shrinks to a narrow names-only rail so the conversation gets the full width.",
     related: [
       "How do I view emails vs SMS separately?",
       "How does the AI 'Enhance with AI' button work?",
@@ -710,7 +710,7 @@ const KB: KbEntry[] = [
       "sms tab",
     ],
     answer:
-      "Every conversation pane has an Email / SMS toggle at the top of the thread.\n\n  â€¢ Email shows only messages sent or received via email.\n  â€¢ SMS shows only texts.\n\nThe toggle also drives what the composer sends â€” so you stay in one medium at a time. Carrier threads are email-only, so the SMS tab is disabled there.",
+      "Every conversation pane has an Email / SMS toggle at the top of the thread.\n\n  - Email shows only messages sent or received via email.\n  - SMS shows only texts.\n\nThe toggle also drives what the composer sends - so you stay in one medium at a time. Carrier threads are email-only, so the SMS tab is disabled there.",
     related: [
       "How do I start a new conversation in Messages?",
       "How does promotional vs transactional AI messaging work?",
@@ -729,7 +729,7 @@ const KB: KbEntry[] = [
       "wand button",
     ],
     answer:
-      "After you type a draft in any message composer, click the Enhance with AI button under the textarea. The AI rewrites your draft into a clearer, more polished message â€” channel-aware:\n  â€¢ Email gets a greeting + warm sign-off and proper sentence casing.\n  â€¢ SMS stays short and courteous.\n\nThe rewritten text replaces your draft so you can review + edit before sending.",
+      "After you type a draft in any message composer, click the Enhance with AI button under the textarea. The AI rewrites your draft into a clearer, more polished message - channel-aware:\n  - Email gets a greeting + warm sign-off and proper sentence casing.\n  - SMS stays short and courteous.\n\nThe rewritten text replaces your draft so you can review + edit before sending.",
     related: [
       "How does the AI auto-suggest email subjects?",
       "How do I start a new conversation in Messages?",
@@ -778,7 +778,7 @@ const KB: KbEntry[] = [
       "let manager pick",
     ],
     answer:
-      "When you open Create new activity as an agent, you'll see two buttons:\n  â€¢ Create & assign to me â€” self-assigns to your queue (default).\n  â€¢ Send to manager â€” routes the activity to a manager to assign.\n\nThe sent-to-manager activity drops out of your To-do board and shows up in the manager Routing card under 'Activities to assign', with an amber 'Awaiting manager assignment' badge. The manager picks the owning agent inline; once assigned, the badge clears and the activity moves to that agent's queue.",
+      "When you open Create new activity as an agent, you'll see two buttons:\n  - Create & assign to me - self-assigns to your queue (default).\n  - Send to manager - routes the activity to a manager to assign.\n\nThe sent-to-manager activity drops out of your To-do board and shows up in the manager Routing card under 'Activities to assign', with an amber 'Awaiting manager assignment' badge. The manager picks the owning agent inline; once assigned, the badge clears and the activity moves to that agent's queue.",
     related: [
       "How does the routing card work?",
       "How do I create a new activity?",
@@ -801,7 +801,7 @@ const KB: KbEntry[] = [
     ],
     managerOnly: true,
     answer:
-      "The Routing card sits at the top of the manager Activity Center. It surfaces three things:\n  1. Unrouted prospects â€” prospects with no assigned agent.\n  2. Unrouted clients â€” clients with no assigned agent.\n  3. Activities to assign â€” activities an agent sent over via 'Send to manager'.\n\nEach row has two actions: 'Assign to me' (one-click confirm) or 'Pick agentsâ€¦' (multi-select dialog). For prospects/clients you can co-own with multiple agents â€” the first is the primary owner and the rest co-manage. Activities take a single owner.",
+      "The Routing card sits at the top of the manager Activity Center. It surfaces three things:\n  1. Unrouted prospects - prospects with no assigned agent.\n  2. Unrouted clients - clients with no assigned agent.\n  3. Activities to assign - activities an agent sent over via 'Send to manager'.\n\nEach row has two actions: 'Assign to me' (one-click confirm) or 'Pick agents...' (multi-select dialog). For prospects/clients you can co-own with multiple agents - the first is the primary owner and the rest co-manage. Activities take a single owner.",
     related: [
       "How do I send an activity to a manager to assign?",
       "How do I create a new activity?",
@@ -820,7 +820,7 @@ const KB: KbEntry[] = [
       "auto sms customer",
     ],
     answer:
-      "Start activity (top-left of an open activity card) does two things:\n  1. Moves the card from To-do to In progress so the team knows it's actively owned (the first start stamps the handoff timestamp).\n  2. If the activity is tied to a customer, the customer is auto-texted: 'Hi {name}, one of our agents has started working on your request. We'll follow up shortly with next steps.' This only fires on the first start â€” snoozing and resuming doesn't re-send.\n\nNo-customer activities just flip status with no outbound text.",
+      "Start activity (top-left of an open activity card) does two things:\n  1. Moves the card from To-do to In progress so the team knows it's actively owned (the first start stamps the handoff timestamp).\n  2. If the activity is tied to a customer, the customer is auto-texted: 'Hi {name}, one of our agents has started working on your request. We'll follow up shortly with next steps.' This only fires on the first start - snoozing and resuming doesn't re-send.\n\nNo-customer activities just flip status with no outbound text.",
     related: [
       "How do I mark an activity resolved?",
       "How do AI verification signals work?",
@@ -879,7 +879,7 @@ const KB: KbEntry[] = [
       "policy documents renewed",
     ],
     answer:
-      "Open the policy detail page (/employee/policies/:id). The Coverage card has a Renew documents button. Clicking it regenerates a fresh, dated set from current coverage:\n  â€¢ Declarations page\n  â€¢ Insurance ID card\n  â€¢ Proof of insurance\n\nAll three land on the Documents card below (customer-visible, approved, named with the policy ref + date). A customer-visible status event is logged to the timeline so the client's portal records the renewal.",
+      "Open the policy detail page (/employee/policies/:id). The Coverage card has a Renew documents button. Clicking it regenerates a fresh, dated set from current coverage:\n  - Declarations page\n  - Insurance ID card\n  - Proof of insurance\n\nAll three land on the Documents card below (customer-visible, approved, named with the policy ref + date). A customer-visible status event is logged to the timeline so the client's portal records the renewal.",
     related: [
       "How do I edit a policy or add an asset to it?",
       "What does the Policy description card show?",
@@ -896,7 +896,7 @@ const KB: KbEntry[] = [
       "description card",
     ],
     answer:
-      "Next to Policy remarks on the policy detail page, the Policy description card gives a plain-language summary:\n  â€¢ Line of business, asset, carrier, effective + renewal dates, current premium, and billing frequency.\n  â€¢ A 'What's covered' list pulled from the policy's coverage schedule when it has one (each item with limits + deductibles), or a sensible default outline for the asset type (home, auto, yacht, jewelry, umbrella, portfolio).\n\nAll three cards (Coverage, Policy remarks, Policy description) are fixed-height and scroll internally so the layout stays uniform.",
+      "Next to Policy remarks on the policy detail page, the Policy description card gives a plain-language summary:\n  - Line of business, asset, carrier, effective + renewal dates, current premium, and billing frequency.\n  - A 'What's covered' list pulled from the policy's coverage schedule when it has one (each item with limits + deductibles), or a sensible default outline for the asset type (home, auto, yacht, jewelry, umbrella, portfolio).\n\nAll three cards (Coverage, Policy remarks, Policy description) are fixed-height and scroll internally so the layout stays uniform.",
     related: [
       "How do I renew a policy's documents?",
       "How do I edit a policy or add an asset to it?",
@@ -914,7 +914,7 @@ const KB: KbEntry[] = [
       "insert from policy document",
     ],
     answer:
-      "On the policy detail page, click Edit policy on the Coverage card. The Edit policy modal opens prefilled with the current policy and saves through api.policies.update.\n\nInside it you can:\n  â€¢ Change carrier, policy number, premium, dates, status, and department (Personal / Commercial Lines).\n  â€¢ Pick a different asset OR choose '+ Add a new assetâ€¦' to create one inline (label, type, estimated value) â€” the policy attaches to the new asset on save.\n  â€¢ Drop a declarations page / carrier PDF into the AI document-insert tool at the top to auto-fill the fields and attach the file as a policy document.",
+      "On the policy detail page, click Edit policy on the Coverage card. The Edit policy modal opens prefilled with the current policy and saves through api.policies.update.\n\nInside it you can:\n  - Change carrier, policy number, premium, dates, status, and department (Personal / Commercial Lines).\n  - Pick a different asset OR choose '+ Add a new asset...' to create one inline (label, type, estimated value) - the policy attaches to the new asset on save.\n  - Drop a declarations page / carrier PDF into the AI document-insert tool at the top to auto-fill the fields and attach the file as a policy document.",
     related: [
       "How do I view full policy details?",
       "How do I renew a policy's documents?",
@@ -932,7 +932,7 @@ const KB: KbEntry[] = [
       "merged template",
     ],
     answer:
-      "On a client's profile, the Documents card has a 'Preview template' button in the top-right. It opens a modal that:\n  1. Lets you pick any agency template/form from the library (dropdown).\n  2. Renders that template as if filled in with the client's details â€” insured info (name, code, email, phone, addresses, agent of record), policies table, scheduled assets, client + agent signature lines.\n  3. Offers 'Print / Save as PDF' (opens a clean print view) and 'Save copy to documents' (clones the filled template onto the client's Documents card).\n\nIf no agency templates exist yet, a manager uploads them under Document review â†’ Agency document library.",
+      "On a client's profile, the Documents card has a 'Preview template' button in the top-right. It opens a modal that:\n  1. Lets you pick any agency template/form from the library (dropdown).\n  2. Renders that template as if filled in with the client's details - insured info (name, code, email, phone, addresses, agent of record), policies table, scheduled assets, client + agent signature lines.\n  3. Offers 'Print / Save as PDF' (opens a clean print view) and 'Save copy to documents' (clones the filled template onto the client's Documents card).\n\nIf no agency templates exist yet, a manager uploads them under Document review -> Agency document library.",
     related: [
       "How do I upload an agency-wide template?",
       "How do I download a client's full information as a PDF?",
@@ -952,7 +952,7 @@ const KB: KbEntry[] = [
     ],
     managerOnly: true,
     answer:
-      "Go to Document review (/employee/documents). The top card is the Agency document library; the first section is Templates & forms (manager-only).\n  1. Pick the document type (defaults to Agency template / form) and upload your file.\n  2. The template lands in the shared library â€” every agent can send it to a client via the Documents card or preview it with merged client data.\n\nThe same card has Personal lines and Commercial lines buckets at the bottom; each has its own upload button so you can also drop line-of-business-tagged forms there.",
+      "Go to Document review (/employee/documents). The top card is the Agency document library; the first section is Templates & forms (manager-only).\n  1. Pick the document type (defaults to Agency template / form) and upload your file.\n  2. The template lands in the shared library - every agent can send it to a client via the Documents card or preview it with merged client data.\n\nThe same card has Personal lines and Commercial lines buckets at the bottom; each has its own upload button so you can also drop line-of-business-tagged forms there.",
     related: [
       "How do I preview a filled-in template?",
       "How do I upload carrier-specific documents?",
@@ -972,7 +972,7 @@ const KB: KbEntry[] = [
       "download prospect",
     ],
     answer:
-      "On a client or prospect profile, the top-right header has a 'Download client information' (or 'Download prospect information') button. It compiles everything on file â€” profile, assets, policies, claims, documents, email + SMS messages, timeline & remarks, activities â€” into a print-ready document and opens the browser print dialog so it saves as a PDF.\n\nUses your browser's 'Save as PDF' destination â€” no plugin needed.",
+      "On a client or prospect profile, the top-right header has a 'Download client information' (or 'Download prospect information') button. It compiles everything on file - profile, assets, policies, claims, documents, email + SMS messages, timeline & remarks, activities - into a print-ready document and opens the browser print dialog so it saves as a PDF.\n\nUses your browser's 'Save as PDF' destination - no plugin needed.",
     related: [
       "How do I preview a filled-in template?",
       "How does messaging work?",
@@ -992,7 +992,7 @@ const KB: KbEntry[] = [
       "drill down",
     ],
     answer:
-      "The five tiles at the top of the agency dashboard are clickable (except Activity Center, which deep-links to the page):\n  â€¢ My clients / Active clients â€” opens a quick-view list of clients (expandable rows + Profile button).\n  â€¢ Bound policies â€” list of bound policies with carrier, premium, and Open Policy.\n  â€¢ Open prospects â€” list of new / abandoned prospects with status and Profile button.\n  â€¢ Renewals upcoming â€” list of upcoming renewals with date and Open Policy.\n\nEach row uses the same drill-down UI as the manager Analytics metric modals: expand for details + a deep-link to the actual record.",
+      "The five tiles at the top of the agency dashboard are clickable (except Activity Center, which deep-links to the page):\n  - My clients / Active clients - opens a quick-view list of clients (expandable rows + Profile button).\n  - Bound policies - list of bound policies with carrier, premium, and Open Policy.\n  - Open prospects - list of new / abandoned prospects with status and Profile button.\n  - Renewals upcoming - list of upcoming renewals with date and Open Policy.\n\nEach row uses the same drill-down UI as the manager Analytics metric modals: expand for details + a deep-link to the actual record.",
     related: [
       "What is the Activity Center?",
       "How does Analytics drill-down work?",
@@ -1010,7 +1010,7 @@ const KB: KbEntry[] = [
       "restore archived",
     ],
     answer:
-      "Open the Archive page (/employee/archive). At the top is a search bar that filters by name, email, or status across both Archived prospects and Archived clients.\n\nEach row has two actions:\n  â€¢ Quick view â€” opens a modal of the basic archived record (contacts, policies count, managed-by, archived date) with an 'Open full profile' link â€” without leaving the archive.\n  â€¢ Unarchive â€” restores the contact to the active list.",
+      "Open the Archive page (/employee/archive). At the top is a search bar that filters by name, email, or status across both Archived prospects and Archived clients.\n\nEach row has two actions:\n  - Quick view - opens a modal of the basic archived record (contacts, policies count, managed-by, archived date) with an 'Open full profile' link - without leaving the archive.\n  - Unarchive - restores the contact to the active list.",
     related: [
       "How do I pin or mute a conversation?",
       "How does the archive work?",
@@ -1027,7 +1027,7 @@ const KB: KbEntry[] = [
       "renewals automatically",
     ],
     answer:
-      "Every upcoming renewal gets an Activity Center card assigned to the renewal's owning agent (falling back to the client's assigned agent). The card title is 'Renewal due â€” {asset}', topic renewal_approaching, severity Warning.\n\nThe spawn is idempotent â€” one card per renewal term (keyed by renewalId), so reloading the Activity Center never creates duplicates. Cards appear as soon as the Activity Center is loaded.",
+      "Every upcoming renewal gets an Activity Center card assigned to the renewal's owning agent (falling back to the client's assigned agent). The card title is 'Renewal due - {asset}', topic renewal_approaching, severity Warning.\n\nThe spawn is idempotent - one card per renewal term (keyed by renewalId), so reloading the Activity Center never creates duplicates. Cards appear as soon as the Activity Center is loaded.",
     related: [
       "How do renewals work?",
       "What is the Activity Center?",
@@ -1047,7 +1047,7 @@ const KB: KbEntry[] = [
     ],
     managerOnly: true,
     answer:
-      "On the Marketing activity page, click Compose new campaign. The composer is multi-select for both Channel (toggle Email + SMS on at the same time) and Audience (toggle All clients + All prospects + optional hand-pick â€” they combine).\n\nPromotional campaigns are fire-and-forget: only the campaign + a launch status event are recorded â€” no per-recipient message rows are written, so campaigns never clutter individual clients' Messages threads. Promotional AI auto-outreach (the per-prospect intake fire on prospect creation) is SMS-only by policy.",
+      "On the Marketing activity page, click Compose new campaign. The composer is multi-select for both Channel (toggle Email + SMS on at the same time) and Audience (toggle All clients + All prospects + optional hand-pick - they combine).\n\nPromotional campaigns are fire-and-forget: only the campaign + a launch status event are recorded - no per-recipient message rows are written, so campaigns never clutter individual clients' Messages threads. Promotional AI auto-outreach (the per-prospect intake fire on prospect creation) is SMS-only by policy.",
     related: [
       "How does AI marketing work?",
       "How does promotional vs transactional AI messaging work?",
@@ -1065,7 +1065,7 @@ const KB: KbEntry[] = [
       "serious message",
     ],
     answer:
-      "Two rules:\n  â€¢ Promotional AI auto-messages (per-prospect outreach + manager AI campaigns) are SMS-only and stay out of email. Campaign sends aren't recorded as per-contact messages at all.\n  â€¢ Transactional AI (policy-edit acknowledgments, questionnaires, e-sign requests, anything about the quote/policy/documents) goes via email â€” including AI-drafted ones â€” so the substance lives in the email thread.\n\nThis keeps promo out of the inbox and serious content where the client expects it.",
+      "Two rules:\n  - Promotional AI auto-messages (per-prospect outreach + manager AI campaigns) are SMS-only and stay out of email. Campaign sends aren't recorded as per-contact messages at all.\n  - Transactional AI (policy-edit acknowledgments, questionnaires, e-sign requests, anything about the quote/policy/documents) goes via email - including AI-drafted ones - so the substance lives in the email thread.\n\nThis keeps promo out of the inbox and serious content where the client expects it.",
     related: [
       "How do I send an AI campaign on email and SMS together?",
       "How does AI marketing work?",
@@ -1084,7 +1084,7 @@ const KB: KbEntry[] = [
       "logo signature",
     ],
     answer:
-      "The Messages page has an Email signature card. Tap Edit signature to unlock; add your signature text (name, title, contact info) and any logos. Save re-locks the card and shows a live preview of how your signature appears at the foot of an outbound email (the 'â€”' separator, text, and logos).\n\nThe saved signature is auto-appended to every outbound EMAIL you send from anywhere in the app â€” Messages page, inline detail-page threads, the New send modal. SMS sends ignore it.",
+      "The Messages page has an Email signature card. Tap Edit signature to unlock; add your signature text (name, title, contact info) and any logos. Save re-locks the card and shows a live preview of how your signature appears at the foot of an outbound email (the ' - ' separator, text, and logos).\n\nThe saved signature is auto-appended to every outbound EMAIL you send from anywhere in the app - Messages page, inline detail-page threads, the New send modal. SMS sends ignore it.",
     related: [
       "How do I start a new conversation in Messages?",
       "How does the 'Enhance with AI' button work?",
@@ -1119,7 +1119,7 @@ const KB: KbEntry[] = [
       "what can managers",
     ],
     answer:
-      "Manager-only surfaces and actions:\n  â€¢ Analytics page (team performance + per-agent drill-downs + performance goals).\n  â€¢ Routing card on the Activity Center (assign unrouted prospects/clients + handed-off activities).\n  â€¢ Manage carriers, carrier reps, and the agency document library (templates + line-of-business buckets).\n  â€¢ Agency branches in the master portal.\n  â€¢ Reassign any activity to any agent directly.\n  â€¢ Compose AI marketing campaigns.\n  â€¢ Master portal pages (agencies, users, custom doc types).\n\nAgents can request reassignment (managers action it), and can only create activities for clients/prospects assigned to them.",
+      "Manager-only surfaces and actions:\n  - Analytics page (team performance + per-agent drill-downs + performance goals).\n  - Routing card on the Activity Center (assign unrouted prospects/clients + handed-off activities).\n  - Manage carriers, carrier reps, and the agency document library (templates + line-of-business buckets).\n  - Agency branches in the master portal.\n  - Reassign any activity to any agent directly.\n  - Compose AI marketing campaigns.\n  - Master portal pages (agencies, users, custom doc types).\n\nAgents can request reassignment (managers action it), and can only create activities for clients/prospects assigned to them.",
     related: [
       "How does the routing card work?",
       "How do I grant a manager override on an activity?",
@@ -1137,7 +1137,7 @@ const KB: KbEntry[] = [
       "edit importance",
     ],
     answer:
-      "On an expanded activity card, there's an Importance chip showing the current level (Low / Medium / High). Click it â€” the three options appear inline with their colored icons (Info / AlertTriangle / AlertCircle). Pick one and it saves immediately, collapsing back to a single chip.\n\nA small 'Edited' hint appears next to the chip when a human changed the AI's original grading.",
+      "On an expanded activity card, there's an Importance chip showing the current level (Low / Medium / High). Click it - the three options appear inline with their colored icons (Info / AlertTriangle / AlertCircle). Pick one and it saves immediately, collapsing back to a single chip.\n\nA small 'Edited' hint appears next to the chip when a human changed the AI's original grading.",
     related: [
       "What is the Activity Center?",
     ],
@@ -1154,7 +1154,7 @@ const KB: KbEntry[] = [
       "last message first",
     ],
     answer:
-      "Every message surface auto-scrolls to the most recent message when the thread opens, the Email/SMS channel switches, the card is expanded to full screen, or a new message arrives â€” so you always land at the bottom of the conversation. The exception is the timeline ?msg= deep-link, which scrolls to and highlights that specific message instead.",
+      "Every message surface auto-scrolls to the most recent message when the thread opens, the Email/SMS channel switches, the card is expanded to full screen, or a new message arrives - so you always land at the bottom of the conversation. The exception is the timeline ?msg= deep-link, which scrolls to and highlights that specific message instead.",
     related: [
       "How do I expand a message card to full screen?",
       "How do I view emails vs SMS separately?",
@@ -1280,7 +1280,7 @@ type DataMetric =
   | "status"
   | "profile";
 
-// Order matters â€” more specific phrases first so "renewal date" beats
+// Order matters - more specific phrases first so "renewal date" beats
 // the bare "renewal" count, and "premium" beats "policy".
 const METRIC_PATTERNS: { metric: DataMetric; re: RegExp }[] = [
   { metric: "profile", re: /\b(tell me about|summary of|profile of|overview of|everything about|recap)\b/ },
@@ -1505,6 +1505,7 @@ function openTasksForContact(contact: MatchedContact, ctx: AssistantContext): Ta
         : task.prospectId === contact.id
     )
     .filter((task) => api.tasks.statusOf(task) !== "resolved")
+    .filter(isContactProfileActivity)
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
 }
 
@@ -1968,7 +1969,7 @@ function answerForContactMetric(
       return {
         text: agent
           ? `${name} (prospect) is assigned to ${agent.name}.`
-          : `${name} is an unassigned prospect â€” a manager needs to route them to an agent before they can be converted.`,
+          : `${name} is an unassigned prospect - a manager needs to route them to an agent before they can be converted.`,
         related: ["How do I convert a prospect to a client?"],
         topicId: "data-agent",
         action: prospectAction(p.id),
@@ -1976,7 +1977,7 @@ function answerForContactMetric(
     }
     if (metric === "contact") {
       return {
-        text: `${name} (prospect) â€” ${p.email}${p.phone ? ` Â· ${p.phone}` : ""}.`,
+        text: `${name} (prospect) - ${p.email}${p.phone ? ` - ${p.phone}` : ""}.`,
         topicId: "data-contact",
         action: prospectAction(p.id),
       };
@@ -1993,7 +1994,7 @@ function answerForContactMetric(
         `${name} is a prospect, so there's no bound book yet. They came in interested in ${assetLabel}` +
         `${p.estimatedValue ? ` (est. ${formatMoney(p.estimatedValue)})` : ""}, status "${p.status.replace(/_/g, " ")}", ` +
         `${p.assignedAgentId ? `assigned to ${api.users.get(p.assignedAgentId)?.name ?? "an agent"}` : "currently unassigned"}. ` +
-        `Open their prospect profile for the AI summary, quote interest, and timeline â€” convert them to a client to start attaching assets, policies, and claims.`,
+        `Open their prospect profile for the AI summary, quote interest, and timeline - convert them to a client to start attaching assets, policies, and claims.`,
       related: ["How do I convert a prospect to a client?"],
       topicId: "data-prospect",
       action: prospectAction(p.id),
@@ -2022,14 +2023,14 @@ function answerForContactMetric(
         : undefined;
       return {
         text:
-          `${name} â€” client snapshot:\n` +
-          `â€¢ Assigned agent: ${agent?.name ?? "unassigned"}\n` +
-          `â€¢ Assets: ${assetN}\n` +
-          `â€¢ Policies: ${policies.length} (${bound.length} bound)\n` +
-          `â€¢ Premium under management: ${formatMoney(premium)}\n` +
-          `â€¢ Claims: ${claims.length} (${openClaims} open)\n` +
-          `â€¢ Upcoming renewals: ${renewals}\n` +
-          `${customer ? `â€¢ Contact: ${customer.email}${customer.phone ? ` Â· ${customer.phone}` : ""}` : ""}\n\n` +
+          `${name} - client snapshot:\n` +
+          `- Assigned agent: ${agent?.name ?? "unassigned"}\n` +
+          `- Assets: ${assetN}\n` +
+          `- Policies: ${policies.length} (${bound.length} bound)\n` +
+          `- Premium under management: ${formatMoney(premium)}\n` +
+          `- Claims: ${claims.length} (${openClaims} open)\n` +
+          `- Upcoming renewals: ${renewals}\n` +
+          `${customer ? `- Contact: ${customer.email}${customer.phone ? ` - ${customer.phone}` : ""}` : ""}\n\n` +
           `Open their client profile for the full picture, or ask me about any one of these.`,
         related: [
           `How many policies does ${name} have?`,
@@ -2052,7 +2053,7 @@ function answerForContactMetric(
           ? `${name} is assigned to ${agent.name} (${agent.role}).${
               co.length ? ` Co-owners: ${co.join(", ")}.` : ""
             } The assigned agent is set on the client profile (managers only).`
-          : `${name} doesn't have an assigned agent yet â€” a manager can assign one from the client profile or the Activity Center routing card.`,
+          : `${name} doesn't have an assigned agent yet - a manager can assign one from the client profile or the Activity Center routing card.`,
         topicId: "data-agent",
         action: clientAction(contact.id),
       };
@@ -2060,7 +2061,7 @@ function answerForContactMetric(
     case "contact": {
       return {
         text: customer
-          ? `${name} â€” ${customer.email}${customer.phone ? ` Â· ${customer.phone}` : ""}${
+          ? `${name} - ${customer.email}${customer.phone ? ` - ${customer.phone}` : ""}${
               customer.mailingAddress ? `\nMailing: ${customer.mailingAddress}` : ""
             }. You can edit contact info on the client profile (Edit profile).`
           : `I couldn't load ${name}'s contact details.`,
@@ -2108,7 +2109,7 @@ function answerForContactMetric(
       const lines = upcoming.slice(0, 5).map((r) => {
         const pol = api.policies.get(r.policyId);
         const asset = pol ? api.assets.get(pol.assetId) : undefined;
-        return `â€¢ ${asset?.label ?? pol?.policyNumber ?? "Policy"} â€” ${formatDate(r.renewalDate)}`;
+        return `- ${asset?.label ?? pol?.policyNumber ?? "Policy"} - ${formatDate(r.renewalDate)}`;
       });
       return {
         text:
@@ -2126,7 +2127,7 @@ function answerForContactMetric(
       }
       const lines = policies.slice(0, 6).map((p) => {
         const asset = api.assets.get(p.assetId);
-        return `â€¢ ${asset?.label ?? p.policyNumber ?? "Policy"} â€” ${p.status.replace(/_/g, " ")}`;
+        return `- ${asset?.label ?? p.policyNumber ?? "Policy"} - ${p.status.replace(/_/g, " ")}`;
       });
       return {
         text: `${name}'s policy statuses:\n` + lines.join("\n"),
@@ -2140,7 +2141,7 @@ function answerForContactMetric(
       return {
         text:
           `${name} has ${n} insured ${plural(n, "asset", "assets")} under management. ` +
-          `To view this, go to their client profile and click View on any row in the Assets card to open that asset's detail page â€” structured details, the policies attached to it (each with its own View), documents, and the asset's activity timeline. Customers see the same per-asset view under My assets in their portal.`,
+          `To view this, go to their client profile and click View on any row in the Assets card to open that asset's detail page - structured details, the policies attached to it (each with its own View), documents, and the asset's activity timeline. Customers see the same per-asset view under My assets in their portal.`,
         related: ["How do I view full policy details?"],
         topicId: "data-assets",
         action: assets.length === 1
@@ -2158,7 +2159,7 @@ function answerForContactMetric(
           `${name} has ${n} ${plural(n, "policy", "policies")} on file${
             n > 0 ? ` (${bound} bound)` : ""
           }. ` +
-          `Open their client profile â†’ Policies card and click View on any policy for the full detail page â€” coverage, dates, premium, timeline, and documents.`,
+          `Open their client profile -> Policies card and click View on any policy for the full detail page - coverage, dates, premium, timeline, and documents.`,
         related: ["How do I view full policy details?"],
         topicId: "data-policies",
         action: selected ? policyAction(selected.id) : clientAction(contact.id, "View policies"),
@@ -2172,7 +2173,7 @@ function answerForContactMetric(
       return {
         text:
           `${name} has ${n} ${plural(n, "claim", "claims")}${
-            n > 0 ? ` â€” ${open} open, ${n - open} closed` : ""
+            n > 0 ? ` - ${open} open, ${n - open} closed` : ""
           }. ` +
           `See them on the Claims card of their client profile. Open claims also show up as activities in the Activity Center until they're resolved.`,
         related: ["How does document review work?"],
@@ -2240,9 +2241,9 @@ function formatDurationMs(ms: number | null): string {
 }
 
 function formatDate(iso?: string): string {
-  if (!iso) return "â€”";
+  if (!iso) return "-";
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "â€”";
+  if (Number.isNaN(d.getTime())) return "-";
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
 }
 
@@ -2814,7 +2815,7 @@ function tryAgencyAggregate(q: string, ctx: AssistantContext): AssistantAnswer |
       .filter((p) => isManager || customerIds.has(p.customerId));
     const bound = policies.filter((p) => p.status === "bound").length;
     return {
-      text: `There are ${policies.length} policies${scopeNote} â€” ${bound} bound. The Policies category lists them all.`,
+      text: `There are ${policies.length} policies${scopeNote} - ${bound} bound. The Policies category lists them all.`,
       topicId: "agg-policies",
       action: categoryAction("/employee/policies", "View policies"),
     };
@@ -2871,7 +2872,7 @@ function tryAgencyAggregate(q: string, ctx: AssistantContext): AssistantAnswer |
         "carrier",
         "carriers"
       )}: ${carriers.slice(0, 8).map((c) => c.name).join(", ")}${
-        carriers.length > 8 ? "â€¦" : ""
+        carriers.length > 8 ? "..." : ""
       }. Manage them under Carrier library.`,
       topicId: "agg-carriers",
       action: categoryAction("/employee/carriers", "View carriers"),
@@ -2906,20 +2907,20 @@ function tryCarrierAnswer(q: string, ctx: AssistantContext): AssistantAnswer | n
       .map((c) => `${c.name} (${c.position.replace(/_/g, " ")}, ${c.email})`);
     return {
       text:
-        `${named.name} â€” writes ${
+        `${named.name} - writes ${
           named.preferredAssetTypes.map((t) => t.replace(/_/g, " ")).join(", ") || "various lines"
         }. ` +
         `${named.agentPortalUrl ? "Has an agent portal configured." : "No agent portal URL on file."}\n` +
         (reps.length
-          ? `Reps on file:\n${reps.map((r) => `â€¢ ${r}`).join("\n")}`
-          : "No carrier reps on file yet â€” add them from the carrier card on Carrier library."),
+          ? `Reps on file:\n${reps.map((r) => `- ${r}`).join("\n")}`
+          : "No carrier reps on file yet - add them from the carrier card on Carrier library."),
       related: ["How do I add or remove carriers?"],
       topicId: "data-carrier",
       action: categoryAction("/employee/carriers", "View carrier"),
     };
   }
   // No specific carrier named, but the question reads like "what/which
-  // carriers do we work with" â†’ list them.
+  // carriers do we work with" -> list them.
   if (/\b(what|which|list|work with|do we|our)\b/.test(q)) {
     return {
       text: `This agency works with ${carriers.length} ${plural(
@@ -2969,11 +2970,11 @@ function tryAgentAnswer(q: string, ctx: AssistantContext): AssistantAnswer | nul
     .filter((t) => (t.assignedToId ?? "") === match!.id).length;
   return {
     text:
-      `${match!.name} â€” ${clients.length} ${plural(clients.length, "client", "clients")}, ` +
+      `${match!.name} - ${clients.length} ${plural(clients.length, "client", "clients")}, ` +
       `${policies.length} bound ${plural(policies.length, "policy", "policies")} (${formatMoney(
         premium
       )} premium), ${openTasks} open ${plural(openTasks, "activity", "activities")}. ` +
-      `Open Analytics â†’ click ${match!.name} for the full drill-down.`,
+      `Open Analytics -> click ${match!.name} for the full drill-down.`,
     related: ["What is the performance leaderboard?", "How do I set performance goals?"],
     topicId: "data-agent-stats",
     action: categoryAction("/employee/analytics", "View analytics"),
@@ -3101,7 +3102,7 @@ function answerForAgentPerformance(
           rows
             .map(
               ({ user, metrics }) =>
-                `â€¢ ${user.name} (${agentRoleLabel(user.role)}): ${metrics.assignedClients} clients, ${formatMoney(
+                `- ${user.name} (${agentRoleLabel(user.role)}): ${metrics.assignedClients} clients, ${formatMoney(
                   metrics.premiumUnderMgmt
                 )} premium, ${metrics.openActivities} open activities`
             )
@@ -3146,16 +3147,16 @@ function answerForAgentPerformance(
   return {
     text:
       `${match.name} (${agentRoleLabel(match.role)}) performance snapshot:\n` +
-      `â€¢ Assigned clients: ${metrics.assignedClients}\n` +
-      `â€¢ Bound policies: ${metrics.boundPolicies}\n` +
-      `â€¢ Premium under management: ${formatMoney(metrics.premiumUnderMgmt)}\n` +
-      `â€¢ Open activities: ${metrics.openActivities} (${metrics.inProgress} in progress)\n` +
-      `â€¢ Activities resolved: ${metrics.resolvedLast30} in the last 30 days, ${metrics.resolvedLifetime} lifetime\n` +
-      `â€¢ Response rate: ${formatPercent(metrics.responseRate)}\n` +
-      `â€¢ Avg handle time: ${formatDurationMs(metrics.avgHandleMs)}\n` +
-      `â€¢ Documents uploaded: ${metrics.docsUploaded}\n` +
-      `â€¢ Renewals upcoming: ${metrics.renewalsUpcoming}\n` +
-      `â€¢ Claims: ${metrics.openClaims} open, ${metrics.closedClaims} closed` +
+      `- Assigned clients: ${metrics.assignedClients}\n` +
+      `- Bound policies: ${metrics.boundPolicies}\n` +
+      `- Premium under management: ${formatMoney(metrics.premiumUnderMgmt)}\n` +
+      `- Open activities: ${metrics.openActivities} (${metrics.inProgress} in progress)\n` +
+      `- Activities resolved: ${metrics.resolvedLast30} in the last 30 days, ${metrics.resolvedLifetime} lifetime\n` +
+      `- Response rate: ${formatPercent(metrics.responseRate)}\n` +
+      `- Avg handle time: ${formatDurationMs(metrics.avgHandleMs)}\n` +
+      `- Documents uploaded: ${metrics.docsUploaded}\n` +
+      `- Renewals upcoming: ${metrics.renewalsUpcoming}\n` +
+      `- Claims: ${metrics.openClaims} open, ${metrics.closedClaims} closed` +
       focusLine +
       `\n\nOpen ${match.name}'s Analytics drill-down for the full performance view.`,
     related: ["What is the performance leaderboard?", "How do I set performance goals?"],
@@ -3892,6 +3893,7 @@ function latestOpenTaskForContact(ctx: AssistantContext, contact: MatchedContact
           ? task.customerId === contact.id
           : task.prospectId === contact.id
       )
+      .filter(isContactProfileActivity)
       .filter((task) => canSeeTask(task, ctx))[0] ?? null
   );
 }
@@ -4652,24 +4654,24 @@ export function askPortalAssistant(
   const q = question.trim().toLowerCase();
   if (!q) {
     return {
-      text: "Ask me anything about using the portal â€” the Activity Center, reminders, prospects, policies, carriers, documents, or analytics.",
+      text: "Ask me anything about using the portal - the Activity Center, reminders, prospects, policies, carriers, documents, or analytics.",
       related: assistantStarters(),
     };
   }
 
-  // Pure greeting / "help" with no topic words â†’ menu.
+  // Pure greeting / "help" with no topic words -> menu.
   const isGreeting =
     GREETING_KEYWORDS.some((g) => q === g || q.startsWith(g + " ")) && q.length < 25;
   if (isGreeting) {
     return {
-      text: "Hi! I'm the portal assistant. I can explain how the Activity Center, reminders, prospects, policies, carriers, documents, and analytics work â€” and I can look up live numbers like \"how many assets does <client> have?\". Try one of these:",
+      text: "Hi! I'm the portal assistant. I can explain how the Activity Center, reminders, prospects, policies, carriers, documents, and analytics work - and I can look up live numbers like \"how many assets does <client> have?\". Try one of these:",
       related: assistantStarters(),
     };
   }
 
   const lastTopic = lastAssistantTopic(history);
 
-  // "Tell me more" / "continue" / "step by step" â€” keep walking the
+  // "Tell me more" / "continue" / "step by step" - keep walking the
   // current topic by either deepening with a not-yet-seen related
   // entry or repeating the full answer.
   if (lastTopic && MORE_DETAIL_RE.test(q) && q.split(/\s+/).length <= 6) {
@@ -4715,7 +4717,7 @@ export function askPortalAssistant(
   }
 
   // Live-data lookups (need the records the viewer can see). Use the
-  // raw `q` here â€” never the augmented one â€” so a topic's keywords
+  // raw `q` here - never the augmented one - so a topic's keywords
   // can't accidentally summon a contact lookup.
   if (ctx) {
     const agentStats = tryAgentAnswer(q, ctx);
@@ -4747,7 +4749,7 @@ export function askPortalAssistant(
   const bestScore = ranked[0]?.score ?? 0;
 
   // Follow-up question that didn't strongly match anything new but we
-  // know the prior topic â†’ keep talking about it rather than dumping
+  // know the prior topic -> keep talking about it rather than dumping
   // the topic menu.
   if (looksLikeFollowUp && lastTopic && (!best || bestScore < 3)) {
     return {
@@ -4761,7 +4763,7 @@ export function askPortalAssistant(
     const videoAnswer = answerFromTrainingVideo(q, role);
     if (videoAnswer) return videoAnswer;
     return {
-      text: "I'm not sure about that one yet â€” I cover portal how-tos. Here are some topics I can help with:",
+      text: "I'm not sure about that one yet - I cover portal how-tos. Here are some topics I can help with:",
       related: KB.slice(0, 6).map((e) => e.question),
     };
   }
@@ -4801,10 +4803,11 @@ export async function askPortalAssistantSmart(
 }
 
 function shouldUseAssistantLLM(question: string, local: AssistantAnswer): boolean {
+  if (typeof fetch !== "function") return false;
   if (local.pendingAction) return false;
-  if (local.topicId && /^(data-|agg-|carrier-|action-)/.test(local.topicId)) return false;
-  if (question.trim().length < 8) return false;
-  return typeof fetch === "function";
+  if (local.topicId && /^(action-)/.test(local.topicId)) return false;
+  if (question.trim().length < 4) return false;
+  return true;
 }
 
 async function fetchAssistantSynthesis(
@@ -4819,7 +4822,7 @@ async function fetchAssistantSynthesis(
   const entries = dedupeEntries([
     ...(localEntry ? [localEntry] : []),
     ...ranked.map((r) => r.entry),
-  ]).slice(0, 5);
+  ]).slice(0, 10);
 
   const knowledge = entries
     .map((entry) => {
@@ -4835,11 +4838,11 @@ async function fetchAssistantSynthesis(
     {
       question: q,
       role,
-      history: (history ?? []).slice(-6),
+      history: (history ?? []).slice(-10),
       localAnswer: local.text,
       knowledge,
     },
-    { timeoutMs: 40_000 }
+    { timeoutMs: 60_000 }
   );
   if (!out) throw new Error("Assistant AI provider unavailable");
   return out;

@@ -32,6 +32,9 @@ import { buildDocumentTemplateFields, documentTypeLabelForTemplate } from "@/lib
 import { fmt } from "@/lib/format";
 import { subscribeToDbChanges } from "@/lib/db";
 import { downloadContactDossier } from "@/lib/contactDossier";
+import { requestManagerStepUp, verifyManagerStepUp } from "@/lib/managerStepUp";
+import { isContactProfileActivity } from "@/lib/taskFilters";
+import { scrollAnchorIntoView } from "@/lib/scrollAnchors";
 import {
   buildLossRunEmailBody,
   buildLossRunReport,
@@ -48,15 +51,6 @@ type LossHistoryAiField = "policyId" | "status" | "externalClaimNumber" | "opene
 
 function uniqueStaffIds(ids: Array<string | undefined>): string[] {
   return Array.from(new Set(ids.filter((id): id is string => !!id)));
-}
-
-function generateManagerVerificationCode(): string {
-  if (typeof window !== "undefined" && window.crypto?.getRandomValues) {
-    const values = new Uint32Array(1);
-    window.crypto.getRandomValues(values);
-    return String(values[0] % 1000000).padStart(6, "0");
-  }
-  return String(Math.floor(Math.random() * 1000000)).padStart(6, "0");
 }
 
 function profileValue(value?: string | null): string {
@@ -78,15 +72,34 @@ export function ClientDetailPage() {
   const { user } = useAuth();
   const nav = useNavigate();
   const location = useLocation();
-  // Hash-based deep-link from elsewhere in the app. We wait one tick
-  // so the page is mounted, then scroll the anchor into view.
+  // Deep-links from elsewhere in the app. Hash links still work for
+  // ordinary anchors; quote-flow links use a query flag so the browser
+  // does not force the workspace to the top before React can center it.
   useEffect(() => {
-    if (!location.hash) return;
-    const id = location.hash.slice(1);
-    window.setTimeout(() => {
-      document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
-    }, 80);
-  }, [location.hash]);
+    const query = new URLSearchParams(location.search);
+    const quoteWorkspaceExpanded = query.get("quoteWorkspace") === "expanded";
+    if (quoteWorkspaceExpanded && !location.hash) return;
+    const id = location.hash
+      ? location.hash.slice(1)
+      : quoteWorkspaceExpanded
+      ? "ai-quoting-workspace"
+      : "";
+    if (!id) return;
+    const scrollToTarget = () => {
+      const shouldCenter = id === "ai-quoting-workspace" && quoteWorkspaceExpanded;
+      scrollAnchorIntoView(document.getElementById(id), {
+        behavior: "smooth",
+        block: shouldCenter ? "center" : "start",
+      });
+    };
+    const first = window.setTimeout(scrollToTarget, 100);
+    const second =
+      id === "ai-quoting-workspace" ? window.setTimeout(scrollToTarget, 700) : undefined;
+    return () => {
+      window.clearTimeout(first);
+      if (second) window.clearTimeout(second);
+    };
+  }, [location.hash, location.search]);
   const showIntegrationNotice = useIntegrationNotice();
   // Look up the customer up front so we can seed controlled state with
   // its addresses before any conditional returns.
@@ -154,7 +167,10 @@ export function ClientDetailPage() {
   const [encryptedAccessGranted, setEncryptedAccessGranted] = useState(false);
   const [managerVerificationCode, setManagerVerificationCode] = useState("");
   const [managerVerificationError, setManagerVerificationError] = useState<string | null>(null);
-  const [generatedManagerCode, setGeneratedManagerCode] = useState<string | null>(null);
+  const [managerChallengeId, setManagerChallengeId] = useState<string | null>(null);
+  const [managerChallengeEmail, setManagerChallengeEmail] = useState<string | null>(null);
+  const [managerChallengeExpiresAt, setManagerChallengeExpiresAt] = useState<string | null>(null);
+  const [managerVerificationBusy, setManagerVerificationBusy] = useState(false);
   if (!customerId) {
     return (
       <EmptyState
@@ -243,10 +259,12 @@ export function ClientDetailPage() {
   const events = api.customers.fullHistory(customer.id);
   const openActivities = api.tasks
     .listOpen(agency.id)
-    .filter((t) => t.customerId === customer.id);
+    .filter((t) => t.customerId === customer.id)
+    .filter(isContactProfileActivity);
   const resolvedActivities = api.tasks
     .listCompleted(agency.id)
-    .filter((t) => t.customerId === customer.id);
+    .filter((t) => t.customerId === customer.id)
+    .filter(isContactProfileActivity);
   const refresh = () => setRev((r) => r + 1);
   useEffect(() => subscribeToDbChanges(refresh), []);
   function handleCarrierPolicyRetrieve() {
@@ -291,13 +309,35 @@ export function ClientDetailPage() {
     }, 60);
   }
 
-  function openEncryptedInformation() {
+  async function openEncryptedInformation() {
     if (!canViewEncryptedInfo) return;
-    setGeneratedManagerCode(generateManagerVerificationCode());
+    setManagerChallengeId(null);
+    setManagerChallengeEmail(null);
+    setManagerChallengeExpiresAt(null);
     setManagerVerificationCode("");
     setManagerVerificationError(null);
     setEncryptedAccessGranted(false);
     setEncryptedInfoOpen(true);
+    const email = (activeUser.businessEmail || activeUser.email || "").trim();
+    if (!email) {
+      setManagerVerificationError("This manager account does not have an email address for verification.");
+      return;
+    }
+    setManagerVerificationBusy(true);
+    const result = await requestManagerStepUp({
+      user: activeUser,
+      tenantId: activeAgency.id,
+      email,
+      customerId: activeCustomer.id,
+    });
+    setManagerVerificationBusy(false);
+    if (!result.ok) {
+      setManagerVerificationError(result.message);
+      return;
+    }
+    setManagerChallengeId(result.challengeId);
+    setManagerChallengeEmail(result.maskedEmail);
+    setManagerChallengeExpiresAt(result.expiresAt);
   }
 
   function closeEncryptedInformation() {
@@ -305,17 +345,36 @@ export function ClientDetailPage() {
     setEncryptedAccessGranted(false);
     setManagerVerificationCode("");
     setManagerVerificationError(null);
-    setGeneratedManagerCode(null);
+    setManagerChallengeId(null);
+    setManagerChallengeEmail(null);
+    setManagerChallengeExpiresAt(null);
+    setManagerVerificationBusy(false);
   }
 
-  function verifyEncryptedInformation(event: FormEvent<HTMLFormElement>) {
+  async function verifyEncryptedInformation(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!generatedManagerCode || managerVerificationCode.trim() !== generatedManagerCode) {
-      setManagerVerificationError("The verification code does not match.");
+    if (!managerChallengeId) {
+      setManagerVerificationError("Request a verification code before continuing.");
+      return;
+    }
+    setManagerVerificationBusy(true);
+    setManagerVerificationError(null);
+    const result = await verifyManagerStepUp({
+      user: activeUser,
+      tenantId: activeAgency.id,
+      challengeId: managerChallengeId,
+      customerId: activeCustomer.id,
+      code: managerVerificationCode.trim(),
+    });
+    setManagerVerificationBusy(false);
+    if (!result.ok) {
+      setManagerVerificationError(result.message);
       return;
     }
     setEncryptedAccessGranted(true);
-    setManagerVerificationError(null);
+    setManagerChallengeId(null);
+    setManagerChallengeEmail(null);
+    setManagerChallengeExpiresAt(null);
   }
 
   async function handleOperationsFile(files: File[]) {
@@ -1388,14 +1447,31 @@ export function ClientDetailPage() {
                 Manager 2FA required
               </div>
               <p className="mt-2 text-sm leading-6 text-ink-600">
-                Enter the one-time verification code for this manager session before protected client identifiers and encrypted data scopes are shown.
+                Enter the one-time verification code emailed to this manager session before protected client identifiers and encrypted data scopes are shown.
               </p>
-              {generatedManagerCode && (
-                <div className="mt-3 inline-flex items-center gap-2 rounded-md border border-gold-200 bg-white px-3 py-2 text-sm">
-                  <span className="text-ink-500">Verification code</span>
-                  <span className="font-mono text-base font-semibold tracking-[0.25em] text-ink-900">
-                    {generatedManagerCode}
-                  </span>
+              <div className="mt-3 rounded-md border border-gold-200 bg-white px-3 py-2 text-sm text-ink-600">
+                {managerVerificationBusy && !managerChallengeId ? (
+                  <span>Sending verification code...</span>
+                ) : managerChallengeEmail ? (
+                  <div className="space-y-1">
+                    <div>
+                      Code sent to <span className="font-semibold text-ink-900">{managerChallengeEmail}</span>.
+                    </div>
+                    {managerChallengeExpiresAt && (
+                      <div className="text-xs text-ink-500">
+                        Expires {fmt.dateTime(managerChallengeExpiresAt)}.
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <span>Verification email has not been sent yet.</span>
+                )}
+              </div>
+              {!managerVerificationBusy && !managerChallengeId && (
+                <div className="mt-3">
+                  <Button type="button" variant="outline" onClick={openEncryptedInformation}>
+                    Send verification code
+                  </Button>
                 </div>
               )}
             </div>
@@ -1420,8 +1496,20 @@ export function ClientDetailPage() {
               <Button variant="outline" onClick={closeEncryptedInformation}>
                 Cancel
               </Button>
-              <Button type="submit" variant="primary" disabled={managerVerificationCode.length !== 6}>
-                Verify and view
+              <Button
+                type="button"
+                variant="outline"
+                onClick={openEncryptedInformation}
+                disabled={managerVerificationBusy}
+              >
+                Resend code
+              </Button>
+              <Button
+                type="submit"
+                variant="primary"
+                disabled={!managerChallengeId || managerVerificationBusy || managerVerificationCode.length !== 6}
+              >
+                {managerVerificationBusy ? "Verifying..." : "Verify and view"}
               </Button>
             </div>
           </form>
@@ -3504,7 +3592,7 @@ export function ContactActivitiesCard({
     >
       <CardHeader
         title={hasOpen ? `${title} · ${openActivities.length}` : title}
-        subtitle="Open work up top, resolved history below. Click View to jump into any activity in the Activity Center."
+        subtitle="Open and resolved activity for this record."
       />
       {!hasOpen ? (
         <div className="text-sm text-ink-400 py-1">{emptyHint}</div>

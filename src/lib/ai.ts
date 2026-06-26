@@ -1725,25 +1725,15 @@ async function decodeVinViaNhtsa(vin: string): Promise<{
 }
 
 async function enrichLuxuryVehicle(seed: Record<string, unknown>): Promise<AiAssetEnrichment> {
-  const vin = String(seed.vin ?? "").trim().toUpperCase();
-  if (!vin) {
+  const vin = normalizeVin(seed.vin);
+  const vinIssue = vinValidationIssue(vin);
+  if (vinIssue) {
     return {
       fields: {},
       sources: [],
       confidence: 0,
-      notes: "Enter a VIN to look up vehicle records.",
-    };
-  }
-  // Length sanity: NHTSA's decoder requires a 17-character VIN. Older
-  // pre-1981 vehicles used shorter VINs (8–13 chars) — we still hand
-  // those to NHTSA but warn the user up front so they don't expect
-  // year/make/model to come back populated.
-  if (vin.length < 11) {
-    return {
-      fields: {},
-      sources: [],
-      confidence: 0,
-      notes: `That VIN looks too short (${vin.length} chars; standard VINs are 17). Confirm the value and try again.`,
+      unavailableFields: ["vin", "year", "make", "model", "estimatedValue"],
+      notes: vinIssue,
     };
   }
 
@@ -1781,9 +1771,9 @@ async function enrichLuxuryVehicle(seed: Record<string, unknown>): Promise<AiAss
     });
   });
   markEvidence(evidence, "vin", "client_intake", "Client-entered VIN", {
-    confidence: vin.length === 17 ? 0.9 : 0.7,
+    confidence: 0.9,
     verified: clean,
-    allowDocumentAutofill: vin.length >= 11,
+    allowDocumentAutofill: clean,
     notes: clean ? "VIN accepted by NHTSA decoder." : "VIN should be reviewed before binding.",
   });
 
@@ -1805,6 +1795,22 @@ async function enrichLuxuryVehicle(seed: Record<string, unknown>): Promise<AiAss
       ? "VIN decoded via NHTSA's federal database. Market value requires a paid valuation provider (Manheim / KBB / NADA / J.D. Power) wired through the production backend."
       : `NHTSA returned partial results (error code ${errorCode}). Confirm the VIN and any missing fields with your agent.`,
   };
+}
+
+function normalizeVin(value: unknown): string {
+  return String(value ?? "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+}
+
+function vinValidationIssue(vin: string): string | null {
+  if (!vin) return "Enter a VIN to look up vehicle records.";
+  if (/[IOQ]/.test(vin)) return "VIN contains I, O, or Q, which are not valid in standard VINs.";
+  if (vin.length < 17) {
+    return "VIN is too short. A standard 17-character VIN is required before Quotex decodes vehicle records.";
+  }
+  if (vin.length > 17) {
+    return "VIN is too long. A standard 17-character VIN is required before Quotex decodes vehicle records.";
+  }
+  return null;
 }
 
 async function enrichYacht(seed: Record<string, unknown>): Promise<AiAssetEnrichment> {
@@ -1863,6 +1869,16 @@ export async function aiEnrichAsset(
     { timeoutMs: 25_000 }
   );
   if (server) return server;
+  if (!browserEnrichmentFallbackAllowed()) {
+    return {
+      fields: {},
+      sources: [],
+      confidence: 0,
+      unavailableFields: Object.keys(seed).filter(Boolean),
+      notes:
+        "Server-side public-record enrichment is unavailable. Quotex did not run browser-side lookup fallbacks for this production session.",
+    };
+  }
 
   switch (assetType) {
     case "coastal_home":
@@ -1875,6 +1891,17 @@ export async function aiEnrichAsset(
       return enrichJewelry(seed);
     default:
       return { fields: {}, sources: [], confidence: 0 };
+  }
+}
+
+function browserEnrichmentFallbackAllowed(): boolean {
+  try {
+    return (
+      Boolean((import.meta as { env?: { DEV?: boolean } })?.env?.DEV) ||
+      (import.meta as { env?: Record<string, string> })?.env?.VITE_ALLOW_BROWSER_AI_FALLBACK === "true"
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -2112,7 +2139,7 @@ export async function aiExtractContactFromFile(input: {
     fileType: input.fileType,
     text: input.text,
     dataUrl: input.dataUrl,
-  });
+  }, { timeoutMs: 60_000 });
   if (
     server &&
     typeof server.summary === "string" &&
@@ -2608,6 +2635,203 @@ export interface AiQuotingPrep {
   summary: string;
 }
 
+export interface AiAcordFieldDescriptor {
+  id?: string;
+  label: string;
+  required?: boolean;
+  kind?: string;
+  page?: number;
+}
+
+export interface AiAcordFieldMapping {
+  targetId?: string;
+  targetField: string;
+  value: string;
+  sourceLabel: string;
+  sourceKind: PublicDataFieldSourceKind;
+  confidence: number;
+  verified: boolean;
+  rationale: string;
+}
+
+export interface AiAcordMappingResult {
+  fields: Record<string, string>;
+  publicFieldEvidence: PublicDataEvidenceMap;
+  mappings: AiAcordFieldMapping[];
+  missingFields: string[];
+  webSources: { title: string; url: string; field: string }[];
+  summary: string;
+  confidence: number;
+}
+
+const ACORD_AI_DOCUMENT_SOURCE_KINDS = new Set<PublicDataFieldSourceKind>([
+  "agent_seed",
+  "client_intake",
+  "validated_address",
+  "public_geocoder",
+  "public_web",
+  "government_api",
+  "commercial_provider",
+  "carrier_api",
+]);
+
+type AiAcordMappingIntent = "document_autofill" | "questionnaire_prefill";
+
+function asAcordAiSourceKind(value: unknown): PublicDataFieldSourceKind {
+  return ACORD_AI_DOCUMENT_SOURCE_KINDS.has(value as PublicDataFieldSourceKind)
+    ? (value as PublicDataFieldSourceKind)
+    : "unknown";
+}
+
+function acordAiLabelLooksAddress(label: string): boolean {
+  const normalized = label.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  return /\b(address|location|premises|garaging|mooring|risk)\b/.test(normalized);
+}
+
+function acordAiValueLooksAddress(value: string): boolean {
+  return (
+    /\d/.test(value) &&
+    /\b(st|street|rd|road|ave|avenue|dr|drive|ln|lane|blvd|boulevard|ct|court|cir|circle|way|pkwy|parkway|hwy|highway|pl|place|terrace|ter|trail|mi|fl|ga|sc|ny|ca|tx|il|oh|pa|zip)\b/i.test(value)
+  );
+}
+
+function acordAiFieldValueLooksCompatible(label: string, value: string): boolean {
+  const normalized = label.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (acordAiLabelLooksAddress(label)) return acordAiValueLooksAddress(value);
+  if (/\b(email)\b/.test(normalized)) return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+  if (/\b(phone|telephone)\b/.test(normalized)) return value.replace(/\D/g, "").length >= 7;
+  if (/\b(fein|ein|tax id)\b/.test(normalized)) return value.replace(/\D/g, "").length >= 9;
+  if (/\b(name|insured|applicant|business)\b/.test(normalized) && acordAiValueLooksAddress(value)) {
+    return false;
+  }
+  return true;
+}
+
+function unsafeAcordAiFieldLabel(label: string): boolean {
+  const normalized = label.toLowerCase().replace(/\s+/g, " ").trim();
+  if (!normalized) return true;
+  if (normalized.includes("?")) return true;
+  if (/\bexplain all\b|\byes responses?\b|\bremarks?\b|\bdetails?\b/.test(normalized)) return true;
+  if (/\bfax\b|\bsecondary\b|\balternate\b|\bssn\b|\bsocial security\b/.test(normalized)) return true;
+  return false;
+}
+
+function safeQuestionnaireAiPrefillLabel(label: string): boolean {
+  const normalized = label.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (!normalized) return false;
+  if (unsafeAcordAiFieldLabel(normalized)) return false;
+  if (/\b(loss|claim|incident|conviction|violation|mvr|bankruptcy|cancel|nonrenew|audit|payroll|revenue|sales|fein|tax id|ssn)\b/.test(normalized)) {
+    return false;
+  }
+  return /\b(legal business name|business name|named insured|name of insured|applicant name|dba|doing business as|mailing address|property address|risk address|location address|premises address|city|state|zip|postal|phone|email|website|business description|operations|entity type|year started|years in business|naics|sic)\b/.test(normalized);
+}
+
+function parseAcordAiMappings(
+  raw: unknown,
+  intent: AiAcordMappingIntent = "document_autofill"
+): AiAcordMappingResult {
+  const record = isRecord(raw) ? raw : {};
+  const fields: Record<string, string> = {};
+  const publicFieldEvidence: PublicDataEvidenceMap = {};
+  const mappings: AiAcordFieldMapping[] = [];
+  const rawMappings = Array.isArray(record.mappings) ? record.mappings : [];
+  rawMappings.forEach((item) => {
+    if (!isRecord(item)) return;
+    const targetField = normalizeLookupText(item.targetField);
+    const value = normalizeLookupText(item.value);
+    const confidence = clamp(Number(item.confidence ?? 0), 0, 1);
+    const verified = item.verified === true;
+    if (!targetField || !value || unsafeAcordAiFieldLabel(targetField)) return;
+    if (!acordAiFieldValueLooksCompatible(targetField, value)) return;
+    const sourceKind = asAcordAiSourceKind(item.sourceKind);
+    const documentReady =
+      verified &&
+      confidence >= 0.84 &&
+      sourceKind !== "model_estimate" &&
+      sourceKind !== "unknown" &&
+      sourceKind !== "public_web";
+    const questionnaireReady =
+      intent === "questionnaire_prefill" &&
+      confidence >= 0.6 &&
+      sourceKind !== "model_estimate" &&
+      sourceKind !== "unknown" &&
+      (verified || sourceKind === "public_web" || sourceKind === "public_geocoder") &&
+      safeQuestionnaireAiPrefillLabel(targetField);
+    if (!documentReady && !questionnaireReady) return;
+    const sourceLabel = normalizeLookupText(item.sourceLabel) || "Verified Quotex AI mapping";
+    const targetId = normalizeLookupText(item.targetId);
+    const mapping: AiAcordFieldMapping = {
+      ...(targetId ? { targetId } : {}),
+      targetField,
+      value,
+      sourceLabel,
+      sourceKind,
+      confidence,
+      verified,
+      rationale: normalizeLookupText(item.rationale),
+    };
+    fields[targetField] = value;
+    markEvidence(publicFieldEvidence, targetField, sourceKind, sourceLabel, {
+      confidence,
+      verified,
+      allowDocumentAutofill: documentReady,
+      notes:
+        mapping.rationale ||
+        (documentReady
+          ? "Mapped by server-side ACORD AI with source-backed verification."
+          : "Mapped as editable questionnaire prefill from source-backed AI research."),
+    });
+    mappings.push(mapping);
+  });
+  const missingFields = Array.isArray(record.missingFields)
+    ? record.missingFields
+        .map(normalizeLookupText)
+        .filter((field) => field && !unsafeAcordAiFieldLabel(field))
+    : [];
+  const webSources = Array.isArray(record.webSources)
+    ? record.webSources
+        .filter(isRecord)
+        .map((row) => ({
+          title: normalizeLookupText(row.title),
+          url: normalizeLookupText(row.url),
+          field: normalizeLookupText(row.field),
+        }))
+        .filter((row) => row.title || row.url || row.field)
+    : [];
+  return {
+    fields,
+    publicFieldEvidence,
+    mappings,
+    missingFields,
+    webSources,
+    summary:
+      normalizeLookupText(record.summary) ||
+      `Mapped ${mappings.length} verified ACORD field${mappings.length === 1 ? "" : "s"}.`,
+    confidence: clamp(Number(record.confidence ?? (mappings.length ? 0.84 : 0)), 0, 1),
+  };
+}
+
+export async function aiMapAcordFields(input: {
+  tenantId: string;
+  template?: { documentName?: string; fileName?: string; formNumber?: string };
+  fields: AiAcordFieldDescriptor[];
+  dossier: Record<string, unknown>;
+  intent?: AiAcordMappingIntent;
+}): Promise<AiAcordMappingResult> {
+  const server = await postServerAi<unknown>(
+    "/ai/acord-map",
+    {
+      tenantId: input.tenantId,
+      template: input.template,
+      fields: input.fields,
+      dossier: input.dossier,
+      intent: input.intent,
+    },
+    { timeoutMs: 60_000 }
+  );
+  return parseAcordAiMappings(server, input.intent);
+}
+
 export async function aiPreparePublicFields(input: {
   assetType: AssetType;
   prospectName: string;
@@ -2914,10 +3138,10 @@ export function aiGenerateCommercialQuestionnaire(input: {
   knownPublicFields: Record<string, unknown>;
 }): QuotingQuestion[] {
   const out: QuotingQuestion[] = [];
-  const has = (label: string) => label in input.knownPublicFields;
 
-  // Base intake — always asked unless the AI already pulled the
-  // value from public records.
+  // Base intake stays visible even when AI/public data already has a
+  // value. Agents and clients can review or correct the AI-filled answer
+  // before it is used downstream.
   const base: { label: string; kind: QuotingQuestion["kind"]; options?: string[]; required?: boolean }[] = [
     { label: "Legal business name (as registered)", kind: "text", required: true },
     { label: "Federal EIN", kind: "text", required: true },
@@ -2938,7 +3162,6 @@ export function aiGenerateCommercialQuestionnaire(input: {
     { label: "Claims in the last 5 years (Y/N + details)", kind: "textarea", required: true },
   ];
   base.forEach((q) => {
-    if (has(q.label)) return; // AI already has it
     out.push({
       id: `base-${slugify(q.label)}`,
       section: "Base business intake",

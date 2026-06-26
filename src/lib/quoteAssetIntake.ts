@@ -320,6 +320,62 @@ export const QUOTE_ASSET_DETAIL_FIELDS: Record<AssetType, QuoteAssetDetailField[
   other: OTHER_FIELDS,
 };
 
+const QUOTE_ASSET_DETAIL_KEY_ALIASES: Partial<Record<AssetType, Record<string, string[]>>> = {
+  coastal_home: {
+    riskAddress: ["propertyAddress", "address", "locationAddress", "premisesAddress", "primaryResidenceAddress"],
+    yearBuilt: ["builtYear", "constructionYear", "year_built"],
+    squareFeet: ["squareFootage", "sqft", "sqFt", "livingArea", "livingAreaSqFt"],
+    constructionType: ["construction", "constructionClass", "wallConstruction"],
+    roofMaterial: ["roof", "roofCovering", "roofType"],
+    distanceToCoast: ["coastDistance", "distanceFromCoast", "distanceToWater"],
+    windMitigation: ["windMitigationDetails", "windCert", "windCertificate"],
+    lossHistory: ["losses", "claims", "claimsHistory"],
+  },
+  luxury_vehicle: {
+    vin: ["VIN", "vehicleVin"],
+    garagingAddress: ["address", "riskAddress", "propertyAddress", "garageAddress"],
+    annualMileage: ["mileage", "estimatedAnnualMileage"],
+    primaryUse: ["use", "usage"],
+  },
+  yacht: {
+    hin: ["HIN", "hullId", "hullIdentificationNumber"],
+    marinaAddress: ["address", "mooringAddress", "riskAddress", "propertyAddress"],
+    length: ["hullLength", "loa"],
+    cruisingArea: ["navigationArea", "navigationTerritory"],
+  },
+  jewelry: {
+    appraisedValue: ["value", "estimatedValue", "scheduledValue"],
+    itemDescription: ["description"],
+    appraisalDate: ["valuationDate"],
+  },
+  umbrella_liability: {
+    primaryResidenceAddress: ["address", "mailingAddress", "propertyAddress", "riskAddress"],
+    requestedLimit: ["limit", "coverageLimit", "estimatedValue"],
+  },
+  full_portfolio: {
+    primaryAddress: ["address", "mailingAddress", "propertyAddress", "riskAddress"],
+    totalInsuredValue: ["value", "estimatedValue", "portfolioValue"],
+  },
+  other: {
+    location: ["address", "propertyAddress", "riskAddress", "premisesAddress"],
+    requestedCoverage: ["coverage", "limit"],
+  },
+};
+
+function detailValueByKeyOrAlias(
+  assetType: AssetType,
+  details: Record<string, unknown> | undefined,
+  key: string
+): unknown {
+  if (!details) return undefined;
+  if (Object.prototype.hasOwnProperty.call(details, key)) return details[key];
+  const aliases = QUOTE_ASSET_DETAIL_KEY_ALIASES[assetType]?.[key] ?? [];
+  for (const alias of aliases) {
+    if (Object.prototype.hasOwnProperty.call(details, alias)) return details[alias];
+  }
+  return undefined;
+}
+
 export function cleanQuoteAssetDetails(
   assetType: AssetType,
   details: Record<string, unknown> | undefined
@@ -327,7 +383,7 @@ export function cleanQuoteAssetDetails(
   const fields = QUOTE_ASSET_DETAIL_FIELDS[assetType] ?? [];
   const out: Record<string, string> = {};
   for (const field of fields) {
-    const value = details?.[field.key];
+    const value = detailValueByKeyOrAlias(assetType, details, field.key);
     const text = stringifyDetailValue(value);
     if (text) out[field.key] = text;
   }

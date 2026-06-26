@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { AlertTriangle, Building2, Check, Plus, Search, User, X } from "lucide-react";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { AddressAutocomplete } from "@/components/ui/AddressAutocomplete";
@@ -174,6 +174,7 @@ function ContactQuotingCard({
     | { kind: "prospect"; record: Prospect };
   onChanged?: () => void;
 }) {
+  const location = useLocation();
   const [, setRev] = useState(0);
   const [showImplementedQuoteAudit, setShowImplementedQuoteAudit] = useState(false);
   const refresh = () => {
@@ -198,6 +199,13 @@ function ContactQuotingCard({
     : undefined;
   const shouldCollapseImplementedWorkspace =
     !!implementedQuote?.implementation?.policyId && !showImplementedQuoteAudit;
+  const quoteWorkspaceSearch = useMemo(
+    () => new URLSearchParams(location.search),
+    [location.search]
+  );
+  const shouldExpandFocusedQuoteWorkspace =
+    quoteWorkspaceSearch.get("quoteWorkspace") === "expanded";
+  const quoteWorkspaceFocusKey = `${location.key}:${location.search}:${location.hash}`;
 
   // Lock the asset picker once a session is active — restarting the
   // workspace via "Start over" clears the session and unlocks the
@@ -212,9 +220,12 @@ function ContactQuotingCard({
   const [assetSearch, setAssetSearch] = useState("");
   const [showNewAssetForm, setShowNewAssetForm] = useState(false);
   const [prospectDraftAssets, setProspectDraftAssets] = useState<Asset[]>([]);
-  const [newAssetValue, setNewAssetValue] = useState<number>(
-    existing?.estimatedValue ?? prospect?.estimatedValue ?? 1_000_000
-  );
+  const [newAssetValue, setNewAssetValue] = useState<string>(() => {
+    const value = existing?.estimatedValue ?? prospect?.estimatedValue;
+    return typeof value === "number" && Number.isFinite(value) && value > 0
+      ? String(value)
+      : "";
+  });
   const [newAssetDetails, setNewAssetDetails] = useState<Record<string, string>>({});
   const assetCategoryOptions = useMemo<AssetCategoryOption[]>(() => {
     const linkedCategories = api.categories.listActiveForTenant(tenantId);
@@ -253,12 +264,17 @@ function ContactQuotingCard({
     showNewAssetForm && selectedNewCategory
       ? cleanCategoryQuestionAnswers(newAssetDetailQuestions, newAssetDetails)
       : {};
+  const parsedNewAssetValue = Number(newAssetValue);
+  const newAssetEstimatedValue =
+    Number.isFinite(parsedNewAssetValue) && parsedNewAssetValue > 0
+      ? parsedNewAssetValue
+      : undefined;
   const estimatedValue = pickedAsset
     ? pickedAsset.estimatedValue
-    : existing?.estimatedValue ?? prospect?.estimatedValue;
+    : existing?.estimatedValue ?? newAssetEstimatedValue ?? prospect?.estimatedValue;
   const assetDetails = pickedAsset
     ? cleanQuoteAssetDetails(assetType, pickedAsset.details)
-    : {};
+    : newAssetCategoryDetails;
   const prospectiveQuoteAddress =
     primaryCategoryQuestionAddress(newAssetDetailQuestions, newAssetCategoryDetails) ??
     cleanOptionalText(prospectQuoteRequest?.parsedData?.address) ??
@@ -316,6 +332,11 @@ function ContactQuotingCard({
   function createNewAsset() {
     if (!selectedNewCategory || newAssetMissingQuestions.length > 0) return;
     const details = newAssetCategoryDetails;
+    const parsedEstimatedValue = Number(newAssetValue);
+    const estimatedAssetValue =
+      Number.isFinite(parsedEstimatedValue) && parsedEstimatedValue > 0
+        ? parsedEstimatedValue
+        : 0;
     const label =
       String(details.assetName ?? "").trim() ||
       String(details.propertyAddress ?? "").trim() ||
@@ -332,7 +353,7 @@ function ContactQuotingCard({
           customerId: customerIdForAsset,
           type: selectedNewCategory.assetType,
           label,
-          estimatedValue: newAssetValue,
+          estimatedValue: estimatedAssetValue,
           details,
           status: "pending",
         })
@@ -342,7 +363,7 @@ function ContactQuotingCard({
           customerId: "",
           type: selectedNewCategory.assetType,
           label,
-          estimatedValue: newAssetValue,
+          estimatedValue: estimatedAssetValue,
           details: {
             ...details,
             prospectId: prospect?.id,
@@ -357,7 +378,7 @@ function ContactQuotingCard({
     setSelectedAssetIds((current) => [asset.id, ...current.filter((id) => id !== asset.id)]);
     setShowNewAssetForm(false);
     setNewAssetDetails({});
-    setNewAssetValue(1_000_000);
+    setNewAssetValue("");
     refresh();
   }
 
@@ -476,7 +497,7 @@ function ContactQuotingCard({
                   type="number"
                   className="input"
                   value={newAssetValue}
-                  onChange={(e) => setNewAssetValue(Number(e.target.value) || 0)}
+                  onChange={(e) => setNewAssetValue(e.target.value)}
                 />
               </div>
 
@@ -619,6 +640,8 @@ function ContactQuotingCard({
             lineOfBusiness: selectedLineOfBusiness ?? selectedNewCategory?.lineOfBusiness,
           }}
           onChanged={refresh}
+          deepLinkExpanded={shouldExpandFocusedQuoteWorkspace}
+          deepLinkFocusKey={quoteWorkspaceFocusKey}
         />
       )}
     </Card>
@@ -658,6 +681,7 @@ function CategoryQuestionDetailField({
           placeholder={question.placeholder ?? "Start typing address..."}
           required={!!question.required}
           className={fieldClassName}
+          allowMockFallback={false}
         />
       ) : question.inputType === "textarea" ? (
         <textarea

@@ -33,6 +33,7 @@ import {
   isStaffRole,
   type StaffRole,
 } from "@/lib/roles";
+import { isRoutingAssignmentTask } from "@/lib/taskFilters";
 
 // Per-route alert counts shown as red badges next to each nav item.
 // Computed cheaply from the local DB on every render (the localStorage
@@ -132,20 +133,13 @@ export function computeEmployeeBadges(
         }) =>
           (r.assignedToId ?? "") === viewer.id ||
           (r.additionalAssignedToIds ?? []).includes(viewer.id);
-        const isManagerAssignmentFollowUp = (title: unknown) => {
-          const safeTitle = typeof title === "string" ? title : "";
-          return (
-            safeTitle.startsWith("New prospect assigned:") ||
-            safeTitle.startsWith("New client assigned:")
-          );
-        };
         const ownItems = [
           ...notifs,
           ...tasks.filter(
             (t) =>
               !(
                 isRoutingManagerRole(viewer.role) &&
-                isManagerAssignmentFollowUp(t.title)
+                isRoutingAssignmentTask(t)
               )
           ),
         ].filter(assignedToViewer).length;
@@ -155,7 +149,27 @@ export function computeEmployeeBadges(
                 (n) => n.kind === "override_request" && !n.assignedToId
               ).length
             : 0;
-        return ownItems + managerBroadcasts;
+        const managerRoutingWork =
+          isRoutingManagerRole(viewer.role)
+            ? (() => {
+                const unassignedProspectIds = new Set(
+                  prospects.filter((p) => !p.assignedAgentId).map((p) => p.id)
+                );
+                const unassignedClientIds = new Set(
+                  customers.filter((c) => !c.assignedAgentId).map((c) => c.id)
+                );
+                const routeRequests = api.tasks
+                  .listOpen(tenantId)
+                  .filter((t) => t.awaitingManagerAssignment)
+                  .filter(
+                    (t) =>
+                      !(t.prospectId && unassignedProspectIds.has(t.prospectId)) &&
+                      !(t.customerId && unassignedClientIds.has(t.customerId))
+                  ).length;
+                return unassignedProspectIds.size + unassignedClientIds.size + routeRequests;
+              })()
+            : 0;
+        return ownItems + managerBroadcasts + managerRoutingWork;
       })()
     : 0;
 
@@ -172,9 +186,8 @@ export function computeEmployeeBadges(
           .listForUser(tenantId, viewer.id)
           .filter((event) => localDateKey(event.startsAt) === today).length;
         const meetingRequestCount = api.calendarEvents.pendingRequestCount(tenantId, viewer.id);
-        const dueTaskCount = tasks.filter(
+        const dueTaskCount = api.tasks.listOpen(tenantId).filter(
           (task) =>
-            !task.completedAt &&
             !!task.dueAt &&
             localDateKey(task.dueAt) === today &&
             ((task.assignedToId ?? "") === viewer.id ||
@@ -266,6 +279,7 @@ export function EmployeeLayout() {
     to: string;
     label: string;
     icon: ReactNode;
+    badge?: number;
     end?: boolean;
     allowedRoles?: StaffRole[];
   }> = [
@@ -277,6 +291,7 @@ export function EmployeeLayout() {
       to: "/employee/tasks",
       label: "Activity Center",
       icon: <CheckSquare />,
+      badge: badges.tasks,
       allowedRoles: ["agent", "manager", "csr"],
     },
     { to: "/employee/calendar", label: "Calendar", icon: <CalendarDays /> },

@@ -840,6 +840,287 @@ Return appetite rows for personal/commercial lines, allowed states, exclusions, 
   };
 }
 
+type AcordMapSourceKind =
+  | "agent_seed"
+  | "client_intake"
+  | "validated_address"
+  | "public_geocoder"
+  | "public_web"
+  | "government_api"
+  | "commercial_provider"
+  | "carrier_api";
+
+interface AcordMapField {
+  id?: string;
+  label: string;
+  acordFieldLabels?: string[];
+  acordFieldKey?: string;
+  required?: boolean;
+  kind?: string;
+  page?: number;
+}
+
+interface AcordMapping {
+  targetId?: string;
+  targetField: string;
+  value: string;
+  sourceLabel: string;
+  sourceKind: AcordMapSourceKind;
+  confidence: number;
+  verified: boolean;
+  rationale: string;
+}
+
+const ACORD_MAP_SOURCE_KINDS: AcordMapSourceKind[] = [
+  "agent_seed",
+  "client_intake",
+  "validated_address",
+  "public_geocoder",
+  "public_web",
+  "government_api",
+  "commercial_provider",
+  "carrier_api",
+];
+
+function asAcordMapSourceKind(value: unknown): AcordMapSourceKind {
+  return ACORD_MAP_SOURCE_KINDS.includes(value as AcordMapSourceKind)
+    ? (value as AcordMapSourceKind)
+    : "client_intake";
+}
+
+function isUnsafeAcordAiTarget(label: string): boolean {
+  const normalized = label.toLowerCase().replace(/\s+/g, " ").trim();
+  if (!normalized) return true;
+  if (normalized.length > 180) return true;
+  if (normalized.includes("?")) return true;
+  if (/\b(any|does|do|is|are|has|have)\b.+\b(if so|identify|explain|describe|details?)\b/.test(normalized)) {
+    return true;
+  }
+  if (/\bexplain all\b|\byes responses?\b|\bremarks?\b|\bdetails?\b/.test(normalized)) return true;
+  if (/\bfax\b|\bsecondary\b|\balternate\b/.test(normalized)) return true;
+  if (/\bssn\b|\bsocial security\b/.test(normalized)) return true;
+  return false;
+}
+
+function isSafeQuestionnairePrefillTarget(label: string): boolean {
+  const normalized = label.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (!normalized || isUnsafeAcordAiTarget(normalized)) return false;
+  if (/\b(loss|claim|incident|conviction|violation|mvr|bankruptcy|cancel|nonrenew|audit|payroll|revenue|sales|fein|tax id|ssn)\b/.test(normalized)) {
+    return false;
+  }
+  return /\b(legal business name|business name|named insured|name of insured|applicant name|dba|doing business as|mailing address|property address|risk address|location address|premises address|city|state|zip|postal|phone|email|website|business description|operations|entity type|year started|years in business|naics|sic)\b/.test(normalized);
+}
+
+function cleanAcordAiValue(value: unknown): string {
+  return asString(value)
+    .replace(/\s+/g, " ")
+    .replace(/\u0000/g, "")
+    .trim()
+    .slice(0, 240);
+}
+
+function parseAcordMappings(record: Record<string, unknown>): {
+  mappings: AcordMapping[];
+  missingFields: string[];
+  webSources: { title: string; url: string; field: string }[];
+  summary: string;
+  confidence: number;
+} {
+  const mappings = asObjectArray(record.mappings)
+    .map((row): AcordMapping | null => {
+      const targetField = asString(row.targetField);
+      const value = cleanAcordAiValue(row.value);
+      const confidence = clamp(asNumber(row.confidence, 0), 0, 1);
+      const verified = row.verified === true;
+      if (!targetField || !value || !verified || confidence < 0.84) return null;
+      if (isUnsafeAcordAiTarget(targetField)) return null;
+      return {
+        targetId: asString(row.targetId) || undefined,
+        targetField,
+        value,
+        sourceLabel: asString(row.sourceLabel, "Verified Quotex AI mapping"),
+        sourceKind: asAcordMapSourceKind(row.sourceKind),
+        confidence,
+        verified,
+        rationale: asString(row.rationale),
+      };
+    })
+    .filter((item): item is AcordMapping => item !== null);
+  return {
+    mappings,
+    missingFields: asStringArray(record.missingFields).filter((field) => !isUnsafeAcordAiTarget(field)),
+    webSources: asObjectArray(record.webSources)
+      .map((row) => ({
+        title: asString(row.title),
+        url: asString(row.url),
+        field: asString(row.field),
+      }))
+      .filter((row) => row.title || row.url || row.field)
+      .slice(0, 12),
+    summary: asString(record.summary, `Mapped ${mappings.length} verified ACORD field${mappings.length === 1 ? "" : "s"}.`),
+    confidence: clamp(asNumber(record.confidence, mappings.length > 0 ? 0.84 : 0.4), 0, 1),
+  };
+}
+
+export async function aiMapAcordFields(input: {
+  template?: { documentName?: string; fileName?: string; formNumber?: string };
+  fields: AcordMapField[];
+  dossier: Record<string, unknown>;
+  intent?: "document_autofill" | "questionnaire_prefill";
+}) {
+  const intent = input.intent ?? "document_autofill";
+  const safeFields = input.fields
+    .filter((field) => asString(field.label) && !isUnsafeAcordAiTarget(field.label))
+    .slice(0, 260)
+    .map((field) => ({
+      id: asString(field.id),
+      label: asString(field.label),
+      acordFieldKey: asString(field.acordFieldKey) || undefined,
+      acordFieldLabels: asStringArray(field.acordFieldLabels)
+        .filter((label) => !isUnsafeAcordAiTarget(label))
+        .slice(0, 12),
+      required: field.required === true,
+      kind: asString(field.kind, "text"),
+      page: Math.max(0, Math.round(asNumber(field.page, 0))),
+    }));
+  if (safeFields.length === 0) {
+    return { mappings: [], missingFields: [], webSources: [], summary: "No safe ACORD fields were available to map.", confidence: 0 };
+  }
+  const templateLabel = [
+    input.template?.formNumber,
+    input.template?.documentName,
+    input.template?.fileName,
+  ].filter(Boolean).join(" - ") || "selected ACORD document";
+  const system = [
+    domainSystem("Map verified client/agency/public data into exact ACORD PDF field labels."),
+    "You are an ACORD document mapping specialist for insurance agencies.",
+    intent === "questionnaire_prefill"
+      ? "You are filling an editable commercial questionnaire before final document review. Use web search to find source-backed public facts such as business identity, public contact details, address normalization, public operations description, entity type, NAICS/SIC, or years in business."
+      : "You may use web search only to verify public facts such as business registration, property address normalization, or public building/location facts.",
+    intent === "questionnaire_prefill"
+      ? "Do not guess private underwriting facts. If a public source supports a safe identity/contact/address/operations answer but is not official enough for final document writing, return it with verified=false, sourceKind=public_web, and confidence between 0.60 and 0.83 so the UI can prefill it for review only."
+      : "Never guess. If a fact is not explicitly supplied or publicly verified, omit the mapping and list the field as missing.",
+    "Map only into the exact targetField labels supplied by the application.",
+    "If a target has acordFieldLabels, use the most specific atomic label from that list as targetField and keep the parent id as targetId.",
+    "When a supplied target field includes an id, return that exact id as targetId. Do not invent targetId values.",
+    "Do not fill yes/no prompts, explanation boxes, remarks boxes, fax fields, secondary email/phone fields, SSN fields, or any field that asks a conditional question unless the dossier contains a direct explicit answer.",
+    intent === "questionnaire_prefill"
+      ? "Never fill claims/losses, violations, MVR, revenue, payroll, FEIN/tax ID, or prior coverage answers from general web research."
+      : "Every returned mapping must cite a sourceLabel and use a sourceKind from the allowed enum.",
+  ].join(" ");
+  const user = [
+    `Template: ${templateLabel}`,
+    `Allowed target fields:\n${JSON.stringify(safeFields).slice(0, 18_000)}`,
+    `Quotex dossier:\n${JSON.stringify(input.dossier).slice(0, 45_000)}`,
+    "Return only verified field mappings. Leave doubtful fields blank.",
+  ].join("\n\n");
+  const schema = objectSchema({
+    summary: { type: "string" },
+    confidence: { type: "number" },
+    mappings: {
+      type: "array",
+      items: objectSchema({
+        targetId: { type: "string" },
+        targetField: { type: "string" },
+        value: { type: "string" },
+        sourceLabel: { type: "string" },
+        sourceKind: { type: "string", enum: ACORD_MAP_SOURCE_KINDS },
+        confidence: { type: "number" },
+        verified: { type: "boolean" },
+        rationale: { type: "string" },
+      }),
+    },
+    missingFields: STRING_ARRAY_SCHEMA,
+    webSources: {
+      type: "array",
+      items: objectSchema({
+        title: { type: "string" },
+        url: { type: "string" },
+        field: { type: "string" },
+      }),
+    },
+  });
+  const complete = async (withWebSearch: boolean) =>
+    provider.completeJson({
+      system,
+      user,
+      schemaName: "acord_field_mapping",
+      schema,
+      quality: "maximum",
+      reasoningEffort: "high",
+      maxOutputTokens: 4_000,
+      tools: withWebSearch ? [{ type: "web_search" }] : undefined,
+      toolChoice: withWebSearch ? "required" : undefined,
+    });
+  let raw: unknown;
+  try {
+    raw = await complete(true);
+  } catch (error) {
+    if (intent === "questionnaire_prefill") {
+      return {
+        mappings: [],
+        missingFields: safeFields.map((field) => field.label),
+        webSources: [],
+        summary:
+          error instanceof Error
+            ? `OpenAI web search could not complete questionnaire prefill: ${error.message}`
+            : "OpenAI web search could not complete questionnaire prefill.",
+        confidence: 0,
+      };
+    }
+    raw = await complete(false);
+  }
+  const record = isRecord(raw) ? raw : {};
+  if (intent !== "questionnaire_prefill") return parseAcordMappings(record);
+  const relaxedMappings = asObjectArray(record.mappings)
+    .map((row): AcordMapping | null => {
+      const targetField = asString(row.targetField);
+      const value = cleanAcordAiValue(row.value);
+      const confidence = clamp(asNumber(row.confidence, 0), 0, 1);
+      const sourceKind = asAcordMapSourceKind(row.sourceKind);
+      const verified = row.verified === true;
+      const documentReady = verified && confidence >= 0.84 && sourceKind !== "public_web";
+      const reviewReady =
+        confidence >= 0.6 &&
+        (sourceKind === "public_web"
+          ? isSafeQuestionnairePrefillTarget(targetField)
+          : verified);
+      if (!targetField || !value || isUnsafeAcordAiTarget(targetField)) return null;
+      if (!documentReady && !reviewReady) return null;
+      if (!documentReady && !isSafeQuestionnairePrefillTarget(targetField)) return null;
+      return {
+        targetId: asString(row.targetId) || undefined,
+        targetField,
+        value,
+        sourceLabel: asString(row.sourceLabel, "Source-backed Quotex AI questionnaire prefill"),
+        sourceKind,
+        confidence,
+        verified,
+        rationale: asString(row.rationale),
+      };
+    })
+    .filter((item): item is AcordMapping => item !== null);
+  return {
+    mappings: relaxedMappings,
+    missingFields: asStringArray(record.missingFields).filter((field) => !isUnsafeAcordAiTarget(field)),
+    webSources: asObjectArray(record.webSources)
+      .map((row) => ({
+        title: asString(row.title),
+        url: asString(row.url),
+        field: asString(row.field),
+      }))
+      .filter((row) => row.title || row.url || row.field)
+      .slice(0, 12),
+    summary: asString(
+      record.summary,
+      `Mapped ${relaxedMappings.length} source-backed questionnaire field${
+        relaxedMappings.length === 1 ? "" : "s"
+      }.`
+    ),
+    confidence: clamp(asNumber(record.confidence, relaxedMappings.length > 0 ? 0.72 : 0.4), 0, 1),
+  };
+}
+
 type PublicDataFieldSourceKind =
   | "agent_seed"
   | "client_intake"
@@ -1130,18 +1411,19 @@ async function enrichCoastalHomeServer(seed: Record<string, unknown>): Promise<A
 }
 
 async function enrichLuxuryVehicleServer(seed: Record<string, unknown>): Promise<AiAssetEnrichment> {
-  const vin = fieldText(seed.vin).toUpperCase();
+  const vin = normalizeVin(seed.vin);
   const fields: Record<string, unknown> = {};
   const sourceEvidence: PublicDataEvidenceMap = {};
   const unavailableFields = new Set<string>(["estimatedValue"]);
-  if (!vin || vin.length < 11) {
+  const vinIssue = vinValidationIssue(vin);
+  if (vinIssue) {
     return {
       fields,
       evidence: sourceEvidence,
       sources: [],
       confidence: 0,
       unavailableFields: ["vin", "year", "make", "model", "estimatedValue"],
-      notes: "A valid VIN is required for federal vehicle lookup.",
+      notes: vinIssue,
     };
   }
 
@@ -1173,9 +1455,9 @@ async function enrichLuxuryVehicleServer(seed: Record<string, unknown>): Promise
     });
   });
   markEvidence(sourceEvidence, "vin", "client_intake", "Client-entered VIN", {
-    confidence: vin.length === 17 ? 0.9 : 0.7,
+    confidence: 0.9,
     verified: clean,
-    allowDocumentAutofill: vin.length >= 11,
+    allowDocumentAutofill: clean,
     notes: clean ? "VIN accepted by NHTSA decoder." : "VIN should be reviewed before binding.",
   });
 
@@ -1189,6 +1471,17 @@ async function enrichLuxuryVehicleServer(seed: Record<string, unknown>): Promise
       ? "VIN decoded from the federal NHTSA database. Market valuation still requires a vehicle valuation provider."
       : "NHTSA returned partial VIN results; review before document autofill.",
   };
+}
+
+function normalizeVin(value: unknown): string {
+  return fieldText(value).replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+}
+
+function vinValidationIssue(vin: string): string | null {
+  if (!vin) return "A VIN is required for federal vehicle lookup.";
+  if (/[IOQ]/.test(vin)) return "VIN contains I, O, or Q, which are not valid in standard VINs.";
+  if (vin.length !== 17) return "A standard 17-character VIN is required before Quotex decodes vehicle records.";
+  return null;
 }
 
 async function enrichEstimateOnlyAssetServer(assetType: AssetType, seed: Record<string, unknown>): Promise<AiAssetEnrichment> {
@@ -1433,7 +1726,7 @@ export async function aiPortalAssistant(input: {
   knowledge: string;
 }) {
   const system = domainSystem(
-    "Answer as the in-app portal assistant for the Quotex private-client insurance SaaS."
+    "Answer as a senior Quotex portal support specialist for a private-client insurance SaaS."
   );
   const user = `User role: ${input.role ?? "staff"}
 User question:
@@ -1448,12 +1741,15 @@ Local grounded answer:
 Portal knowledge:
 """${input.knowledge.slice(0, 12_000)}"""
 
-Rewrite or synthesize the best answer.
+Rewrite or synthesize the best answer for an agent or manager who is using the live portal.
 Rules:
 - Be direct, calm, and step-by-step when the user asks how to do something.
+- Prefer exact screens, button names, and workflow names from the supplied knowledge.
+- If the question spans multiple areas, organize the answer by workflow in the order the user should try it.
 - Ground every statement in the supplied portal knowledge or local answer.
 - If the local answer contains live data, preserve the numbers exactly.
-- Do not invent UI controls, automations, integrations, or permissions not present in the supplied knowledge.`;
+- Do not invent UI controls, automations, integrations, permissions, or live data not present in the supplied knowledge.
+- If the supplied knowledge is not enough, say what is not confirmed and where the user should check inside Quotex.`;
   const json = await provider.completeJson({
     system,
     user,
@@ -1462,8 +1758,8 @@ Rules:
       text: { type: "string" },
       related: STRING_ARRAY_SCHEMA,
     }),
-    quality: "advanced",
-    maxOutputTokens: 1_600,
+    quality: "maximum",
+    maxOutputTokens: 2_400,
   });
   const record = isRecord(json) ? json : {};
   return {

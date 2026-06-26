@@ -2,16 +2,17 @@
 // Address autocomplete service — nationwide US coverage.
 //
 // Provider order (first one with a successful response wins):
-//   1. Mapbox Geocoding API     — used when VITE_MAPBOX_TOKEN is set
-//   2. Nominatim (OpenStreetMap) — no API key required, used otherwise
-//   3. Built-in mock pool        — last-resort fallback if both providers
-//                                  fail (offline, blocked, rate-limited)
+//   1. Google Places / Smarty server proxy when configured
+//   2. Smarty browser key / Mapbox when configured
+//   3. Photon (OpenStreetMap search-as-you-type) as a keyless autocomplete fallback
+//   4. Nominatim (OpenStreetMap) as a keyless geocoder fallback
+//   5. U.S. Census Geocoder as a keyless validator for complete inputs
+//   6. Built-in mock pool only when a caller explicitly opts into demos
 //
 // Both real providers are restricted to US-only results
-// (`country=us` / `countrycodes=us`). The Nominatim public endpoint
-// supports CORS and is keyless; for production, swap to a dedicated
-// Mapbox / Smarty / Google Places token to avoid Nominatim's rate
-// limits and respect their fair-use policy.
+// (`country=us` / `countrycodes=us`). Keyless providers are fallbacks;
+// for production-grade Google-like behavior, configure Google Places,
+// Mapbox, or Smarty and keep Photon/Nominatim as outage fallbacks.
 //
 // All errors are routed through `reportAddressSearchError` so future
 // failures are auto-captured (real impl wires this to Sentry / Datadog).
@@ -39,10 +40,17 @@ export interface AddressParts {
 
 export type AddressSearchMode = "address" | "marina";
 
+export interface LocationBias {
+  latitude: number;
+  longitude: number;
+  radiusMeters?: number;
+}
+
 export interface AddressSearchOptions {
-  // Defaults to true for legacy demo surfaces. Customer quote intake
-  // passes false so the dropdown only shows real provider results.
+  // Defaults to false for production safety. Demo-only callers can
+  // opt in so the dropdown never shows fake addresses by accident.
   allowMockFallback?: boolean;
+  locationBias?: LocationBias | null;
 }
 
 interface ProviderError {
@@ -103,6 +111,10 @@ const telemetry: AddressSearchTelemetry = {
 export function _resetAddressSearchForTest() {
   responseCache.clear();
   googleJsSessionTokens.clear();
+  googleProxyDisabledUntil = 0;
+  smartyProxyDisabledUntil = 0;
+  photonProxyDisabledUntil = 0;
+  nominatimProxyDisabledUntil = 0;
   telemetry.errors.length = 0;
   telemetry.lastSuccessProvider = null;
   telemetry.nonStreetFilteredCount = 0;
@@ -124,16 +136,151 @@ function recordNonPrefixLeak(provider: string, query: string, raw: string) {
   telemetry.lastNonPrefixSample = { provider, query, raw };
 }
 
+function normalizeLocationBias(value?: LocationBias | null): LocationBias | null {
+  if (!value) return null;
+  const latitude = Number(value.latitude);
+  const longitude = Number(value.longitude);
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  if (latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return null;
+  const radiusMeters = Number(value.radiusMeters ?? 50_000);
+  return {
+    latitude,
+    longitude,
+    radiusMeters: Math.min(50_000, Math.max(1_000, Number.isFinite(radiusMeters) ? radiusMeters : 50_000)),
+  };
+}
+
+function toGoogleLocationAreaBody(value?: LocationBias | null): GoogleLocationBiasBody | null {
+  const bias = normalizeLocationBias(value);
+  if (!bias) return null;
+  return {
+    circle: {
+      center: {
+        latitude: bias.latitude,
+        longitude: bias.longitude,
+      },
+      radius: bias.radiusMeters ?? 50_000,
+    },
+  };
+}
+
+function googleLocationConstraintFor(
+  query: string,
+  locationBias?: LocationBias | null
+): { locationBias?: GoogleLocationBiasBody; locationRestriction?: GoogleLocationBiasBody } {
+  const area = toGoogleLocationAreaBody(locationBias);
+  if (!area) return {};
+  return isShortHouseNumberPrefix(query)
+    ? { locationRestriction: area }
+    : { locationBias: area };
+}
+
+function locationBiasCacheKey(value?: LocationBias | null): string {
+  const bias = normalizeLocationBias(value);
+  if (!bias) return "global";
+  const radiusBucket = Math.round((bias.radiusMeters ?? 50_000) / 1_000);
+  return `${bias.latitude.toFixed(3)},${bias.longitude.toFixed(3)},${radiusBucket}`;
+}
+
+function nominatimViewbox(value?: LocationBias | null): string {
+  const bias = normalizeLocationBias(value);
+  if (!bias) return "";
+  const radiusMeters = bias.radiusMeters ?? 50_000;
+  const latDelta = radiusMeters / 111_320;
+  const lngScale = Math.max(0.2, Math.cos((bias.latitude * Math.PI) / 180));
+  const lngDelta = radiusMeters / (111_320 * lngScale);
+  const west = Math.max(-180, bias.longitude - lngDelta);
+  const east = Math.min(180, bias.longitude + lngDelta);
+  const south = Math.max(-90, bias.latitude - latDelta);
+  const north = Math.min(90, bias.latitude + latDelta);
+  return `${west},${north},${east},${south}`;
+}
+
+function mapboxBoundingBox(value?: LocationBias | null): string {
+  const bias = normalizeLocationBias(value);
+  if (!bias) return "";
+  const radiusMeters = bias.radiusMeters ?? 50_000;
+  const latDelta = radiusMeters / 111_320;
+  const lngScale = Math.max(0.2, Math.cos((bias.latitude * Math.PI) / 180));
+  const lngDelta = radiusMeters / (111_320 * lngScale);
+  const west = Math.max(-180, bias.longitude - lngDelta);
+  const east = Math.min(180, bias.longitude + lngDelta);
+  const south = Math.max(-90, bias.latitude - latDelta);
+  const north = Math.min(90, bias.latitude + latDelta);
+  return `${west},${south},${east},${north}`;
+}
+
 // ---------------------------------------------------------------------
 // Strict prefix matching
 // ---------------------------------------------------------------------
 
-// Normalize for left-to-right comparison: lowercase, collapse internal
-// whitespace runs to a single space, trim ends. We intentionally keep
-// punctuation (commas, periods in "St.", dashes) so that everything
-// after the first non-prefix character truly fails the match.
+const STREET_SUFFIX_ALIASES: Record<string, string> = {
+  aly: "alley",
+  alley: "alley",
+  ave: "avenue",
+  av: "avenue",
+  avenue: "avenue",
+  blvd: "boulevard",
+  boulevard: "boulevard",
+  cir: "circle",
+  circle: "circle",
+  ct: "court",
+  court: "court",
+  dr: "drive",
+  drive: "drive",
+  hwy: "highway",
+  highway: "highway",
+  ln: "lane",
+  lane: "lane",
+  pkwy: "parkway",
+  parkway: "parkway",
+  pl: "place",
+  place: "place",
+  rd: "road",
+  road: "road",
+  sq: "square",
+  square: "square",
+  st: "street",
+  street: "street",
+  ter: "terrace",
+  terrace: "terrace",
+  trl: "trail",
+  trail: "trail",
+  way: "way",
+};
+
+const STREET_SUFFIX_QUERY_EXPANSIONS: Record<string, string> = {
+  aly: "Alley",
+  ave: "Avenue",
+  av: "Avenue",
+  blvd: "Boulevard",
+  cir: "Circle",
+  ct: "Court",
+  dr: "Drive",
+  hwy: "Highway",
+  ln: "Lane",
+  pkwy: "Parkway",
+  pl: "Place",
+  rd: "Road",
+  sq: "Square",
+  st: "Street",
+  ter: "Terrace",
+  trl: "Trail",
+};
+
+// Normalize for left-to-right comparison: lowercase, collapse punctuation
+// and whitespace, and canonicalize common street suffix abbreviations.
+// This keeps strict "starts with the same address" behavior while allowing
+// normal user shorthand like "Dr" to match provider output like "Drive".
 function normalizeForPrefix(s: string): string {
-  return s.toLowerCase().replace(/\s+/g, " ").trim();
+  return s
+    .toLowerCase()
+    .replace(/[#.,/\\;:()]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((token) => STREET_SUFFIX_ALIASES[token] ?? token)
+    .join(" ")
+    .trim();
 }
 
 export function matchesQueryPrefix(description: string, query: string): boolean {
@@ -141,6 +288,10 @@ export function matchesQueryPrefix(description: string, query: string): boolean 
   const q = normalizeForPrefix(query);
   if (!q) return true;
   return d.startsWith(q);
+}
+
+function isShortHouseNumberPrefix(query: string): boolean {
+  return /^\s*\d{2,6}\s*$/.test(query);
 }
 
 // Apply strict prefix matching to a list of provider predictions.
@@ -176,7 +327,12 @@ function reportAddressSearchError(provider: string, query: string, err: unknown,
   if (Date.now() - lastErrAt < 5000) return;
   lastErrAt = Date.now();
   // eslint-disable-next-line no-console
-  console.warn("[addressSearch] provider failed", entry);
+  console.warn("[addressSearch] provider failed", {
+    provider: entry.provider,
+    status: entry.status,
+    message: entry.message,
+    at: entry.at,
+  });
 }
 
 function markSuccess(provider: string) {
@@ -210,15 +366,17 @@ function markSuccess(provider: string) {
 
 const GOOGLE_AUTOCOMPLETE_URL = "https://places.googleapis.com/v1/places:autocomplete";
 const GOOGLE_PLACE_DETAILS_BASE = "https://places.googleapis.com/v1/places/";
+const GOOGLE_PROXY_AUTOCOMPLETE_PATH = "/api/google-places-autocomplete";
+const GOOGLE_PROXY_DETAILS_PATH = "/api/google-place-details";
 
 function getGoogleKey(): string {
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const env = (import.meta as any)?.env;
-    // Prefer the dedicated Places key. Fall back to the legacy
-    // VITE_GOOGLE_MAPS_API_KEY so existing deployments keep working
-    // without a redeploy. Either one must have the Places API,
-    // Place Details, and Geocoding API enabled in Cloud Console.
+    // Production uses the server-side Google proxy so the paid key is
+    // never bundled into the browser. The direct browser key path is
+    // kept only as an explicit local debugging escape hatch.
+    if (env?.VITE_ENABLE_DIRECT_GOOGLE_PLACES !== "true") return "";
     if (typeof env?.VITE_GOOGLE_PLACES_API_KEY === "string" && env.VITE_GOOGLE_PLACES_API_KEY) {
       return env.VITE_GOOGLE_PLACES_API_KEY;
     }
@@ -254,13 +412,105 @@ interface GooglePrediction {
   };
 }
 
+interface GoogleLocationBiasBody {
+  circle: {
+    center: {
+      latitude: number;
+      longitude: number;
+    };
+    radius: number;
+  };
+}
+
+let googleProxyDisabledUntil = 0;
+const GOOGLE_PROXY_RETRY_DELAY_MS = 15_000;
+
+function serverGoogleProxyEnabled(): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const env = (import.meta as any)?.env;
+    if (env?.VITE_ENABLE_GOOGLE_PLACES_PROXY === "false") return false;
+    if (env?.VITE_ENABLE_GOOGLE_PLACES_PROXY === "true") return true;
+    if (env?.MODE === "test") return false;
+    return env?.PROD === true || env?.DEV === true;
+  } catch {
+    return false;
+  }
+}
+
+async function searchGoogleProxy(
+  query: string,
+  sessionToken: string,
+  signal?: AbortSignal,
+  locationBias?: LocationBias | null
+): Promise<AddressPrediction[]> {
+  if (!serverGoogleProxyEnabled()) return [];
+  if (Date.now() < googleProxyDisabledUntil) return [];
+
+  const normalizedBias = normalizeLocationBias(locationBias);
+  let res: Response;
+  try {
+    res = await fetch(GOOGLE_PROXY_AUTOCOMPLETE_PATH, {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query,
+        sessionToken,
+        ...(normalizedBias ? { locationBias: normalizedBias } : {}),
+      }),
+    });
+  } catch (err) {
+    reportAddressSearchError("google_proxy", query, err);
+    return [];
+  }
+
+  if (!res.ok) {
+    let errorCode = "";
+    try {
+      const body = (await res.json()) as { error?: string };
+      errorCode = body.error ?? "";
+    } catch {
+      /* ignore */
+    }
+    if (
+      res.status === 404 ||
+      res.status >= 500 ||
+      errorCode === "google_places_not_configured" ||
+      errorCode === "google_places_upstream_error" ||
+      errorCode === "google_places_rate_limited"
+    ) {
+      googleProxyDisabledUntil = Date.now() + GOOGLE_PROXY_RETRY_DELAY_MS;
+    }
+    reportAddressSearchError("google_proxy", query, errorCode || `HTTP ${res.status}`, res.status);
+    return [];
+  }
+
+  let data: { suggestions?: AddressPrediction[] };
+  try {
+    data = (await res.json()) as { suggestions?: AddressPrediction[] };
+  } catch (err) {
+    reportAddressSearchError("google_proxy", query, err);
+    return [];
+  }
+
+  return (data.suggestions ?? [])
+    .map((s): AddressPrediction | null => {
+      if (!s.id || !s.description) return null;
+      return { id: s.id, description: s.description, googlePlaceId: s.googlePlaceId ?? s.id };
+    })
+    .filter((p): p is AddressPrediction => p !== null);
+}
+
 async function searchGoogle(
   query: string,
   sessionToken: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  locationBias?: LocationBias | null
 ): Promise<AddressPrediction[]> {
   const key = getGoogleKey();
   if (!key) return [];
+  const googleLocationConstraint = googleLocationConstraintFor(query, locationBias);
   let res: Response;
   try {
     res = await fetch(GOOGLE_AUTOCOMPLETE_URL, {
@@ -278,6 +528,7 @@ async function searchGoogle(
         includedPrimaryTypes: ["street_address", "premise", "subpremise"],
         includedRegionCodes: ["us"],
         sessionToken,
+        ...googleLocationConstraint,
       }),
     });
   } catch (err) {
@@ -372,16 +623,17 @@ function logGoogleFailure(transport: string, query: string, raw: unknown) {
   const hint = decodeGoogleError(message);
   // eslint-disable-next-line no-console
   console.warn(
-    `[addressSearch] ${transport} failed for "${query}"` +
+    `[addressSearch] ${transport} failed` +
       (hint ? ` — ${hint.code}: ${hint.remediation}` : ""),
-    { raw }
+    { message }
   );
 }
 
 async function searchGoogleJs(
   query: string,
   sessionToken: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  locationBias?: LocationBias | null
 ): Promise<AddressPrediction[]> {
   const key = getGoogleKey();
   if (!key) return [];
@@ -399,11 +651,13 @@ async function searchGoogleJs(
 
   let response: { suggestions: unknown[] };
   try {
+    const googleLocationConstraint = googleLocationConstraintFor(query, locationBias);
     response = await places.AutocompleteSuggestion.fetchAutocompleteSuggestions({
       input: query,
       includedPrimaryTypes: ["street_address", "premise", "subpremise"],
       includedRegionCodes: ["us"],
       sessionToken: getGoogleJsSessionToken(places, sessionToken),
+      ...googleLocationConstraint,
     });
   } catch (err) {
     logGoogleFailure("google_js", query, err);
@@ -414,9 +668,6 @@ async function searchGoogleJs(
   // explicitly asked for this so REQUEST_DENIED etc. show up in
   // DevTools during testing. Keep it terse so production noise stays
   // manageable.
-  // eslint-disable-next-line no-console
-  console.info(`[addressSearch] google_js raw response for "${query}"`, response);
-
   const suggestions = (response.suggestions ?? []) as Array<{
     placePrediction?: { placeId?: string; text?: { text?: string } };
   }>;
@@ -526,9 +777,68 @@ export async function fetchGooglePlaceDetails(
   sessionToken: string,
   signal?: AbortSignal
 ): Promise<AddressParts | null> {
+  const viaProxy = await fetchGooglePlaceDetailsViaProxy(placeId, sessionToken, signal);
+  if (viaProxy) return viaProxy;
   const viaJs = await fetchGooglePlaceDetailsViaJs(placeId, sessionToken);
   if (viaJs) return viaJs;
   return fetchGooglePlaceDetailsViaRest(placeId, sessionToken, signal);
+}
+
+async function fetchGooglePlaceDetailsViaProxy(
+  placeId: string,
+  sessionToken: string,
+  signal?: AbortSignal
+): Promise<AddressParts | null> {
+  if (!serverGoogleProxyEnabled() || Date.now() < googleProxyDisabledUntil) return null;
+  let res: Response;
+  try {
+    res = await fetch(GOOGLE_PROXY_DETAILS_PATH, {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ placeId, sessionToken }),
+    });
+  } catch (err) {
+    reportAddressSearchError("google_proxy_details", placeId, err);
+    return null;
+  }
+
+  if (!res.ok) {
+    let errorCode = "";
+    try {
+      const body = (await res.json()) as { error?: string };
+      errorCode = body.error ?? "";
+    } catch {
+      /* ignore */
+    }
+    if (
+      res.status === 404 ||
+      res.status >= 500 ||
+      errorCode === "google_places_not_configured" ||
+      errorCode === "google_places_upstream_error" ||
+      errorCode === "google_places_rate_limited"
+    ) {
+      googleProxyDisabledUntil = Date.now() + GOOGLE_PROXY_RETRY_DELAY_MS;
+    }
+    reportAddressSearchError("google_proxy_details", placeId, errorCode || `HTTP ${res.status}`, res.status);
+    return null;
+  }
+
+  try {
+    const data = (await res.json()) as { parts?: Partial<AddressParts> };
+    const parts = data.parts;
+    if (!parts) return null;
+    return {
+      street: parts.street ?? "",
+      apt: parts.apt ?? "",
+      city: parts.city ?? "",
+      state: parts.state ?? "",
+      zip: parts.zip ?? "",
+    };
+  } catch (err) {
+    reportAddressSearchError("google_proxy_details", placeId, err);
+    return null;
+  }
 }
 
 async function fetchGooglePlaceDetailsViaRest(
@@ -582,6 +892,7 @@ async function fetchGooglePlaceDetailsViaRest(
 // ---------------------------------------------------------------------
 
 const SMARTY_BASE = "https://us-autocomplete-pro.api.smarty.com/lookup";
+const SMARTY_PROXY_PATH = "/api/smarty-autocomplete";
 
 function getSmartyKey(): string {
   try {
@@ -641,6 +952,76 @@ async function searchSmarty(query: string, signal?: AbortSignal): Promise<Addres
     .filter((p) => p.description.length > 0);
 }
 
+function serverSmartyProxyEnabled(): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const env = (import.meta as any)?.env;
+    if (env?.VITE_ENABLE_SMARTY_AUTOCOMPLETE_PROXY === "false") return false;
+    if (env?.VITE_ENABLE_SMARTY_AUTOCOMPLETE_PROXY === "true") return true;
+    if (env?.MODE === "test") return false;
+    return env?.PROD === true || env?.DEV === true;
+  } catch {
+    return false;
+  }
+}
+
+let smartyProxyDisabledUntil = 0;
+
+async function searchSmartyProxy(query: string, signal?: AbortSignal): Promise<AddressPrediction[]> {
+  if (!serverSmartyProxyEnabled()) return [];
+  if (Date.now() < smartyProxyDisabledUntil) return [];
+
+  let res: Response;
+  try {
+    res = await fetch(SMARTY_PROXY_PATH, {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, maxResults: 10 }),
+    });
+  } catch (err) {
+    reportAddressSearchError("smarty_proxy", query, err);
+    return [];
+  }
+
+  if (!res.ok) {
+    let errorCode = "";
+    try {
+      const body = (await res.json()) as { error?: string };
+      errorCode = body.error ?? "";
+    } catch {
+      /* ignore */
+    }
+    if (
+      res.status === 404 ||
+      res.status >= 500 ||
+      errorCode === "smarty_not_configured" ||
+      errorCode === "smarty_upstream_error" ||
+      errorCode === "smarty_not_available" ||
+      errorCode === "smarty_rate_limited"
+    ) {
+      smartyProxyDisabledUntil = Date.now() + 5 * 60 * 1000;
+    }
+    reportAddressSearchError("smarty_proxy", query, errorCode || `HTTP ${res.status}`, res.status);
+    return [];
+  }
+
+  let data: { suggestions?: AddressPrediction[] };
+  try {
+    data = (await res.json()) as { suggestions?: AddressPrediction[] };
+  } catch (err) {
+    reportAddressSearchError("smarty_proxy", query, err);
+    return [];
+  }
+
+  return (data.suggestions ?? [])
+    .map((s): AddressPrediction | null => {
+      if (!s.id || !s.description) return null;
+      return { id: s.id, description: s.description };
+    })
+    .filter((p): p is AddressPrediction => p !== null);
+}
+
 // ---------------------------------------------------------------------
 // Mapbox provider
 // ---------------------------------------------------------------------
@@ -657,19 +1038,38 @@ function getMapboxToken(): string {
   }
 }
 
-async function searchMapbox(query: string, signal?: AbortSignal): Promise<AddressPrediction[]> {
+async function searchMapbox(
+  query: string,
+  signal?: AbortSignal,
+  locationBias?: LocationBias | null
+): Promise<AddressPrediction[]> {
   const token = getMapboxToken();
   if (!token) return [];
   // types=address restricts results to street-level addresses only;
   // we deliberately exclude place / locality / postcode / poi so the
   // dropdown never shows "McDonald, PA" when the user is searching
   // for "901 McDonald Drive".
-  const url = `${MAPBOX_BASE}/${encodeURIComponent(query)}.json?country=us&types=address&autocomplete=true&limit=6&access_token=${encodeURIComponent(
-    token
-  )}`;
+  const url = new URL(`${MAPBOX_BASE}/${encodeURIComponent(query)}.json`);
+  url.searchParams.set("country", "us");
+  url.searchParams.set("types", "address");
+  url.searchParams.set("autocomplete", "true");
+  url.searchParams.set("limit", "6");
+  const normalizedBias = normalizeLocationBias(locationBias);
+  if (normalizedBias) {
+    url.searchParams.set("proximity", `${normalizedBias.longitude},${normalizedBias.latitude}`);
+    if (isShortHouseNumberPrefix(query)) {
+      url.searchParams.set("bbox", mapboxBoundingBox(normalizedBias));
+    }
+  }
+  url.searchParams.set("access_token", token);
   let res: Response;
   try {
-    res = await fetch(url, { signal });
+    const fetched = await fetch(url.toString(), { signal });
+    if (!fetched) {
+      reportAddressSearchError("mapbox", query, "Empty Mapbox response");
+      return [];
+    }
+    res = fetched;
   } catch (err) {
     reportAddressSearchError("mapbox", query, err);
     return [];
@@ -708,6 +1108,150 @@ async function searchMapbox(query: string, signal?: AbortSignal): Promise<Addres
 // Nominatim (OpenStreetMap) provider — keyless default
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// Photon autocomplete proxy — keyless OpenStreetMap search-as-you-type
+// ---------------------------------------------------------------------
+
+const PHOTON_PROXY_PATH = "/api/photon-autocomplete";
+const NOMINATIM_PROXY_PATH = "/api/nominatim-search";
+
+function serverPhotonProxyEnabled(): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const env = (import.meta as any)?.env;
+    if (env?.VITE_ENABLE_PHOTON_AUTOCOMPLETE === "false") return false;
+    if (env?.VITE_ENABLE_PHOTON_AUTOCOMPLETE === "true") return true;
+    if (env?.MODE === "test") return false;
+    return env?.PROD === true || env?.DEV === true;
+  } catch {
+    return false;
+  }
+}
+
+let photonProxyDisabledUntil = 0;
+let nominatimProxyDisabledUntil = 0;
+
+async function searchPhotonProxy(
+  query: string,
+  signal?: AbortSignal,
+  locationBias?: LocationBias | null
+): Promise<AddressPrediction[]> {
+  if (!serverPhotonProxyEnabled()) return [];
+  if (Date.now() < photonProxyDisabledUntil) return [];
+
+  const normalizedBias = normalizeLocationBias(locationBias);
+  let res: Response;
+  try {
+    res = await fetch(PHOTON_PROXY_PATH, {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query,
+        ...(normalizedBias ? { locationBias: normalizedBias } : {}),
+      }),
+    });
+  } catch (err) {
+    reportAddressSearchError("photon_proxy", query, err);
+    return [];
+  }
+
+  if (!res.ok) {
+    let errorCode = "";
+    try {
+      const body = (await res.json()) as { error?: string };
+      errorCode = body.error ?? "";
+    } catch {
+      /* ignore */
+    }
+    if (res.status === 404 || res.status >= 500 || errorCode === "photon_unavailable") {
+      photonProxyDisabledUntil = Date.now() + 5 * 60 * 1000;
+    }
+    reportAddressSearchError("photon_proxy", query, errorCode || `HTTP ${res.status}`, res.status);
+    return [];
+  }
+
+  try {
+    const data = (await res.json()) as { suggestions?: AddressPrediction[] };
+    return (data.suggestions ?? [])
+      .map((s): AddressPrediction | null => {
+        if (!s.id || !s.description) return null;
+        return { id: s.id, description: s.description };
+      })
+      .filter((p): p is AddressPrediction => p !== null);
+  } catch (err) {
+    reportAddressSearchError("photon_proxy", query, err);
+    return [];
+  }
+}
+
+function serverNominatimProxyEnabled(): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const env = (import.meta as any)?.env;
+    if (env?.VITE_ENABLE_NOMINATIM_PROXY === "false") return false;
+    if (env?.VITE_ENABLE_NOMINATIM_PROXY === "true") return true;
+    if (env?.MODE === "test") return false;
+    return env?.PROD === true || env?.DEV === true;
+  } catch {
+    return false;
+  }
+}
+
+async function searchNominatimProxy(
+  query: string,
+  signal?: AbortSignal,
+  locationBias?: LocationBias | null
+): Promise<AddressPrediction[]> {
+  if (!serverNominatimProxyEnabled()) return [];
+  if (Date.now() < nominatimProxyDisabledUntil) return [];
+
+  const normalizedBias = normalizeLocationBias(locationBias);
+  let res: Response;
+  try {
+    res = await fetch(NOMINATIM_PROXY_PATH, {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query,
+        ...(normalizedBias ? { locationBias: normalizedBias } : {}),
+      }),
+    });
+  } catch (err) {
+    reportAddressSearchError("nominatim_proxy", query, err);
+    return [];
+  }
+
+  if (!res.ok) {
+    let errorCode = "";
+    try {
+      const body = (await res.json()) as { error?: string };
+      errorCode = body.error ?? "";
+    } catch {
+      /* ignore */
+    }
+    if (res.status === 404 || res.status >= 500 || errorCode === "nominatim_unavailable") {
+      nominatimProxyDisabledUntil = Date.now() + 5 * 60 * 1000;
+    }
+    reportAddressSearchError("nominatim_proxy", query, errorCode || `HTTP ${res.status}`, res.status);
+    return [];
+  }
+
+  try {
+    const data = (await res.json()) as { suggestions?: AddressPrediction[] };
+    return (data.suggestions ?? [])
+      .map((s): AddressPrediction | null => {
+        if (!s.id || !s.description) return null;
+        return { id: s.id, description: s.description };
+      })
+      .filter((p): p is AddressPrediction => p !== null);
+  } catch (err) {
+    reportAddressSearchError("nominatim_proxy", query, err);
+    return [];
+  }
+}
+
 const NOMINATIM_BASE = "https://nominatim.openstreetmap.org/search";
 
 interface NominatimAddress {
@@ -743,6 +1287,10 @@ export function isNominatimStreetLevel(r: NominatimResult): boolean {
   return houseNumber.length > 0 && road.length > 0;
 }
 
+function isNominatimRoadLevel(r: NominatimResult): boolean {
+  return (r.address?.road ?? "").trim().length > 0;
+}
+
 // Build a clean address string from the structured response. Falls
 // back to display_name if components are missing.
 export function formatNominatimAddress(r: NominatimResult): string {
@@ -757,6 +1305,30 @@ export function formatNominatimAddress(r: NominatimResult): string {
     return (r.display_name ?? "").replace(/, United States$/, "").trim();
   }
   return parts.join(", ");
+}
+
+function formatNominatimAddressForQuery(r: NominatimResult, query: string): string {
+  if (isNominatimStreetLevel(r)) return formatNominatimAddress(r);
+  if (!queryHasStreetText(query) || !isNominatimRoadLevel(r)) return "";
+
+  const a = r.address ?? {};
+  const houseNumber = extractLeadingHouseNumber(query);
+  const road = (a.road ?? "").trim();
+  if (!houseNumber || !road) return "";
+
+  const queryRoad = query
+    .replace(/^\s*\d+[A-Za-z]?\s+/, "")
+    .split(",")[0]
+    .trim();
+  if (queryRoad && !normalizeForPrefix(road).startsWith(normalizeForPrefix(queryRoad))) {
+    return "";
+  }
+
+  const city = a.city || a.town || a.village || a.hamlet || a.county || "";
+  const stateCode = (a["ISO3166-2-lvl4"] ?? "").replace(/^US-/i, "") || stateNameToCode(a.state);
+  const zip = a.postcode ?? "";
+  const tail = [stateCode, zip].filter(Boolean).join(" ").trim();
+  return [`${houseNumber} ${road}`.trim(), city, tail].filter(Boolean).join(", ");
 }
 
 const STATE_NAME_TO_CODE: Record<string, string> = {
@@ -777,19 +1349,33 @@ function stateNameToCode(name?: string): string {
   return STATE_NAME_TO_CODE[name] ?? "";
 }
 
-async function searchNominatim(query: string, signal?: AbortSignal): Promise<AddressPrediction[]> {
+async function searchNominatim(
+  query: string,
+  signal?: AbortSignal,
+  locationBias?: LocationBias | null
+): Promise<AddressPrediction[]> {
   const url = new URL(NOMINATIM_BASE);
   url.searchParams.set("format", "json");
   url.searchParams.set("countrycodes", "us");
   url.searchParams.set("addressdetails", "1");
   url.searchParams.set("limit", "6");
   url.searchParams.set("q", query);
+  const viewbox = nominatimViewbox(locationBias);
+  if (viewbox) {
+    url.searchParams.set("viewbox", viewbox);
+    url.searchParams.set("bounded", "0");
+  }
   let res: Response;
   try {
-    res = await fetch(url.toString(), {
+    const fetched = await fetch(url.toString(), {
       signal,
       headers: { "Accept-Language": "en-US" },
     });
+    if (!fetched) {
+      reportAddressSearchError("nominatim", query, "Empty Nominatim response");
+      return [];
+    }
+    res = fetched;
   } catch (err) {
     reportAddressSearchError("nominatim", query, err);
     return [];
@@ -806,17 +1392,78 @@ async function searchNominatim(query: string, signal?: AbortSignal): Promise<Add
     return [];
   }
   const list = Array.isArray(data) ? data : [];
-  // Drop city / county / region / POI hits — keep only entries with
-  // both a house number and a road. Anything we drop is recorded in
-  // telemetry so ops can spot a provider regression.
+  // Drop city / county / region / POI hits. Keep real house-number
+  // rows, and as a last-resort keep road-level rows when the user
+  // already typed a house number. Nominatim often knows the road and
+  // ZIP but not the parcel-level house number; preserving the user's
+  // typed number is better than silently returning nothing.
   const streetOnly = list.filter((r) => {
     if (isNominatimStreetLevel(r)) return true;
+    if (queryHasStreetText(query) && isNominatimRoadLevel(r)) return true;
     recordNonStreetLeak("nominatim", r.display_name ?? "");
     return false;
   });
   return streetOnly
-    .map((r) => ({ id: String(r.place_id), description: formatNominatimAddress(r) }))
+    .map((r) => ({ id: String(r.place_id), description: formatNominatimAddressForQuery(r, query) }))
     .filter((p) => p.description.length > 0);
+}
+
+// ---------------------------------------------------------------------
+// U.S. Census Geocoder proxy — keyless verifier for complete addresses
+// ---------------------------------------------------------------------
+
+const CENSUS_PROXY_PATH = "/api/census-geocode";
+
+function shouldTryCensusQuery(query: string): boolean {
+  const q = query.trim();
+  if (q.length < 12) return false;
+  if (!/^\d+\s+\S+/.test(q)) return false;
+  const hasZip = /\b\d{5}(?:-\d{4})?\b/.test(q);
+  const hasState = /(?:,\s*|\s+)(A[LKSZRAEP]|C[AOT]|D[CE]|F[LM]|G[AU]|HI|I[ADLN]|K[SY]|LA|M[ADEINOST]|N[CDEHJMVY]|O[HKR]|P[AWR]|RI|S[CD]|T[NX]|UT|V[AIT]|W[AIVY])\b/i.test(q);
+  const hasCitySeparator = q.includes(",");
+  const hasStreetAndCity =
+    /^(\d+)\s+[^,]{3,},\s*[A-Za-z][A-Za-z .'-]{1,}(?:,|$)/.test(q);
+  return hasZip || (hasState && hasCitySeparator) || hasStreetAndCity;
+}
+
+async function searchCensusProxy(query: string, signal?: AbortSignal): Promise<AddressPrediction[]> {
+  if (!shouldTryCensusQuery(query)) return [];
+
+  let res: Response;
+  try {
+    const fetched = await fetch(CENSUS_PROXY_PATH, {
+      method: "POST",
+      signal,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query }),
+    });
+    if (!fetched) {
+      reportAddressSearchError("census", query, "Empty Census response");
+      return [];
+    }
+    res = fetched;
+  } catch (err) {
+    reportAddressSearchError("census", query, err);
+    return [];
+  }
+
+  if (!res.ok) {
+    reportAddressSearchError("census", query, `HTTP ${res.status}`, res.status);
+    return [];
+  }
+
+  try {
+    const data = (await res.json()) as { suggestions?: AddressPrediction[] };
+    return (data.suggestions ?? [])
+      .map((s): AddressPrediction | null => {
+        if (!s.id || !s.description) return null;
+        return { id: s.id, description: s.description };
+      })
+      .filter((p): p is AddressPrediction => p !== null);
+  } catch (err) {
+    reportAddressSearchError("census", query, err);
+    return [];
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -824,6 +1471,59 @@ async function searchNominatim(query: string, signal?: AbortSignal): Promise<Add
 // or no network is available). This is small and intentionally
 // nationwide-flavored.
 // ---------------------------------------------------------------------
+
+export async function reverseGeocodeCurrentLocation(
+  coords: { latitude: number; longitude: number },
+  signal?: AbortSignal
+): Promise<AddressPrediction | null> {
+  const lat = Number(coords.latitude);
+  const lon = Number(coords.longitude);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+
+  const url = new URL("https://nominatim.openstreetmap.org/reverse");
+  url.searchParams.set("format", "json");
+  url.searchParams.set("addressdetails", "1");
+  url.searchParams.set("zoom", "18");
+  url.searchParams.set("lat", lat.toFixed(6));
+  url.searchParams.set("lon", lon.toFixed(6));
+
+  let res: Response;
+  try {
+    const fetched = await fetch(url.toString(), {
+      signal,
+      headers: { "Accept-Language": "en-US" },
+    });
+    if (!fetched) {
+      reportAddressSearchError("nominatim_reverse", `${lat},${lon}`, "Empty reverse geocode response");
+      return null;
+    }
+    res = fetched;
+  } catch (err) {
+    reportAddressSearchError("nominatim_reverse", `${lat},${lon}`, err);
+    return null;
+  }
+
+  if (!res.ok) {
+    reportAddressSearchError("nominatim_reverse", `${lat},${lon}`, `HTTP ${res.status}`, res.status);
+    return null;
+  }
+
+  try {
+    const data = (await res.json()) as NominatimResult;
+    if (!isNominatimStreetLevel(data)) {
+      recordNonStreetLeak("nominatim_reverse", data.display_name ?? "");
+      return null;
+    }
+    const description = formatNominatimAddress(data);
+    return {
+      id: `current-location-${lat.toFixed(5)}-${lon.toFixed(5)}`,
+      description,
+    };
+  } catch (err) {
+    reportAddressSearchError("nominatim_reverse", `${lat},${lon}`, err);
+    return null;
+  }
+}
 
 const FALLBACK_STREETS = [
   "Main Street", "Oak Avenue", "Maple Drive", "Cedar Lane", "Park Avenue",
@@ -944,16 +1644,23 @@ function searchMarinas(query: string): AddressPrediction[] {
 const MAX_CACHE_ENTRIES = 32;
 interface CachedEntry {
   key: string;             // normalized cache key
+  providerName: string;
+  normalizedQuery: string;
+  biasKey: string;
   rawResults: AddressPrediction[];
 }
 const responseCache = new Map<string, CachedEntry>();
 
-function cacheKey(query: string, providerName: string): string {
-  return `${providerName}::${normalizeForPrefix(query)}`;
+function cacheKey(query: string, providerName: string, locationBias?: LocationBias | null): string {
+  return `${providerName}::${locationBiasCacheKey(locationBias)}::${normalizeForPrefix(query)}`;
 }
 
-function cacheGet(query: string, providerName: string): AddressPrediction[] | undefined {
-  const k = cacheKey(query, providerName);
+function cacheGet(
+  query: string,
+  providerName: string,
+  locationBias?: LocationBias | null
+): AddressPrediction[] | undefined {
+  const k = cacheKey(query, providerName, locationBias);
   const v = responseCache.get(k);
   if (!v) return undefined;
   // LRU bump
@@ -962,10 +1669,17 @@ function cacheGet(query: string, providerName: string): AddressPrediction[] | un
   return v.rawResults;
 }
 
-function cacheSet(query: string, providerName: string, raw: AddressPrediction[]) {
-  const k = cacheKey(query, providerName);
+function cacheSet(
+  query: string,
+  providerName: string,
+  raw: AddressPrediction[],
+  locationBias?: LocationBias | null
+) {
+  const biasKey = locationBiasCacheKey(locationBias);
+  const normalizedQuery = normalizeForPrefix(query);
+  const k = cacheKey(query, providerName, locationBias);
   if (responseCache.has(k)) responseCache.delete(k);
-  responseCache.set(k, { key: k, rawResults: raw });
+  responseCache.set(k, { key: k, providerName, normalizedQuery, biasKey, rawResults: raw });
   if (responseCache.size > MAX_CACHE_ENTRIES) {
     const oldest = responseCache.keys().next().value;
     if (oldest !== undefined) responseCache.delete(oldest);
@@ -980,13 +1694,18 @@ function cacheSet(query: string, providerName: string, raw: AddressPrediction[])
 //     PREFIX of cached
 // Returns the cached raw results (caller does the final prefix
 // filter so a single source of truth applies).
-function findUsableCachedEntry(query: string): { providerName: string; raw: AddressPrediction[] } | undefined {
+function findUsableCachedEntry(
+  query: string,
+  locationBias?: LocationBias | null
+): { providerName: string; raw: AddressPrediction[] } | undefined {
   const normCurrent = normalizeForPrefix(query);
+  const currentBiasKey = locationBiasCacheKey(locationBias);
   const entries = [...responseCache.values()].reverse();
   for (const entry of entries) {
-    const [providerName, cachedNorm] = entry.key.split("::");
-    if (!providerName || cachedNorm === undefined) continue;
-    if (cachedNorm.length === 0) continue;
+    if (entry.biasKey !== currentBiasKey) continue;
+    const providerName = entry.providerName;
+    const cachedNorm = entry.normalizedQuery;
+    if (!providerName || cachedNorm.length === 0) continue;
     // Accept when either direction is a prefix of the other — covers
     // both forward typing and backspaces over the cached query.
     const oneIsPrefix =
@@ -1010,34 +1729,135 @@ function stripTrailingPartialWord(query: string): string {
   if (!trimmed) return "";
   const parts = trimmed.split(/\s+/);
   if (parts.length <= 1) return "";
-  return parts.slice(0, -1).join(" ");
+  return parts.slice(0, -1).join(" ").replace(/[,\s]+$/g, "").trim();
+}
+
+function expandStreetSuffixesForProvider(query: string): string {
+  return query.replace(/\b([A-Za-z]{1,8})\.?\b/g, (match, token: string) => {
+    return STREET_SUFFIX_QUERY_EXPANSIONS[token.toLowerCase()] ?? match;
+  });
+}
+
+function extractLeadingHouseNumber(query: string): string {
+  return query.trim().match(/^(\d+[A-Za-z]?)(?:\s+|$)/)?.[1] ?? "";
+}
+
+function queryHasStreetText(query: string): boolean {
+  return /^\s*\d+[A-Za-z]?\s+[A-Za-z0-9]/.test(query);
+}
+
+function streetLineBeforeComma(query: string): string {
+  const parts = query.split(",").map((part) => part.trim()).filter(Boolean);
+  if (parts.length <= 1) return "";
+  const first = parts[0];
+  return /^\d+\s+\S+/.test(first) ? first : "";
+}
+
+interface ProviderQueryVariant {
+  value: string;
+  isBroader: boolean;
+}
+
+function addProviderQueryVariant(
+  variants: ProviderQueryVariant[],
+  value: string,
+  isBroader: boolean
+) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) return;
+  const duplicate = variants.some(
+    (variant) => variant.value.toLowerCase() === normalized.toLowerCase()
+  );
+  if (duplicate) return;
+  variants.push({ value: normalized, isBroader });
+}
+
+function buildProviderQueryVariants(query: string): ProviderQueryVariant[] {
+  const variants: ProviderQueryVariant[] = [];
+  const trimmed = query.replace(/\s+/g, " ").trim();
+  addProviderQueryVariant(variants, trimmed, false);
+  addProviderQueryVariant(variants, expandStreetSuffixesForProvider(trimmed), false);
+
+  const streetOnly = streetLineBeforeComma(trimmed);
+  addProviderQueryVariant(variants, streetOnly, true);
+  addProviderQueryVariant(variants, expandStreetSuffixesForProvider(streetOnly), true);
+
+  const broader = stripTrailingPartialWord(trimmed);
+  addProviderQueryVariant(variants, broader, true);
+  addProviderQueryVariant(variants, expandStreetSuffixesForProvider(broader), true);
+
+  if (streetOnly) {
+    const broaderStreetOnly = stripTrailingPartialWord(streetOnly);
+    addProviderQueryVariant(variants, broaderStreetOnly, true);
+    addProviderQueryVariant(variants, expandStreetSuffixesForProvider(broaderStreetOnly), true);
+  }
+
+  return variants.slice(0, 8);
 }
 
 // Wraps a provider with cache write + telemetry on success. Returns
 // the raw (pre-prefix-filter) results.
-type ProviderName = "google_js" | "google" | "smarty" | "mapbox" | "nominatim";
+type ProviderName =
+  | "google_proxy"
+  | "google_js"
+  | "google"
+  | "smarty_proxy"
+  | "smarty"
+  | "mapbox"
+  | "photon_proxy"
+  | "nominatim_proxy"
+  | "nominatim"
+  | "census";
 
 async function runProvider(
   providerName: ProviderName,
   query: string,
-  options: { signal?: AbortSignal; googleSessionToken?: string } = {}
-): Promise<AddressPrediction[]> {
-  const { signal, googleSessionToken } = options;
+  options: { signal?: AbortSignal; googleSessionToken?: string; locationBias?: LocationBias | null } = {}
+): Promise<{ raw: AddressPrediction[]; error?: ProviderError }> {
+  const { signal, googleSessionToken, locationBias } = options;
+  const beforeErrors = telemetry.errors.length;
   let raw: AddressPrediction[];
-  if (providerName === "google_js") {
-    raw = await searchGoogleJs(query, googleSessionToken ?? newGoogleSessionToken(), signal);
+  if (providerName === "google_proxy") {
+    raw = await searchGoogleProxy(
+      query,
+      googleSessionToken ?? newGoogleSessionToken(),
+      signal,
+      locationBias
+    );
+  } else if (providerName === "google_js") {
+    raw = await searchGoogleJs(
+      query,
+      googleSessionToken ?? newGoogleSessionToken(),
+      signal,
+      locationBias
+    );
   } else if (providerName === "google") {
-    raw = await searchGoogle(query, googleSessionToken ?? newGoogleSessionToken(), signal);
+    raw = await searchGoogle(
+      query,
+      googleSessionToken ?? newGoogleSessionToken(),
+      signal,
+      locationBias
+    );
+  } else if (providerName === "smarty_proxy") {
+    raw = await searchSmartyProxy(query, signal);
   } else if (providerName === "smarty") {
     raw = await searchSmarty(query, signal);
   } else if (providerName === "mapbox") {
-    raw = await searchMapbox(query, signal);
+    raw = await searchMapbox(query, signal, locationBias);
+  } else if (providerName === "photon_proxy") {
+    raw = await searchPhotonProxy(query, signal, locationBias);
+  } else if (providerName === "nominatim_proxy") {
+    raw = await searchNominatimProxy(query, signal, locationBias);
+  } else if (providerName === "census") {
+    raw = await searchCensusProxy(query, signal);
   } else {
-    raw = await searchNominatim(query, signal);
+    raw = await searchNominatim(query, signal, locationBias);
   }
-  cacheSet(query, providerName, raw);
+  cacheSet(query, providerName, raw, locationBias);
   if (raw.length > 0) markSuccess(providerName);
-  return raw;
+  const error =
+    telemetry.errors.length > beforeErrors ? telemetry.errors[telemetry.errors.length - 1] : undefined;
+  return { raw, error };
 }
 
 // Pick the highest-priority provider whose credentials are configured.
@@ -1046,10 +1866,39 @@ async function runProvider(
 // load failure (CSP, ad-blocker, etc.). Smarty / Mapbox / Nominatim
 // are mutually exclusive — only one is used per session.
 function pickProvider(): ProviderName {
+  if (serverGoogleProxyEnabled()) return "google_proxy";
   if (getGoogleKey()) return "google_js";
+  if (serverSmartyProxyEnabled()) return "smarty_proxy";
   if (getSmartyKey()) return "smarty";
   if (getMapboxToken()) return "mapbox";
+  if (serverPhotonProxyEnabled()) return "photon_proxy";
+  if (serverNominatimProxyEnabled()) return "nominatim_proxy";
   return "nominatim";
+}
+
+function providerOrder(query?: string, locationBias?: LocationBias | null): ProviderName[] {
+  const order: ProviderName[] = [];
+  const shortHouseNumberPrefix = isShortHouseNumberPrefix(query ?? "");
+  const explicitLocationBias = Boolean(normalizeLocationBias(locationBias));
+  if (shortHouseNumberPrefix && serverPhotonProxyEnabled()) order.push("photon_proxy");
+  if (serverGoogleProxyEnabled()) order.push("google_proxy");
+  if (getGoogleKey()) order.push("google_js", "google");
+  if (!shortHouseNumberPrefix || !explicitLocationBias) {
+    if (serverSmartyProxyEnabled()) order.push("smarty_proxy");
+    if (getSmartyKey()) order.push("smarty");
+  }
+  if (getMapboxToken()) order.push("mapbox");
+  if (!shortHouseNumberPrefix && serverPhotonProxyEnabled()) order.push("photon_proxy");
+  if (query && shouldTryCensusQuery(query)) order.push("census");
+  if (serverNominatimProxyEnabled()) order.push("nominatim_proxy");
+  order.push("nominatim");
+  return Array.from(new Set(order));
+}
+
+function shouldTryNextProvider(providerName: ProviderName, error?: ProviderError): boolean {
+  if (providerName === "google_js") return true;
+  if (error?.status === 401 || error?.status === 403) return false;
+  return true;
 }
 
 // Public helper so the UI knows which provider is active (e.g.
@@ -1058,7 +1907,12 @@ function pickProvider(): ProviderName {
 // is the same regardless of which one served the response.
 export function getActiveProvider(): "google" | "smarty" | "mapbox" | "nominatim" {
   const p = pickProvider();
+  if (p === "google_proxy") return "google";
   if (p === "google_js") return "google";
+  if (p === "smarty_proxy") return "smarty";
+  if (p === "photon_proxy") return "nominatim";
+  if (p === "nominatim_proxy") return "nominatim";
+  if (p === "census") return "nominatim";
   return p;
 }
 
@@ -1080,43 +1934,76 @@ export async function searchAddresses(
   // 1. Cache lookup. If any cached longer-prefix entry can still
   //    answer this query under strict prefix, use it and skip the
   //    network entirely.
-  const cached = findUsableCachedEntry(query);
+  const cached = findUsableCachedEntry(query, options.locationBias);
   if (cached) {
     telemetry.cacheHits += 1;
     return enforcePrefixMatch(cached.providerName, query, cached.raw);
   }
 
-  // 2. Live provider. When Google is configured we try the JS SDK
-  //    first; on SDK load failure (CSP, ad-blocker, slow CDN) the
-  //    JS provider returns 0 and we silently fall through to the
-  //    REST transport so the user still gets predictions.
-  let provider = pickProvider();
-  let raw = await runProvider(provider, query, { signal, googleSessionToken });
-  if (raw.length === 0 && provider === "google_js") {
-    provider = "google";
-    raw = await runProvider(provider, query, { signal, googleSessionToken });
-  }
+  // 2. Live providers. For real autocomplete providers, let the
+  //    provider rank results from the exact text the user typed. For
+  //    keyless validators/fallbacks, use conservative variants and
+  //    strict filtering so city/county/region noise never leaks into
+  //    the dropdown.
+  let matched: AddressPrediction[] = [];
+  const queryVariants = buildProviderQueryVariants(query);
+  providerLoop:
+  for (const candidate of providerOrder(query, options.locationBias)) {
+    const variants =
+      candidate === "google_proxy" ||
+      candidate === "google_js" ||
+      candidate === "google" ||
+      candidate === "smarty_proxy" ||
+      candidate === "smarty" ||
+      candidate === "photon_proxy" ||
+      candidate === "nominatim_proxy"
+        ? [{ value: query.replace(/\s+/g, " ").trim(), isBroader: false }]
+        : queryVariants;
 
-  // 3. Broader-query retry. Nominatim's search endpoint does
-  //    whole-word matching, so "901 McD" returns 0. Drop the last
-  //    partial word ("901 McD" → "901") and ask again, then enforce
-  //    strict prefix client-side to keep only the user-typed prefix.
-  if (raw.length === 0) {
-    const broader = stripTrailingPartialWord(query);
-    if (broader && broader !== query) {
-      telemetry.broaderQueryRetries += 1;
-      telemetry.lastBroaderQuery = { original: query, broader };
-      raw = await runProvider(provider, broader, { signal, googleSessionToken });
+    for (const variant of variants) {
+      if (candidate === "census" && (variant.isBroader || !shouldTryCensusQuery(variant.value))) {
+        continue;
+      }
+      if (variant.isBroader && candidate !== "census") {
+        telemetry.broaderQueryRetries += 1;
+        telemetry.lastBroaderQuery = { original: query, broader: variant.value };
+      }
+      const result = await runProvider(candidate, variant.value, {
+        signal,
+        googleSessionToken,
+        locationBias: options.locationBias,
+      });
+      const raw = result.raw;
+      if (raw.length > 0) {
+        const trustsProviderRanking =
+          candidate === "google_proxy" ||
+          candidate === "google_js" ||
+          candidate === "google" ||
+          candidate === "smarty_proxy" ||
+          candidate === "smarty" ||
+          candidate === "photon_proxy" ||
+          candidate === "nominatim_proxy";
+        const filtered = trustsProviderRanking ? raw : enforcePrefixMatch(candidate, query, raw);
+        if (filtered.length > 0) {
+          matched = filtered;
+          break providerLoop;
+        }
+        if (candidate === "census") break;
+      }
+      if (result.error) {
+        if (!shouldTryNextProvider(candidate, result.error)) break providerLoop;
+        break;
+      }
     }
   }
 
-  // 4. Still nothing → fall back to the mock pool so the UI never
-  //    goes blank when both real providers fail.
-  if (raw.length === 0) {
-    if (options.allowMockFallback === false) return [];
+  // 3. Still nothing → fall back to the mock pool only for demo
+  //    surfaces that explicitly opted in.
+  if (matched.length === 0) {
+    if (options.allowMockFallback !== true) return [];
     return enforcePrefixMatch("mock", query, buildFallbackPredictions(query));
   }
 
-  // 5. Apply strict prefix matching as the final gate.
-  return enforcePrefixMatch(provider, query, raw);
+  // 4. The winning provider/variant already passed strict prefix matching.
+  return matched;
 }

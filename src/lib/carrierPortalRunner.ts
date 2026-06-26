@@ -173,8 +173,9 @@ function validationChecks(input: {
   session: QuotingSession;
   state?: string;
   entryUrl?: string;
-  credentialReference?: string;
+  browserSessionReference?: string;
   bridgeUrl?: string;
+  mode: CarrierPortalRunnerTrace["mode"];
   fieldMappings: CarrierPortalFieldMapping[];
 }): CarrierPortalRunnerCheck[] {
   const requiredLabels = requiredLabelsForAsset(
@@ -193,11 +194,19 @@ function validationChecks(input: {
       : "A secure HTTPS carrier agent portal URL is required.",
   });
   push({
-    label: "Carrier credential reference",
-    status: input.credentialReference ? "pass" : "block",
-    detail: input.credentialReference
-      ? "Encrypted vault reference is present; no raw carrier password is exposed to the browser."
-      : "Encrypted carrier credentials are missing for this agency/user/carrier.",
+    label: "Signed-in browser session",
+    status:
+      input.mode === "configuration_trace"
+        ? "warn"
+        : input.browserSessionReference
+          ? "pass"
+          : "block",
+    detail:
+      input.mode === "configuration_trace"
+        ? "Live carrier access will require the agent to be signed into the carrier portal in their browser first."
+        : input.browserSessionReference
+          ? "Runner will use the existing signed-in browser session; no carrier username or password is provided."
+          : "Sign in to the carrier portal in your browser, then run the AI runner again.",
   });
   push({
     label: "MFA mode",
@@ -279,8 +288,8 @@ export function runCarrierPortalRunner(input: CarrierPortalRunnerInput): Carrier
     input.carrier.agentPortalUrl?.trim() ||
     "";
   const surface = automation?.agentPortalUrl || input.carrier.agentPortalUrl ? "agent_portal" : "customer_portal";
-  const credentialReference = automation?.credentialReference;
   const bridgeUrl = readClientEnv("VITE_QUOTEX_CARRIER_AUTOMATION_BRIDGE_URL");
+  const browserSessionReference = readClientEnv("VITE_QUOTEX_CARRIER_BROWSER_SESSION_REFERENCE");
   const mode: CarrierPortalRunnerTrace["mode"] =
     bridgeUrl && automation?.status === "connected" ? "live_worker" : "configuration_trace";
   const jobId = `RPA-${input.carrier.id.slice(-5).toUpperCase()}-${input.session.id.slice(-6).toUpperCase()}-${
@@ -308,8 +317,9 @@ export function runCarrierPortalRunner(input: CarrierPortalRunnerInput): Carrier
     session: input.session,
     state: input.state,
     entryUrl,
-    credentialReference,
+    browserSessionReference,
     bridgeUrl,
+    mode,
     fieldMappings,
   });
   if (mode === "live_worker" && !gate.allowed) {
@@ -336,7 +346,7 @@ export function runCarrierPortalRunner(input: CarrierPortalRunnerInput): Carrier
     `Runner job ${jobId} prepared for ${input.carrier.name}.`,
     `Mapped ${fieldMappings.length} Quotex field${fieldMappings.length === 1 ? "" : "s"} into carrier form fields.`,
     mode === "live_worker"
-      ? "Live worker is configured; job is ready for server-side browser execution and MFA handling."
+      ? "Live worker is configured; job requires the agent's existing signed-in browser session and will not use carrier credentials."
       : "Configuration trace generated because live worker configuration is not present in this environment.",
     gate.allowed
       ? `AI production gate passed for ${surface}.`
@@ -358,7 +368,8 @@ export function runCarrierPortalRunner(input: CarrierPortalRunnerInput): Carrier
     mode,
     surface,
     entryUrl,
-    credentialReference,
+    browserSessionReference,
+    signInNotice: "Sign in to the carrier portal in your browser, then run the AI runner again.",
     mfaMode: automation?.mfaMode ?? "staff_prompt",
     parallelGroupKey: `parallel:${input.session.id}:${input.session.lineOfBusiness ?? "personal"}`,
     status,

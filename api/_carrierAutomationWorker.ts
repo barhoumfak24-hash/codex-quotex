@@ -23,6 +23,7 @@ export interface CarrierAutomationJobPayload {
     agentPortalUrl?: string;
     customerPortalUrl?: string;
     credentialReference?: string;
+    browserSessionReference?: string;
     mfaMode?: string;
   };
   session?: {
@@ -42,8 +43,6 @@ export interface CarrierAutomationJobPayload {
 export interface CarrierAutomationWorkerConfig {
   mode: CarrierAutomationWorkerMode;
   allowedHosts: string[];
-  credentialVaultUrl?: string;
-  credentialVaultToken?: string;
   aiPlannerEnabled?: boolean;
   aiPlannerModel?: string;
   openAiApiKey?: string;
@@ -54,8 +53,7 @@ export interface CarrierAutomationPlanStep {
   id: string;
   action:
     | "navigate"
-    | "resolve_credentials"
-    | "authenticate"
+    | "verify_browser_session"
     | "wait_for_mfa"
     | "discover_page"
     | "fill_mapped_fields"
@@ -74,7 +72,9 @@ export interface CarrierAutomationPlan {
   entryUrl: string;
   allowedHost: string;
   carrierName: string;
-  credentialReference: string;
+  browserSessionReference?: string;
+  browserSessionRequired: boolean;
+  signInNotice: string;
   mfaMode: string;
   fieldCount: number;
   requiredFieldCount: number;
@@ -107,12 +107,6 @@ export interface CarrierAutomationWorkerResult {
   error?: string;
 }
 
-interface BrowserCredential {
-  username: string;
-  password: string;
-  otp?: string;
-}
-
 interface PortalObservation {
   url: string;
   title: string;
@@ -132,9 +126,11 @@ const RAW_CREDENTIAL_KEYS = new Set([
   "token_value",
   "access_token",
   "refresh_token",
+  "cookie",
+  "session_cookie",
 ]);
 
-const ALLOWED_REFERENCE_KEYS = new Set(["credentialreference"]);
+const ALLOWED_REFERENCE_KEYS = new Set(["browsersessionreference"]);
 
 const DESTRUCTIVE_ACTIONS = [
   "bind coverage",
@@ -236,14 +232,19 @@ export function buildCarrierAutomationPlan(
   const fields = sanitizeFieldMappings(payload.fieldMappings ?? []);
   const blockingReasons = [...hostCheck.errors];
   const warnings: string[] = [];
-  const credentialReference = payload.carrier?.credentialReference?.trim() ?? "";
+  const browserSessionReference = payload.carrier?.browserSessionReference?.trim() ?? "";
   const jobId = payload.jobId || payload.requestId || `runner-${Date.now()}`;
+  const signInNotice =
+    "Sign in to the carrier agent portal in your browser, then run the AI runner again.";
 
   if (!payload.tenantId) blockingReasons.push("tenantId is required");
   if (!payload.userId) blockingReasons.push("userId is required");
   if (!payload.carrier?.id) blockingReasons.push("carrier.id is required");
   if (!payload.carrier?.name) blockingReasons.push("carrier.name is required");
-  if (!credentialReference) blockingReasons.push("carrier.credentialReference is required");
+  if (payload.carrier?.credentialReference) {
+    blockingReasons.push("carrier credential references are not accepted for browser-session runners");
+  }
+  if (!browserSessionReference) blockingReasons.push(signInNotice);
   if (jsonContainsRawCredential(payload)) blockingReasons.push("raw credential values are not allowed in runner jobs");
   if (fields.length === 0 && jobKind === "quote") blockingReasons.push("fieldMappings are required for quote jobs");
   if ((payload.fieldMappings ?? []).length > 150) blockingReasons.push("fieldMappings exceeds the 150-field safety limit");
@@ -263,16 +264,10 @@ export function buildCarrierAutomationPlan(
       guardrail: "HTTPS only, approved carrier host only, no redirects to unapproved domains.",
     },
     {
-      id: "resolve-credentials",
-      action: "resolve_credentials",
-      description: "Resolve username/password from the credential vault reference.",
-      guardrail: "Raw credentials never enter the browser bundle or runner payload.",
-    },
-    {
-      id: "authenticate",
-      action: "authenticate",
-      description: "Sign into the carrier portal.",
-      guardrail: "Only login fields may be filled before the session is authenticated.",
+      id: "verify-browser-session",
+      action: "verify_browser_session",
+      description: "Verify that the agent is already signed into the carrier portal.",
+      guardrail: "The runner never receives or types carrier usernames, passwords, cookies, or one-time codes.",
     },
     {
       id: "mfa",
@@ -332,7 +327,9 @@ export function buildCarrierAutomationPlan(
     entryUrl,
     allowedHost: hostCheck.url?.hostname ?? "",
     carrierName: payload.carrier?.name ?? "Carrier",
-    credentialReference,
+    browserSessionReference,
+    browserSessionRequired: true,
+    signInNotice,
     mfaMode,
     fieldCount: fields.length,
     requiredFieldCount,
@@ -387,8 +384,6 @@ export function workerConfigFromEnv(env: Record<string, string | undefined>): Ca
   return {
     mode: env.CARRIER_AUTOMATION_WORKER_MODE === "playwright" ? "playwright" : "plan_only",
     allowedHosts: parseRunnerList(env.CARRIER_AUTOMATION_ALLOWED_HOSTS),
-    credentialVaultUrl: env.CARRIER_CREDENTIAL_VAULT_URL,
-    credentialVaultToken: env.CARRIER_CREDENTIAL_VAULT_TOKEN,
     aiPlannerEnabled: env.CARRIER_AUTOMATION_ENABLE_AI_PLANNER === "true",
     aiPlannerModel: env.AI_RUNNER_MODEL || env.AI_REASONING_MODEL || env.OPENAI_MODEL || "gpt-5.5",
     openAiApiKey: env.OPENAI_API_KEY,
@@ -418,34 +413,6 @@ async function executeWithOptionalPlaywright(
     };
   }
 
-  if (!config.credentialVaultUrl || !config.credentialVaultToken) {
-    return {
-      ok: false,
-      jobId: plan.jobId,
-      status: "blocked",
-      plan,
-      auditEvents: [
-        ...auditEvents,
-        `${now()} Browser execution blocked because credential vault URL/token is not configured.`,
-      ],
-      blockingReasons: ["Credential vault URL/token is required before browser execution."],
-      error: "credential_vault_not_configured",
-    };
-  }
-
-  const credential = await resolveCredential(payload.carrier!.credentialReference!, config);
-  if (!credential) {
-    return {
-      ok: false,
-      jobId: plan.jobId,
-      status: "blocked",
-      plan,
-      auditEvents: [...auditEvents, `${now()} Credential vault did not return usable credentials.`],
-      blockingReasons: ["Credential vault did not return usable credentials."],
-      error: "credential_resolution_failed",
-    };
-  }
-
   let browser: any;
   try {
     browser = await playwright.chromium.launch({ headless: true });
@@ -453,21 +420,24 @@ async function executeWithOptionalPlaywright(
     const page = await context.newPage();
     await page.goto(plan.entryUrl, { waitUntil: "domcontentloaded", timeout: 45_000 });
     auditEvents.push(`${now()} Browser opened approved carrier host ${plan.allowedHost}.`);
+    auditEvents.push(`${now()} Runner is using a signed-in browser-session reference; no carrier credentials were provided.`);
 
-    const loginFilled = await fillGenericLogin(page, credential);
-    if (loginFilled) auditEvents.push(`${now()} Login fields filled through generic secure login handler.`);
-    if (plan.mfaMode !== "none" && plan.mfaMode !== "service_account") {
+    let observation = await observePortalPage(page);
+    if (pageLooksLikeLoginOrMfa(observation)) {
       return {
-        ok: true,
+        ok: false,
         jobId: plan.jobId,
-        status: "needs_mfa",
+        status: "blocked",
         plan,
-        auditEvents: [...auditEvents, `${now()} MFA required before continuing.`],
-        blockingReasons: [],
+        auditEvents: [...auditEvents, `${now()} Carrier portal session was not authenticated.`],
+        blockingReasons: [plan.signInNotice],
+        error: "carrier_portal_session_required",
       };
     }
+    if (plan.mfaMode !== "none" && plan.mfaMode !== "service_account") {
+      auditEvents.push(`${now()} MFA mode is ${plan.mfaMode.replace(/_/g, " ")}; runner will stop if the carrier prompts for re-authentication.`);
+    }
 
-    const observation = await observePortalPage(page);
     const filled = await fillMappedFields(page, sanitizeFieldMappings(payload.fieldMappings ?? []), observation);
     auditEvents.push(`${now()} Filled ${filled} carrier fields from approved mappings.`);
 
@@ -589,51 +559,6 @@ async function optionalImport(specifier: string): Promise<any | null> {
   }
 }
 
-async function resolveCredential(
-  reference: string,
-  config: CarrierAutomationWorkerConfig
-): Promise<BrowserCredential | null> {
-  const res = await fetch(config.credentialVaultUrl!, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${config.credentialVaultToken}`,
-    },
-    body: JSON.stringify({ reference }),
-  });
-  if (!res.ok) return null;
-  const data = await res.json().catch(() => ({}));
-  const username = cleanText(data.username);
-  const password = cleanText(data.password);
-  const otp = cleanText(data.otp);
-  if (!username || !password) return null;
-  return { username, password, ...(otp ? { otp } : {}) };
-}
-
-async function fillGenericLogin(page: any, credential: BrowserCredential): Promise<boolean> {
-  const userSelector = await firstExistingSelector(page, [
-    'input[type="email"]',
-    'input[name*="user" i]',
-    'input[id*="user" i]',
-    'input[name*="email" i]',
-    'input[id*="email" i]',
-    'input[name*="login" i]',
-    'input[id*="login" i]',
-  ]);
-  const passSelector = await firstExistingSelector(page, [
-    'input[type="password"]',
-    'input[name*="pass" i]',
-    'input[id*="pass" i]',
-  ]);
-  if (!userSelector || !passSelector) return false;
-  await page.fill(userSelector, credential.username);
-  await page.fill(passSelector, credential.password);
-  const button = await safeButtonSelector(page, /\b(sign in|log in|login|continue)\b/i);
-  if (button) await page.click(button);
-  await page.waitForLoadState("domcontentloaded", { timeout: 20_000 }).catch(() => undefined);
-  return true;
-}
-
 async function observePortalPage(page: any): Promise<PortalObservation> {
   return page.evaluate(() => {
     function cssPath(el: Element): string {
@@ -671,6 +596,30 @@ async function observePortalPage(page: any): Promise<PortalObservation> {
     }));
     return { url: location.href, title: document.title || "", fields, buttons, links };
   });
+}
+
+function pageLooksLikeLoginOrMfa(observation: PortalObservation): boolean {
+  const urlPath = (() => {
+    try {
+      const url = new URL(observation.url);
+      return `${url.pathname} ${url.search}`.toLowerCase();
+    } catch {
+      return observation.url.toLowerCase();
+    }
+  })();
+  const hasPasswordField = observation.fields.some((field) => {
+    const type = (field.type ?? "").toLowerCase();
+    const label = field.label.toLowerCase();
+    return type === "password" || /\b(password|passcode|verification code|one[- ]?time|mfa|2fa)\b/.test(label);
+  });
+  const hasLoginButton = observation.buttons.some((button) =>
+    /\b(sign in|sign-in|log in|login|continue|verify|authenticate)\b/i.test(button.text)
+  );
+  const hasLoginLink = observation.links.some((link) =>
+    /\b(sign in|sign-in|log in|login|register|forgot password)\b/i.test(`${link.text} ${link.href ?? ""}`)
+  );
+  const loginUrl = /\b(login|logon|signin|sign-in|auth|sso|mfa|2fa)\b/.test(urlPath);
+  return hasPasswordField || (loginUrl && (hasLoginButton || hasLoginLink));
 }
 
 async function fillMappedFields(

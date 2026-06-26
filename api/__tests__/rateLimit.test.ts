@@ -105,6 +105,32 @@ describe("applyRateLimit", () => {
     expect(res.state.json).toEqual({ error: "rate_limit_store_required" });
   });
 
+  it("can fail open to the memory bucket for public endpoints when no shared store is configured", async () => {
+    vi.stubEnv("VERCEL_ENV", "production");
+
+    const req = { headers: { "x-forwarded-for": "203.0.113.44" } };
+    const allowed = mockRes();
+    const blocked = mockRes();
+
+    expect(
+      await applyRateLimit(req, allowed, "public-address-lookup", {
+        windowMs: 60_000,
+        limit: 1,
+        failOpen: true,
+      })
+    ).toBe(true);
+    expect(allowed.state.status).toBe(200);
+
+    expect(
+      await applyRateLimit(req, blocked, "public-address-lookup", {
+        windowMs: 60_000,
+        limit: 1,
+        failOpen: true,
+      })
+    ).toBe(false);
+    expect(blocked.state.status).toBe(429);
+  });
+
   it("fails closed when the shared store is unavailable", async () => {
     vi.stubEnv("UPSTASH_REDIS_REST_URL", "https://redis.example");
     vi.stubEnv("UPSTASH_REDIS_REST_TOKEN", "redis-token");

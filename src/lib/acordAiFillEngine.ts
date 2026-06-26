@@ -290,9 +290,23 @@ function buildClientDossierCandidates(dossier: AcordAiFillDossier): CandidateVal
   dossier.questions.forEach((question) => {
     const value = dossier.responses[question.id];
     if (!value) return;
-    add(question.label, value, "questionnaire", 0.96);
-    if (questionTargetsCarrySameValue(question.acordFieldLabels ?? [])) {
-      question.acordFieldLabels?.forEach((fieldLabel) => add(fieldLabel, value, "questionnaire", 0.98));
+    const fieldLabels = question.acordFieldLabels ?? [];
+    if (fieldLabels.length <= 1) {
+      add(question.label, value, "questionnaire", 0.96);
+      fieldLabels.forEach((fieldLabel) => add(fieldLabel, value, "questionnaire", 0.98));
+    } else if (questionTargetsCarrySameValue(fieldLabels) && !looksLikeUngroundedCompositeAnswer(value)) {
+      const mapped = mapCompositeQuestionnaireValueToFields(value, fieldLabels);
+      mapped.forEach(({ fieldLabel, fieldValue }) =>
+        add(fieldLabel, fieldValue, "questionnaire", 0.98)
+      );
+    } else {
+      const mapped = mapCompositeQuestionnaireValueToFields(
+        value,
+        fieldLabels
+      );
+      mapped.forEach(({ fieldLabel, fieldValue }) =>
+        add(fieldLabel, fieldValue, "questionnaire", 0.98)
+      );
     }
   });
 
@@ -890,8 +904,66 @@ function requiresDirectQuestionnaireResponse(label: string): boolean {
 
 function questionTargetsCarrySameValue(labels: string[]): boolean {
   if (labels.length <= 1) return true;
-  const kinds = new Set(labels.map((label) => inferCandidateKind(label, "questionnaire")).filter((kind) => kind !== "generic"));
-  return kinds.size <= 1;
+  const kinds = labels.map((label) => inferCandidateKind(label, "questionnaire"));
+  if (kinds.includes("generic")) return false;
+  return new Set(kinds).size === 1;
+}
+
+function mapCompositeQuestionnaireValueToFields(
+  value: string,
+  fieldLabels: string[]
+): { fieldLabel: string; fieldValue: string }[] {
+  const lines = compositeQuestionnaireLines(value);
+  const mapped = fieldLabels
+    .map((fieldLabel) => {
+      const fieldValue = compositeValueForFieldLabel(lines, fieldLabel);
+      return fieldValue ? { fieldLabel, fieldValue } : null;
+    })
+    .filter((item): item is { fieldLabel: string; fieldValue: string } => item !== null);
+  if (mapped.length > 0 || looksLikeUngroundedCompositeAnswer(value)) return mapped;
+
+  const fallbackField =
+    fieldLabels.find((label) => inferCandidateKind(label, "questionnaire") !== "generic") ??
+    fieldLabels[0];
+  return fallbackField ? [{ fieldLabel: fallbackField, fieldValue: value }] : [];
+}
+
+function looksLikeUngroundedCompositeAnswer(value: string): boolean {
+  const cleaned = value.trim();
+  if (!cleaned) return false;
+  return /[,;\n]/.test(cleaned) && !/^\s*[^:]{2,90}:\s*.+$/m.test(cleaned);
+}
+
+function compositeQuestionnaireLines(value: string): { label: string; value: string }[] {
+  return value
+    .split(/\r?\n|;\s+/)
+    .map((line) => line.trim())
+    .map((line) => line.match(/^([^:]{2,90}):\s*(.+)$/))
+    .filter((match): match is RegExpMatchArray => !!match?.[1] && !!match?.[2])
+    .map((match) => ({ label: match[1].trim(), value: match[2].trim() }))
+    .filter((line) => !!line.label && !!line.value);
+}
+
+function compositeValueForFieldLabel(
+  lines: { label: string; value: string }[],
+  fieldLabel: string
+): string {
+  if (lines.length === 0) return "";
+  const normalizedField = normalize(fieldLabel);
+  const exact = lines.find(({ label }) => {
+    const normalizedLine = normalize(label);
+    return (
+      normalizedLine === normalizedField ||
+      normalizedField.includes(normalizedLine) ||
+      normalizedLine.includes(normalizedField)
+    );
+  });
+  if (exact) return exact.value;
+
+  const fieldKind = inferCandidateKind(fieldLabel, "questionnaire");
+  if (fieldKind === "generic") return "";
+  const kindMatch = lines.find(({ label }) => inferCandidateKind(label, "questionnaire") === fieldKind);
+  return kindMatch?.value ?? "";
 }
 
 function canUseFuzzyMatch(normalizedLabel: string): boolean {

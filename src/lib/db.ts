@@ -78,7 +78,23 @@ import type {
 // Bump this whenever DbShape gets a new table that older localStorage caches
 // won't have, so visitors automatically get the fresh seed.
 const STORAGE_KEY = "quotex.db.v31";
+const CRITICAL_STORAGE_KEY = `${STORAGE_KEY}.critical`;
+const QUOTE_WORKFLOW_STORAGE_KEY = `${STORAGE_KEY}.quote-workflows`;
 const LEGACY_KEYS = ["quotex.db.v1", "quotex.db.v2", "quotex.db.v3", "quotex.db.v4", "quotex.db.v5", "quotex.db.v6", "quotex.db.v7", "quotex.db.v8", "quotex.db.v9", "quotex.db.v10", "quotex.db.v11", "quotex.db.v12", "quotex.db.v13", "quotex.db.v14", "quotex.db.v15", "quotex.db.v16", "quotex.db.v17", "quotex.db.v18", "quotex.db.v19", "quotex.db.v20", "quotex.db.v21", "quotex.db.v22", "quotex.db.v23", "quotex.db.v24", "quotex.db.v25", "quotex.db.v26", "quotex.db.v27", "quotex.db.v28", "quotex.db.v29", "quotex.db.v30"];
+const CRITICAL_TABLES: (keyof DbShape)[] = [
+  "quotingSessions",
+  "communications",
+  "documents",
+  "notes",
+  "statusEvents",
+  "tasks",
+  "aiNotifications",
+  "mailboxOutbox",
+  "softwareSales",
+  "masterAgencyActivities",
+  "securityIncidents",
+  "securityBans",
+];
 
 const CARRIER_AGENT_SIGN_IN_URLS: Record<string, string> = {
   carrier_chubb: "https://www.chubb.com/us-en/agents-brokers.html",
@@ -926,19 +942,47 @@ function load(): DbShape {
     for (const k of LEGACY_KEYS) window.localStorage.removeItem(k);
 
     const raw = window.localStorage.getItem(STORAGE_KEY);
+    const critical =
+      normalizeCriticalSnapshot(window.sessionStorage.getItem(CRITICAL_STORAGE_KEY)) ??
+      normalizeCriticalSnapshot(window.localStorage.getItem(CRITICAL_STORAGE_KEY));
+    const quoteWorkflows =
+      normalizeQuoteWorkflowSnapshot(window.sessionStorage.getItem(QUOTE_WORKFLOW_STORAGE_KEY)) ??
+      normalizeQuoteWorkflowSnapshot(window.localStorage.getItem(QUOTE_WORKFLOW_STORAGE_KEY));
     if (!raw) {
-      const fresh = withDefaultMigrations(freshSeed());
+      const fresh = mergeQuoteWorkflowSnapshot(
+        mergeCriticalSnapshot(withDefaultMigrations(freshSeed()), critical),
+        quoteWorkflows
+      );
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
       return fresh;
     }
     const parsed = JSON.parse(raw) as Partial<DbShape>;
     // Fill in any tables added since the cache was written.
     const fresh = freshSeed();
-    const migrated = withDefaultMigrations({ ...fresh, ...parsed } as DbShape);
+    const migrated = mergeQuoteWorkflowSnapshot(
+      mergeCriticalSnapshot(
+        withDefaultMigrations({ ...fresh, ...parsed } as DbShape),
+        critical
+      ),
+      quoteWorkflows
+    );
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
     return migrated;
   } catch {
-    return withDefaultMigrations(freshSeed());
+    const critical =
+      typeof window === "undefined"
+        ? null
+        : normalizeCriticalSnapshot(window.sessionStorage.getItem(CRITICAL_STORAGE_KEY)) ??
+          normalizeCriticalSnapshot(window.localStorage.getItem(CRITICAL_STORAGE_KEY));
+    const quoteWorkflows =
+      typeof window === "undefined"
+        ? null
+        : normalizeQuoteWorkflowSnapshot(window.sessionStorage.getItem(QUOTE_WORKFLOW_STORAGE_KEY)) ??
+          normalizeQuoteWorkflowSnapshot(window.localStorage.getItem(QUOTE_WORKFLOW_STORAGE_KEY));
+    return mergeQuoteWorkflowSnapshot(
+      mergeCriticalSnapshot(withDefaultMigrations(freshSeed()), critical),
+      quoteWorkflows
+    );
   }
 }
 
@@ -988,6 +1032,73 @@ function normalizeLocalSnapshot(raw: string | null): DbShape | null {
   } catch {
     return null;
   }
+}
+
+function criticalSnapshot(data: DbShape): Partial<DbShape> {
+  const out: Partial<DbShape> = {};
+  const writeable = out as Record<keyof DbShape, unknown>;
+  CRITICAL_TABLES.forEach((table) => {
+    writeable[table] = data[table];
+  });
+  return out;
+}
+
+function quoteWorkflowSnapshot(data: DbShape): Pick<DbShape, "quotingSessions"> {
+  return {
+    quotingSessions: data.quotingSessions,
+  };
+}
+
+function normalizeQuoteWorkflowSnapshot(raw: string | null): QuotingSession[] | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<Pick<DbShape, "quotingSessions">>;
+    return Array.isArray(parsed.quotingSessions) ? parsed.quotingSessions : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeCriticalSnapshot(raw: string | null): Partial<DbShape> | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<DbShape>;
+    const out: Partial<DbShape> = {};
+    const writeable = out as Record<keyof DbShape, unknown>;
+    CRITICAL_TABLES.forEach((table) => {
+      const rows = parsed[table];
+      if (Array.isArray(rows)) writeable[table] = rows;
+    });
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+function mergeCriticalSnapshot(data: DbShape, critical: Partial<DbShape> | null): DbShape {
+  if (!critical) return data;
+  const merged = { ...data } as DbShape;
+  const writeable = merged as Record<keyof DbShape, unknown>;
+  CRITICAL_TABLES.forEach((table) => {
+    const criticalRows = critical[table] as unknown;
+    if (!Array.isArray(criticalRows)) return;
+    writeable[table] = mergeRows(
+      criticalRows as { id?: string }[],
+      merged[table] as unknown as { id?: string }[]
+    );
+  });
+  return withDefaultMigrations(merged);
+}
+
+function mergeQuoteWorkflowSnapshot(
+  data: DbShape,
+  quoteWorkflows: QuotingSession[] | null
+): DbShape {
+  if (!quoteWorkflows || quoteWorkflows.length === 0) return data;
+  return withDefaultMigrations({
+    ...data,
+    quotingSessions: mergeRows(quoteWorkflows, data.quotingSessions),
+  });
 }
 
 function rowSyncStamp(row: unknown) {
@@ -1137,8 +1248,30 @@ async function persistRemote() {
 
 function persistLocalOnly() {
   if (typeof window === "undefined") return;
+  const quoteWorkflows = JSON.stringify(quoteWorkflowSnapshot(cache));
+  try {
+    window.sessionStorage.setItem(QUOTE_WORKFLOW_STORAGE_KEY, quoteWorkflows);
+  } catch {
+    /* quota - ignore */
+  }
+  const critical = JSON.stringify(criticalSnapshot(cache));
+  try {
+    window.sessionStorage.setItem(CRITICAL_STORAGE_KEY, critical);
+  } catch {
+    /* quota - ignore */
+  }
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(cache));
+    try {
+      window.localStorage.setItem(QUOTE_WORKFLOW_STORAGE_KEY, quoteWorkflows);
+    } catch {
+      /* quota - session backup already attempted */
+    }
+    try {
+      window.localStorage.setItem(CRITICAL_STORAGE_KEY, critical);
+    } catch {
+      /* quota - session backup already attempted */
+    }
   } catch {
     /* quota — ignore */
   }

@@ -1,9 +1,15 @@
 import { Router } from "express";
 import { z } from "zod";
+import { requireAuth, requireRole } from "../middleware/auth.js";
 import { sendEmail } from "../services/email.js";
 import { sendSms } from "../services/twilio.js";
 
 export const communicationsRoutes = Router();
+
+const requirePlatformDeliveryAuth = [
+  requireAuth,
+  requireRole("platform_owner", "platform_admin", "master_admin"),
+] as const;
 
 const requiredFormSchema = z.object({
   title: z.string().min(1),
@@ -56,7 +62,7 @@ const invoicePayloadSchema = z.object({
   signedAgreements: z.array(signedAgreementSchema).default([]),
 });
 
-communicationsRoutes.post("/software-sale/signing-email", async (req, res) => {
+communicationsRoutes.post("/software-sale/signing-email", ...requirePlatformDeliveryAuth, async (req, res) => {
   const parsed = signingPayloadSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ ok: false, error: parsed.error.flatten() });
@@ -74,7 +80,7 @@ communicationsRoutes.post("/software-sale/signing-email", async (req, res) => {
   return res.status(result.status === "failed" ? 502 : 200).json({ ok: result.status !== "failed", result });
 });
 
-communicationsRoutes.post("/software-sale/signing-sms", async (req, res) => {
+communicationsRoutes.post("/software-sale/signing-sms", ...requirePlatformDeliveryAuth, async (req, res) => {
   const parsed = signingPayloadSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ ok: false, error: parsed.error.flatten() });
@@ -85,14 +91,14 @@ communicationsRoutes.post("/software-sale/signing-sms", async (req, res) => {
 
   const result = await sendSms({
     to: payload.phone,
-    body: `Quotex documents for ${payload.agencyName}: ${payload.signingLink} Please review and sign each required document.`,
+    body: `Quotex documents and payment authorization for ${payload.agencyName}: ${payload.signingLink} Please review, sign, enter payment method, and submit from the secure packet.`,
     metadata: { agencyName: payload.agencyName, kind: "software-sale-esign" },
   });
 
   return res.status(result.status === "failed" ? 502 : 200).json({ ok: result.status !== "failed", result });
 });
 
-communicationsRoutes.post("/software-sale/invoice-email", async (req, res) => {
+communicationsRoutes.post("/software-sale/invoice-email", ...requirePlatformDeliveryAuth, async (req, res) => {
   const parsed = invoicePayloadSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ ok: false, error: parsed.error.flatten() });
@@ -124,9 +130,9 @@ function signingEmailHtml(payload: z.infer<typeof signingPayloadSchema>) {
     "Review and e-sign your Quotex plan documents",
     `
       <p>Hi ${escapeHtml(payload.contactName)},</p>
-      <p>Your Quotex software plan documents for <strong>${escapeHtml(payload.agencyName)}</strong> are ready for review. Each document needs its own electronic signature before payment or provisioning can continue.</p>
+      <p>Your Quotex software plan documents and payment authorization for <strong>${escapeHtml(payload.agencyName)}</strong> are ready for review. Open the secure packet, sign each required document, enter the payment method, then submit everything from the same page.</p>
       <ul>${documentList}</ul>
-      ${button(payload.signingLink, "Open secure signing packet")}
+      ${button(payload.signingLink, "Open secure packet")}
       <p style="font-size:13px;color:#666;">If the button does not open, paste this link into your browser:<br>${escapeHtml(payload.signingLink)}</p>
     `
   );
@@ -136,12 +142,13 @@ function signingEmailText(payload: z.infer<typeof signingPayloadSchema>) {
   const docs = payload.documents.map((document) => `- ${document.title}${document.version ? ` (${document.version})` : ""}`).join("\n");
   return `Hi ${payload.contactName},
 
-Your Quotex software plan documents for ${payload.agencyName} are ready for review. Each document needs its own electronic signature.
+Your Quotex software plan documents and payment authorization for ${payload.agencyName} are ready for review. Open the secure packet, sign each required document, enter the payment method, then submit everything from the same page.
 
 ${docs}
 
-Open the secure signing packet:
-${payload.signingLink}`;
+Open the secure packet:
+${payload.signingLink}
+`;
 }
 
 function invoiceEmailHtml(payload: z.infer<typeof invoicePayloadSchema>) {

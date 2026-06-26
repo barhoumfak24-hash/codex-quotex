@@ -28,6 +28,9 @@ export async function applyRateLimit(
   options: RateLimitOptions
 ): Promise<boolean> {
   if (productionRuntime() && !sharedRateLimitConfigured()) {
+    if (options.failOpen || process.env.RATE_LIMIT_FAIL_OPEN === "true") {
+      return applyMemoryRateLimit(req, res, name, options);
+    }
     res.status(503).json({ error: "rate_limit_store_required" });
     return false;
   }

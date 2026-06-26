@@ -107,6 +107,213 @@ export function NewContactModal({
     setBusy(false);
   }
 
+  function contactLabel() {
+    return kind === "prospect" ? "prospect" : "client";
+  }
+
+  function hasUsableEmail(value: string): boolean {
+    const email = value.trim();
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && !/@example\./i.test(email);
+  }
+
+  function hasUsableName(value: string): boolean {
+    const name = value.trim();
+    return (
+      name.length >= 2 &&
+      /[a-z]/i.test(name) &&
+      !name.includes("@") &&
+      !/\.(png|jpe?g|pdf|docx?|txt)$/i.test(name)
+    );
+  }
+
+  function extractionIsReliable(out: AiExtractedContact, draft: FormState): boolean {
+    const confidence = Number.isFinite(out.confidence) ? out.confidence : 0;
+    const sources = out.sources.join(" ").toLowerCase();
+    const hasDocumentSignal =
+      out.sources.length > 0 &&
+      !sources.includes("no readable contact fields") &&
+      !sources.includes("no fields were confidently extracted") &&
+      !sources.includes("no fabricated filename data");
+    return (
+      confidence >= 0.55 &&
+      hasDocumentSignal &&
+      hasUsableName(draft.name) &&
+      hasUsableEmail(draft.email)
+    );
+  }
+
+  function formFromExtraction(out: AiExtractedContact): { next: FormState; filled: Set<string> } {
+    const next: FormState = { ...EMPTY };
+    const filled = new Set<string>();
+    if (out.lineOfBusiness === "commercial" || out.businessName) {
+      next.lineOfBusiness = "commercial";
+      filled.add("lineOfBusiness");
+    } else if (out.lineOfBusiness === "personal") {
+      next.lineOfBusiness = "personal";
+      filled.add("lineOfBusiness");
+    }
+    if (out.businessName) {
+      next.businessName = out.businessName;
+      filled.add("businessName");
+      if (!out.name) {
+        next.name = out.businessName;
+        filled.add("name");
+      }
+    }
+    if (out.name) {
+      next.name = out.name;
+      filled.add("name");
+    }
+    if (out.email) {
+      next.email = out.email;
+      filled.add("email");
+    }
+    if (out.phone) {
+      next.phone = out.phone;
+      filled.add("phone");
+    }
+    if (out.address) {
+      next.mailingAddress = out.address;
+      filled.add("mailingAddress");
+    }
+    if (out.assetType) {
+      next.assetType = out.assetType;
+      filled.add("assetType");
+    }
+    if (out.estimatedValue) {
+      next.estimatedValue = out.estimatedValue;
+      filled.add("estimatedValue");
+    }
+    if (out.notes) {
+      next.notes = out.notes;
+      filled.add("notes");
+    }
+    return { next, filled };
+  }
+
+  function autoCreateFromExtraction(
+    draft: FormState,
+    extractedContact: AiExtractedContact,
+    sourceFields: Set<string>,
+    fileName: string
+  ): boolean {
+    const label = contactLabel();
+    if (!extractionIsReliable(extractedContact, draft)) {
+      setError(
+        `AI could not create this ${label} automatically because the file did not produce a reliable name and email. Upload a clearer file or use manual entry.`
+      );
+      return false;
+    }
+    if (!draft.name.trim()) {
+      setError(`AI could not create this ${label} because the file did not contain a verifiable name.`);
+      return false;
+    }
+    if (!draft.email.trim()) {
+      setError(`AI could not create this ${label} because the file did not contain a verifiable email.`);
+      return false;
+    }
+    if (kind === "client" && draft.lineOfBusiness === "commercial" && !draft.businessName.trim()) {
+      setError(
+        "AI could not create this commercial-lines client because the file did not contain a verifiable business name."
+      );
+      return false;
+    }
+
+    if (kind === "prospect") {
+      const created = api.prospects.create({
+        tenantId: agency!.id,
+        name: draft.name.trim(),
+        email: draft.email.trim(),
+        phone: draft.phone.trim() || undefined,
+        lineOfBusiness: draft.lineOfBusiness,
+        assetType: draft.assetType,
+        estimatedValue: draft.estimatedValue,
+        aiSummary: extractedContact.summary,
+        lastAction: `Profile created from "${fileName}"`,
+        lastActivityAt: new Date().toISOString(),
+        recommendedFollowUp:
+          "Personal outreach within 24h to confirm details and schedule a 15-min review.",
+        marketingStatus: "active",
+        status: "new",
+      });
+      api.status.create({
+        tenantId: agency!.id,
+        source: "ai",
+        message: `Prospect created automatically from uploaded document "${fileName}".`,
+        visibility: "internal",
+        prospectId: created.id,
+        createdById: user!.id,
+      });
+      onCreated(created.id);
+      return true;
+    }
+
+    if (api.users.byEmail(draft.email.trim())) {
+      setError("A user with that email already exists.");
+      return false;
+    }
+    const newUser = api.users.create({
+      role: "customer",
+      tenantId: agency!.id,
+      email: draft.email.trim(),
+      name: draft.name.trim(),
+      phone: draft.phone.trim() || undefined,
+      profileCompleted: true,
+    });
+    const created = api.customers.create({
+      tenantId: agency!.id,
+      userId: newUser.id,
+      lineOfBusiness: draft.lineOfBusiness,
+      businessName: draft.lineOfBusiness === "commercial" ? draft.businessName.trim() : undefined,
+      name: draft.name.trim(),
+      email: draft.email.trim(),
+      phone: draft.phone.trim() || undefined,
+      mailingAddress: draft.mailingAddress.trim() || undefined,
+      marketingOptInEmail: draft.marketingOptInEmail,
+      marketingOptInSms: draft.marketingOptInSms,
+    });
+    const shouldCreateAsset =
+      sourceFields.has("assetType") ||
+      sourceFields.has("estimatedValue") ||
+      sourceFields.has("mailingAddress") ||
+      draft.notes.trim().length > 0;
+    const createdAsset = shouldCreateAsset
+      ? api.assets.create({
+          tenantId: agency!.id,
+          customerId: created.id,
+          type: draft.assetType,
+          label:
+            draft.lineOfBusiness === "commercial" && draft.businessName.trim()
+              ? `${draft.businessName.trim()} - ${ASSET_LABEL[draft.assetType]}`
+              : `${ASSET_LABEL[draft.assetType]} - ${draft.name.trim()}`,
+          estimatedValue: draft.estimatedValue ?? 0,
+          details: {
+            source: `Extracted from ${fileName}`,
+            address: draft.mailingAddress.trim() || undefined,
+            notes: draft.notes.trim() || undefined,
+            lineOfBusiness: draft.lineOfBusiness,
+            businessName: draft.businessName.trim() || undefined,
+          },
+          status: "pending",
+        })
+      : undefined;
+    api.status.create({
+      tenantId: agency!.id,
+      source: "ai",
+      message: `Client created automatically from uploaded document "${fileName}" as a ${
+        draft.lineOfBusiness === "commercial" ? "commercial-lines" : "personal-lines"
+      } client${draft.lineOfBusiness === "commercial" ? ` for ${draft.businessName.trim()}` : ""}${
+        createdAsset ? ` with ${ASSET_LABEL[createdAsset.type]} added to the profile` : ""
+      }.`,
+      visibility: "internal",
+      customerId: created.id,
+      assetId: createdAsset?.id,
+      createdById: user!.id,
+    });
+    onCreated(created.id);
+    return true;
+  }
+
   async function handleFiles(files: File[]) {
     if (files.length === 0) return;
     const file = files[0];
@@ -123,27 +330,11 @@ export function NewContactModal({
       });
       const mergedSources = Array.from(new Set([...payload.sources, ...out.sources]));
       const extractedContact = { ...out, sources: mergedSources };
-      setExtracted(extractedContact);
-      const next: FormState = { ...EMPTY };
-      const filled: string[] = [];
-      if (out.lineOfBusiness === "commercial" || out.businessName) {
-        next.lineOfBusiness = "commercial";
-        filled.push("lineOfBusiness");
-      } else if (out.lineOfBusiness === "personal") {
-        next.lineOfBusiness = "personal";
-        filled.push("lineOfBusiness");
+      const { next, filled } = formFromExtraction(extractedContact);
+      if (autoCreateFromExtraction(next, extractedContact, filled, file.name)) {
+        resetAll();
+        onClose();
       }
-      if (out.businessName) { next.businessName = out.businessName; filled.push("businessName"); }
-      if (out.name) { next.name = out.name; filled.push("name"); }
-      if (out.email) { next.email = out.email; filled.push("email"); }
-      if (out.phone) { next.phone = out.phone; filled.push("phone"); }
-      if (out.address) { next.mailingAddress = out.address; filled.push("mailingAddress"); }
-      if (out.assetType) { next.assetType = out.assetType; filled.push("assetType"); }
-      if (out.estimatedValue) { next.estimatedValue = out.estimatedValue; filled.push("estimatedValue"); }
-      if (out.notes) { next.notes = out.notes; filled.push("notes"); }
-      setForm(next);
-      setEnriched(new Set(filled));
-      setMode("upload"); // keep on upload mode to show the form with results
     } catch (err) {
       setError(
         err instanceof Error
@@ -296,7 +487,7 @@ export function NewContactModal({
               <div className="mt-2 font-semibold text-ink-900">Upload a file</div>
               <p className="mt-1 text-xs text-ink-600 leading-relaxed">
                 Drop an intake form, prior policy, or referral note. AI extracts the contact
-                + asset details and fills in the profile. You confirm before saving.
+                + asset details and creates the profile from verified fields.
               </p>
             </button>
             <button
@@ -323,19 +514,20 @@ export function NewContactModal({
           {mode === "upload" && !extracted && (
             <div>
               <Disclaimer>
-                Files are read for extraction and stored only after you save the profile. Review
-                AI-filled fields before creating the contact.
+                Files are read for extraction. If the AI can verify the required contact fields,
+                the profile is created automatically.
               </Disclaimer>
               <div className="mt-4">
                 <FileDropZone
                   title="Choose, drop, or paste a file"
-                  help="PDF, image, document, referral note, or copied screenshot. AI fills the profile fields below."
+                  help="PDF, image, document, referral note, or copied screenshot. AI creates the profile when the name and email are reliable."
                   accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.txt"
                   busy={busy}
                   busyLabel="Extracting contact details..."
                   icon="ai"
                   onFiles={handleFiles}
                 />
+                {error && <div className="mt-3 text-sm text-rose-600">{error}</div>}
                 {false && (
               <label className="hidden">
                 <input

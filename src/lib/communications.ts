@@ -1,5 +1,7 @@
 import { WEBSITE_APP_ADD_ON_OPTIONS } from "@/lib/tiers";
 import { apiBaseUrl } from "@/lib/apiBase";
+import { revealProtectedAgencyCode } from "@/lib/credentials";
+import { provisionAgencyForCompletedSale } from "@/lib/softwareSaleProvisioning";
 import type { SoftwareSale, SoftwareSaleSignedAgreement } from "@/types";
 
 export type CommunicationResult = {
@@ -20,14 +22,13 @@ export type SigningDocument = {
   version?: string;
 };
 
-export function softwareSaleAgencyCode(sale: Pick<SoftwareSale, "agencyName" | "id">) {
-  const agencyPrefix = sale.agencyName
-    .replace(/[^a-z]/gi, "")
-    .slice(0, 4)
-    .toUpperCase()
-    .padEnd(4, "Q");
-  const recordSuffix = sale.id.replace(/[^a-z0-9]/gi, "").slice(-4).toUpperCase() || "2026";
-  return `${agencyPrefix}-${recordSuffix}`;
+export function softwareSaleAgencyCode(sale: SoftwareSale) {
+  const agency = provisionAgencyForCompletedSale(sale);
+  const code = revealProtectedAgencyCode(agency);
+  if (!code) {
+    throw new Error(`Unable to reveal agency code for ${sale.agencyName}.`);
+  }
+  return code;
 }
 
 export async function sendSoftwareSaleSigningEmail(input: {
@@ -99,7 +100,7 @@ async function postCommunication(path: string, payload: Record<string, unknown>)
   try {
     const res = await fetch(`${base}${path}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: communicationAuthHeaders(),
       body: JSON.stringify(payload),
     });
     const json = (await res.json().catch(() => null)) as CommunicationResult | null;
@@ -111,6 +112,17 @@ async function postCommunication(path: string, payload: Record<string, unknown>)
       error: error instanceof Error ? error.message : "The communications API could not be reached.",
     };
   }
+}
+
+function communicationAuthHeaders(): HeadersInit {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (typeof window === "undefined") return headers;
+  const token =
+    window.localStorage.getItem("quotex.authToken") ||
+    window.localStorage.getItem("quotex.jwt") ||
+    "";
+  if (token) headers.authorization = `Bearer ${token}`;
+  return headers;
 }
 
 function cleanSignedAgreements(agreements?: SoftwareSaleSignedAgreement[]) {

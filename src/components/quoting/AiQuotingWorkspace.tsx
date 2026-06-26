@@ -47,11 +47,13 @@ import {
 } from "@/lib/emailSignature";
 import { fmt } from "@/lib/format";
 import { fileToCommunicationAttachment, formatAttachmentSize } from "@/lib/messageAttachments";
+import type { AiGatewayFailureDetail } from "@/lib/aiGateway";
 import {
   quoteMatchBadgeClass,
   quoteMatchCriteriaTitle,
   quoteMatchPercent,
 } from "@/lib/quoteMatch";
+import { scrollAnchorIntoView } from "@/lib/scrollAnchors";
 import type {
   AssetType,
   CarrierQuote,
@@ -64,19 +66,46 @@ import type {
   QuotingSession,
 } from "@/types";
 
+function scrollParentFor(element: HTMLElement | null): HTMLElement | null {
+  let parent = element?.parentElement ?? null;
+  while (parent) {
+    const style = window.getComputedStyle(parent);
+    if (/(auto|scroll|overlay)/.test(style.overflowY) && parent.scrollHeight > parent.clientHeight) {
+      return parent;
+    }
+    parent = parent.parentElement;
+  }
+  return null;
+}
+
 function preserveWindowScroll<T>(action: () => T): T {
   const anchor =
     document.getElementById("ai-quoting-workspace") ??
     document.getElementById("commercial-acord-workspace");
   const anchorTop = anchor?.getBoundingClientRect().top;
+  const scrollParent = scrollParentFor(anchor);
+  const parentTop = scrollParent?.scrollTop;
+  const parentLeft = scrollParent?.scrollLeft;
   const left = window.scrollX;
   const top = window.scrollY;
   const restore = () => {
     if (document.querySelector('[role="dialog"]')) return;
+    if (
+      scrollParent &&
+      typeof parentTop === "number" &&
+      (Math.abs(scrollParent.scrollTop - parentTop) > 1 ||
+        Math.abs(scrollParent.scrollLeft - (parentLeft ?? 0)) > 1)
+    ) {
+      scrollParent.scrollTo({ left: parentLeft ?? 0, top: parentTop, behavior: "auto" });
+    }
     if (anchor && typeof anchorTop === "number") {
       const delta = anchor.getBoundingClientRect().top - anchorTop;
       if (Math.abs(delta) > 1) {
-        window.scrollBy({ top: delta, left: 0, behavior: "auto" });
+        if (scrollParent) {
+          scrollParent.scrollBy({ top: delta, left: 0, behavior: "auto" });
+        } else {
+          window.scrollBy({ top: delta, left: 0, behavior: "auto" });
+        }
       }
       if (Math.abs(window.scrollX - left) > 1) {
         window.scrollTo({ left, top: window.scrollY, behavior: "auto" });
@@ -106,6 +135,15 @@ function preserveWindowScroll<T>(action: () => T): T {
   }
 }
 
+function quoteWorkspaceFailure(message: string, error: unknown): AiGatewayFailureDetail {
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  return {
+    path: "/ai/acord-map",
+    message,
+    error: errorMessage,
+  };
+}
+
 type QuotingLineSelection = "none" | QuotingLineOfBusiness;
 
 // =====================================================================
@@ -125,6 +163,8 @@ export function AiQuotingWorkspace({
   contact,
   onChanged,
   onReset,
+  deepLinkExpanded = false,
+  deepLinkFocusKey,
 }: {
   tenantId: string;
   userId: string;
@@ -147,8 +187,11 @@ export function AiQuotingWorkspace({
   };
   onChanged?: () => void;
   onReset?: () => void;
+  deepLinkExpanded?: boolean;
+  deepLinkFocusKey?: string;
 }) {
   const [busy, setBusy] = useState<null | string>(null);
+  const [aiFailure, setAiFailure] = useState<AiGatewayFailureDetail | null>(null);
   const [, setDbRev] = useState(0);
   const lockedLineOfBusiness = contact.lineOfBusiness;
   const [lineOfBusiness, setLineOfBusiness] = useState<QuotingLineSelection>(
@@ -157,9 +200,19 @@ export function AiQuotingWorkspace({
   const [selectedAcordTemplateIds, setSelectedAcordTemplateIds] = useState<string[]>([]);
   const [highlightedCommercialMissingQuestions, setHighlightedCommercialMissingQuestions] =
     useState<QuotingQuestion[]>([]);
-  const [workspaceCollapsed, setWorkspaceCollapsed] = useState(true);
+  const [workspaceCollapsed, setWorkspaceCollapsed] = useState(!deepLinkExpanded);
   const activeContactIdRef = useRef(contact.id);
   useEffect(() => subscribeToDbChanges(() => setDbRev((r) => r + 1)), []);
+  useEffect(() => {
+    const onFailure = (event: Event) => {
+      const detail = (event as CustomEvent<AiGatewayFailureDetail>).detail;
+      if (!detail?.path) return;
+      if (detail.path !== "/ai/acord-map" && detail.path !== "/ai/enrich-asset") return;
+      setAiFailure(detail);
+    };
+    window.addEventListener("quotex:ai-gateway-failure", onFailure);
+    return () => window.removeEventListener("quotex:ai-gateway-failure", onFailure);
+  }, []);
   const session =
     contact.kind === "prospect"
       ? api.quoting.getForProspect(contact.id)
@@ -171,13 +224,33 @@ export function AiQuotingWorkspace({
   }, [lockedLineOfBusiness]);
   useEffect(() => {
     setHighlightedCommercialMissingQuestions([]);
+    setAiFailure(null);
   }, [session?.id]);
   useEffect(() => {
     if (activeContactIdRef.current !== contact.id) {
       activeContactIdRef.current = contact.id;
-      setWorkspaceCollapsed(true);
+      setWorkspaceCollapsed(!deepLinkExpanded);
     }
-  }, [contact.id]);
+  }, [contact.id, deepLinkExpanded]);
+  useEffect(() => {
+    if (!deepLinkExpanded) return;
+    setWorkspaceCollapsed(false);
+
+    const centerWorkspace = () => {
+      scrollAnchorIntoView(document.getElementById("ai-quoting-workspace"), {
+        behavior: "smooth",
+        block: "center",
+      });
+    };
+    const first = window.setTimeout(centerWorkspace, 120);
+    const second = window.setTimeout(centerWorkspace, 360);
+    const third = window.setTimeout(centerWorkspace, 800);
+    return () => {
+      window.clearTimeout(first);
+      window.clearTimeout(second);
+      window.clearTimeout(third);
+    };
+  }, [deepLinkExpanded, deepLinkFocusKey]);
   const activeHighlightedCommercialMissingQuestions = useMemo(() => {
     if (!session || session.lineOfBusiness !== "commercial") return [];
     const responses = session.questionnaireResponses ?? {};
@@ -242,6 +315,8 @@ export function AiQuotingWorkspace({
       });
       setWorkspaceCollapsed(false);
       onChanged?.();
+    } catch (error) {
+      setAiFailure(quoteWorkspaceFailure("AI mapping could not start. Please try again.", error));
     } finally {
       setBusy(null);
     }
@@ -289,44 +364,9 @@ export function AiQuotingWorkspace({
             }
           />
         )}
-        {lineOfBusiness !== "none" && (
-          <div className="rounded-md border border-ink-100 bg-white px-3 py-2 text-xs text-ink-700">
-            <div className="font-semibold text-ink-900">Setup status</div>
-            <dl className="mt-2 grid gap-1 sm:grid-cols-3">
-              <div>
-                <dt className="text-ink-500">Line</dt>
-                <dd className="font-medium">
-                  {lineOfBusiness === "personal" ? "Personal lines" : "Commercial lines"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-ink-500">Asset</dt>
-                <dd className="font-medium">
-                  {lineOfBusiness === "personal"
-                    ? contact.personalLinesAssetSelected
-                      ? "Selected"
-                      : "Required"
-                    : contact.assetId
-                    ? "Selected"
-                    : "None - not required"}
-                </dd>
-              </div>
-              <div>
-                <dt className="text-ink-500">ACORD packet</dt>
-                <dd className="font-medium">
-                  {lineOfBusiness === "commercial"
-                    ? selectedAcordTemplateIds.length > 0
-                      ? `${selectedAcordTemplateIds.length} selected`
-                      : "Required"
-                    : "N/A"}
-                </dd>
-              </div>
-            </dl>
-            {lineOfBusiness === "commercial" && selectedCommercialTemplateNames.length > 0 && (
-              <p className="mt-2 text-ink-500">
-                Selected: {selectedCommercialTemplateNames.join(", ")}.
-              </p>
-            )}
+        {lineOfBusiness === "commercial" && selectedCommercialTemplateNames.length > 0 && (
+          <div className="rounded-md border border-ink-100 bg-white px-3 py-2 text-xs text-ink-600">
+            Selected: {selectedCommercialTemplateNames.join(", ")}.
           </div>
         )}
         {intakeWarnings.length > 0 && (
@@ -344,6 +384,7 @@ export function AiQuotingWorkspace({
             Asset required.
           </div>
         )}
+        {aiFailure && <AiFailureBanner failure={aiFailure} />}
         <div className="flex justify-end">
           <button
             type="button"
@@ -430,6 +471,7 @@ export function AiQuotingWorkspace({
 
   return (
     <div className="space-y-4">
+      {aiFailure && <AiFailureBanner failure={aiFailure} />}
       <button
         type="button"
         className="btn-outline absolute right-6 top-6 z-10 text-xs"
@@ -494,9 +536,25 @@ export function AiQuotingWorkspace({
             userId={userId}
             busy={busy}
             setBusy={setBusy}
-            onChanged={onChanged}
-            onCommercialMissingFieldsRevealed={setHighlightedCommercialMissingQuestions}
-          />
+          onChanged={onChanged}
+          onCommercialMissingFieldsRevealed={setHighlightedCommercialMissingQuestions}
+          onFailure={setAiFailure}
+        />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AiFailureBanner({ failure }: { failure: AiGatewayFailureDetail }) {
+  return (
+    <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs leading-5 text-rose-900">
+      <div className="flex items-start gap-2">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600" />
+        <div>
+          <div className="font-semibold">AI mapping could not complete</div>
+          <div>{failure.message}</div>
+          {failure.status && <div className="text-rose-700">Status {failure.status}</div>}
         </div>
       </div>
     </div>
@@ -938,15 +996,6 @@ function commercialFlowPage(session: QuotingSession): CommercialFlowPage {
       title: "Applications are out to carriers",
     };
   }
-  if (session.quotes.length > 0 || session.status === "complete") {
-    return {
-      key: "accepted_ranking",
-      step: 6,
-      total: 6,
-      eyebrow: "Accepted ranking",
-      title: "Review accepted markets and ranked quotes",
-    };
-  }
   if (session.commercialSecondRoundSentAt && !session.commercialSupplementalsCompletedAt) {
     return {
       key: "supplemental_round",
@@ -954,6 +1003,15 @@ function commercialFlowPage(session: QuotingSession): CommercialFlowPage {
       total: 6,
       eyebrow: "Supplemental round",
       title: "Collect only the carrier follow-up fields",
+    };
+  }
+  if (session.quotes.length > 0 || session.status === "complete") {
+    return {
+      key: "accepted_ranking",
+      step: 6,
+      total: 6,
+      eyebrow: "Accepted ranking",
+      title: "Review accepted markets and ranked quotes",
     };
   }
   return {
@@ -986,8 +1044,7 @@ function WorkflowStepIcons({
       aria-label={`Workflow progress: step ${currentStep} of ${total}`}
     >
       {visibleSteps.map((step, index) => {
-        const done =
-          step.number < currentStep || (completed.has(step.number) && step.number !== currentStep);
+        const done = step.number < currentStep || completed.has(step.number);
         const active = step.number === currentStep && !done;
         const Icon = step.icon;
         return (
@@ -1033,7 +1090,6 @@ function workflowCompletedStepNumbers(session: QuotingSession): number[] {
       completed.add(4);
     }
     if (session.commercialSupplementalsCompletedAt) completed.add(5);
-    if (commercialFlowPage(session).key === "accepted_ranking") completed.add(6);
     return Array.from(completed);
   }
   return session.status === "complete" || session.quotes.length > 0 ? [4] : [];
@@ -1094,7 +1150,7 @@ function PublicFields({ session }: { session: QuotingSession }) {
   return (
     <div className="rounded-md border border-blue-100 bg-blue-50/40 p-3">
       <div className="text-[10px] uppercase tracking-wider text-blue-800 font-semibold mb-2 flex items-center gap-1.5">
-        <Bot className="h-3 w-3" /> Auto-collected from public records
+        <Bot className="h-3 w-3" /> AI-sourced values for review
       </div>
       <dl className="grid sm:grid-cols-2 gap-x-4 gap-y-1.5 text-xs">
         {entries.map(([k, v]) => (
@@ -1150,13 +1206,15 @@ function Questionnaire({
     }
   }
   function send() {
-    setBusy("send");
-    try {
-      api.quoting.sendQuestionnaire(session.id);
-      onChanged?.();
-    } finally {
-      setBusy(null);
-    }
+    preserveWindowScroll(() => {
+      setBusy("send");
+      try {
+        api.quoting.sendQuestionnaire(session.id);
+        onChanged?.();
+      } finally {
+        setBusy(null);
+      }
+    });
   }
   function markReplied() {
     setBusy("reply");
@@ -1367,13 +1425,15 @@ function PortalQuestionnaire({
   }
 
   function send() {
-    setBusy("send");
-    try {
-      api.quoting.sendPortalLink(session.id, portalUrl);
-      onChanged?.();
-    } finally {
-      setBusy(null);
-    }
+    preserveWindowScroll(() => {
+      setBusy("send");
+      try {
+        api.quoting.sendPortalLink(session.id, portalUrl);
+        onChanged?.();
+      } finally {
+        setBusy(null);
+      }
+    });
   }
 
   return (
@@ -1450,20 +1510,18 @@ function PortalQuestionnaire({
               )}
               {busy === "send" ? "Sending..." : sendButtonLabel}
             </button>
-            {session.lineOfBusiness !== "commercial" && (
-              <button
-                type="button"
-                className="btn-outline text-xs"
-                onClick={() => setManualQuestionnaireOpen(true)}
-              >
-                <FileText className="h-3.5 w-3.5" />
-                Edit manually
-              </button>
-            )}
+            <button
+              type="button"
+              className="btn-outline text-xs"
+              onClick={() => setManualQuestionnaireOpen(true)}
+            >
+              <FileText className="h-3.5 w-3.5" />
+              Edit manually
+            </button>
           </div>
           {session.status === "awaiting_reply" && !isSupplementalQuestionnaire && (
             <p className="text-[11px] text-amber-800">
-              The client got an email with the link. When they submit, the AI ranking runs
+              The questionnaire link is queued for client delivery. When they submit, the AI ranking runs
               automatically and you'll see an Activity Center task land in your queue.
             </p>
           )}
@@ -1477,15 +1535,13 @@ function PortalQuestionnaire({
         onClose={() => setQuestionnaireEditorOpen(false)}
         onChanged={onChanged}
       />
-      {session.lineOfBusiness !== "commercial" && (
-        <ManualQuestionnaireModal
-          open={manualQuestionnaireOpen}
-          session={session}
-          userId={userId}
-          onClose={() => setManualQuestionnaireOpen(false)}
-          onChanged={onChanged}
-        />
-      )}
+      <ManualQuestionnaireModal
+        open={manualQuestionnaireOpen}
+        session={session}
+        userId={userId}
+        onClose={() => setManualQuestionnaireOpen(false)}
+        onChanged={onChanged}
+      />
     </>
   );
 }
@@ -1801,6 +1857,7 @@ function QuoteNextAction({
   setBusy,
   onChanged,
   onCommercialMissingFieldsRevealed,
+  onFailure,
 }: {
   session: QuotingSession;
   userId: string;
@@ -1808,6 +1865,7 @@ function QuoteNextAction({
   setBusy: (v: null | string) => void;
   onChanged?: () => void;
   onCommercialMissingFieldsRevealed?: (questions: QuotingQuestion[]) => void;
+  onFailure?: (failure: AiGatewayFailureDetail) => void;
 }) {
   const responses = session.questionnaireResponses ?? {};
   const questions = visibleQuestionnaireQuestions(session);
@@ -1881,6 +1939,10 @@ function QuoteNextAction({
       try {
         api.quoting.readCommercialCarrierResponses(session.id);
         onChanged?.();
+      } catch (error) {
+        onFailure?.(
+          quoteWorkspaceFailure("Carrier response processing could not complete.", error)
+        );
       } finally {
         setBusy(null);
       }
@@ -1901,6 +1963,8 @@ function QuoteNextAction({
     try {
       api.quoting.submitQuestionnaireResponses(session.id, responses, actor);
       onChanged?.();
+    } catch (error) {
+      onFailure?.(quoteWorkspaceFailure("Quote ranking could not complete.", error));
     } finally {
       setBusy(null);
     }
@@ -1913,6 +1977,10 @@ function QuoteNextAction({
       try {
         api.quoting.preparePersonalQuestionnaire(session.id);
         onChanged?.();
+      } catch (error) {
+        onFailure?.(
+          quoteWorkspaceFailure("Personal-lines questionnaire could not be prepared.", error)
+        );
       } finally {
         setBusy(null);
       }
@@ -1921,8 +1989,13 @@ function QuoteNextAction({
     if (needsCommercialQuestionnaire) {
       setBusy("next");
       try {
+        await api.quoting.runAcordAiMapping(session.id);
         api.quoting.prepareCommercialQuestionnaire(session.id);
         onChanged?.();
+      } catch (error) {
+        onFailure?.(
+          quoteWorkspaceFailure("AI mapping could not complete. Please try again.", error)
+        );
       } finally {
         setBusy(null);
       }
@@ -1969,6 +2042,7 @@ function QuoteNextAction({
             selectedCarrierIds
           );
           if (drafts.length > 0) {
+            setCarrierSelectOpen(false);
             setCarrierDraftReview({
               kind: "application",
               selectedCarrierIds,
@@ -1984,6 +2058,10 @@ function QuoteNextAction({
               });
               onChanged?.();
               setCarrierSelectOpen(false);
+            } catch (error) {
+              onFailure?.(
+                quoteWorkspaceFailure("Carrier-send review could not be completed.", error)
+              );
             } finally {
               setBusy(null);
             }
@@ -1997,7 +2075,13 @@ function QuoteNextAction({
         uploadedById={session.createdById}
         drafts={carrierDraftReview?.drafts ?? []}
         busy={busy === "next"}
-        onClose={() => setCarrierDraftReview(null)}
+        onClose={() => {
+          const shouldReturnToCarrierList =
+            carrierDraftReview?.kind === "application" &&
+            !!carrierDraftReview.selectedCarrierIds?.length;
+          setCarrierDraftReview(null);
+          if (shouldReturnToCarrierList) setCarrierSelectOpen(true);
+        }}
         onChangeDraft={(index, patch) => {
           setCarrierDraftReview((current) =>
             current
@@ -2022,6 +2106,10 @@ function QuoteNextAction({
               onChanged?.();
               setCarrierSelectOpen(false);
               setCarrierDraftReview(null);
+            } catch (error) {
+              onFailure?.(
+                quoteWorkspaceFailure("Carrier-send review could not be completed.", error)
+              );
             } finally {
               setBusy(null);
             }
@@ -2353,13 +2441,14 @@ function ManualQuestionnaireModal({
           responses,
           "application",
           selectedCarrierIds
-        );
-        if (drafts.length > 0) {
-          setCarrierDraftReview({
-            kind: "application",
-            selectedCarrierIds,
-            drafts,
-          });
+          );
+          if (drafts.length > 0) {
+            setCarrierSelectOpen(false);
+            setCarrierDraftReview({
+              kind: "application",
+              selectedCarrierIds,
+              drafts,
+            });
           return;
         }
         preserveWindowScroll(() => {
@@ -2384,7 +2473,13 @@ function ManualQuestionnaireModal({
       uploadedById={session.createdById}
       drafts={carrierDraftReview?.drafts ?? []}
       busy={busy === "submit"}
-      onClose={() => setCarrierDraftReview(null)}
+      onClose={() => {
+        const shouldReturnToCarrierList =
+          carrierDraftReview?.kind === "application" &&
+          !!carrierDraftReview.selectedCarrierIds?.length;
+        setCarrierDraftReview(null);
+        if (shouldReturnToCarrierList) setCarrierSelectOpen(true);
+      }}
       onChangeDraft={(index, patch) => {
         setCarrierDraftReview((current) =>
           current
@@ -4811,6 +4906,8 @@ function QuickViewQuoteModal({
   const apiBadge =
     quote.providerTrace?.provider === "carrier_portal_automation" && quote.apiStatus === "connected"
       ? { tone: "success" as const, label: "Live AI carrier runner" }
+    : quote.providerTrace?.runnerTrace?.mode === "configuration_trace"
+      ? { tone: "gold" as const, label: "Carrier configuration estimate" }
     : quote.providerTrace?.provider === "carrier_portal_automation"
       ? { tone: "gold" as const, label: "AI carrier runner" }
       : quote.apiStatus === "simulated"
@@ -5235,7 +5332,7 @@ function friendlyCarrierFitSummary(rawReason: string, carrierName: string): stri
     parts.push("pricing is higher, but the carrier fit remains strong");
   }
   if (parts.length === 0) {
-    return rawReason.replace(/\s+-\s+/g, "; ").replace(/\s*Â·\s*/g, ", ");
+    return rawReason.replace(/\s+-\s+/g, "; ").replace(/\s*\u00b7\s*/g, ", ");
   }
   return `${parts.join(", ")}.`;
 }

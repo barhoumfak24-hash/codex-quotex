@@ -12,6 +12,7 @@ import {
   aiExtractPolicyFromFile,
   aiMarketingMessage,
   aiMarketingCreative,
+  aiMapAcordFields,
   aiPortalAssistant,
   aiSortIntent,
   aiParseCarrierAppetite,
@@ -26,7 +27,7 @@ export const aiRoutes = Router();
 const DEFAULT_AI_STRING_LIMIT = 50_000;
 const AI_STRING_LIMITS: Record<string, number> = {
   body: 20_000,
-  dataurl: 1_800_000,
+  dataurl: 8_500_000,
   filename: 300,
   knowledge: 80_000,
   localanswer: 80_000,
@@ -229,6 +230,41 @@ aiRoutes.post("/parse-carrier-appetite", async (req, res) => {
       fileName: typeof fileName === "string" ? fileName : undefined,
       text: typeof text === "string" ? text : undefined,
       carrierName: isRecord(carrier) && typeof carrier.name === "string" ? carrier.name : undefined,
+    });
+    res.json(out);
+  } catch {
+    res.status(500).json({ error: "ai_failed" });
+  }
+});
+
+aiRoutes.post("/acord-map", async (req, res) => {
+  try {
+    const { template, fields, dossier, intent } = req.body ?? {};
+    if (!Array.isArray(fields)) return badRequest(res, "fields must be an array");
+    if (!isRecord(dossier)) return badRequest(res, "dossier must be an object");
+    const cleanFields = fields
+      .filter(isRecord)
+      .map((field) => ({
+        id: typeof field.id === "string" ? field.id : undefined,
+        label: typeof field.label === "string" ? field.label : "",
+        required: field.required === true,
+        kind: typeof field.kind === "string" ? field.kind : undefined,
+        page: typeof field.page === "number" ? field.page : undefined,
+      }))
+      .filter((field) => field.label.trim().length > 0);
+    if (cleanFields.length === 0) return badRequest(res, "at least one field label is required");
+    const cleanTemplate = isRecord(template)
+      ? {
+          documentName: typeof template.documentName === "string" ? template.documentName : undefined,
+          fileName: typeof template.fileName === "string" ? template.fileName : undefined,
+          formNumber: typeof template.formNumber === "string" ? template.formNumber : undefined,
+        }
+      : undefined;
+    const out = await aiMapAcordFields({
+      template: cleanTemplate,
+      fields: cleanFields,
+      dossier,
+      intent: intent === "questionnaire_prefill" ? "questionnaire_prefill" : "document_autofill",
     });
     res.json(out);
   } catch {

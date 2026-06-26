@@ -12,6 +12,7 @@ import {
   aiClassifyInboundForActivity,
   aiGeneratePersonalQuestionnaire,
   aiGenerateCommercialQuestionnaire,
+  aiMapAcordFields,
 } from "./ai";
 import type { ActivityResolution } from "./ai";
 import { db } from "./db";
@@ -95,6 +96,7 @@ import {
 import { fillAcordFromClientDossier } from "./acordAiFillEngine";
 import {
   aiEvidenceAllowsQuestionnairePrefill,
+  aiEvidenceAllowsDocumentAutofill,
   evaluateAiProductionGate,
   findAiPublicEvidence,
 } from "./aiProductionGuards";
@@ -236,7 +238,14 @@ function mergeQuestionnaireResponseMeta(
   const next = { ...(session.questionnaireResponseMeta ?? {}) };
   const existing = session.questionnaireResponses ?? {};
   for (const [questionId, value] of Object.entries(responses)) {
-    if (existing[questionId] === value && next[questionId]) continue;
+    const existingMeta = next[questionId];
+    const actorRole = actor?.role ?? "agent";
+    const sameValue = existing[questionId] === value;
+    const humanConfirmedAiValue =
+      sameValue &&
+      existingMeta?.updatedByRole === "ai" &&
+      actorRole !== "ai";
+    if (sameValue && existingMeta && !humanConfirmedAiValue) continue;
     next[questionId] = questionnaireResponseMetaFor(actor, updatedAt);
   }
   return next;
@@ -258,6 +267,425 @@ function cleanQuestionnairePrefillValue(value: unknown): string {
   if (value === null || value === undefined) return "";
   if (typeof value === "boolean") return value ? "Yes" : "No";
   return String(value).trim();
+}
+
+function questionnaireLookupText(question: QuotingQuestion): string {
+  return compactQuestionnaireLookup(
+    `${question.id} ${question.acordFieldKey ?? ""} ${question.label} ${(question.acordFieldLabels ?? []).join(" ")}`
+  );
+}
+
+function recordLookupText(key: string): string {
+  return compactQuestionnaireLookup(key);
+}
+
+function lookupLooksAddress(value: string): boolean {
+  return (
+    value.includes("address") ||
+    value.includes("location") ||
+    value.includes("premises") ||
+    value.includes("garaging") ||
+    value.includes("mooring") ||
+    value.includes("risk")
+  );
+}
+
+function lookupLooksPropertyComposite(value: string): boolean {
+  return (
+    (value.includes("propertylocation") ||
+      value.includes("propertyaddresslocation") ||
+      value.includes("premises")) &&
+    (value.includes("occupancy") || value.includes("description"))
+  );
+}
+
+type QuestionnaireLookupKind =
+  | "address"
+  | "email"
+  | "phone"
+  | "website"
+  | "businessName"
+  | "dba"
+  | "entityType"
+  | "operations"
+  | "yearStarted"
+  | "yearsInBusiness"
+  | "naics"
+  | "sic"
+  | "value"
+  | "city"
+  | "state"
+  | "zip";
+
+function questionnaireLookupKind(value: string): QuestionnaireLookupKind | null {
+  const lookup = compactQuestionnaireLookup(value);
+  if (!lookup) return null;
+  if (lookup.includes("email")) return "email";
+  if (lookup.includes("phone") || lookup.includes("telephone")) return "phone";
+  if (lookup.includes("website") || lookup.includes("url")) return "website";
+  if (lookup.includes("zipcode") || lookup.includes("postalcode") || lookup === "zip") return "zip";
+  if (lookup === "city" || lookup.endsWith("city")) return "city";
+  if (lookup === "state" || lookup.endsWith("state")) return "state";
+  if (lookup.includes("naics")) return "naics";
+  if (lookup.includes("sic")) return "sic";
+  if (lookup.includes("dba") || lookup.includes("doingbusinessas")) return "dba";
+  if (lookup.includes("entitytype") || lookup.includes("businesstype") || lookup.includes("typeofbusiness")) {
+    return "entityType";
+  }
+  if (
+    lookup.includes("businessdescription") ||
+    lookup.includes("operations") ||
+    lookup.includes("operationdescription") ||
+    lookup.includes("natureofbusiness")
+  ) {
+    return "operations";
+  }
+  if (
+    lookup.includes("yearstarted") ||
+    lookup.includes("businessstarted") ||
+    lookup.includes("datebusinessstarted") ||
+    lookup.includes("yearbusinessstarted")
+  ) {
+    return "yearStarted";
+  }
+  if (lookup.includes("yearsinbusiness") || lookup.includes("timeinbusiness")) return "yearsInBusiness";
+  if (
+    lookup.includes("legalbusinessname") ||
+    lookup.includes("businesslegalname") ||
+    lookup.includes("businessnameasregistered") ||
+    lookup.includes("nameofinsured") ||
+    lookup.includes("namedinsured") ||
+    lookup.includes("insuredname") ||
+    lookup.includes("applicantname") ||
+    lookup.includes("businessname")
+  ) {
+    return "businessName";
+  }
+  if (
+    lookup.includes("industrycode") ||
+    lookup.includes("primaryindustry") ||
+    lookup.includes("industry")
+  ) {
+    return "naics";
+  }
+  if (
+    lookup.includes("estimatedvalue") ||
+    lookup.includes("appraisedvalue") ||
+    lookup.includes("agreedvalue") ||
+    lookup.includes("scheduledvalue") ||
+    lookup.includes("requestedamount") ||
+    lookup.includes("requestedlimit") ||
+    lookup.includes("propertyvalue") ||
+    lookup.includes("buildinglimit")
+  ) {
+    return "value";
+  }
+  if (lookupLooksAddress(lookup)) return "address";
+  return null;
+}
+
+function questionnaireQuestionLookupKinds(question: QuotingQuestion): Set<QuestionnaireLookupKind> {
+  return new Set(
+    questionnaireQuestionLookupKeys(question)
+      .map(questionnaireLookupKind)
+      .filter((kind): kind is QuestionnaireLookupKind => kind !== null)
+  );
+}
+
+function questionnaireFieldKeyMatchesQuestion(question: QuotingQuestion, recordKey: string): boolean {
+  const keys = questionnaireQuestionLookupKeys(question);
+  const normalizedRecordKey = normalizeQuestionnaireLookup(recordKey);
+  const compactRecordKey = compactQuestionnaireLookup(recordKey);
+  if (
+    keys.some((key) => {
+      const normalizedKey = normalizeQuestionnaireLookup(key);
+      const compactKey = compactQuestionnaireLookup(key);
+      return normalizedKey === normalizedRecordKey || compactKey === compactRecordKey;
+    })
+  ) {
+    return true;
+  }
+
+  const recordKind = questionnaireLookupKind(recordKey);
+  if (!recordKind) return false;
+  return questionnaireQuestionLookupKinds(question).has(recordKind);
+}
+
+function valueLooksLikeAddress(value: string): boolean {
+  return /\d/.test(value) && /\b(st|street|rd|road|ave|avenue|dr|drive|ln|lane|blvd|boulevard|ct|court|cir|circle|way|pkwy|parkway|hwy|highway|pl|place|terrace|ter|trail|trl|mi|fl|ga|sc|ny|ca|tx|il|oh|pa|zip)\b/i.test(value);
+}
+
+function questionLooksAddressOnly(question: QuotingQuestion): boolean {
+  const lookup = questionnaireLookupText(question);
+  if (!lookupLooksAddress(lookup)) return false;
+  if (lookupLooksPropertyComposite(lookup)) return false;
+  return !(
+    lookup.includes("nameandmailingaddress") ||
+    lookup.includes("nameaddress") ||
+    lookup.includes("contactphoneemail") ||
+    lookup.includes("certificateholder") ||
+    lookup.includes("evidenceholder") ||
+    lookup.includes("additionalinterest")
+  );
+}
+
+function valueLooksLikeBusinessEntityName(value: string): boolean {
+  return /\b(llc|l\.l\.c\.|inc|inc\.|corp|corporation|co\.|company|ltd|limited|pllc|llp|lp|holdings|group|partners|enterprises|ventures|services|logistics|management|agency|insurance|properties)\b/i.test(
+    value
+  );
+}
+
+function valueLooksLikeUsableBusinessName(value: string): boolean {
+  const text = value.trim();
+  return (
+    /[a-z]/i.test(text) &&
+    text.replace(/[^a-z]/gi, "").length >= 3 &&
+    !/^\d+$/.test(text.replace(/\D/g, "")) &&
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text) &&
+    !valueLooksLikeAddress(text)
+  );
+}
+
+function questionRequiresRegisteredBusinessName(question: QuotingQuestion): boolean {
+  const lookup = questionnaireLookupText(question);
+  return (
+    lookup.includes("legalbusinessname") ||
+    lookup.includes("businesslegalname") ||
+    lookup.includes("businessnameasregistered")
+  );
+}
+
+function questionRecordEntryIsCompatible(
+  question: QuotingQuestion,
+  recordKey: string,
+  value: string
+): boolean {
+  const questionLookup = questionnaireLookupText(question);
+  const keyLookup = recordLookupText(recordKey);
+  if (
+    valueLooksLikeAddress(value) &&
+    !questionLooksAddressOnly(question) &&
+    !lookupLooksPropertyComposite(questionLookup) &&
+    !questionExplicitlyAllowsAddressAnswer(question)
+  ) {
+    return false;
+  }
+  if (questionSpecificAcordLabelMatchesRecordKey(question, recordKey)) {
+    if (lookupLooksAddress(keyLookup)) {
+      if (
+        !questionLooksAddressOnly(question) &&
+        !lookupLooksPropertyComposite(questionLookup) &&
+        !questionExplicitlyAllowsAddressAnswer(question)
+      ) {
+        return false;
+      }
+      return valueLooksLikeAddress(value);
+    }
+    if (keyLookup.includes("email")) return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+    if (keyLookup.includes("phone")) return value.replace(/\D/g, "").length >= 7;
+    if (keyLookup.includes("fein") || keyLookup.includes("ein") || keyLookup.includes("tax")) {
+      return value.replace(/\D/g, "").length >= 9;
+    }
+    if (
+      keyLookup.includes("name") ||
+      keyLookup.includes("insured") ||
+      keyLookup.includes("applicant") ||
+      keyLookup.includes("business")
+    ) {
+      return !valueLooksLikeAddress(value);
+    }
+    return true;
+  }
+  if (questionLooksAddressOnly(question)) {
+    return lookupLooksAddress(keyLookup) && valueLooksLikeAddress(value);
+  }
+  if (lookupLooksPropertyComposite(questionLookup)) {
+    if (keyLookup.includes("propertylocation") || keyLookup.includes("propertyaddresslocation")) {
+      return valueLooksLikeAddress(value);
+    }
+    return (
+      (lookupLooksAddress(keyLookup) && valueLooksLikeAddress(value)) ||
+      keyLookup.includes("occupancy") ||
+      keyLookup.includes("description") ||
+      keyLookup.includes("construction") ||
+      keyLookup.includes("squarefootage") ||
+      keyLookup.includes("yearbuilt")
+    );
+  }
+  if (lookupLooksAddress(keyLookup)) {
+    return false;
+  }
+  if (questionCanUseContactName(question)) {
+    if (questionRequiresRegisteredBusinessName(question) && !valueLooksLikeBusinessEntityName(value)) {
+      return false;
+    }
+    return !lookupLooksAddress(keyLookup);
+  }
+  if (questionCanUseEstimatedValue(question)) {
+    return /value|limit|amount|coverage|premium|revenue|payroll|sales/.test(keyLookup);
+  }
+  if (questionLookup.includes("email")) return keyLookup.includes("email");
+  if (questionLookup.includes("phone")) return keyLookup.includes("phone");
+  if (questionLookup.includes("website")) return keyLookup.includes("website") || keyLookup.includes("url");
+  if (questionLookup.includes("fein") || questionLookup.includes("federalein")) {
+    return keyLookup.includes("fein") || keyLookup.includes("ein") || keyLookup.includes("tax");
+  }
+  return true;
+}
+
+function questionnaireAnswerLooksCompatible(question: QuotingQuestion, rawValue: unknown): boolean {
+  const value = cleanQuestionnairePrefillValue(rawValue);
+  if (!value) return false;
+  const lookup = questionnaireLookupText(question);
+  const labeledLines = value
+    .split(/\r?\n|;\s+/)
+    .map((line) => line.trim())
+    .filter((line) => /^([^:]{2,90}):\s*(.+)$/.test(line));
+  if (lookup.includes("primarycontactphoneemailandmailingaddress")) {
+    return (
+      labeledLines.length > 0 &&
+      labeledLines.some((line) => /^Primary contact:\s+.+/i.test(line)) &&
+      labeledLines.some((line) => /^Phone:\s*[\d\s().+-]{7,}$/i.test(line)) &&
+      labeledLines.some((line) => /^Email:\s*[^\s@]+@[^\s@]+\.[^\s@]+$/i.test(line))
+    );
+  }
+  if (lookup.includes("businessidentity") || lookup.includes("legalbusinessnameentitytype")) {
+    return labeledLines.some((line) => /^Legal business name:\s+.+/i.test(line));
+  }
+  const normalizedQuestion = normalizeQuestionnaireLookup(
+    `${question.label} ${(question.acordFieldLabels ?? []).join(" ")}`
+  );
+  if (
+    valueLooksLikeAddress(value) &&
+    /\b(operation|operations|product|products|service|services|revenue|payroll|employee|employees)\b/.test(
+      normalizedQuestion
+    )
+  ) {
+    return false;
+  }
+  if (
+    valueLooksLikeAddress(value) &&
+    !questionLooksAddressOnly(question) &&
+    !lookupLooksPropertyComposite(lookup) &&
+    !questionExplicitlyAllowsAddressAnswer(question)
+  ) {
+    return false;
+  }
+  if (questionRequiresRegisteredBusinessName(question) && !valueLooksLikeBusinessEntityName(value)) {
+    return false;
+  }
+  if (lookup.includes("email")) return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+  if (lookup.includes("phone")) return value.replace(/\D/g, "").length >= 7;
+  if (lookup.includes("fein") || lookup.includes("federalein")) {
+    return value.replace(/\D/g, "").length >= 9;
+  }
+  return true;
+}
+
+function questionSpecificAcordLabelMatchesRecordKey(question: QuotingQuestion, recordKey: string): boolean {
+  const labels = question.acordFieldLabels ?? [];
+  if (labels.length === 0) return false;
+  const normalizedRecordKey = normalizeQuestionnaireLookup(recordKey);
+  const compactRecordKey = compactQuestionnaireLookup(recordKey);
+  return labels.some((label) => {
+    const normalizedLabel = normalizeQuestionnaireLookup(label);
+    const compactLabel = compactQuestionnaireLookup(label);
+    return normalizedLabel === normalizedRecordKey || compactLabel === compactRecordKey;
+  });
+}
+
+function questionnaireLookupIsSensitive(value: string): boolean {
+  return /address|location|premises|garaging|mooring|risk|name|insured|applicant|email|phone|website|fein|ein|tax|policy/.test(
+    value
+  );
+}
+
+function questionnaireQuestionAllowsFuzzyRecordLookup(question: QuotingQuestion): boolean {
+  const lookup = questionnaireLookupText(question);
+  if (questionnaireLookupIsSensitive(lookup)) return false;
+  return (question.acordFieldLabels ?? []).length <= 1;
+}
+
+function mappedFieldValueIsCompatible(
+  fieldKey: string,
+  rawValue: unknown,
+  session?: {
+    contactName?: string;
+    publicFields?: Record<string, unknown>;
+    address?: string;
+  }
+): boolean {
+  const value = cleanQuestionnairePrefillValue(rawValue);
+  if (!value) return false;
+  const keyLookup = recordLookupText(fieldKey);
+  const addressField = lookupLooksAddress(keyLookup);
+  const knownNames = [
+    session?.contactName,
+    session?.publicFields?.["Legal business name"],
+    session?.publicFields?.["Business legal name"],
+    session?.publicFields?.["Named insured"],
+    session?.publicFields?.["Name of insured"],
+    session?.publicFields?.["Applicant name"],
+    session?.publicFields?.["Owner of record"],
+  ]
+    .map((item) => cleanQuestionnairePrefillValue(item).toLowerCase())
+    .filter(Boolean);
+  if (addressField) {
+    const normalizedValue = value.toLowerCase();
+    if (knownNames.some((name) => name === normalizedValue)) return false;
+    return valueLooksLikeAddress(value);
+  }
+  if (keyLookup.includes("email")) return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+  if (keyLookup.includes("phone")) return value.replace(/\D/g, "").length >= 7;
+  if (keyLookup.includes("fein") || keyLookup.includes("ein") || keyLookup.includes("tax")) {
+    return value.replace(/\D/g, "").length >= 9;
+  }
+  if (
+    (keyLookup.includes("name") ||
+      keyLookup.includes("insured") ||
+      keyLookup.includes("applicant") ||
+      keyLookup.includes("business")) &&
+    valueLooksLikeAddress(value)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function compatibleQuestionnaireMappingKey(
+  question: QuotingQuestion,
+  fieldKey: string,
+  rawValue: unknown,
+  session?: {
+    contactName?: string;
+    publicFields?: Record<string, unknown>;
+    address?: string;
+  }
+): string | null {
+  const value = cleanQuestionnairePrefillValue(rawValue);
+  if (!value) return null;
+  if (!questionnaireFieldKeyMatchesQuestion(question, fieldKey)) return null;
+  const candidates = [
+    fieldKey,
+    ...(question.acordFieldLabels ?? []),
+    question.acordFieldKey,
+    question.label,
+  ]
+    .map((candidate) => cleanQuestionnairePrefillValue(candidate))
+    .filter(Boolean);
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    const key = candidate.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (
+      mappedFieldValueIsCompatible(candidate, value, session) &&
+      questionRecordEntryIsCompatible(question, candidate, value)
+    ) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 function questionnaireQuestionLookupKeys(question: QuotingQuestion): string[] {
@@ -286,12 +714,24 @@ function questionnaireRecordEntryFor(
   const normalizedKeys = new Set(keys.map(normalizeQuestionnaireLookup).filter(Boolean));
   const compactKeys = new Set(keys.map(compactQuestionnaireLookup).filter(Boolean));
   for (const [recordKey, rawValue] of Object.entries(record)) {
-    if (
-      !normalizedKeys.has(normalizeQuestionnaireLookup(recordKey)) &&
-      !compactKeys.has(compactQuestionnaireLookup(recordKey))
-    ) {
-      continue;
-    }
+    if (!questionnaireFieldKeyMatchesQuestion(question, recordKey)) continue;
+    const value = cleanQuestionnairePrefillValue(rawValue);
+    if (value) return { key: recordKey, value };
+  }
+  for (const [recordKey, rawValue] of Object.entries(record)) {
+    if (!questionnaireQuestionAllowsFuzzyRecordLookup(question)) break;
+    const normalizedRecordKey = normalizeQuestionnaireLookup(recordKey);
+    const compactRecordKey = compactQuestionnaireLookup(recordKey);
+    const fuzzy = [...normalizedKeys].some(
+      (key) => key.length >= 8 && normalizedRecordKey.length >= 8 && (
+        normalizedRecordKey.includes(key) || key.includes(normalizedRecordKey)
+      )
+    ) || [...compactKeys].some(
+      (key) => key.length >= 8 && compactRecordKey.length >= 8 && (
+        compactRecordKey.includes(key) || key.includes(compactRecordKey)
+      )
+    );
+    if (!fuzzy) continue;
     const value = cleanQuestionnairePrefillValue(rawValue);
     if (value) return { key: recordKey, value };
   }
@@ -299,14 +739,27 @@ function questionnaireRecordEntryFor(
 }
 
 function questionCanUseQuoteAddress(question: QuotingQuestion): boolean {
-  const lookup = compactQuestionnaireLookup(`${question.acordFieldKey ?? ""} ${question.label}`);
+  const lookup = questionnaireLookupText(question);
   if (lookup.includes("email") || lookup.includes("ifdifferent")) return false;
   return (
     lookup.includes("propertyaddress") ||
     lookup.includes("riskaddress") ||
     lookup.includes("primaryresidenceaddress") ||
     lookup.includes("residenceaddress") ||
-    lookup.includes("locationaddress")
+    lookup.includes("locationaddress") ||
+    lookup.includes("propertylocation") ||
+    lookup.includes("premisesaddress")
+  );
+}
+
+function questionExplicitlyAllowsAddressAnswer(question: QuotingQuestion): boolean {
+  const lookup = normalizeQuestionnaireLookup(
+    `${question.id} ${question.acordFieldKey ?? ""} ${question.label} ${(question.acordFieldLabels ?? []).join(" ")}`
+  );
+  return (
+    /\b(address|premises|garaging|mooring)\b/.test(lookup) ||
+    /\b(property|risk|insured|applicant|mailing|location)\s+location\b/.test(lookup) ||
+    questionCanUseQuoteAddress(question)
   );
 }
 
@@ -322,9 +775,190 @@ function questionCanUseEstimatedValue(question: QuotingQuestion): boolean {
   );
 }
 
+function questionCanUseContactName(question: QuotingQuestion): boolean {
+  const lookup = questionnaireLookupText(question);
+  if (questionLooksAddressOnly(question)) return false;
+  return (
+    lookup.includes("legalbusinessname") ||
+    lookup.includes("businesslegalname") ||
+    lookup.includes("businessnameasregistered") ||
+    lookup.includes("nameofinsured") ||
+    lookup.includes("insuredname") ||
+    lookup.includes("applicantname")
+  );
+}
+
+function publicOrAssetValue(
+  input: {
+    assetDetails?: Record<string, string>;
+    publicFields: Record<string, unknown>;
+  },
+  keys: string[]
+): string | undefined {
+  for (const key of keys) {
+    const assetValue = cleanQuestionnairePrefillValue(input.assetDetails?.[key]);
+    if (assetValue) return assetValue;
+    const publicValue = cleanQuestionnairePrefillValue(input.publicFields[key]);
+    if (publicValue) return publicValue;
+  }
+  const normalizedKeys = keys.map(compactQuestionnaireLookup).filter(Boolean);
+  const records = [input.assetDetails, input.publicFields].filter(Boolean) as Record<string, unknown>[];
+  for (const record of records) {
+    for (const [key, value] of Object.entries(record)) {
+      const compactKey = compactQuestionnaireLookup(key);
+      if (!normalizedKeys.some((candidate) => compactKey === candidate)) continue;
+      const cleaned = cleanQuestionnairePrefillValue(value);
+      if (cleaned) return cleaned;
+    }
+  }
+  return undefined;
+}
+
+function line(label: string, value?: string): string | undefined {
+  const cleaned = cleanQuestionnairePrefillValue(value);
+  return cleaned ? `${label}: ${cleaned}` : undefined;
+}
+
+function joinKnownLines(lines: (string | undefined)[]): string | undefined {
+  const out = lines.filter((item): item is string => !!item);
+  return out.length > 0 ? out.join("\n") : undefined;
+}
+
+function compositeKnownQuestionnaireAnswerFor(
+  question: QuotingQuestion,
+  input: {
+    contactName?: string;
+    contactEmail?: string;
+    contactPhone?: string;
+    businessName?: string;
+    address?: string;
+    estimatedValue?: number;
+    assetDetails?: Record<string, string>;
+    publicFields: Record<string, unknown>;
+  }
+): string | undefined {
+  const lookup = questionnaireLookupText(question);
+  const legalName =
+    publicOrAssetValue(input, [
+      "Legal business name (as registered)",
+      "Legal business name",
+      "Business legal name",
+      "Named insured",
+      "Name of insured",
+      "Applicant name",
+      "businessName",
+    ]) ??
+    (input.businessName && valueLooksLikeUsableBusinessName(input.businessName)
+      ? input.businessName
+      : undefined) ??
+    (input.contactName && valueLooksLikeBusinessEntityName(input.contactName)
+      ? input.contactName
+      : undefined);
+  const propertyAddressCandidate =
+    publicOrAssetValue(input, [
+      "Property address",
+      "Risk address",
+      "Premises address",
+      "Location address",
+      "Garaging address",
+      "address",
+      "propertyAddress",
+      "riskAddress",
+      "primaryResidenceAddress",
+    ]) ?? input.address;
+  const propertyAddress =
+    propertyAddressCandidate && valueLooksLikeAddress(propertyAddressCandidate)
+      ? propertyAddressCandidate
+      : undefined;
+  const operationsCandidate =
+    publicOrAssetValue(input, [
+      "Business operations summary",
+      "Business operations",
+      "Description of operations",
+      "Business description",
+      "operationsDescription",
+      "productsServices",
+    ]);
+  const operations =
+    operationsCandidate && !valueLooksLikeAddress(operationsCandidate)
+      ? operationsCandidate
+      : undefined;
+  const entityType = publicOrAssetValue(input, ["Entity type", "Business entity type", "entityType"]);
+  const fein = publicOrAssetValue(input, ["Federal EIN", "FEIN", "EIN", "Tax ID", "federalEin"]);
+  const website = publicOrAssetValue(input, ["Website", "Business website", "website"]);
+  const years = publicOrAssetValue(input, ["Years in business", "Year established", "yearEstablished"]);
+  const naics = publicOrAssetValue(input, ["Primary industry / NAICS code", "NAICS", "SIC", "naics"]);
+  const operatingStatesCandidate =
+    publicOrAssetValue(input, ["Operating states", "State", "States of operation", "state"]) ??
+    undefined;
+  const operatingStates =
+    operatingStatesCandidate && !valueLooksLikeAddress(operatingStatesCandidate)
+      ? operatingStatesCandidate
+      : undefined;
+  const occupancy = publicOrAssetValue(input, ["Occupancy", "occupancy"]);
+  const description = publicOrAssetValue(input, ["Description of premises", "Property description", "description"]);
+  const estimatedValue =
+    typeof input.estimatedValue === "number" && Number.isFinite(input.estimatedValue) && input.estimatedValue > 0
+      ? `$${Math.round(input.estimatedValue).toLocaleString()}`
+      : publicOrAssetValue(input, ["Estimated exposure value", "Estimated value", "Building value"]);
+
+  if (questionLooksAddressOnly(question)) {
+    return propertyAddress && valueLooksLikeAddress(propertyAddress) ? propertyAddress : undefined;
+  }
+  if (lookup.includes("namedinsuredlegalnameandmailingaddress") || lookup.includes("insurednameaddress")) {
+    return joinKnownLines([line("Named insured", legalName), line("Mailing address", propertyAddress)]);
+  }
+  if (lookup.includes("businessidentity") || lookup.includes("legalbusinessnameentitytype")) {
+    return joinKnownLines([
+      line("Legal business name", legalName),
+      line("Entity type", entityType),
+      line("FEIN", fein),
+      line("Website", website),
+      line("Years in business", years),
+      line("Primary industry / NAICS", naics),
+    ]);
+  }
+  if (lookup.includes("legalbusinessnameasregistered")) return legalName;
+  if (lookup.includes("federalein")) return fein;
+  if (lookup.includes("yearestablished")) return years;
+  if (lookup.includes("entitytype")) return entityType;
+  if (lookup.includes("primaryindustry") || lookup.includes("naics")) return naics;
+  if (lookup.includes("businessoperationssummary") || lookup.includes("businessoperations")) return operations;
+  if (lookup.includes("operatingstates")) return operatingStates;
+  if (lookup.includes("primarycontactphoneemailandmailingaddress")) {
+    return joinKnownLines([
+      line("Primary contact", input.contactName),
+      line("Phone", input.contactPhone),
+      line("Email", input.contactEmail),
+      line("Mailing address", propertyAddress),
+    ]);
+  }
+  if (lookup.includes("email") && input.contactEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.contactEmail)) {
+    return input.contactEmail.trim();
+  }
+  if (lookup.includes("phone") && input.contactPhone && input.contactPhone.replace(/\D/g, "").length >= 7) {
+    return input.contactPhone.trim();
+  }
+  if (lookup.includes("propertylocation") || lookup.includes("propertyaddresslocationoccupancydescription")) {
+    return joinKnownLines([
+      line("Property address", propertyAddress),
+      line("Occupancy", occupancy),
+      line("Description", description),
+    ]);
+  }
+  if (lookup.includes("buildingbusinesspersonalproperty") || lookup.includes("propertyvalues")) {
+    return estimatedValue ? `Estimated value / limit: ${estimatedValue}` : undefined;
+  }
+  return undefined;
+}
+
 function knownQuestionnaireAnswerFor(
   question: QuotingQuestion,
   input: {
+    contactName?: string;
+    contactEmail?: string;
+    contactPhone?: string;
+    businessName?: string;
     address?: string;
     estimatedValue?: number;
     assetDetails?: Record<string, string>;
@@ -332,21 +966,37 @@ function knownQuestionnaireAnswerFor(
     publicFieldEvidence?: PublicDataEvidenceMap;
   }
 ): string | undefined {
+  const composite = compositeKnownQuestionnaireAnswerFor(question, input);
+  if (composite) return composite;
   const fromAssetDetails = questionnaireRecordEntryFor(question, input.assetDetails);
   if (
     fromAssetDetails &&
-    aiEvidenceAllowsQuestionnairePrefill(findAiPublicEvidence(input.publicFieldEvidence, fromAssetDetails.key))
+    questionRecordEntryIsCompatible(question, fromAssetDetails.key, fromAssetDetails.value)
   ) {
+    const assetEvidence = findAiPublicEvidence(input.publicFieldEvidence, fromAssetDetails.key);
+    if (assetEvidence && !aiEvidenceAllowsQuestionnairePrefill(assetEvidence)) return undefined;
     return fromAssetDetails.value;
   }
   const fromPublicFields = questionnaireRecordEntryFor(question, input.publicFields);
   if (
     fromPublicFields &&
+    questionRecordEntryIsCompatible(question, fromPublicFields.key, fromPublicFields.value) &&
     aiEvidenceAllowsQuestionnairePrefill(findAiPublicEvidence(input.publicFieldEvidence, fromPublicFields.key))
   ) {
     return fromPublicFields.value;
   }
-  if (input.address && questionCanUseQuoteAddress(question)) return input.address.trim();
+  if (input.address && questionCanUseQuoteAddress(question) && valueLooksLikeAddress(input.address)) {
+    return input.address.trim();
+  }
+  if (input.contactName?.trim() && questionCanUseContactName(question)) {
+    if (
+      questionRequiresRegisteredBusinessName(question) &&
+      !valueLooksLikeBusinessEntityName(input.contactName)
+    ) {
+      return undefined;
+    }
+    return input.contactName.trim();
+  }
   if (
     typeof input.estimatedValue === "number" &&
     Number.isFinite(input.estimatedValue) &&
@@ -360,9 +1010,13 @@ function knownQuestionnaireAnswerFor(
 
 function seedKnownQuestionnaireResponses(input: {
   questions: QuotingQuestion[];
-  address?: string;
-  estimatedValue?: number;
-  assetDetails?: Record<string, string>;
+  contactName?: string;
+    contactEmail?: string;
+    contactPhone?: string;
+    businessName?: string;
+    address?: string;
+    estimatedValue?: number;
+    assetDetails?: Record<string, string>;
   publicFields: Record<string, unknown>;
   publicFieldEvidence?: PublicDataEvidenceMap;
   updatedAt: string;
@@ -376,6 +1030,7 @@ function seedKnownQuestionnaireResponses(input: {
   input.questions.forEach((question) => {
     const answer = knownQuestionnaireAnswerFor(question, input);
     if (!answer) return;
+    if (!questionnaireAnswerLooksCompatible(question, answer)) return;
     questionnaireResponses[question.id] = answer;
     questionnaireResponseMeta[question.id] = {
       updatedAt: input.updatedAt,
@@ -396,6 +1051,65 @@ function seedKnownQuestionnaireResponses(input: {
       Object.keys(questionnaireResponseMeta).length > 0 ? questionnaireResponseMeta : undefined,
     missingFields,
   };
+}
+
+function mergeSeededQuestionnaireResponses(input: {
+  session: QuotingSession;
+  questions: QuotingQuestion[];
+  contactName?: string;
+  contactEmail?: string;
+  contactPhone?: string;
+  businessName?: string;
+  address?: string;
+  estimatedValue?: number;
+  assetDetails?: Record<string, string>;
+  publicFields: Record<string, unknown>;
+  publicFieldEvidence?: PublicDataEvidenceMap;
+  updatedAt: string;
+}): {
+  questionnaireResponses: Record<string, string>;
+  questionnaireResponseMeta: Record<string, QuestionnaireResponseMeta>;
+  missingFields: string[];
+} {
+  const seeded = seedKnownQuestionnaireResponses({
+    questions: input.questions,
+    contactName: input.contactName,
+    contactEmail: input.contactEmail,
+    contactPhone: input.contactPhone,
+    businessName: input.businessName,
+    address: input.address,
+    estimatedValue: input.estimatedValue,
+    assetDetails: input.assetDetails,
+    publicFields: input.publicFields,
+    publicFieldEvidence: input.publicFieldEvidence,
+    updatedAt: input.updatedAt,
+  });
+  const questionIds = new Set(input.questions.map((question) => question.id));
+  const questionsById = new Map(input.questions.map((question) => [question.id, question]));
+  const existingResponses = Object.fromEntries(
+    Object.entries(input.session.questionnaireResponses ?? {}).filter(([questionId, value]) => {
+      if (!questionIds.has(questionId)) return false;
+      const question = questionsById.get(questionId);
+      return question ? questionnaireAnswerLooksCompatible(question, value) : false;
+    })
+  );
+  const existingMeta = Object.fromEntries(
+    Object.entries(input.session.questionnaireResponseMeta ?? {}).filter(([questionId]) =>
+      questionIds.has(questionId)
+    )
+  );
+  const questionnaireResponses: Record<string, string> = {
+    ...(seeded.questionnaireResponses ?? {}),
+    ...existingResponses,
+  };
+  const questionnaireResponseMeta: Record<string, QuestionnaireResponseMeta> = {
+    ...(seeded.questionnaireResponseMeta ?? {}),
+    ...existingMeta,
+  };
+  const missingFields = input.questions
+    .filter((question) => question.required && !questionnaireResponses[question.id]?.trim())
+    .map((question) => question.label);
+  return { questionnaireResponses, questionnaireResponseMeta, missingFields };
 }
 
 function dedupeQuotingQuestionsByLabel(questions: QuotingQuestion[]): QuotingQuestion[] {
@@ -454,11 +1168,8 @@ function quoteSessionAddressContext(session: QuotingSession): string | undefined
     session.assetDetails?.primaryResidenceAddress,
     session.assetDetails?.address,
     typeof session.publicFields.address === "string" ? session.publicFields.address : undefined,
-    typeof session.publicFields.assetIdentifier === "string"
-      ? session.publicFields.assetIdentifier
-      : undefined,
   ];
-  return candidates.find((value) => !!value?.trim());
+  return candidates.find((value) => !!value?.trim() && valueLooksLikeAddress(value));
 }
 
 function ensureCompletePersonalCategoryQuestionnaire(session: QuotingSession): QuotingSession {
@@ -476,8 +1187,13 @@ function ensureCompletePersonalCategoryQuestionnaire(session: QuotingSession): Q
   const existingQuestions = session.questionnaireQuestions ?? [];
   const existingResponses = session.questionnaireResponses ?? {};
   const existingMeta = session.questionnaireResponseMeta ?? {};
+  const contact = contactForQuotingSession(session);
   const seeded = seedKnownQuestionnaireResponses({
     questions: fullQuestions,
+    contactName: contact?.name,
+    contactEmail: contact?.email,
+    contactPhone: contact?.phone,
+    businessName: contact && "businessName" in contact ? contact.businessName : undefined,
     address: quoteSessionAddressContext(session),
     estimatedValue: session.estimatedValue,
     assetDetails: session.assetDetails,
@@ -494,7 +1210,7 @@ function ensureCompletePersonalCategoryQuestionnaire(session: QuotingSession): Q
 
   fullQuestions.forEach((question) => {
     const exactValue = cleanQuestionnairePrefillValue(existingResponses[question.id]);
-    if (exactValue) {
+    if (exactValue && questionnaireAnswerLooksCompatible(question, exactValue)) {
       questionnaireResponses[question.id] = exactValue;
       if (existingMeta[question.id]) questionnaireResponseMeta[question.id] = existingMeta[question.id];
       return;
@@ -507,6 +1223,7 @@ function ensureCompletePersonalCategoryQuestionnaire(session: QuotingSession): Q
     if (!labelMatch) return;
     const labelValue = cleanQuestionnairePrefillValue(existingResponses[labelMatch.id]);
     if (!labelValue) return;
+    if (!questionnaireAnswerLooksCompatible(question, labelValue)) return;
     questionnaireResponses[question.id] = labelValue;
     questionnaireResponseMeta[question.id] =
       existingMeta[labelMatch.id] ??
@@ -1546,7 +2263,13 @@ function createActionTaskOnce(input: {
 }): Task {
   const existing = db
     .list("tasks")
-    .find((t) => t.tenantId === input.tenantId && t.activityKey === input.activityKey && !t.completedAt);
+    .find(
+      (t) =>
+        t.tenantId === input.tenantId &&
+        t.activityKey === input.activityKey &&
+        !t.completedAt &&
+        t.status !== "resolved"
+    );
   if (existing) return existing;
   const row: Task = {
     id: uid("task"),
@@ -1594,7 +2317,14 @@ function resolveActionTasks(
   const keySet = new Set(activityKeys);
   db
     .list("tasks")
-    .filter((t) => t.tenantId === tenantId && !!t.activityKey && keySet.has(t.activityKey) && !t.completedAt)
+    .filter(
+      (t) =>
+        t.tenantId === tenantId &&
+        !!t.activityKey &&
+        keySet.has(t.activityKey) &&
+        !t.completedAt &&
+        t.status !== "resolved"
+    )
     .forEach((task) => {
       db.update("tasks", task.id, {
         status: "resolved",
@@ -2981,6 +3711,7 @@ function spawnProspectRoutingTask(
     description: `${prospect.name} was routed to your queue. Make first contact, qualify the lead, and update the prospect status.`,
     prospectId: prospect.id,
     source: "ai_notification",
+    activityKey: `routing_assignment:prospect:${prospect.id}:${toAgentId}`,
     severity: "warning",
     status: "open",
     topic: "other",
@@ -3015,6 +3746,7 @@ function spawnRoutingTask(
     description: `${customer.name} was routed to your queue. Review their book, set up an intro call, and confirm their contact preferences.`,
     customerId: customer.id,
     source: "ai_notification",
+    activityKey: `routing_assignment:client:${customer.id}:${toAgentId}`,
     severity: "warning",
     status: "open",
     topic: "other",
@@ -3394,6 +4126,13 @@ function isDocumentOnlyAcordSession(session: QuotingSession): boolean {
   );
 }
 
+function sortQuotingSessionsByWorkRecency(a: QuotingSession, b: QuotingSession): number {
+  const aStamp = a.updatedAt || a.createdAt;
+  const bStamp = b.updatedAt || b.createdAt;
+  if (aStamp !== bStamp) return aStamp < bStamp ? 1 : -1;
+  return a.createdAt < b.createdAt ? 1 : -1;
+}
+
 function commercialApplicationSentAtForSession(session: QuotingSession): string | undefined {
   if (session.commercialApplicationSentAt) return session.commercialApplicationSentAt;
   const submission = (session.commercialCarrierSubmissions ?? []).find(
@@ -3444,7 +4183,8 @@ function ensureQuotingSessionConsistency(session: QuotingSession): QuotingSessio
   const hasInitialQuestions = (current.questionnaireQuestions ?? []).some(
     (question) => !question.carrierId && question.round !== "second_round"
   );
-  if (!current.commercialQuestionnairePreparedAt && hasInitialQuestions) {
+  const hasCommercialAcordTemplates = (current.commercialAcordTemplates ?? []).length > 0;
+  if (!current.commercialQuestionnairePreparedAt && hasInitialQuestions && hasCommercialAcordTemplates) {
     patch.commercialQuestionnairePreparedAt = current.updatedAt ?? applicationSentAt ?? current.createdAt;
   }
   if (
@@ -3475,7 +4215,6 @@ function ensureQuotingSessionConsistency(session: QuotingSession): QuotingSessio
 function initialCommercialQuestionnaireQuestions(session: QuotingSession): QuotingQuestion[] {
   const contact = contactForQuotingSession(session);
   const agency = db.list("agencies").find((candidate) => candidate.id === session.tenantId);
-  const carriers = linkedActiveCarriers(session.tenantId);
   const templates = session.commercialAcordTemplates ?? [];
   const knownFieldsByTemplateId = knownAcordFieldsByTemplateId(
     templates,
@@ -3484,24 +4223,27 @@ function initialCommercialQuestionnaireQuestions(session: QuotingSession): Quoti
     "application"
   );
 
+  return commercialBaseQuestionnaireQuestions(session).concat(
+    acordMissingFieldQuestions(templates, {
+      contactName: contact?.name ?? "Commercial applicant",
+      agencyName: agency?.name,
+      estimatedValue: session.estimatedValue,
+      state: session.state,
+      publicFields: session.publicFields,
+      publicFieldEvidence: session.publicFieldEvidence,
+      assetDetails: session.assetDetails,
+      knownFieldsByTemplateId,
+    })
+  );
+}
+
+function commercialBaseQuestionnaireQuestions(session: QuotingSession): QuotingQuestion[] {
+  const contact = contactForQuotingSession(session);
   return aiGenerateCommercialQuestionnaire({
     contactName: contact?.name ?? "Commercial applicant",
-    carrierList: carriers,
+    carrierList: [],
     knownPublicFields: session.publicFields,
-  })
-    .filter((q) => !q.carrierId)
-    .concat(
-      acordMissingFieldQuestions(templates, {
-        contactName: contact?.name ?? "Commercial applicant",
-        agencyName: agency?.name,
-        estimatedValue: session.estimatedValue,
-        state: session.state,
-        publicFields: session.publicFields,
-        publicFieldEvidence: session.publicFieldEvidence,
-        assetDetails: session.assetDetails,
-        knownFieldsByTemplateId,
-      })
-    );
+  }).filter((question) => !question.carrierId);
 }
 
 function commercialSupplementalQuestionsForCarrier(carrier: Carrier): {
@@ -3772,12 +4514,406 @@ function clientAcordFillDossier(
     communications,
     session,
     questions: session.questionnaireQuestions ?? [],
-    responses: {
+    responses: documentSafeQuestionnaireResponses(session, {
       ...(session.questionnaireResponses ?? {}),
       ...responses,
-    },
+    }),
     templateDocument,
   };
+}
+
+function documentSafeQuestionnaireResponses(
+  session: QuotingSession,
+  responses: Record<string, string>
+): Record<string, string> {
+  const questionsById = new Map(
+    (session.questionnaireQuestions ?? []).map((question) => [question.id, question])
+  );
+  return Object.fromEntries(
+    Object.entries(responses).filter(([questionId, value]) => {
+      if (!String(value ?? "").trim()) return false;
+      const meta = session.questionnaireResponseMeta?.[questionId];
+      if (meta?.updatedByRole !== "ai") return true;
+      const question = questionsById.get(questionId);
+      if (!question) return false;
+      const candidateEvidenceKeys = [
+        question.acordFieldKey,
+        question.label,
+        ...(question.acordFieldLabels ?? []),
+      ].filter((key): key is string => Boolean(key?.trim()));
+      return candidateEvidenceKeys.some((key) =>
+        aiEvidenceAllowsDocumentAutofill(
+          findAiPublicEvidence(session.publicFieldEvidence, key)
+        )
+      );
+    })
+  );
+}
+
+function compactAcordAiScalar(value: unknown): string | number | boolean | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? trimmed.slice(0, 500) : undefined;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "boolean") return value;
+  return undefined;
+}
+
+function compactAcordAiRecord(value: unknown, keys: string[]): Record<string, string | number | boolean> | null {
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  const out: Record<string, string | number | boolean> = {};
+  keys.forEach((key) => {
+    const scalar = compactAcordAiScalar(record[key]);
+    if (scalar !== undefined) out[key] = scalar;
+  });
+  return Object.keys(out).length ? out : null;
+}
+
+function compactAcordAiDetails(
+  value: unknown,
+  limit = 24
+): Record<string, string | number | boolean> {
+  if (!value || typeof value !== "object") return {};
+  const out: Record<string, string | number | boolean> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>).slice(0, limit)) {
+    const scalar = compactAcordAiScalar(raw);
+    if (scalar !== undefined) out[key] = scalar;
+  }
+  return out;
+}
+
+function compactAcordAiDossier(
+  session: QuotingSession,
+  responses: Record<string, string>,
+  templateDocument?: Document
+): Record<string, unknown> {
+  const dossier = clientAcordFillDossier(session, responses, templateDocument);
+  const contactRecord = dossier.contact as Record<string, unknown> | null;
+  return {
+    agency: compactAcordAiRecord(dossier.agency, [
+      "id",
+      "name",
+      "legalName",
+      "agencyName",
+      "address",
+      "phone",
+      "contactEmail",
+      "supportEmail",
+      "email",
+      "website",
+    ]),
+    contact: compactAcordAiRecord(contactRecord, [
+      "id",
+      "name",
+      "businessName",
+      "email",
+      "phone",
+      "address",
+      "mailingAddress",
+      "operationsDescription",
+      "customerId",
+    ]),
+    session: {
+      id: session.id,
+      lineOfBusiness: session.lineOfBusiness,
+      assetType: session.assetType,
+      categoryLabel: session.categoryLabel,
+      estimatedValue: session.estimatedValue || undefined,
+      state: session.state,
+      assetDetails: compactAcordAiDetails(session.assetDetails, 30),
+      publicFields: compactAcordAiDetails(session.publicFields, 60),
+    },
+    assets: dossier.assets.slice(0, 12).map((asset) => ({
+      id: asset.id,
+      label: asset.label,
+      assetType: asset.type,
+      estimatedValue: asset.estimatedValue || undefined,
+      details: compactAcordAiDetails(asset.details, 30),
+    })),
+    policies: dossier.policies.slice(0, 12).map((policy) => ({
+      id: policy.id,
+      policyNumber: policy.policyNumber,
+      carrierId: policy.carrierId,
+      status: policy.status,
+      effectiveDate: policy.effectiveDate,
+      renewalDate: policy.renewalDate,
+      finalPremium: policy.finalPremium,
+      premiumEstimate: policy.premiumEstimate,
+      coverages: (policy.coverages ?? []).slice(0, 18).map((coverage) => ({
+        name: coverage.name,
+        limit: coverage.limit,
+        deductible: coverage.deductible,
+        description: coverage.description,
+      })),
+      participants: (policy.participants ?? []).slice(0, 18).map((participant) =>
+        compactAcordAiRecord(participant, ["name", "participantType", "role", "licenseNumber", "dob", "phone", "email"])
+      ),
+      additionalInsureds: (policy.additionalInsureds ?? []).slice(0, 18).map((party) =>
+        compactAcordAiRecord(party, ["name", "holderType", "address", "loanNumber", "relationship"])
+      ),
+    })),
+    carriers: dossier.carriers.slice(0, 24).map((carrier) =>
+      compactAcordAiRecord(carrier, ["id", "name", "naic", "status"])
+    ),
+    claims: dossier.claims.slice(0, 18).map((claim) =>
+      compactAcordAiRecord(claim, [
+        "id",
+        "externalClaimNumber",
+        "carrierId",
+        "policyId",
+        "openedAt",
+        "lossDescription",
+        "lossAmountUsd",
+        "status",
+      ])
+    ),
+    documents: dossier.documents.slice(0, 30).map((document) =>
+      compactAcordAiRecord(document, ["id", "documentName", "fileName", "type", "status", "uploadedAt"])
+    ),
+    notes: dossier.notes.slice(0, 12).map((note) =>
+      compactAcordAiRecord(note, ["id", "title", "body", "createdAt", "source"])
+    ),
+    communications: dossier.communications.slice(0, 12).map((communication) =>
+      compactAcordAiRecord(communication, ["id", "subject", "body", "direction", "channel", "sentAt", "createdAt"])
+    ),
+    questions: dossier.questions.map((question) => ({
+      id: question.id,
+      label: question.label,
+      acordFieldLabels: question.acordFieldLabels ?? [],
+    })),
+    responses: Object.fromEntries(
+      Object.entries(dossier.responses)
+        .map(([key, value]) => [key, compactAcordAiScalar(value)])
+        .filter((entry): entry is [string, string | number | boolean] => entry[1] !== undefined)
+    ),
+  };
+}
+
+function acordAiFieldsForTemplate(
+  template: CommercialAcordTemplateSelection,
+  templateDocument?: Document
+) {
+  const sourceArtifact = completedAcordSourceArtifact(template, templateDocument);
+  const seen = new Set<string>();
+  return (sourceArtifact.templateFieldLayout ?? [])
+    .map((field) => ({
+      label: field.label?.trim() ?? "",
+      required: field.required === true,
+      kind: field.kind ?? "text",
+      page: field.page,
+    }))
+    .filter((field) => {
+      const key = field.label.toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
+function questionnaireAiFieldsForSession(session: QuotingSession) {
+  return initialCommercialQuestionnaireQuestions(session).map((question) => ({
+    id: question.id,
+    label: question.label,
+    acordFieldLabels: question.acordFieldLabels ?? [],
+    acordFieldKey: question.acordFieldKey,
+    required: question.required === true,
+    kind: question.kind,
+  }));
+}
+
+async function applyServerAcordMappingToCommercialSession(
+  session: QuotingSession,
+  responses: Record<string, string> = {}
+): Promise<QuotingSession> {
+  const templates = session.commercialAcordTemplates ?? [];
+  if (session.lineOfBusiness !== "commercial") return session;
+  const questionnaireQuestionsForMapping = initialCommercialQuestionnaireQuestions(session);
+  const questionnaireFields = questionnaireAiFieldsForSession(session);
+  if (templates.length === 0 && questionnaireFields.length === 0) return session;
+  const publicFields: Record<string, unknown> = { ...(session.publicFields ?? {}) };
+  const publicFieldEvidence: PublicDataEvidenceMap = { ...(session.publicFieldEvidence ?? {}) };
+  const questionnaireResponses: Record<string, string> = {
+    ...(session.questionnaireResponses ?? {}),
+  };
+  const questionnaireResponseMeta: Record<string, QuestionnaireResponseMeta> = {
+    ...(session.questionnaireResponseMeta ?? {}),
+  };
+  const summaries: string[] = [];
+  let addedCount = 0;
+  let questionnaireAddedCount = 0;
+  const applyQuestionnaireMappedResult = (
+    mapped: Awaited<ReturnType<typeof aiMapAcordFields>>,
+    questions: QuotingQuestion[]
+  ) => {
+    const updatedAt = nowIso();
+    const questionsById = new Map(questions.map((question) => [question.id, question]));
+    const appliedFieldKeys = new Set<string>();
+    const mappingContext = {
+      contactName: (session as { contactName?: string }).contactName,
+      publicFields,
+      address: (session as { address?: string }).address,
+    };
+    const applyOne = (fieldKey: string, value: unknown, targetId?: string) => {
+      const evidence = findAiPublicEvidence(mapped.publicFieldEvidence, fieldKey);
+      if (!evidence || !aiEvidenceAllowsQuestionnairePrefill(evidence)) return false;
+      const directQuestion =
+        targetId && questionsById.has(targetId) ? questionsById.get(targetId) : undefined;
+      const compatibilityKey = directQuestion
+        ? compatibleQuestionnaireMappingKey(directQuestion, fieldKey, value, mappingContext)
+        : fieldKey;
+      if (!compatibilityKey) return false;
+      if (!mappedFieldValueIsCompatible(compatibilityKey, value, mappingContext)) return false;
+      const question =
+        directQuestion ??
+        questions.find((candidate) => {
+          const entry = questionnaireRecordEntryFor(candidate, { [fieldKey]: value });
+          return entry
+            ? questionRecordEntryIsCompatible(candidate, entry.key, entry.value)
+            : false;
+        });
+      if (!question) return false;
+      if (targetId && directQuestion && !questionRecordEntryIsCompatible(question, compatibilityKey, cleanQuestionnairePrefillValue(value))) {
+        return false;
+      }
+      const cleanedValue = cleanQuestionnairePrefillValue(value);
+      if (!cleanedValue) return false;
+      if (questionnaireResponses[question.id]?.trim()) return false;
+      questionnaireResponses[question.id] = cleanedValue;
+      questionnaireResponseMeta[question.id] = {
+        updatedAt,
+        updatedById: "ai",
+        updatedByName: "QuoteX AI",
+        updatedByRole: "ai",
+      };
+      if (!publicFields[fieldKey]) {
+        publicFields[fieldKey] = value;
+        publicFieldEvidence[fieldKey] = {
+          ...evidence,
+          collectedAt: evidence.collectedAt || updatedAt,
+        };
+      }
+      questionnaireAddedCount += 1;
+      appliedFieldKeys.add(fieldKey);
+      return true;
+    };
+
+    for (const mapping of mapped.mappings ?? []) {
+      applyOne(mapping.targetField, mapping.value, mapping.targetId);
+    }
+    for (const [fieldKey, value] of Object.entries(mapped.fields)) {
+      if (appliedFieldKeys.has(fieldKey)) continue;
+      applyOne(fieldKey, value);
+    }
+  };
+  const applyMappedResult = (mapped: Awaited<ReturnType<typeof aiMapAcordFields>>) => {
+    if (mapped.summary) summaries.push(mapped.summary);
+    const mappingContext = {
+      contactName: (session as { contactName?: string }).contactName,
+      publicFields,
+      address: (session as { address?: string }).address,
+    };
+    for (const [fieldKey, value] of Object.entries(mapped.fields)) {
+      const evidence = findAiPublicEvidence(mapped.publicFieldEvidence, fieldKey);
+      if (!evidence || !aiEvidenceAllowsDocumentAutofill(evidence)) continue;
+      if (!mappedFieldValueIsCompatible(fieldKey, value, mappingContext)) continue;
+      const existingEvidence = findAiPublicEvidence(publicFieldEvidence, fieldKey);
+      if (
+        publicFields[fieldKey] &&
+        existingEvidence &&
+        aiEvidenceAllowsDocumentAutofill(existingEvidence)
+      ) {
+        continue;
+      }
+      publicFields[fieldKey] = value;
+      publicFieldEvidence[fieldKey] = {
+        ...evidence,
+        collectedAt: evidence.collectedAt || nowIso(),
+      };
+      addedCount += 1;
+    }
+  };
+
+  if (questionnaireFields.length > 0) {
+    try {
+      const mapped = await aiMapAcordFields({
+        tenantId: session.tenantId,
+        template: {
+          documentName: "Commercial questionnaire",
+          fileName: "commercial-questionnaire",
+          formNumber: "Commercial intake",
+        },
+        fields: questionnaireFields,
+        dossier: compactAcordAiDossier(session, responses),
+        intent: "questionnaire_prefill",
+      });
+      applyQuestionnaireMappedResult(mapped, questionnaireQuestionsForMapping);
+      applyMappedResult(mapped);
+    } catch {
+      // Server AI mapping is advisory; deterministic fill still runs below.
+    }
+  }
+
+  for (const template of templates) {
+    const templateDocument = db.list("documents").find((document) => document.id === template.templateId);
+    const fields = acordAiFieldsForTemplate(template, templateDocument);
+    if (fields.length === 0) continue;
+    try {
+      applyMappedResult(
+        await aiMapAcordFields({
+          tenantId: session.tenantId,
+          template: {
+            documentName: template.documentName,
+            fileName: template.fileName,
+            formNumber: template.formNumber,
+          },
+          fields,
+          dossier: compactAcordAiDossier(session, responses, templateDocument),
+        })
+      );
+    } catch {
+      // ACORD AI mapping is advisory. The deterministic fill engine
+      // still runs with the already-known dossier data when the server
+      // mapper is unavailable.
+    }
+  }
+  if (addedCount === 0 && questionnaireAddedCount === 0) return session;
+  const now = nowIso();
+  const uniqueSummaries = Array.from(new Set(summaries)).slice(0, 4);
+  return (
+    db.update("quotingSessions", session.id, {
+      publicFields,
+      publicFieldEvidence,
+      questionnaireResponses,
+      questionnaireResponseMeta,
+      aiSummary: [
+        session.aiSummary,
+        addedCount > 0
+          ? `Server-side ACORD AI mapping added ${addedCount} verified document field${
+              addedCount === 1 ? "" : "s"
+            }.`
+          : "",
+        questionnaireAddedCount > 0
+          ? `OpenAI research prefilled ${questionnaireAddedCount} editable questionnaire answer${
+              questionnaireAddedCount === 1 ? "" : "s"
+            } for review.`
+          : "",
+        ...uniqueSummaries,
+      ]
+        .filter(Boolean)
+        .join(" "),
+      updatedAt: now,
+    }) ?? {
+      ...session,
+      publicFields,
+      publicFieldEvidence,
+      questionnaireResponses,
+      questionnaireResponseMeta,
+      updatedAt: now,
+    }
+  );
 }
 
 function completedAcordTemplateFields(
@@ -10950,7 +12086,7 @@ export const api = {
       targetId: string
     ): Task | undefined {
       return db.list("tasks").find((t) => {
-        if (t.completedAt || !t.awaitingManagerAssignment) return false;
+        if (t.completedAt || t.status === "resolved" || !t.awaitingManagerAssignment) return false;
         if (t.routeRequestKind !== kind) return false;
         return kind === "client" ? t.customerId === targetId : t.prospectId === targetId;
       });
@@ -11077,6 +12213,9 @@ export const api = {
   // reconstruct the full trail from /master/data or the client
   // profile timeline.
   tasks: {
+    isResolved(t: Task): boolean {
+      return !!t.completedAt || t.status === "resolved";
+    },
     get(id: string): Task | undefined {
       return db.list("tasks").find((t) => t.id === id);
     },
@@ -11105,7 +12244,7 @@ export const api = {
       // snoozedUntil passes (we compare against `now` here).
       const now = Date.now();
       return this.listByTenant(tenantId).filter((t) => {
-        if (t.completedAt) return false;
+        if (this.isResolved(t)) return false;
         if (t.snoozedUntil && new Date(t.snoozedUntil).getTime() > now) return false;
         return true;
       });
@@ -11114,19 +12253,19 @@ export const api = {
       const now = Date.now();
       return this.listByTenant(tenantId).filter(
         (t) =>
-          !t.completedAt &&
+          !this.isResolved(t) &&
           t.snoozedUntil &&
           new Date(t.snoozedUntil).getTime() > now
       );
     },
     listCompleted(tenantId: string): Task[] {
-      return this.listByTenant(tenantId).filter((t) => !!t.completedAt);
+      return this.listByTenant(tenantId).filter((t) => this.isResolved(t));
     },
     // Implicit-status helper: respects both completedAt and the
     // future-snooze window. Use this on render so the badge / chip
     // matches what listOpen / listSnoozed return.
     statusOf(t: Task): TaskStatus {
-      if (t.completedAt) return "resolved";
+      if (this.isResolved(t)) return "resolved";
       if (t.snoozedUntil && new Date(t.snoozedUntil).getTime() > Date.now()) return "snoozed";
       if (t.status === "in_progress") return "in_progress";
       return "open";
@@ -11720,7 +12859,7 @@ export const api = {
     },
     markInProgress(id: string, userId?: string): Task | null {
       const row = db.list("tasks").find((t) => t.id === id);
-      if (!row || row.completedAt) return null;
+      if (!row || this.isResolved(row)) return null;
       // First-time flip records startedAt; subsequent flips (e.g.
       // after a snooze) keep the original timestamp so the card
       // always shows the handoff moment.
@@ -11766,7 +12905,7 @@ export const api = {
       options: { resolutionNote?: string } = {}
     ): Task | null {
       const row = db.list("tasks").find((t) => t.id === id);
-      if (!row || row.completedAt) return null;
+      if (!row || this.isResolved(row)) return null;
       const completedAt = nowIso();
       const trimmedNote = options.resolutionNote?.trim();
       let resolutionNoteId: string | undefined;
@@ -11820,7 +12959,7 @@ export const api = {
     },
     snooze(id: string, days: 1 | 3 | 7, userId?: string): Task | null {
       const row = db.list("tasks").find((t) => t.id === id);
-      if (!row || row.completedAt) return null;
+      if (!row || this.isResolved(row)) return null;
       const until = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
       const updated = db.update("tasks", id, { status: "snoozed", snoozedUntil: until });
       logTaskAudit({
@@ -12531,14 +13670,14 @@ export const api = {
       const session = db
         .list("quotingSessions")
         .filter((s) => s.prospectId === prospectId)
-        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
+        .sort(sortQuotingSessionsByWorkRecency)[0];
       return session ? ensureQuotingSessionConsistency(session) : undefined;
     },
     getForCustomer(customerId: string): QuotingSession | undefined {
       const session = db
         .list("quotingSessions")
         .filter((s) => s.customerId === customerId && !isDocumentOnlyAcordSession(s))
-        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
+        .sort(sortQuotingSessionsByWorkRecency)[0];
       return session ? ensureQuotingSessionConsistency(session) : undefined;
     },
     diagnosePersonalLinesCarrierApis(input: {
@@ -12590,6 +13729,7 @@ export const api = {
           .map((question) => {
             const sourceKey = question.acordFieldKey ?? question.id.replace(`category-${input.categoryId}-`, "");
             const value = String(answers[sourceKey] ?? "").trim();
+            if (value && !questionnaireAnswerLooksCompatible(question, value)) return null;
             return value ? [question.id, value] : null;
           })
           .filter((entry): entry is [string, string] => !!entry)
@@ -12815,7 +13955,11 @@ export const api = {
         });
         const seededQuestionnaire = seedKnownQuestionnaireResponses({
           questions: questionnaireQuestions,
-          address: input.address,
+        contactName: input.contactName,
+        contactEmail: undefined,
+        contactPhone: undefined,
+        businessName: undefined,
+        address: input.address,
           estimatedValue: input.estimatedValue,
           assetDetails: input.assetDetails,
           publicFields: prep.publicFields,
@@ -12855,12 +13999,16 @@ export const api = {
         updatedAt: createdAt,
       };
       db.insert("quotingSessions", row);
-      const syncedAcordTemplates = syncCommercialAcordPdfArtifacts(row, {}, "application");
+      const mappedRow =
+        lineOfBusiness === "commercial"
+          ? await applyServerAcordMappingToCommercialSession(row, {})
+          : row;
+      const syncedAcordTemplates = syncCommercialAcordPdfArtifacts(mappedRow, {}, "application");
       const activeRow = syncedAcordTemplates
-        ? db.update("quotingSessions", row.id, {
+        ? db.update("quotingSessions", mappedRow.id, {
             commercialAcordTemplates: syncedAcordTemplates,
-          }) ?? row
-        : row;
+          }) ?? mappedRow
+        : mappedRow;
       logQuotingWorkflowProgress(activeRow, {
         message: `AI quoting workflow started for ${activeRow.lineOfBusiness === "commercial" ? "commercial" : "personal"} ${assetTypeDisplayName(activeRow.assetType)}.`,
         detail: [
@@ -12887,10 +14035,28 @@ export const api = {
       }
       return activeRow;
     },
+    async runAcordAiMapping(sessionId: string): Promise<QuotingSession | null> {
+      const session = this.get(sessionId);
+      if (!session || session.lineOfBusiness !== "commercial") return session ?? null;
+      const mapped = await applyServerAcordMappingToCommercialSession(
+        session,
+        session.questionnaireResponses ?? {}
+      );
+      const syncedAcordTemplates = syncCommercialAcordPdfArtifacts(
+        mapped,
+        mapped.questionnaireResponses ?? {},
+        "application"
+      );
+      return syncedAcordTemplates
+        ? db.update("quotingSessions", mapped.id, {
+            commercialAcordTemplates: syncedAcordTemplates,
+            updatedAt: nowIso(),
+          }) ?? mapped
+        : mapped;
+    },
     prepareCommercialQuestionnaire(sessionId: string): QuotingSession | null {
       const session = this.get(sessionId);
       if (!session || session.lineOfBusiness !== "commercial") return session ?? null;
-      if (session.commercialQuestionnairePreparedAt) return session;
 
       const preparedAt = nowIso();
       const syncedAcordTemplates = syncCommercialAcordPdfArtifacts(
@@ -12905,10 +14071,28 @@ export const api = {
       const questionnaireQuestions = initialCommercialQuestionnaireQuestions(
         sessionWithCurrentAcords
       );
+      const contact = contactForQuotingSession(sessionWithCurrentAcords);
+      const seeded = mergeSeededQuestionnaireResponses({
+        session: sessionWithCurrentAcords,
+        questions: questionnaireQuestions,
+        contactName: contact?.name,
+        contactEmail: contact?.email,
+        contactPhone: contact?.phone,
+        businessName: contact && "businessName" in contact ? contact.businessName : undefined,
+        address: quoteSessionAddressContext(sessionWithCurrentAcords),
+        estimatedValue: sessionWithCurrentAcords.estimatedValue,
+        assetDetails: sessionWithCurrentAcords.assetDetails,
+        publicFields: sessionWithCurrentAcords.publicFields,
+        publicFieldEvidence: sessionWithCurrentAcords.publicFieldEvidence,
+        updatedAt: preparedAt,
+      });
       const updated = db.update("quotingSessions", sessionId, {
         commercialAcordTemplates: sessionWithCurrentAcords.commercialAcordTemplates,
         questionnaireQuestions,
-        commercialQuestionnairePreparedAt: preparedAt,
+        questionnaireResponses: seeded.questionnaireResponses,
+        questionnaireResponseMeta: seeded.questionnaireResponseMeta,
+        missingFields: seeded.missingFields,
+        commercialQuestionnairePreparedAt: session.commercialQuestionnairePreparedAt ?? preparedAt,
         status: "gathering_info",
         updatedAt: preparedAt,
       });
@@ -13390,6 +14574,33 @@ export const api = {
                 (submission) => submission.carrierId
               )
             : undefined);
+        if (
+          actor?.role === "customer" &&
+          !applicationSentAt &&
+          !explicitSelectedCommercialCarrierIds?.length
+        ) {
+          const answeredCount = Object.values(mergedResponses).filter((value) => value.trim()).length;
+          const updatedSession = db.update("quotingSessions", sessionId, {
+            questionnaireResponses: mergedResponses,
+            questionnaireResponseMeta: responseMeta,
+            commercialAcordTemplates:
+              syncedAcordTemplates ?? session.commercialAcordTemplates,
+            replyReceivedAt: updatedAt,
+            missingFields: [],
+            aiSummary: `${commercialContact?.name ?? "Client"} completed the commercial questionnaire. The ACORD package is ready for agent review before selecting carriers.`,
+            status: "gathering_info",
+            updatedAt,
+          });
+          logQuotingWorkflowProgress(session, {
+            message: `${commercialContact?.name ?? "Client"} completed the commercial quoting questionnaire.`,
+            detail: `${answeredCount} answer${
+              answeredCount === 1 ? "" : "s"
+            } saved. Carrier send is waiting for agent review and selected markets.`,
+            createdAt: updatedAt,
+            createdById: actor.id ?? "customer",
+          });
+          return updatedSession;
+        }
         const pipeline = analyzeCommercialCarrierPipeline(
           {
             ...sessionWithResponses,
@@ -13461,7 +14672,7 @@ export const api = {
           session,
           pipeline.submissions
         );
-        if (pipeline.secondRoundQuestions.length > 0) {
+        if (!session.commercialSecondRoundSentAt && pipeline.secondRoundQuestions.length > 0) {
           const portalUrl = `/customer/questionnaire/${sessionId}`;
           const subject = "Additional details needed for carrier supplementals";
           const body = [

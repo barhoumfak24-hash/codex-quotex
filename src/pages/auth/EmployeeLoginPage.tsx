@@ -23,6 +23,7 @@ export function EmployeeLoginPage() {
   const [selectedBranchId, setSelectedBranchId] = useState("");
   const [mode, setMode] = useState<"signIn" | "create">("signIn");
   const [role, setRole] = useState<StaffRole>("agent");
+  const [submitting, setSubmitting] = useState(false);
   const requestedAgency = resolveAgencyByKey(
     api.agencies.list(),
     new URLSearchParams(location.search).get("agency")
@@ -81,55 +82,60 @@ export function EmployeeLoginPage() {
       </div>
 
       <form
-        onSubmit={(e) => {
+        onSubmit={async (e) => {
           e.preventDefault();
           setError(null);
+          setSubmitting(true);
           const data = new FormData(e.currentTarget);
-          if (mode === "create") {
-            const code = String(data.get("agencyCode")).trim();
-            const agency = api.agencies.byCode(code);
-            if (!agency) {
-              setError("Agency code wasn't recognized. Check the code from your master admin.");
+          try {
+            if (mode === "create") {
+              const code = String(data.get("agencyCode")).trim();
+              const agency = api.agencies.byCode(code);
+              if (!agency) {
+                setError("Agency code wasn't recognized. Check the code from your master admin.");
+                return;
+              }
+              const password = String(data.get("password"));
+              const confirmPassword = String(data.get("confirmPassword"));
+              if (password !== confirmPassword) {
+                setError("Passwords don't match.");
+                return;
+              }
+              const result = registerStaff({
+                agencyCode: code,
+                branchId: selectedBranchId || undefined,
+                role,
+                firstName: String(data.get("firstName")),
+                lastName: String(data.get("lastName")),
+                phone: String(data.get("phone")),
+                businessEmail: String(data.get("businessEmail")),
+                password,
+              });
+              if (!result.ok) {
+                setError(registrationError(result.reason));
+                return;
+              }
+              setAgencyId(result.agencyId);
+              nav(postLoginPath);
               return;
             }
-            const password = String(data.get("password"));
-            const confirmPassword = String(data.get("confirmPassword"));
-            if (password !== confirmPassword) {
-              setError("Passwords don't match.");
-              return;
-            }
-            const result = registerStaff({
-              agencyCode: code,
-              branchId: selectedBranchId || undefined,
-              role,
-              firstName: String(data.get("firstName")),
-              lastName: String(data.get("lastName")),
-              phone: String(data.get("phone")),
-              businessEmail: String(data.get("businessEmail")),
-              password,
-            });
-            if (!result.ok) {
-              setError(registrationError(result.reason));
-              return;
-            }
-            setAgencyId(result.agencyId);
-            nav(postLoginPath);
-            return;
-          }
 
-          const identifier = String(data.get("identifier")).trim();
-          const password = String(data.get("password"));
-          const u = signInStaff(identifier, password);
-          if (!u || !isStaffRole(u.role)) {
-            setError(
-              u
-                ? "That account isn't an agency user. Use the master portal in the footer."
-                : "Email or password didn't match an active agency staff account."
-            );
-            return;
+            const identifier = String(data.get("identifier")).trim();
+            const password = String(data.get("password"));
+            const u = await signInStaff(identifier, password);
+            if (!u || !isStaffRole(u.role)) {
+              setError(
+                u
+                  ? "That account isn't an agency user. Use the master portal in the footer."
+                  : "Email or password didn't match an active agency staff account."
+              );
+              return;
+            }
+            if (u.tenantId) setAgencyId(u.tenantId);
+            nav(postLoginPath);
+          } finally {
+            setSubmitting(false);
           }
-          if (u.tenantId) setAgencyId(u.tenantId);
-          nav(postLoginPath);
         }}
         className="space-y-3"
       >
@@ -263,8 +269,8 @@ export function EmployeeLoginPage() {
         )}
 
         {error && <div className="text-xs text-rose-600">{error}</div>}
-        <button className="btn-primary w-full" type="submit">
-          {mode === "create" ? "Create account" : "Sign in"}
+        <button className="btn-primary w-full" type="submit" disabled={submitting}>
+          {submitting ? "Working..." : mode === "create" ? "Create account" : "Sign in"}
         </button>
       </form>
 

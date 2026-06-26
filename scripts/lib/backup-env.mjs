@@ -12,7 +12,7 @@ const PLACEHOLDER_PATTERNS = [
 export function loadBackupEnv(cwd = process.cwd()) {
   const configured = process.env.BACKUP_ENV_FILE
     ? process.env.BACKUP_ENV_FILE.split(/[,\n;]/).map((entry) => entry.trim()).filter(Boolean)
-    : [".env", "server/.env"];
+    : [".env.vercel.production.local", ".env.local", ".env", "server/.env"];
 
   const loaded = [];
   for (const relative of configured) {

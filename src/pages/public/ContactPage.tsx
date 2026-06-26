@@ -11,6 +11,7 @@ import { submitWebsiteLead } from "@/lib/websiteApi";
 
 export function ContactPage() {
   const [sent, setSent] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [sendError, setSendError] = useState("");
   const [fallbackHref, setFallbackHref] = useState("");
   const { agency } = useTenant();
@@ -35,16 +36,33 @@ export function ContactPage() {
 
   async function handleContactSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
+    if (submitting) return;
+    setSubmitting(true);
     setSendError("");
     setFallbackHref("");
     const data = new FormData(e.currentTarget);
+    const message = String(data.get("message") ?? "").trim();
+    const clientName = customer?.name?.trim();
+    const clientEmail = customer?.email?.trim();
+    const clientPhone = customer?.phone?.trim();
+    const formName = String(data.get("name") ?? "").trim();
+    const formEmail = String(data.get("email") ?? "").trim();
     const result = await submitWebsiteLead({
       agencyId: agency?.id,
       source: "contact",
-      name: String(data.get("name") ?? ""),
-      email: String(data.get("email") ?? ""),
-      message: String(data.get("message") ?? ""),
+      name: formName || clientName,
+      email: formEmail || clientEmail,
+      phone: clientPhone,
+      message: [
+        agency?.name ? `Agency: ${agency.name}` : "",
+        clientName ? `Client: ${clientName}` : "",
+        clientEmail ? `Client email: ${clientEmail}` : "",
+        message,
+      ]
+        .filter(Boolean)
+        .join("\n\n"),
     });
+    setSubmitting(false);
     if (!result.ok) {
       setFallbackHref(result.fallback.href);
       setSendError("Automatic delivery is temporarily unavailable. Open your email app to send the message.");
@@ -155,10 +173,7 @@ export function ContactPage() {
             ) : (
               <form
                 className="mt-2.5 space-y-2.5"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  setSent(true);
-                }}
+                onSubmit={handleContactSubmit}
               >
                 <textarea
                   name="message"
@@ -166,8 +181,22 @@ export function ContactPage() {
                   placeholder="Type your message..."
                   required
                 />
-                <button type="submit" className="btn-gold min-h-[50px] w-full rounded-2xl">
-                  <Send className="h-4 w-4" /> Send
+                {sendError && (
+                  <div className="rounded-2xl border border-red-200 bg-red-50 px-3 py-2 text-xs leading-relaxed text-red-800">
+                    <div>{sendError}</div>
+                    {fallbackHref && (
+                      <a href={fallbackHref} className="mt-1.5 inline-flex font-semibold underline">
+                        Open email app
+                      </a>
+                    )}
+                  </div>
+                )}
+                <button
+                  type="submit"
+                  className="btn-gold min-h-[50px] w-full rounded-2xl"
+                  disabled={submitting}
+                >
+                  <Send className="h-4 w-4" /> {submitting ? "Sending..." : "Send"}
                 </button>
               </form>
             )}
@@ -274,8 +303,8 @@ export function ContactPage() {
                     )}
                   </div>
                 )}
-                <button type="submit" className="btn-primary">
-                  <Send className="h-4 w-4" /> Send message
+                <button type="submit" className="btn-primary" disabled={submitting}>
+                  <Send className="h-4 w-4" /> {submitting ? "Sending..." : "Send message"}
                 </button>
               </form>
             </>

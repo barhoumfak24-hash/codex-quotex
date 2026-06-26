@@ -38,6 +38,8 @@ import { policiesRoutes } from "./routes/policies.js";
 import { prospectsRoutes } from "./routes/prospects.js";
 import { quotesRoutes } from "./routes/quotes.js";
 import { renewalsRoutes } from "./routes/renewals.js";
+import { signingPacketsRoutes } from "./routes/signingPackets.js";
+import { stateRoutes } from "./routes/state.js";
 import { statusRoutes } from "./routes/status.js";
 import { stripeRoutes } from "./routes/stripe.js";
 import { systemRoutes } from "./routes/system.js";
@@ -118,6 +120,8 @@ app.get("/cron/disaster-recovery", diagnosticsLimiter, async (req, res, next) =>
 app.use("/api", apiLimiter);
 app.use("/api/auth", authLimiter, authRoutes);
 app.use("/api/communications", publicWorkflowLimiter, communicationsRoutes);
+app.use("/api/signing-packets", publicWorkflowLimiter, signingPacketsRoutes);
+app.use("/api/state", publicWorkflowLimiter, stateRoutes);
 app.use("/api/website", publicWorkflowLimiter, websiteRoutes);
 app.use("/api/stripe", webhookLimiter, stripeRoutes);
 app.use("/api/mailboxes/oauth", authLimiter, mailboxOAuthCallbackRoutes);

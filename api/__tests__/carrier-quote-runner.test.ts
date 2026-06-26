@@ -24,7 +24,7 @@ const validPayload = {
     id: "carrier_progressive",
     name: "Progressive",
     entryUrl: "https://foragentsonly.progressive.com",
-    credentialReference: "secret://carrier-runner/agency_palmcoast/user_agent/carrier_progressive",
+    browserSessionReference: "browser-session://agency_palmcoast/user_agent/carrier_progressive",
     mfaMode: "staff_prompt",
   },
   session: {
@@ -83,6 +83,28 @@ describe("/api/carrier-quote-runner", () => {
     expect(JSON.stringify(res.state.json)).toContain("raw credentials");
   });
 
+  it("rejects credential references and requires a signed-in browser session", async () => {
+    const handler = (await import("../carrier-quote-runner")).default;
+    const res = mockRes();
+    await handler(
+      {
+        method: "POST",
+        body: {
+          ...validPayload,
+          carrier: {
+            ...validPayload.carrier,
+            browserSessionReference: undefined,
+            credentialReference: "secret://legacy/carrier-login",
+          },
+        },
+      },
+      res
+    );
+    expect(res.state.status).toBe(400);
+    expect(JSON.stringify(res.state.json)).toContain("carrier.credentialReference is not accepted");
+    expect(JSON.stringify(res.state.json)).toContain("carrier.browserSessionReference is required");
+  });
+
   it("fails closed when live automation is disabled", async () => {
     const handler = (await import("../carrier-quote-runner")).default;
     const res = mockRes();
@@ -115,7 +137,8 @@ describe("/api/carrier-quote-runner", () => {
     expect(url).toBe("https://worker.example.com/run");
     expect(init.headers.Authorization).toBe("Bearer worker-secret-token");
     const forwarded = JSON.parse(init.body);
-    expect(forwarded.carrier.credentialReference).toBe(validPayload.carrier.credentialReference);
+    expect(forwarded.carrier.browserSessionReference).toBe(validPayload.carrier.browserSessionReference);
+    expect(forwarded.carrier.credentialReference).toBeUndefined();
     expect(JSON.stringify(forwarded)).not.toContain("worker-secret-token");
     expect(JSON.stringify(forwarded)).not.toContain("never-send-this");
     expect((res.state.json as { result: { quoteNumber: string } }).result.quoteNumber).toBe("QT-PROG-10001");

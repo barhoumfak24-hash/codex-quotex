@@ -1,7 +1,7 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "vite",
-  "buildCommand": "pnpm build",
+  "buildCommand": "pnpm run production:check && pnpm build",
   "outputDirectory": "dist",
   "installCommand": "corepack prepare pnpm@11.0.7 --activate && pnpm install --frozen-lockfile && pnpm -C server run prisma:generate && pnpm -C server run build",
   "devCommand": "pnpm dev",
@@ -17,6 +17,11 @@
   },
   "rewrites": [
     { "source": "/api/app/:path*", "destination": "/api/app?path=:path*" },
+    { "source": "/api/auth/:path*", "destination": "/api/app?path=api/auth/:path*" },
+    { "source": "/api/website/:path*", "destination": "/api/app?path=api/website/:path*" },
+    { "source": "/api/communications/:path*", "destination": "/api/app?path=api/communications/:path*" },
+    { "source": "/api/signing-packets/:path*", "destination": "/api/app?path=api/signing-packets/:path*" },
+    { "source": "/api/state/:path*", "destination": "/api/app?path=api/state/:path*" },
     { "source": "/((?!api/.*).*)", "destination": "/index.html" }
   ],
   "headers": [
@@ -26,7 +31,7 @@
         { "key": "X-Content-Type-Options", "value": "nosniff" },
         { "key": "X-Frame-Options", "value": "DENY" },
         { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
-        { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=()" }
+        { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=(self)" }
       ]
     },
     {

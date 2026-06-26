@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // =====================================================================
 // Commercial quoting flow. AI infers line of business from the
@@ -16,6 +16,7 @@ beforeEach(async () => {
   db.reset();
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   if (typeof window !== "undefined" && window.localStorage) window.localStorage.clear();
 });
 
@@ -56,6 +57,39 @@ describe("commercial quoting session", () => {
     "base-annual-revenue": "2400000",
   };
 
+  it("opens the most recently worked quote session for a customer", async () => {
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const customer = api.customers.list(agency.id)[0];
+    const olderWorkedSession = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: agent.id,
+      assetType: "other",
+      contactName: "Coastal Logistics LLC",
+      estimatedValue: 2_500_000,
+      lineOfBusiness: "commercial",
+    });
+    await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: agent.id,
+      assetType: "coastal_home",
+      contactName: customer.name,
+      estimatedValue: 1_000_000,
+      lineOfBusiness: "personal",
+    });
+
+    db.update("quotingSessions", olderWorkedSession.id, {
+      commercialApplicationSentAt: "2099-01-01T00:00:00.000Z",
+      updatedAt: "2099-01-01T00:00:00.000Z",
+    });
+
+    expect(api.quoting.getForCustomer(customer.id)?.id).toBe(olderWorkedSession.id);
+  });
+
   it("prepares the structured commercial questionnaire after the ACORD fill audit", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
@@ -78,6 +112,313 @@ describe("commercial quoting session", () => {
     const questions = prepared.questionnaireQuestions ?? [];
     expect(questions.every((q) => !q.carrierId)).toBe(true);
     expect(new Set(questions.map((q) => q.section))).toEqual(new Set(["Base business intake"]));
+  });
+
+  it("prefills commercial questionnaire answers from verified AI/public data while keeping them editable", async () => {
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const customer = api.customers.list(agency.id)[0];
+    const initial = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: agent.id,
+      assetType: "other",
+      contactName: "Coastal Logistics LLC",
+      estimatedValue: 2_500_000,
+      lineOfBusiness: "commercial",
+    });
+
+    db.update("quotingSessions", initial.id, {
+      publicFields: {
+        "Legal business name (as registered)": "Coastal Logistics LLC",
+        "Operating states": "FL, GA",
+      },
+      publicFieldEvidence: {
+        "Legal business name (as registered)": {
+          fieldKey: "Legal business name (as registered)",
+          sourceKind: "government_api",
+          sourceLabel: "Verified state business registry",
+          confidence: 0.96,
+          verified: true,
+          allowDocumentAutofill: true,
+          collectedAt: "2026-06-25T12:00:00.000Z",
+        },
+        "Operating states": {
+          fieldKey: "Operating states",
+          sourceKind: "government_api",
+          sourceLabel: "Verified state business registry",
+          confidence: 0.92,
+          verified: true,
+          allowDocumentAutofill: true,
+          collectedAt: "2026-06-25T12:00:00.000Z",
+        },
+      },
+    });
+
+    const prepared = api.quoting.prepareCommercialQuestionnaire(initial.id)!;
+    const legalName = prepared.questionnaireQuestions?.find((question) =>
+      /legal business name/i.test(question.label)
+    );
+    const operatingStates = prepared.questionnaireQuestions?.find((question) =>
+      /operating states/i.test(question.label)
+    );
+
+    expect(legalName).toBeTruthy();
+    expect(operatingStates).toBeTruthy();
+    expect(prepared.questionnaireResponses?.[legalName!.id]).toBe("Coastal Logistics LLC");
+    expect(prepared.questionnaireResponses?.[operatingStates!.id]).toBe("FL, GA");
+    expect(prepared.questionnaireResponseMeta?.[legalName!.id]?.updatedByRole).toBe("ai");
+    expect(prepared.missingFields).not.toContain(legalName!.label);
+    expect(prepared.missingFields).not.toContain(operatingStates!.label);
+  });
+
+  it("prefills source-backed web answers for review without writing them into ACORD until confirmed", async () => {
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const customer = api.customers.list(agency.id)[0];
+    const template = api.documents
+      .listTemplates(agency.id)
+      .find((document) => document.documentName?.startsWith("ACORD 125"));
+    expect(template).toBeTruthy();
+
+    const initial = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: agent.id,
+      assetType: "other",
+      contactName: "Coastal Logistics LLC",
+      estimatedValue: 2_500_000,
+      lineOfBusiness: "commercial",
+      selectedAcordTemplateIds: [template!.id],
+    });
+
+    db.update("quotingSessions", initial.id, {
+      publicFields: {
+        "Business operations summary (2-3 sentences)":
+          "Coastal logistics and private property management services.",
+      },
+      publicFieldEvidence: {
+        "Business operations summary (2-3 sentences)": {
+          fieldKey: "Business operations summary (2-3 sentences)",
+          sourceKind: "public_web",
+          sourceLabel: "Company website",
+          confidence: 0.72,
+          verified: false,
+          allowDocumentAutofill: false,
+          collectedAt: "2026-06-25T12:00:00.000Z",
+        },
+      },
+    });
+
+    const prepared = api.quoting.prepareCommercialQuestionnaire(initial.id)!;
+    const operationsQuestion = prepared.questionnaireQuestions?.find((question) =>
+      /business operations/i.test(question.label)
+    );
+    expect(operationsQuestion).toBeTruthy();
+    expect(prepared.questionnaireResponses?.[operationsQuestion!.id]).toBe(
+      "Coastal logistics and private property management services."
+    );
+    expect(prepared.questionnaireResponseMeta?.[operationsQuestion!.id]?.updatedByRole).toBe("ai");
+
+    const aiOnlyDoc = api.documents
+      .listByTenant(agency.id)
+      .find(
+        (document) =>
+          document.quoteRequestId === initial.id &&
+          document.type === "completed_acord_application" &&
+          document.templateFields?.["Source ACORD template ID"] === template!.id
+      );
+    expect(
+      Object.values(aiOnlyDoc?.templateFields ?? {}).some(
+        (value) => value === "Coastal logistics and private property management services."
+      )
+    ).toBe(false);
+
+    const confirmed = api.quoting.saveQuestionnaireResponses(
+      initial.id,
+      { [operationsQuestion!.id]: "Coastal logistics and private property management services." },
+      { id: agent.id, name: agent.name, role: "agent" }
+    );
+    const confirmedDoc = api.documents
+      .listByTenant(agency.id)
+      .find(
+        (document) =>
+          document.quoteRequestId === initial.id &&
+          document.type === "completed_acord_application" &&
+          document.templateFields?.["Source ACORD template ID"] === template!.id
+      );
+    expect(confirmed?.questionnaireResponseMeta?.[operationsQuestion!.id]?.updatedByRole).toBe(
+      "agent"
+    );
+    expect(
+      Object.values(confirmedDoc?.templateFields ?? {}).some(
+        (value) => value === "Coastal logistics and private property management services."
+      )
+    ).toBe(true);
+  });
+
+  it("stores multiple OpenAI research mappings in editable questionnaire boxes without address/name bleed", async () => {
+    vi.resetModules();
+    const ai = await import("../ai");
+    const evidence = (fieldKey: string, sourceKind: "public_web" | "public_geocoder" = "public_web") => ({
+      fieldKey,
+      sourceKind,
+      sourceLabel: sourceKind === "public_geocoder" ? "Verified public geocoder" : "OpenAI web research",
+      confidence: sourceKind === "public_geocoder" ? 0.91 : 0.76,
+      verified: sourceKind === "public_geocoder",
+      allowDocumentAutofill: false,
+      collectedAt: "2026-06-25T12:00:00.000Z",
+      notes: "Source-backed answer for staff review only.",
+    });
+    const mapSpy = vi.spyOn(ai, "aiMapAcordFields").mockImplementation(async (input) => {
+      const fieldId = (pattern: RegExp) =>
+        input.fields.find((field) => pattern.test(field.label))?.id;
+      const industryId = fieldId(/primary industry|naics/i);
+      const operationsId = fieldId(/business operations/i);
+      const propertyId = fieldId(/property location/i);
+      return {
+        fields: {
+          "Industry code": "Real estate investment and property management / NAICS 531390",
+          Operations: "Private property management and coastal portfolio administration.",
+          "Named insured": "Coastal Logistics LLC",
+          "Risk address": "901 McDonald Dr, Northville, MI 48167",
+        },
+        publicFieldEvidence: {
+          "Industry code": evidence("Industry code"),
+          Operations: evidence("Operations"),
+          "Named insured": evidence("Named insured"),
+          "Risk address": evidence("Risk address", "public_geocoder"),
+        },
+        mappings: [
+          {
+            targetId: industryId,
+            targetField: "Industry code",
+            value: "Real estate investment and property management / NAICS 531390",
+            sourceLabel: "OpenAI web research",
+            sourceKind: "public_web",
+            confidence: 0.76,
+            verified: false,
+            rationale: "Public business profile.",
+          },
+          {
+            targetId: operationsId,
+            targetField: "Operations",
+            value: "Private property management and coastal portfolio administration.",
+            sourceLabel: "OpenAI web research",
+            sourceKind: "public_web",
+            confidence: 0.76,
+            verified: false,
+            rationale: "Public business profile.",
+          },
+          {
+            targetId: propertyId,
+            targetField: "Named insured",
+            value: "Coastal Logistics LLC",
+            sourceLabel: "OpenAI web research",
+            sourceKind: "public_web",
+            confidence: 0.76,
+            verified: false,
+            rationale: "Deliberate mismatch that must not fill the property question.",
+          },
+          {
+            targetId: propertyId,
+            targetField: "Risk address",
+            value: "901 McDonald Dr, Northville, MI 48167",
+            sourceLabel: "Verified public geocoder",
+            sourceKind: "public_geocoder",
+            confidence: 0.91,
+            verified: true,
+            rationale: "Verified address suggestion.",
+          },
+        ],
+        missingFields: [],
+        webSources: [],
+        summary: "Mapped multiple review-only questionnaire fields.",
+        confidence: 0.76,
+      };
+    });
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    db.reset();
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const prospect = api.prospects.listByTenant(agency.id)[0];
+    const template = api.documents
+      .listTemplates(agency.id)
+      .find((document) => document.documentName?.startsWith("ACORD 140"));
+    expect(template).toBeTruthy();
+
+    const initial = await api.quoting.startSession({
+      tenantId: agency.id,
+      prospectId: prospect.id,
+      createdById: agent.id,
+      assetType: "other",
+      contactName: "Coastal Logistics LLC",
+      estimatedValue: 2_500_000,
+      lineOfBusiness: "commercial",
+      selectedAcordTemplateIds: [template!.id],
+    });
+
+    const mapped = await api.quoting.runAcordAiMapping(initial.id);
+    const prepared = api.quoting.prepareCommercialQuestionnaire(initial.id)!;
+    const industryQuestion = prepared.questionnaireQuestions?.find((question) =>
+      /primary industry|naics/i.test(question.label)
+    );
+    const operationsQuestion = prepared.questionnaireQuestions?.find((question) =>
+      /business operations/i.test(question.label)
+    );
+    const propertyQuestion = prepared.questionnaireQuestions?.find((question) =>
+      /property location/i.test(question.label)
+    );
+    expect(mapSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        intent: "questionnaire_prefill",
+        fields: expect.arrayContaining([
+          expect.objectContaining({ label: expect.stringMatching(/property location/i) }),
+        ]),
+      })
+    );
+    expect(industryQuestion).toBeTruthy();
+    expect(operationsQuestion).toBeTruthy();
+    expect(propertyQuestion).toBeTruthy();
+    expect(mapped?.questionnaireResponses?.[industryQuestion!.id]).toBe(
+      "Real estate investment and property management / NAICS 531390"
+    );
+    expect(prepared.questionnaireResponses?.[industryQuestion!.id]).toBe(
+      "Real estate investment and property management / NAICS 531390"
+    );
+    expect(prepared.questionnaireResponses?.[operationsQuestion!.id]).toBe(
+      "Private property management and coastal portfolio administration."
+    );
+    expect(prepared.questionnaireResponses?.[propertyQuestion!.id]).toBe(
+      "901 McDonald Dr, Northville, MI 48167"
+    );
+    expect(prepared.questionnaireResponses?.[propertyQuestion!.id]).not.toBe("Coastal Logistics LLC");
+    expect(Object.keys(prepared.questionnaireResponses ?? {}).length).toBeGreaterThanOrEqual(3);
+    expect(prepared.questionnaireResponseMeta?.[industryQuestion!.id]?.updatedByRole).toBe("ai");
+
+    const aiOnlyDoc = api.documents
+      .listByTenant(agency.id)
+      .find(
+        (document) =>
+          document.quoteRequestId === initial.id &&
+          document.type === "completed_acord_application" &&
+          document.templateFields?.["Source ACORD template ID"] === template!.id
+      );
+    expect(
+      Object.values(aiOnlyDoc?.templateFields ?? {}).some(
+        (value) => value === "Real estate investment and property management / NAICS 531390"
+      )
+    ).toBe(false);
+    expect(
+      Object.values(aiOnlyDoc?.templateFields ?? {}).some(
+        (value) => value === "901 McDonald Dr, Northville, MI 48167"
+      )
+    ).toBe(false);
   });
 
   it("commercial sessions can start from selected ACORD templates and ask only for remaining form fields", async () => {
@@ -137,9 +478,9 @@ describe("commercial quoting session", () => {
     expect(acordQuestions.every((q) => q.acordFormNumber && q.acordFieldKey)).toBe(true);
     expect(acordQuestions.every((q) => (q.acordFieldLabels ?? []).length > 0)).toBe(true);
     expect(new Set(acordQuestions.map((q) => q.acordFormNumber))).toEqual(
-      new Set(["126", "140"])
+      new Set(["125", "126", "140"])
     );
-    expect(acordQuestions.some((q) => q.acordFormNumber === "125")).toBe(false);
+    expect(acordQuestions.some((q) => q.acordFormNumber === "125")).toBe(true);
     expect(acordQuestions.some((q) => q.acordFormNumber === "126")).toBe(true);
     expect(acordQuestions.some((q) => q.acordFormNumber === "140")).toBe(true);
 
@@ -274,16 +615,16 @@ describe("commercial quoting session", () => {
           question.sourceDocumentId === acord36!.id &&
           /policy number|effective date|expiration date/i.test(question.label)
       )
-    ).toBe(false);
+    ).toBe(true);
     expect(
       questions.some(
         (question) =>
           question.sourceDocumentId === acord125!.id &&
-          /legal business name|primary contact|mailing address|business operations/i.test(
+          /legal business name, entity type, FEIN, website, and years in business/i.test(
             question.label
           )
       )
-    ).toBe(false);
+    ).toBe(true);
 
     const completedDocuments = api.documents
       .listByTenant(agency.id)
@@ -304,6 +645,55 @@ describe("commercial quoting session", () => {
     expect(completedFields["Business legal name"]).toBe("Whitford Coastal Holdings LLC");
     expect(completedFields["Policy number"]).toBe(policy.policyNumber);
     expect(completedFields["Mailing address"]).toBe("100 Ocean Drive, Palm Coast, FL 32137");
+  });
+
+  it("does not put property addresses or person names into unrelated ACORD questionnaire fields", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const customer = api.customers.list(agency.id)[0];
+    const acord125 = api.documents
+      .listTemplates(agency.id)
+      .find((d) => d.documentName?.startsWith("ACORD 125"));
+
+    expect(acord125).toBeTruthy();
+
+    const session = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: agent.id,
+      assetType: "other",
+      contactName: "Alexandra Whitford",
+      address: "123 Main St, Northville, MI 48167",
+      estimatedValue: 1_000_000,
+      assetDetails: {
+        propertyAddress: "123 Main St, Northville, MI 48167",
+      },
+      lineOfBusiness: "commercial",
+      selectedAcordTemplateIds: [acord125!.id],
+    });
+
+    const prepared = api.quoting.prepareCommercialQuestionnaire(session.id)!;
+    const responses = prepared.questionnaireResponses ?? {};
+    const questions = prepared.questionnaireQuestions ?? [];
+    const legalName = questions.find((question) =>
+      /legal business name \(as registered\)/i.test(question.label)
+    );
+    const operations = questions.find((question) =>
+      /business operations, products, services, and locations/i.test(question.label)
+    );
+    const exposures = questions.find((question) =>
+      /annual revenue, payroll, employee count, locations, and operating states/i.test(
+        question.label
+      )
+    );
+
+    expect(legalName).toBeTruthy();
+    expect(operations).toBeTruthy();
+    expect(exposures).toBeTruthy();
+    expect(responses[legalName!.id]).toBeUndefined();
+    expect(responses[operations!.id]).toBeUndefined();
+    expect(responses[exposures!.id]).toBeUndefined();
   });
 
   it("has tailored ACORD questions for every bundled ACORD template", async () => {
@@ -813,5 +1203,103 @@ describe("commercial quoting session", () => {
     expect(readyNotification?.assignedToId).toBe(agent.id);
     expect(readyNotification?.title).toContain("quote options ready");
     expect(api.aiNotifications.acknowledge(readyNotification!.id, agent.id)).toBeNull();
+  });
+
+  it("does not create a new supplemental round when an incomplete supplemental is sent anyway", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const customer = api.customers.list(agency.id)[0];
+    const session = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: agent.id,
+      assetType: "other",
+      contactName: "Acme LLC",
+      estimatedValue: 1_500_000,
+      lineOfBusiness: "commercial",
+    });
+
+    const submitted = api.quoting.submitQuestionnaireResponses(session.id, {
+      "base-legal-business-name-as-registered": "Acme Logistics LLC",
+      "base-federal-ein": "12-3456789",
+    });
+    const originalSecondRound = (submitted?.questionnaireQuestions ?? []).filter(
+      (question) => question.round === "second_round"
+    );
+    expect(submitted?.status).toBe("awaiting_reply");
+    expect(originalSecondRound.length).toBeGreaterThan(0);
+
+    const final = api.quoting.submitQuestionnaireResponses(
+      session.id,
+      {},
+      { id: agent.id, name: agent.name, role: "agent" }
+    );
+    const finalSecondRound = (final?.questionnaireQuestions ?? []).filter(
+      (question) => question.round === "second_round"
+    );
+
+    expect(final?.status).toBe("complete");
+    expect(final?.commercialSupplementalsCompletedAt).toBeTruthy();
+    expect(finalSecondRound).toHaveLength(originalSecondRound.length);
+    expect(
+      (final?.commercialCarrierSubmissions ?? []).some(
+        (submission) => submission.status === "needs_client_info"
+      )
+    ).toBe(false);
+    expect(final?.quotes.length).toBeGreaterThan(0);
+  });
+
+  it("prefills commercial profile business name and contact details without using numeric placeholders", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const customer = api.customers.list(agency.id)[0];
+    api.customers.update(customer.id, {
+      lineOfBusiness: "commercial",
+      businessName: "Coastal Logistics LLC",
+      name: "Alexandra Whitford",
+      email: "alexandra@coastallogistics.example",
+      phone: "517-294-2671",
+    });
+    const template = api.documents
+      .listTemplates(agency.id)
+      .find((document) => document.documentName?.startsWith("ACORD 125"));
+    expect(template).toBeTruthy();
+
+    const session = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: agent.id,
+      assetType: "other",
+      contactName: "2345",
+      estimatedValue: 2_500_000,
+      lineOfBusiness: "commercial",
+      selectedAcordTemplateIds: [template!.id],
+    });
+    const prepared = api.quoting.prepareCommercialQuestionnaire(session.id)!;
+    const legalName = prepared.questionnaireQuestions?.find((question) =>
+      /legal business name/i.test(question.label)
+    );
+    const contactInfo = prepared.questionnaireQuestions?.find((question) =>
+      question.id === "contact_information" || /primary contact.*phone.*email/i.test(question.label)
+    );
+    const acordBusinessIdentity = prepared.questionnaireQuestions?.find((question) =>
+      /ACORD 125: Legal business name, entity type/i.test(question.label)
+    );
+
+    expect(legalName).toBeTruthy();
+    expect(contactInfo).toBeTruthy();
+    expect(acordBusinessIdentity).toBeTruthy();
+    expect(prepared.questionnaireResponses?.[legalName!.id]).toBe("Coastal Logistics LLC");
+    expect(prepared.questionnaireResponses?.[legalName!.id]).not.toBe("2345");
+    expect(prepared.questionnaireResponses?.[acordBusinessIdentity!.id]).toContain(
+      "Legal business name: Coastal Logistics LLC"
+    );
+    expect(prepared.questionnaireResponses?.[contactInfo!.id]).toContain("Alexandra Whitford");
+    expect(prepared.questionnaireResponses?.[contactInfo!.id]).toContain("517-294-2671");
+    expect(prepared.questionnaireResponses?.[contactInfo!.id]).toContain(
+      "alexandra@coastallogistics.example"
+    );
   });
 });

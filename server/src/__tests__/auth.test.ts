@@ -1,4 +1,5 @@
 import type { Request, Response } from "express";
+import { pbkdf2Sync } from "node:crypto";
 import jwt from "jsonwebtoken";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -6,6 +7,7 @@ import {
   assertRequestTenantMatchesAuth,
   requireAuth,
 } from "../middleware/auth.js";
+import { issueSessionJwt, verifyPasswordHashForLogin as verifyRoutePasswordHash } from "../routes/auth.js";
 
 type MockRequest = Partial<Request> & {
   auth?: Request["auth"];
@@ -193,5 +195,44 @@ describe("server auth middleware", () => {
 
     expect(ok).toBe(true);
     expect(res.state.status).toBe(200);
+  });
+});
+
+describe("server auth login helpers", () => {
+  it("verifies PBKDF2 password hashes and rejects plain text", () => {
+    const salt = "test-login-salt";
+    const expected = pbkdf2Sync("correct horse battery staple", salt, 150_000, 32, "sha256").toString("hex");
+    const encoded = `pbkdf2$sha256$150000$${salt}$${expected}`;
+
+    expect(verifyRoutePasswordHash("correct horse battery staple", encoded)).toBe(true);
+    expect(verifyRoutePasswordHash("wrong", encoded)).toBe(false);
+    expect(verifyRoutePasswordHash("correct horse battery staple", "correct horse battery staple")).toBe(false);
+  });
+
+  it("issues a JWT accepted by production auth middleware", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("JWT_ISSUER", "quotex");
+    vi.stubEnv("JWT_AUDIENCE", "quotex-api");
+    const token = issueSessionJwt({
+      userId: "user_login",
+      role: "manager",
+      tenantId: "tenant_login",
+      branchId: "branch_1",
+      permissions: ["documents:read"],
+    });
+    const req = mockReq({ authorization: `Bearer ${token}` });
+    const res = mockRes();
+    const next = vi.fn();
+
+    requireAuth(req as Request, res as unknown as Response, next);
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(req.auth).toMatchObject({
+      userId: "user_login",
+      role: "manager",
+      tenantId: "tenant_login",
+      branchId: "branch_1",
+      permissions: ["documents:read"],
+    });
   });
 });

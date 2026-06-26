@@ -40,7 +40,7 @@ export interface CarrierQuoteProviderRequest {
   portalAutomationPlan?: {
     entryUrl: string;
     surface: "agent_portal" | "customer_portal";
-    credentialReference?: string;
+    browserSessionReference?: string;
     mfaMode?: NonNullable<Carrier["quotingAutomation"]>["mfaMode"];
     parallelGroupKey: string;
   };
@@ -112,13 +112,14 @@ export function getCarrierQuoteProviderReadiness(
 
   if (provider === "carrier_portal_automation") {
     const automationBridge = readClientEnv("VITE_QUOTEX_CARRIER_AUTOMATION_BRIDGE_URL");
+    const browserSessionReference = readClientEnv("VITE_QUOTEX_CARRIER_BROWSER_SESSION_REFERENCE");
     if (!portalUrl) blockingReasons.push("missing carrier portal URL");
     if (portalUrl && !hasPortalUrl) blockingReasons.push("carrier portal URL must be HTTPS");
-    if (!carrier.quotingAutomation?.credentialReference) {
-      blockingReasons.push("encrypted carrier credentials are not configured");
-    }
     if (!automationBridge) {
       blockingReasons.push("server-side carrier automation worker is not configured");
+    }
+    if (automationBridge && !browserSessionReference) {
+      blockingReasons.push("agent must be signed into the carrier portal in their browser before the runner can access it");
     }
     if (automationStatus === "not_configured") blockingReasons.push("carrier portal automation not configured");
     if (automationStatus === "configured") blockingReasons.push("carrier portal automation has not passed a live test");
@@ -184,10 +185,11 @@ export function buildCarrierQuoteProviderRequest(
       carrier.quotingAutomation?.customerPortalUrl?.trim() ||
       carrier.agentPortalUrl?.trim();
     if (entryUrl) {
+      const browserSessionReference = readClientEnv("VITE_QUOTEX_CARRIER_BROWSER_SESSION_REFERENCE");
       payload.portalAutomationPlan = {
         entryUrl,
         surface: carrier.quotingAutomation?.agentPortalUrl || carrier.agentPortalUrl ? "agent_portal" : "customer_portal",
-        credentialReference: carrier.quotingAutomation?.credentialReference,
+        browserSessionReference,
         mfaMode: carrier.quotingAutomation?.mfaMode ?? "staff_prompt",
         parallelGroupKey: `parallel:${session.id}:${lineOfBusiness}`,
       };
@@ -213,7 +215,7 @@ function providerMessages(
     return [
       readiness.liveReady
         ? `Queued AI carrier portal runner job ${request.requestId} for ${request.portalAutomationPlan?.surface === "customer_portal" ? "customer quote portal" : "agent quote portal"} submission.`
-        : `Prepared AI carrier portal automation job ${request.requestId}; production run is blocked until the server worker, credentials, and live carrier test are complete.`,
+        : `Prepared AI carrier portal automation job ${request.requestId}; production run is blocked until the server worker, signed-in browser session, and live carrier test are complete.`,
       request.portalAutomationPlan
         ? `Automation entry point: ${request.portalAutomationPlan.entryUrl}. Jobs sharing ${request.portalAutomationPlan.parallelGroupKey} run in parallel for selected carriers.`
         : "No portal automation entry point could be prepared.",
@@ -257,11 +259,12 @@ export function runCarrierQuoteProvider(input: CarrierQuoteProviderRunInput): Ca
           baseQuote: base,
         })
       : undefined;
-  const runnerPremium = runnerTrace?.extractedQuote?.premium;
+  const liveRunnerQuote = runnerTrace?.mode === "live_worker" && runnerTrace.status === "completed";
+  const runnerPremium = liveRunnerQuote ? runnerTrace?.extractedQuote?.premium : undefined;
   const runnerScoreLift =
-    runnerTrace?.status === "completed" ? 0.04 : runnerTrace?.status === "queued" ? 0.03 : 0;
+    liveRunnerQuote ? 0.04 : runnerTrace?.status === "queued" ? 0.02 : 0;
   const runnerConfidenceLift =
-    runnerTrace?.status === "completed" ? 0.03 : runnerTrace?.status === "queued" ? 0.02 : 0;
+    liveRunnerQuote ? 0.03 : runnerTrace?.status === "queued" ? 0.01 : 0;
 
   const providerSuffix =
     readiness.quoteApiStatus === "connected"
@@ -294,7 +297,7 @@ export function runCarrierQuoteProvider(input: CarrierQuoteProviderRunInput): Ca
     score: Math.min(1, base.score + runnerScoreLift),
     apiStatus: readiness.quoteApiStatus,
     fitReason: `${base.fitReason} - ${
-      runnerTrace?.extractedQuote ? "carrier portal quote imported" : providerSuffix
+      liveRunnerQuote ? "carrier portal quote imported" : providerSuffix
     }`,
     providerTrace: {
       provider: readiness.provider,

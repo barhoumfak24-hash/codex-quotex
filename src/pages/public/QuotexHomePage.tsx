@@ -64,41 +64,6 @@ const EMPTY_DEMO_LEAD_FORM: DemoLeadForm = {
   marketingOptIn: true,
 };
 
-const DEMO_ACCESS_CHOICES = [
-  {
-    id: "software",
-    icon: <MonitorPlay className="h-5 w-5" />,
-    label: "Software workspace walkthrough",
-    body: "Open the agency operating system with clients, quote flows, policies, billing, claims, marketing, and activity center.",
-    to: "/contact",
-    cta: "Request access",
-  },
-  {
-    id: "website",
-    icon: <Globe2 className="h-5 w-5" />,
-    label: "Agency website walkthrough",
-    body: "See the branded agency website path for quote intake, client sign-in, service pages, and customer contact.",
-    to: "/contact",
-    cta: "Request access",
-  },
-  {
-    id: "app",
-    icon: <Smartphone className="h-5 w-5" />,
-    label: "Quotex app walkthrough",
-    body: "Preview the client mobile app experience for portal access, quotes, documents, claims, billing, and agency contact.",
-    to: "/contact",
-    cta: "Request access",
-  },
-  {
-    id: "plan",
-    icon: <ShieldCheck className="h-5 w-5" />,
-    label: "Build monthly plan",
-    body: "Use the plan builder to select users, website/app add-ons, term length, contract documents, and payment flow.",
-    to: "/checkout",
-    cta: "Build my plan",
-  },
-];
-
 const EXAMPLE_ALBUMS = [
   {
     id: "software",
@@ -373,6 +338,13 @@ export function QuotexHomePage() {
     openDemoLead(`${publicPreviewLabel(videoId)} walkthrough`);
   }
 
+  function resolveDemoTarget(interest: string): { kind: "album" | "video"; id: string } {
+    const clean = interest.trim().toLowerCase();
+    if (clean.includes("website")) return { kind: "video", id: "what-website-does" };
+    if (clean.includes("app")) return { kind: "video", id: "what-app-does" };
+    return { kind: "album", id: "software" };
+  }
+
   function closePublicPreview() {
     setActiveVideoId(null);
     setPreviewPlaying(false);
@@ -405,6 +377,7 @@ export function QuotexHomePage() {
 
   function submitDemoLead(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const interest = demoLeadForm.interest.trim() || "Full Quotex walkthrough";
     api.demoLeads.create({
       firstName: demoLeadForm.firstName.trim(),
       lastName: demoLeadForm.lastName.trim(),
@@ -413,12 +386,24 @@ export function QuotexHomePage() {
       role: demoLeadForm.role.trim(),
       staffSize: demoLeadForm.staffSize.trim(),
       phone: demoLeadForm.phone.trim() || undefined,
-      interest: demoLeadForm.interest.trim() || "Full Quotex walkthrough",
+      interest,
       notes: demoLeadForm.notes.trim() || undefined,
       marketingOptIn: demoLeadForm.marketingOptIn,
       source: "walkthrough_request",
     });
-    setDemoLeadSubmitted(true);
+    const target = resolveDemoTarget(interest);
+    setDemoLeadOpen(false);
+    setDemoLeadSubmitted(false);
+    if (target.kind === "video") {
+      setActiveAlbumId(null);
+      setActiveVideoId(target.id);
+      setActivePreviewChapterIndex(0);
+      setActivePreviewProgress(0);
+      setPreviewPlaying(false);
+    } else {
+      setActiveVideoId(null);
+      setActiveAlbumId(target.id);
+    }
   }
 
   return (
@@ -525,8 +510,8 @@ export function QuotexHomePage() {
                 What Quotex does.
               </h2>
               <p className="mt-3 max-w-2xl text-sm leading-relaxed text-white/62">
-                Each walkthrough request is routed through a guided form so your team captures qualified
-                agencies before opening the live environment.
+                Each demo starts after a short lead gate so your team captures qualified agencies
+                before opening the right product view.
               </p>
             </div>
           </div>
@@ -539,18 +524,28 @@ export function QuotexHomePage() {
               >
                 <div className="w-full">
                   <div className="relative aspect-video overflow-hidden bg-black">
-                    <ProductSnippet snippet={publicVideoSnippet(video.id, 0)} />
+                    {publicAlbumId(video.id) === "software" ? (
+                      <img
+                        src="/quotex-software-screens/dashboard.png"
+                        alt=""
+                        aria-hidden="true"
+                        className="h-full w-full object-cover object-top"
+                        loading="lazy"
+                      />
+                    ) : (
+                      <ProductSnippet snippet={publicVideoSnippet(video.id, 0)} />
+                    )}
                     <div className="absolute inset-0 bg-black/45" />
                     <div className="absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-full border border-white/15 bg-black/45 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-white/78 backdrop-blur">
                       <span className="text-gold-200">{publicVideoIcon(video.id)}</span>
                       {publicPreviewLabel(video.id)}
                     </div>
                     <span className="absolute bottom-3 right-3 rounded-full bg-black/55 px-2.5 py-1 text-[11px] font-semibold text-white/80">
-                      {video.duration}
+                      {publicAlbumId(video.id) === "software" ? "Screenshots" : video.duration}
                     </span>
                     <div className="absolute inset-0 grid place-items-center">
                       <span className="rounded-full border border-white/20 bg-black/58 px-4 py-2 text-sm font-semibold text-white backdrop-blur">
-                        Walkthrough available by request
+                        {publicAlbumId(video.id) === "software" ? "Lead gate opens screenshots" : "Lead gate opens demo"}
                       </span>
                     </div>
                   </div>
@@ -565,7 +560,7 @@ export function QuotexHomePage() {
                     <PublicPreviewAction
                       videoId={video.id}
                       onViewDemo={() => openDemoLead(`${publicPreviewLabel(video.id)} walkthrough`)}
-                      onViewPhotos={() => setActiveAlbumId(publicAlbumId(video.id))}
+                      onViewPhotos={() => openDemoLead("Software workspace walkthrough")}
                     />
                   </div>
                 </div>
@@ -587,7 +582,7 @@ export function QuotexHomePage() {
               type="button"
               className="absolute right-4 top-4 z-10 grid h-10 w-10 place-items-center rounded-md border border-black/10 bg-white/80 text-ink-700 transition hover:bg-white hover:text-black"
               onClick={closeDemoLead}
-              aria-label="Close walkthrough request"
+              aria-label="Close demo form"
             >
               <X className="h-4 w-4" />
             </button>
@@ -608,7 +603,7 @@ export function QuotexHomePage() {
                     See why modern insurance agencies use Quotex.
                   </h2>
                   <p className="mt-5 text-base leading-relaxed text-white/70">
-                    Tell us who you are, then we will route the right onboarding and access path.
+                    Tell us who you are, then the selected demo opens immediately.
                   </p>
                 </div>
                 <div className="rounded-xl border border-white/12 bg-white/[0.06] p-4 shadow-[0_22px_60px_rgba(0,0,0,0.28)]">
@@ -640,7 +635,7 @@ export function QuotexHomePage() {
                   See Quotex in action.
                 </h2>
                 <p className="mt-3 text-sm leading-relaxed text-ink-600">
-                  Submit your details and our team will route the right follow-up.
+                  Enter your details once and the selected demo opens right away.
                 </p>
               </div>
 
@@ -652,10 +647,10 @@ export function QuotexHomePage() {
                       Details received
                     </div>
                     <h3 id="quotex-sales-lead-title" className="mt-5 font-display text-4xl leading-tight text-black">
-                      Request received.
+                      Details received.
                     </h3>
                     <p className="mt-3 max-w-2xl text-sm leading-relaxed text-ink-600">
-                      Thanks{demoLeadForm.firstName.trim() ? `, ${demoLeadForm.firstName.trim()}` : ""}. Your request is saved so the team can follow up with the right context.
+                      Thanks{demoLeadForm.firstName.trim() ? `, ${demoLeadForm.firstName.trim()}` : ""}. Your details are saved before opening the selected demo.
                     </p>
                   </div>
 
@@ -680,11 +675,10 @@ export function QuotexHomePage() {
                       Product walkthrough
                     </div>
                     <h2 id="quotex-sales-lead-title" className="mt-2 font-display text-4xl leading-tight text-black">
-                      Book a guided Quotex walkthrough.
+                      View the Quotex demo.
                     </h2>
                     <p className="mt-2 max-w-2xl text-sm leading-relaxed text-ink-600">
-                      Capture the agency details first, then follow up with the right software,
-                      website, and app path.
+                      Enter your details once, then the selected software, website, or app demo opens.
                     </p>
                   </div>
 
@@ -781,10 +775,10 @@ export function QuotexHomePage() {
                   </label>
 
                   <button type="submit" className="btn h-12 w-full bg-black text-base text-white hover:bg-ink-800">
-                    Submit request
+                    View demo
                   </button>
                   <p className="text-center text-[11px] leading-relaxed text-ink-500">
-                    Your request is routed to the sales and onboarding workflow.
+                    Your details are saved as a lead before the demo opens.
                   </p>
                 </form>
               )}
@@ -874,13 +868,6 @@ export function QuotexHomePage() {
                   Build my plan
                   <ArrowRight className="h-4 w-4" />
                 </Link>
-                <button
-                  type="button"
-                  className="btn border-white bg-white text-ink-950 hover:bg-white/90"
-                  onClick={() => openDemoLead(`${publicPreviewLabel(activeVideo.id)} walkthrough`)}
-                >
-                  Request walkthrough
-                </button>
                 <button
                   type="button"
                   className="btn border-white/15 bg-white/[0.08] text-white hover:bg-white/[0.14]"

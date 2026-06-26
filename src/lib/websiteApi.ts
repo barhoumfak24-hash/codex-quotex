@@ -30,43 +30,92 @@ export interface WebsiteLeadSubmitResult {
 }
 
 export async function submitWebsiteLead(input: WebsiteLeadInput): Promise<WebsiteLeadSubmitResult> {
-  const base = apiBaseUrl();
   const fallback = createWebsiteLeadFallback(input);
-  if (!base) {
+  const bases = websiteLeadApiBases();
+  if (bases.length === 0) {
     return { ok: false, error: "api_not_configured", fallback };
   }
 
+  const agencyId = cleanOptional(input.agencyId ?? input.connectionId ?? getConfiguredAgencyId());
+  const connectionId = cleanOptional(input.connectionId ?? input.agencyId ?? getConfiguredAgencyId());
+  const payload = {
+    source: input.source,
+    department: input.department,
+    agencyId,
+    connectionId,
+    name: cleanOptional(input.name),
+    email: cleanOptional(input.email),
+    phone: cleanOptional(input.phone),
+    message: cleanOptional(input.message),
+  };
+
+  let lastResult: WebsiteLeadSubmitResult = { ok: false, error: "api_not_configured", fallback };
+  for (const base of bases) {
+    const result = await postWebsiteLead(base, payload, input.websiteApiKey, fallback);
+    if (result.ok) return result;
+    lastResult = result;
+    if (!shouldRetryWebsiteLead(result)) break;
+  }
+  return lastResult;
+}
+
+function cleanOptional(value: string | null | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function websiteLeadApiBases(): string[] {
+  const bases = [apiBaseUrl(), "/api/app/api"]
+    .map((base) => cleanOptional(base))
+    .filter((base): base is string => Boolean(base));
+  return Array.from(new Set(bases));
+}
+
+async function postWebsiteLead(
+  base: string,
+  payload: {
+    source: WebsiteLeadInput["source"];
+    department: WebsiteLeadInput["department"];
+    agencyId?: string;
+    connectionId?: string;
+    name?: string;
+    email?: string;
+    phone?: string;
+    message?: string;
+  },
+  websiteApiKey: string | undefined,
+  fallback: WebsiteLeadFallback
+): Promise<WebsiteLeadSubmitResult> {
   try {
     const res = await fetch(`${base}/website/prospects`, {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        ...(input.websiteApiKey ? { "x-quotex-website-key": input.websiteApiKey } : {}),
+        ...(websiteApiKey ? { "x-quotex-website-key": websiteApiKey } : {}),
       },
-      body: JSON.stringify({
-        ...input,
-        agencyId: input.agencyId ?? input.connectionId ?? getConfiguredAgencyId(),
-        connectionId: input.connectionId ?? input.agencyId ?? getConfiguredAgencyId(),
-        websiteApiKey: undefined,
-      }),
+      body: JSON.stringify(payload),
     });
-    const payload = (await res.json().catch(() => null)) as
+    const responsePayload = (await res.json().catch(() => null)) as
       | {
           error?: string;
           fallback?: Partial<WebsiteLeadFallback>;
         }
       | null;
-    const responseFallback = normalizeFallback(payload?.fallback) ?? fallback;
+    const responseFallback = normalizeFallback(responsePayload?.fallback) ?? fallback;
     if (res.ok) return { ok: true, status: res.status, fallback: responseFallback };
     return {
       ok: false,
       status: res.status,
-      error: payload?.error ?? `website_lead_failed_${res.status}`,
+      error: responsePayload?.error ?? `website_lead_failed_${res.status}`,
       fallback: responseFallback,
     };
   } catch {
     return { ok: false, error: "network_error", fallback };
   }
+}
+
+function shouldRetryWebsiteLead(result: WebsiteLeadSubmitResult): boolean {
+  return result.error === "network_error" || result.status === 404 || result.status === 405;
 }
 
 function createWebsiteLeadFallback(input: WebsiteLeadInput): WebsiteLeadFallback {

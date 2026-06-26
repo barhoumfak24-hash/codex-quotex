@@ -55,9 +55,9 @@ describe("carrier portal runner", () => {
     expect(progressiveQuote?.providerTrace?.runnerTrace?.surface).toBe("agent_portal");
     expect(progressiveQuote?.providerTrace?.runnerTrace?.mappedFieldCount).toBeGreaterThan(5);
     expect(progressiveQuote?.providerTrace?.runnerTrace?.fieldMappings.some((field) => field.carrierField === "VIN")).toBe(true);
-    expect(progressiveQuote?.providerTrace?.runnerTrace?.validationChecks.some((check) => check.label === "Carrier credential reference" && check.status === "pass")).toBe(true);
+    expect(progressiveQuote?.providerTrace?.runnerTrace?.validationChecks.some((check) => check.label === "Signed-in browser session" && check.status === "warn")).toBe(true);
     expect(progressiveQuote?.providerTrace?.runnerTrace?.extractedQuote?.quoteNumber).toMatch(/^QT-/);
-    expect(progressiveQuote?.fitReason).toContain("carrier portal quote imported");
+    expect(progressiveQuote?.fitReason).toContain("adapter ready");
   });
 
   it("attaches runner traces to commercial carrier portal submissions", async () => {

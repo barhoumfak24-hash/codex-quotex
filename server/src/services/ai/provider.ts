@@ -25,6 +25,8 @@ export type CompleteArgs = {
   reasoningEffort?: "none" | "low" | "medium" | "high" | "xhigh";
   quality?: "fast" | "standard" | "advanced" | "maximum";
   maxOutputTokens?: number;
+  tools?: Array<Record<string, unknown>>;
+  toolChoice?: "auto" | "required" | Record<string, unknown>;
 };
 
 export interface AiProvider {
@@ -281,6 +283,8 @@ async function openaiProvider(): Promise<AiProvider> {
               ...(model.startsWith("gpt-5")
                 ? { reasoning: { effort: qualityReasoningEffort(args.quality, args.reasoningEffort, route.reasoningEffort) } }
                 : {}),
+              ...(args.tools && args.tools.length > 0 ? { tools: args.tools } : {}),
+              ...(args.toolChoice ? { tool_choice: args.toolChoice } : {}),
               max_output_tokens: args.maxOutputTokens ?? 1_200,
               store: false,
             }),
@@ -317,8 +321,19 @@ async function geminiProvider(): Promise<AiProvider> {
 
 let cachedKey = "";
 let cached: AiProvider | null = null;
+function configuredProvider(): "openai" | "anthropic" | "gemini" | "stub" {
+  const explicit = process.env.AI_PROVIDER?.trim().toLowerCase();
+  if (explicit === "openai" || explicit === "anthropic" || explicit === "gemini" || explicit === "stub") {
+    return explicit;
+  }
+  if (process.env.OPENAI_API_KEY?.trim()) return "openai";
+  if (process.env.ANTHROPIC_API_KEY?.trim()) return "anthropic";
+  if (process.env.GEMINI_API_KEY?.trim()) return "gemini";
+  return "stub";
+}
+
 async function pick(): Promise<AiProvider> {
-  const p = (process.env.AI_PROVIDER ?? "stub").toLowerCase();
+  const p = configuredProvider();
   const key = `${p}:${process.env.OPENAI_MODEL ?? ""}:${process.env.OPENAI_REASONING_EFFORT ?? ""}`;
   if (cached && cachedKey === key) return cached;
   cachedKey = key;

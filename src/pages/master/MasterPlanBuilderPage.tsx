@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   ArrowRight,
   CheckCircle2,
@@ -25,6 +25,7 @@ import {
   type CommunicationResult,
 } from "@/lib/communications";
 import { fmt } from "@/lib/format";
+import { provisionAgencyForCompletedSale } from "@/lib/softwareSaleProvisioning";
 import {
   COMPANY_APP_MONTHLY_ADD_ON_USD,
   COMPANY_WEBSITE_AND_APP_BUNDLE_DISCOUNT_USD,
@@ -42,6 +43,8 @@ import {
   emptyRemoteCheckoutSignatures,
   encodeRemotePacketPayload,
   readRemoteSigningPacket,
+  readSharedRemoteSigningPacket,
+  writeSharedRemoteSigningPacket,
   writeRemoteSigningPacket,
   type PlanTermMonths,
   type RemoteCheckoutPacket,
@@ -60,6 +63,7 @@ const TERM_OPTIONS = [
 ] as const;
 
 const QUICK_USER_COUNTS = [10, 25, 50];
+const MASTER_PLAN_BUILDER_DRAFT_KEY = "quotex_master_plan_builder:draft";
 
 type MasterPlanForm = {
   agencyName: string;
@@ -83,19 +87,31 @@ const blankForm: MasterPlanForm = {
   notes: "",
 };
 
+type MasterPlanBuilderDraft = {
+  form: MasterPlanForm;
+  termMonths: PlanTermMonths;
+  saleId?: string;
+  packetId?: string | null;
+  customPriceActive?: boolean;
+  customPriceValue?: string;
+  customPriceReason?: string;
+};
+
 export function MasterPlanBuilderPage() {
-  const [form, setForm] = useState<MasterPlanForm>(blankForm);
-  const [termMonths, setTermMonths] = useState<PlanTermMonths>(12);
-  const [sale, setSale] = useState<SoftwareSale | null>(null);
-  const [packetId, setPacketId] = useState<string | null>(null);
+  const [draftSeed] = useState(() => loadMasterPlanBuilderDraft());
+  const [form, setForm] = useState<MasterPlanForm>(draftSeed.form);
+  const [termMonths, setTermMonths] = useState<PlanTermMonths>(draftSeed.termMonths);
+  const [sale, setSale] = useState<SoftwareSale | null>(draftSeed.sale);
+  const [packetId, setPacketId] = useState<string | null>(draftSeed.packetId);
+  const [packetSyncRevision, setPacketSyncRevision] = useState(0);
   const [shareStatus, setShareStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [invoiceSending, setInvoiceSending] = useState(false);
   const [autoInvoiceSaleId, setAutoInvoiceSaleId] = useState<string | null>(null);
   const [customPriceEditing, setCustomPriceEditing] = useState(false);
-  const [customPriceActive, setCustomPriceActive] = useState(false);
-  const [customPriceValue, setCustomPriceValue] = useState("");
-  const [customPriceReason, setCustomPriceReason] = useState("");
+  const [customPriceActive, setCustomPriceActive] = useState(draftSeed.customPriceActive);
+  const [customPriceValue, setCustomPriceValue] = useState(draftSeed.customPriceValue);
+  const [customPriceReason, setCustomPriceReason] = useState(draftSeed.customPriceReason);
   const [customPriceError, setCustomPriceError] = useState<string | null>(null);
 
   const parsedSeats = Number.parseInt(form.seats, 10);
@@ -121,60 +137,106 @@ export function MasterPlanBuilderPage() {
     customPriceActive && Number.isFinite(parsedCustomPrice) && parsedCustomPrice >= 0;
   const estimatedMonthly = hasCustomPrice ? parsedCustomPrice : standardEstimatedMonthly;
   const customPriceDelta = hasSelectedUsers && hasCustomPrice ? standardEstimatedMonthly - estimatedMonthly : 0;
-  const packet = packetId ? readRemoteSigningPacket(packetId) : null;
+  const packet = useMemo(
+    () => (packetId ? readRemoteSigningPacket(packetId) : null),
+    [packetId, packetSyncRevision]
+  );
   const signingLink = packet ? signingLinkForPacket(packet) : "";
   const signedCount = packet
     ? REQUIRED_CHECKOUT_FORMS.filter((requiredForm) => packet.signatures[requiredForm.id]?.signedAt).length
     : 0;
   const allSigned = signedCount === REQUIRED_CHECKOUT_FORMS.length;
+  const packetSubmitted = !!packet?.submittedAt;
   const invoiceSent = !!sale?.invoiceEmailSentAt || sale?.invoiceEmailStatus === "sent";
 
   useEffect(() => {
-    if (!packetId || !sale) return;
+    saveMasterPlanBuilderDraft({
+      form,
+      termMonths,
+      saleId: sale?.id,
+      packetId,
+      customPriceActive,
+      customPriceValue,
+      customPriceReason,
+    });
+  }, [customPriceActive, customPriceReason, customPriceValue, form, packetId, sale?.id, termMonths]);
 
-    const syncSignedSale = () => {
-      const nextPacket = readRemoteSigningPacket(packetId);
-      if (!nextPacket) return;
+  useEffect(() => {
+    if (!packetId) return;
+    let cancelled = false;
+
+    const syncSignedSale = async () => {
+      const localPacket = readRemoteSigningPacket(packetId);
+      const sharedPacket = await readSharedRemoteSigningPacket(packetId);
+      const nextPacket = newestSigningPacket(localPacket, sharedPacket);
+      if (!nextPacket || cancelled) return;
+      if (!sameSigningPacketSnapshot(localPacket, nextPacket)) {
+        writeRemoteSigningPacket(nextPacket);
+        setPacketSyncRevision((current) => current + 1);
+      }
+      const activeSale = sale ?? recoverSoftwareSaleFromPacket(nextPacket);
+      if (!activeSale) return;
+      if (!sale || sale.id !== activeSale.id) setSale(activeSale);
       const nextSignedCount = REQUIRED_CHECKOUT_FORMS.filter(
         (requiredForm) => nextPacket.signatures[requiredForm.id]?.signedAt
       ).length;
       if (nextSignedCount !== REQUIRED_CHECKOUT_FORMS.length) return;
+      if (!nextPacket.submittedAt) return;
       const signedAgreements = signedAgreementsFromPacket(nextPacket);
       const signedAtValues = signedAgreements.map((agreement) => agreement.signedAt).sort();
       const signedAt = signedAtValues[signedAtValues.length - 1];
       const signedAgreementNames = signedAgreements.map((agreement) => agreement.title);
-      const existingSale = api.softwareSales.get(sale.id) ?? sale;
+      const existingSale = api.softwareSales.get(activeSale.id) ?? activeSale;
       const alreadySynced =
+        existingSale.signingPacketId === nextPacket.id &&
         existingSale.signedAt === signedAt &&
+        existingSale.signedPacketSubmittedAt === nextPacket.submittedAt &&
+        existingSale.invoiceEmailSentAt === nextPacket.invoiceEmailSentAt &&
+        existingSale.invoiceEmailStatus === nextPacket.invoiceEmailStatus &&
         signedAgreementNames.length === (existingSale.signedAgreementNames ?? []).length &&
         signedAgreementNames.every((title, index) => title === existingSale.signedAgreementNames?.[index]);
       const updated = alreadySynced
         ? existingSale
-        : api.softwareSales.update(sale.id, {
+        : api.softwareSales.update(activeSale.id, {
+            signingPacketId: nextPacket.id,
             signedAgreementNames,
             signedAgreements,
             signedByName: signedAgreements[0]?.signedByName,
             signedByEmail: signedAgreements[0]?.signedByEmail,
             signedAt,
+            signedPacketSubmittedAt: nextPacket.submittedAt,
+            signedPacketSubmittedByName: nextPacket.submittedByName ?? signedAgreements[0]?.signedByName,
+            signedPacketSubmittedByEmail: nextPacket.submittedByEmail ?? signedAgreements[0]?.signedByEmail,
+            invoiceEmailSentAt: nextPacket.invoiceEmailSentAt,
+            invoiceEmailStatus: nextPacket.invoiceEmailStatus,
+            invoiceEmailProvider: nextPacket.invoiceEmailProvider,
+            invoiceEmailError: nextPacket.invoiceEmailError,
+            status: nextPacket.invoiceEmailStatus === "sent" ? "provisioning" : existingSale.status,
           });
       if (!updated) return;
       if (!alreadySynced) setSale(updated);
+      if (updated.invoiceEmailStatus === "sent" || updated.invoiceEmailSentAt) {
+        const provisionedAgency = provisionAgencyForCompletedSale(updated);
+        clearCompletedPlan(`Invoice sent. Agency provisioned: ${provisionedAgency.name}.`);
+        return;
+      }
       if (
         autoInvoiceSaleId !== updated.id &&
-        !updated.invoiceEmailSentAt &&
-        updated.invoiceEmailStatus !== "sent"
+        !updated.invoiceEmailSentAt
       ) {
         setAutoInvoiceSaleId(updated.id);
         void sendInvoiceForSale(updated, nextPacket, true);
       }
     };
 
-    syncSignedSale();
-    const interval = window.setInterval(syncSignedSale, 1500);
-    window.addEventListener("storage", syncSignedSale);
+    void syncSignedSale();
+    const interval = window.setInterval(() => void syncSignedSale(), 1000);
+    const handleStorage = () => void syncSignedSale();
+    window.addEventListener("storage", handleStorage);
     return () => {
+      cancelled = true;
       window.clearInterval(interval);
-      window.removeEventListener("storage", syncSignedSale);
+      window.removeEventListener("storage", handleStorage);
     };
   }, [autoInvoiceSaleId, packetId, sale]);
 
@@ -237,16 +299,27 @@ export function MasterPlanBuilderPage() {
       : api.softwareSales.create(saleInput);
     if (!nextSale) return setError("The master plan could not be saved.");
     const nextPacket = createPacketForSale(nextSale);
+    const saleWithPacketId =
+      nextSale.signingPacketId === nextPacket.id
+        ? nextSale
+        : api.softwareSales.update(nextSale.id, { signingPacketId: nextPacket.id }) ?? nextSale;
     writeRemoteSigningPacket(nextPacket);
-    setSale(nextSale);
+    void writeSharedRemoteSigningPacket(nextPacket).catch(() => undefined);
+    setSale(saleWithPacketId);
     setPacketId(nextPacket.id);
+    setPacketSyncRevision((current) => current + 1);
     setShareStatus("Plan saved. Send the e-sign packet when ready.");
     setError(null);
   }
 
   function createPacketForSale(nextSale: SoftwareSale): RemoteCheckoutPacket {
-    const existing = packetId ? readRemoteSigningPacket(packetId) : null;
-    const nextPacketId = existing?.id ?? createRemoteSigningPacketId();
+    const existing =
+      packetId
+        ? readRemoteSigningPacket(packetId)
+        : nextSale.signingPacketId
+          ? readRemoteSigningPacket(nextSale.signingPacketId)
+          : null;
+    const nextPacketId = existing?.id ?? nextSale.signingPacketId ?? createRemoteSigningPacketId();
     const now = new Date().toISOString();
     return {
       id: nextPacketId,
@@ -255,13 +328,34 @@ export function MasterPlanBuilderPage() {
       contactName: nextSale.contactName,
       email: nextSale.email,
       phone: nextSale.phone ?? "",
+      website: nextSale.website,
+      tier: nextSale.tier,
       seats: nextSale.seats,
       estimatedMonthly: nextSale.estimatedMonthly,
+      setupFee: nextSale.setupFee,
+      websiteAppAddOn: nextSale.websiteAppAddOn,
+      websiteAppAddOnMonthly: nextSale.websiteAppAddOnMonthly,
       termMonths: (nextSale.termMonths ?? 12) as PlanTermMonths,
       termDiscountPercent: nextSale.termDiscountPercent ?? 0,
+      termDiscountMonthly: nextSale.termDiscountMonthly,
+      monthlyBeforeTermDiscount: nextSale.monthlyBeforeTermDiscount,
+      standardEstimatedMonthly: nextSale.standardEstimatedMonthly,
+      customMonthlyPriceUsd: nextSale.customMonthlyPriceUsd,
+      customMonthlyPriceReason: nextSale.customMonthlyPriceReason,
       addOnLabel: WEBSITE_APP_ADD_ON_OPTIONS[nextSale.websiteAppAddOn ?? "none"].label,
+      source: nextSale.source,
+      paymentMode: nextSale.paymentMode,
+      stripeCheckoutSessionId: nextSale.stripeCheckoutSessionId,
+      invoiceEmailSentAt: nextSale.invoiceEmailSentAt,
+      invoiceEmailStatus: nextSale.invoiceEmailStatus,
+      invoiceEmailProvider: nextSale.invoiceEmailProvider,
+      invoiceEmailError: nextSale.invoiceEmailError,
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
+      submittedAt: existing?.submittedAt,
+      submittedByName: existing?.submittedByName,
+      submittedByEmail: existing?.submittedByEmail,
+      paymentMethodEntry: existing?.paymentMethodEntry,
       signatures: existing?.signatures ?? emptyRemoteCheckoutSignatures(nextSale.contactName),
     };
   }
@@ -296,7 +390,13 @@ export function MasterPlanBuilderPage() {
     }
     const nextPacket = packet ?? createPacketForSale(sale);
     writeRemoteSigningPacket(nextPacket);
+    void writeSharedRemoteSigningPacket(nextPacket).catch(() => undefined);
     setPacketId(nextPacket.id);
+    if (sale.signingPacketId !== nextPacket.id) {
+      const updatedSale = api.softwareSales.update(sale.id, { signingPacketId: nextPacket.id });
+      if (updatedSale) setSale(updatedSale);
+    }
+    setPacketSyncRevision((current) => current + 1);
     return signingLinkForPacket(nextPacket);
   }
 
@@ -331,8 +431,8 @@ export function MasterPlanBuilderPage() {
 
   async function sendInvoice() {
     if (!sale) return;
-    if (!allSigned || !packet) {
-      return setShareStatus("Complete all document signatures before sending the invoice.");
+    if (!allSigned || !packet || !packetSubmitted) {
+      return setShareStatus("The customer must sign and submit the e-sign packet before sending the invoice.");
     }
     await sendInvoiceForSale(sale, packet, false);
   }
@@ -343,7 +443,8 @@ export function MasterPlanBuilderPage() {
       targetSale.invoiceEmailSentAt ||
       targetSale.invoiceEmailStatus === "sent"
     ) {
-      if (!automatic) setShareStatus("Invoice email has already been sent for this purchase.");
+      const provisionedAgency = provisionAgencyForCompletedSale(targetSale);
+      clearCompletedPlan(`Agency provisioned: ${provisionedAgency.name}. Build A Plan is ready for the next sale.`);
       return;
     }
     setShareStatus("Sending invoice email...");
@@ -353,27 +454,64 @@ export function MasterPlanBuilderPage() {
     const signedAt = signedAtValues[signedAtValues.length - 1];
     const saleForEmail = {
       ...targetSale,
+      signingPacketId: targetPacket.id,
       signedAgreementNames: signedAgreements.map((agreement) => agreement.title),
       signedAgreements,
       signedByName: signedAgreements[0]?.signedByName,
       signedByEmail: signedAgreements[0]?.signedByEmail,
       signedAt,
+      signedPacketSubmittedAt: targetPacket.submittedAt,
+      signedPacketSubmittedByName: targetPacket.submittedByName ?? signedAgreements[0]?.signedByName,
+      signedPacketSubmittedByEmail: targetPacket.submittedByEmail ?? signedAgreements[0]?.signedByEmail,
     };
     try {
       const result = await sendSoftwareSaleInvoiceEmail(saleForEmail);
       const updated = api.softwareSales.update(targetSale.id, {
+        status: result.ok && result.result?.status === "sent" ? "provisioning" : targetSale.status,
+        signingPacketId: targetPacket.id,
         signedAgreementNames: saleForEmail.signedAgreementNames,
         signedAgreements: saleForEmail.signedAgreements,
         signedByName: saleForEmail.signedByName,
         signedByEmail: saleForEmail.signedByEmail,
         signedAt: saleForEmail.signedAt,
+        signedPacketSubmittedAt: saleForEmail.signedPacketSubmittedAt,
+        signedPacketSubmittedByName: saleForEmail.signedPacketSubmittedByName,
+        signedPacketSubmittedByEmail: saleForEmail.signedPacketSubmittedByEmail,
         ...softwareSaleInvoicePatchFromResult(result),
       });
       if (updated) setSale(updated);
-      setShareStatus(formatCommunicationStatus(result, "Invoice email"));
+      const statusMessage = formatCommunicationStatus(result, "Invoice email");
+      if (result.ok && result.result?.status === "sent") {
+        const completedSale = updated ?? { ...targetSale, ...softwareSaleInvoicePatchFromResult(result) };
+        const provisionedAgency = provisionAgencyForCompletedSale(completedSale);
+        clearCompletedPlan(`${statusMessage} Agency provisioned: ${provisionedAgency.name}.`);
+        return;
+      }
+      setShareStatus(statusMessage);
     } finally {
       setInvoiceSending(false);
     }
+  }
+
+  function clearCompletedPlan(message?: string) {
+    setForm(blankForm);
+    setTermMonths(12);
+    setSale(null);
+    setPacketId(null);
+    setPacketSyncRevision((current) => current + 1);
+    setCustomPriceActive(false);
+    setCustomPriceValue("");
+    setCustomPriceReason("");
+    setCustomPriceEditing(false);
+    setCustomPriceError(null);
+    setAutoInvoiceSaleId(null);
+    setError(null);
+    try {
+      localStorage.removeItem(MASTER_PLAN_BUILDER_DRAFT_KEY);
+    } catch {
+      // Non-critical: state above has already cleared the active builder.
+    }
+    setShareStatus(message ?? "Plan complete. Build A Plan is ready for the next sale.");
   }
 
   function openSigner() {
@@ -394,7 +532,11 @@ export function MasterPlanBuilderPage() {
             billing, then send the required e-sign documents from here.
           </p>
         </div>
-        {sale && <Badge tone={allSigned ? "success" : "warn"}>{allSigned ? "All docs signed" : "Docs pending"}</Badge>}
+        {sale && (
+          <Badge tone={packetSubmitted ? "success" : allSigned ? "gold" : "warn"}>
+            {packetSubmitted ? "Packet complete" : allSigned ? "Awaiting submit" : "Docs pending"}
+          </Badge>
+        )}
       </div>
 
       <div className="grid gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
@@ -660,10 +802,21 @@ export function MasterPlanBuilderPage() {
                       <div className="font-semibold text-ink-900">{sale.agencyName}</div>
                       <div className="text-xs text-ink-500">{sale.contactName} · {sale.email}</div>
                     </div>
-                    <Badge tone={allSigned ? "success" : "warn"}>
-                      {signedCount}/{REQUIRED_CHECKOUT_FORMS.length} signed
+                    <Badge tone={packetSubmitted ? "success" : allSigned ? "gold" : "warn"}>
+                      {packetSubmitted ? "Submitted" : `${signedCount}/${REQUIRED_CHECKOUT_FORMS.length} signed`}
                     </Badge>
                   </div>
+                  {packet?.submittedAt && (
+                    <div className="mt-3 rounded-md border border-emerald-100 bg-white px-3 py-2 text-xs text-emerald-700">
+                      Signed packet submitted {fmt.dateTime(packet.submittedAt)} by{" "}
+                      {packet.submittedByName ?? sale.contactName}.
+                    </div>
+                  )}
+                  {packet?.paymentMethodEntry && (
+                    <div className="mt-3 rounded-md border border-gold-100 bg-white px-3 py-2 text-xs text-gold-800">
+                      Payment method saved: {paymentEntryLabel(packet.paymentMethodEntry.label, packet.paymentMethodEntry.last4)}.
+                    </div>
+                  )}
                   {signingLink && (
                     <div className="mt-3 break-all rounded-md border border-ink-100 bg-white px-3 py-2 text-xs text-ink-500">
                       {signingLink}
@@ -684,8 +837,8 @@ export function MasterPlanBuilderPage() {
                 </div>
                 <button
                   type="button"
-                  className={`btn-gold w-full justify-center text-xs ${allSigned && !invoiceSending ? "" : "cursor-not-allowed opacity-50"}`}
-                  disabled={!allSigned || invoiceSending}
+                  className={`btn-gold w-full justify-center text-xs ${packetSubmitted && !invoiceSending ? "" : "cursor-not-allowed opacity-50"}`}
+                  disabled={!packetSubmitted || invoiceSending}
                   onClick={sendInvoice}
                 >
                   <ReceiptText className="h-4 w-4" />{" "}
@@ -762,6 +915,104 @@ function PlanRow({ label, value, detail }: { label: string; value: string; detai
   );
 }
 
+function loadMasterPlanBuilderDraft() {
+  const fallback = {
+    form: blankForm,
+    termMonths: 12 as PlanTermMonths,
+    sale: null as SoftwareSale | null,
+    packetId: null as string | null,
+    customPriceActive: false,
+    customPriceValue: "",
+    customPriceReason: "",
+  };
+  if (typeof localStorage === "undefined") return fallback;
+  try {
+    const raw = localStorage.getItem(MASTER_PLAN_BUILDER_DRAFT_KEY);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as Partial<MasterPlanBuilderDraft>;
+    const savedSale = parsed.saleId ? api.softwareSales.get(parsed.saleId) : null;
+    return {
+      form: { ...blankForm, ...(parsed.form ?? {}) },
+      termMonths: isPlanTermMonths(parsed.termMonths) ? parsed.termMonths : fallback.termMonths,
+      sale: savedSale ?? null,
+      packetId: parsed.packetId ?? null,
+      customPriceActive: !!parsed.customPriceActive,
+      customPriceValue: parsed.customPriceValue ?? "",
+      customPriceReason: parsed.customPriceReason ?? "",
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function saveMasterPlanBuilderDraft(draft: MasterPlanBuilderDraft) {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(MASTER_PLAN_BUILDER_DRAFT_KEY, JSON.stringify(draft));
+  } catch {
+    // Browser storage can be unavailable in private mode; the active page still keeps state in memory.
+  }
+}
+
+function isPlanTermMonths(value: unknown): value is PlanTermMonths {
+  return value === 12 || value === 24 || value === 36;
+}
+
+function paymentEntryLabel(label: string, last4: string) {
+  return `${label} ending in ${last4}`;
+}
+
+function recoverSoftwareSaleFromPacket(packet: RemoteCheckoutPacket): SoftwareSale | null {
+  if (packet.saleId) {
+    const existing = api.softwareSales.get(packet.saleId);
+    if (existing) {
+      return existing.signingPacketId === packet.id
+        ? existing
+        : api.softwareSales.update(existing.id, { signingPacketId: packet.id }) ?? existing;
+    }
+  }
+  try {
+    return api.softwareSales.create({
+      agencyName: packet.agencyName,
+      contactName: packet.contactName,
+      email: packet.email,
+      phone: packet.phone,
+      website: packet.website,
+      tier: packet.tier ?? billingTierForSeats(packet.seats),
+      seats: packet.seats,
+      estimatedMonthly: packet.estimatedMonthly,
+      setupFee: packet.setupFee ?? SOFTWARE_SETUP_FEE_USD,
+      websiteAppAddOn: packet.websiteAppAddOn ?? websiteAppAddOnFromPacket(packet),
+      websiteAppAddOnMonthly: packet.websiteAppAddOnMonthly ?? 0,
+      termMonths: packet.termMonths,
+      termDiscountPercent: packet.termDiscountPercent,
+      termDiscountMonthly: packet.termDiscountMonthly ?? 0,
+      monthlyBeforeTermDiscount: packet.monthlyBeforeTermDiscount ?? packet.estimatedMonthly,
+      standardEstimatedMonthly: packet.standardEstimatedMonthly ?? packet.estimatedMonthly,
+      customMonthlyPriceUsd: packet.customMonthlyPriceUsd,
+      customMonthlyPriceReason: packet.customMonthlyPriceReason,
+      source: packet.source ?? "master_portal",
+      paymentMode: packet.paymentMode ?? "manual_invoice",
+      notes: `Recovered from submitted e-sign packet ${packet.id}.`,
+      stripeCheckoutSessionId: packet.stripeCheckoutSessionId ?? `recovered_${packet.id}`,
+      invoiceEmailSentAt: packet.invoiceEmailSentAt,
+      invoiceEmailStatus: packet.invoiceEmailStatus,
+      invoiceEmailProvider: packet.invoiceEmailProvider,
+      invoiceEmailError: packet.invoiceEmailError,
+      signingPacketId: packet.id,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function websiteAppAddOnFromPacket(packet: RemoteCheckoutPacket): SoftwareSaleWebsiteAppAddOn {
+  const matched = (Object.keys(WEBSITE_APP_ADD_ON_OPTIONS) as SoftwareSaleWebsiteAppAddOn[]).find(
+    (key) => WEBSITE_APP_ADD_ON_OPTIONS[key].label === packet.addOnLabel
+  );
+  return matched ?? "none";
+}
+
 function billingTierForSeats(seats: number): SubscriptionTier {
   if (seats <= 10) return "minimum";
   if (seats <= 25) return "mid";
@@ -770,6 +1021,32 @@ function billingTierForSeats(seats: number): SubscriptionTier {
 
 function signingLinkForPacket(packet: RemoteCheckoutPacket) {
   return `${window.location.origin}/checkout/sign/${packet.id}?p=${encodeRemotePacketPayload(packet)}`;
+}
+
+function newestSigningPacket(
+  localPacket: RemoteCheckoutPacket | null,
+  sharedPacket: RemoteCheckoutPacket | null
+): RemoteCheckoutPacket | null {
+  if (!localPacket) return sharedPacket;
+  if (!sharedPacket) return localPacket;
+  if (sharedPacket.submittedAt && !localPacket.submittedAt) return sharedPacket;
+  if (localPacket.submittedAt && !sharedPacket.submittedAt) return localPacket;
+  return sharedPacket.updatedAt >= localPacket.updatedAt ? sharedPacket : localPacket;
+}
+
+function sameSigningPacketSnapshot(a: RemoteCheckoutPacket | null, b: RemoteCheckoutPacket | null) {
+  if (!a || !b) return a === b;
+  return (
+    a.updatedAt === b.updatedAt &&
+    a.submittedAt === b.submittedAt &&
+    a.paymentMethodEntry?.enteredAt === b.paymentMethodEntry?.enteredAt &&
+    REQUIRED_CHECKOUT_FORMS.every(
+      (requiredForm) =>
+        a.signatures[requiredForm.id]?.viewedAt === b.signatures[requiredForm.id]?.viewedAt &&
+        a.signatures[requiredForm.id]?.signedAt === b.signatures[requiredForm.id]?.signedAt &&
+        a.signatures[requiredForm.id]?.signerName === b.signatures[requiredForm.id]?.signerName
+    )
+  );
 }
 
 function signedAgreementsFromPacket(packet: RemoteCheckoutPacket): SoftwareSaleSignedAgreement[] {

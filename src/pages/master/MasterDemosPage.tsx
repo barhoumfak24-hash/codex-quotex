@@ -45,9 +45,9 @@ export function MasterDemosPage() {
   );
   const carrierNameFor = (carrierId: string) => api.carriers.get(carrierId)?.name ?? "Carrier";
 
-  function launchSoftwareDemo(path: string) {
+  async function launchSoftwareDemo(path: string) {
     setError(null);
-    const demoUser = signInStaff(DEMO_MANAGER_EMAIL, DEMO_MANAGER_PASSWORD);
+    const demoUser = await signInStaff(DEMO_MANAGER_EMAIL, DEMO_MANAGER_PASSWORD);
     if (!demoUser) {
       setError("The Palm Coast software demo account could not be opened. Refresh the demo data, then try again.");
       return;

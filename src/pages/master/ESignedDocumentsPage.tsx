@@ -1,18 +1,29 @@
 import { Link } from "react-router-dom";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Clock3, FileCheck2, Search, ShieldCheck, UserRoundCheck } from "lucide-react";
 import { MasterBackButton } from "@/components/layout/MasterBackButton";
 import { Badge } from "@/components/ui/Badge";
 import { Card, EmptyState, StatCard } from "@/components/ui/Card";
 import { api } from "@/lib/api";
 import { fmt } from "@/lib/format";
-import type { Document } from "@/types";
+import {
+  REMOTE_SIGNING_PACKET_PREFIX,
+  REQUIRED_CHECKOUT_FORMS,
+  readSharedRemoteSigningPacket,
+  writeRemoteSigningPacket,
+  type RemoteCheckoutPacket,
+} from "@/pages/transactions/TransactionSitePage";
+import type { Document, SoftwareSale, SoftwareSaleSignedAgreement } from "@/types";
 
 type SignatureFilter = "all" | "customer" | "agent" | "both";
 
 type SignedDocumentRow = {
-  document: Document;
-  agencyId: string;
+  id: string;
+  auditId: string;
+  fileName: string;
+  displayName: string;
+  sourceLabel: string;
+  agencyId?: string;
   agencyName: string;
   clientName: string;
   policyLabel: string;
@@ -29,11 +40,72 @@ const filters: { value: SignatureFilter; label: string }[] = [
   { value: "agent", label: "Agent signed" },
   { value: "both", label: "Both signed" },
 ];
+const MASTER_PLAN_BUILDER_DRAFT_KEY = "quotex_master_plan_builder:draft";
 
 export function ESignedDocumentsPage() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<SignatureFilter>("all");
-  const rows = useMemo(() => buildSignedDocumentRows(), []);
+  const [syncRevision, setSyncRevision] = useState(0);
+  const rows = useMemo(() => buildSignedDocumentRows(), [syncRevision]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const syncSubmittedSigningPackets = async () => {
+      const packetCandidates = signingPacketCandidates();
+      let changed = false;
+
+      for (const [packetId, hintedSale] of packetCandidates) {
+        const packet = await readSharedRemoteSigningPacket(packetId);
+        if (!packet || cancelled || !isCompletedSigningPacket(packet)) continue;
+        writeRemoteSigningPacket(packet);
+        const sale =
+          (packet.saleId ? api.softwareSales.get(packet.saleId) : undefined) ??
+          hintedSale ??
+          recoverSoftwareSaleFromCompletedPacket(packet);
+        if (!sale) continue;
+        const signedAgreements = signedAgreementsFromPacket(packet);
+        const signedAtValues = signedAgreements.map((agreement) => agreement.signedAt).sort();
+        const signedAt = signedAtValues[signedAtValues.length - 1];
+        const signedAgreementNames = signedAgreements.map((agreement) => agreement.title);
+        const currentSale = api.softwareSales.get(sale.id) ?? sale;
+        const needsUpdate =
+          currentSale.signingPacketId !== packet.id ||
+          currentSale.signedAt !== signedAt ||
+          currentSale.signedPacketSubmittedAt !== packet.submittedAt ||
+          signedAgreementNames.length !== (currentSale.signedAgreementNames ?? []).length ||
+          signedAgreementNames.some((title, index) => title !== currentSale.signedAgreementNames?.[index]);
+
+        if (!needsUpdate) continue;
+        const updated = api.softwareSales.update(currentSale.id, {
+          signingPacketId: packet.id,
+          signedAgreementNames,
+          signedAgreements,
+          signedByName: signedAgreements[0]?.signedByName,
+          signedByEmail: signedAgreements[0]?.signedByEmail,
+          signedAt,
+          signedPacketSubmittedAt: packet.submittedAt,
+          signedPacketSubmittedByName: packet.submittedByName ?? signedAgreements[0]?.signedByName,
+          signedPacketSubmittedByEmail: packet.submittedByEmail ?? signedAgreements[0]?.signedByEmail,
+          invoiceEmailSentAt: packet.invoiceEmailSentAt,
+          invoiceEmailStatus: packet.invoiceEmailStatus,
+          invoiceEmailProvider: packet.invoiceEmailProvider,
+          invoiceEmailError: packet.invoiceEmailError,
+          status: packet.invoiceEmailStatus === "sent" ? "provisioning" : currentSale.status,
+        });
+        changed = changed || Boolean(updated);
+      }
+
+      if (changed && !cancelled) setSyncRevision((current) => current + 1);
+    };
+
+    void syncSubmittedSigningPackets();
+    const interval = window.setInterval(() => void syncSubmittedSigningPackets(), 2500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, []);
   const normalizedQuery = query.trim().toLowerCase();
   const visibleRows = rows.filter((row) => {
     const matchesFilter =
@@ -49,9 +121,10 @@ export function ESignedDocumentsPage() {
       row.policyLabel,
       row.signerLabel,
       row.signatureStatus,
-      row.document.fileName,
-      api.helpers.documentDisplayName(row.document),
-      row.document.id,
+      row.sourceLabel,
+      row.fileName,
+      row.displayName,
+      row.auditId,
     ]
       .join(" ")
       .toLowerCase()
@@ -59,7 +132,7 @@ export function ESignedDocumentsPage() {
   });
   const customerSignatureCount = rows.filter((row) => row.customerSignedAt).length;
   const agentSignatureCount = rows.filter((row) => row.agentSignedAt).length;
-  const agencyCount = new Set(rows.map((row) => row.agencyId)).size;
+  const agencyCount = new Set(rows.map((row) => row.agencyId ?? row.agencyName)).size;
 
   return (
     <div className="space-y-6">
@@ -142,19 +215,24 @@ export function ESignedDocumentsPage() {
               </thead>
               <tbody className="divide-y divide-ink-100">
                 {visibleRows.map((row) => (
-                  <tr key={row.document.id} className="align-top">
+                  <tr key={row.id} className="align-top">
                     <td className="px-6 py-4">
-                      <Link
-                        to={`/master/agencies/${row.agencyId}`}
-                        className="font-semibold text-ink-900 hover:text-gold-700"
-                      >
-                        {row.agencyName}
-                      </Link>
+                      {row.agencyId ? (
+                        <Link
+                          to={`/master/agencies/${row.agencyId}`}
+                          className="font-semibold text-ink-900 hover:text-gold-700"
+                        >
+                          {row.agencyName}
+                        </Link>
+                      ) : (
+                        <span className="font-semibold text-ink-900">{row.agencyName}</span>
+                      )}
+                      <div className="mt-1 text-xs text-ink-500">{row.sourceLabel}</div>
                     </td>
                     <td className="px-6 py-4">
-                      <div className="font-semibold text-ink-900">{row.document.fileName}</div>
+                      <div className="font-semibold text-ink-900">{row.fileName}</div>
                       <div className="mt-1 text-xs text-ink-500">
-                        {api.helpers.documentDisplayName(row.document)}
+                        {row.displayName}
                       </div>
                     </td>
                     <td className="px-6 py-4">
@@ -178,7 +256,7 @@ export function ESignedDocumentsPage() {
                       </div>
                     </td>
                     <td className="px-6 py-4 text-right">
-                      <div className="font-mono text-xs text-ink-500">{row.document.id}</div>
+                      <div className="font-mono text-xs text-ink-500">{row.auditId}</div>
                     </td>
                   </tr>
                 ))}
@@ -192,7 +270,7 @@ export function ESignedDocumentsPage() {
 }
 
 function buildSignedDocumentRows(): SignedDocumentRow[] {
-  return api.agencies
+  const documentRows = api.agencies
     .list()
     .flatMap((agency) =>
       api.documents
@@ -222,7 +300,11 @@ function buildSignedDocumentRows(): SignedDocumentRow[] {
             customerSigned && agentSigned ? "Customer + Agent" : customerSigned ? "Customer" : "Agent";
 
           return {
-            document,
+            id: `document:${document.id}`,
+            auditId: document.id,
+            fileName: document.fileName,
+            displayName: api.helpers.documentDisplayName(document),
+            sourceLabel: "Agency document",
             agencyId: agency.id,
             agencyName: agency.name,
             clientName: customer?.name ?? "No client linked",
@@ -234,6 +316,161 @@ function buildSignedDocumentRows(): SignedDocumentRow[] {
             latestSignedAt,
           };
         })
-    )
+    );
+  const softwareSaleRows = buildSoftwareSaleSignedRows();
+
+  return [...documentRows, ...softwareSaleRows]
     .sort((a, b) => (a.latestSignedAt < b.latestSignedAt ? 1 : -1));
+}
+
+function buildSoftwareSaleSignedRows(): SignedDocumentRow[] {
+  const agenciesByName = new Map(api.agencies.list().map((agency) => [normalizeAgencyName(agency.name), agency]));
+
+  return api.softwareSales.list().flatMap((sale) => {
+    const signedAgreements = softwareSaleSignedAgreements(sale);
+    if (signedAgreements.length === 0) return [];
+
+    const agency = agenciesByName.get(normalizeAgencyName(sale.agencyName));
+    return signedAgreements.map((agreement) => {
+      const signedAt = agreement.signedAt || sale.signedAt || sale.signedPacketSubmittedAt || sale.updatedAt;
+      return {
+        id: `software-sale:${sale.id}:${agreement.id}`,
+        auditId: sale.id,
+        fileName: agreement.title,
+        displayName: [agreement.summary, agreement.version ? `Version ${agreement.version}` : "", "Software sale packet"]
+          .filter(Boolean)
+          .join(" - "),
+        sourceLabel: "Software sale packet",
+        agencyId: agency?.id,
+        agencyName: sale.agencyName,
+        clientName: sale.contactName,
+        policyLabel: `${fmt.titleCase(sale.tier)} plan - ${sale.seats} user${sale.seats === 1 ? "" : "s"}`,
+        signerLabel: `${agreement.signedByName} (${agreement.signedByEmail})`,
+        signatureStatus: "Customer" as const,
+        customerSignedAt: signedAt,
+        latestSignedAt: signedAt,
+      };
+    });
+  });
+}
+
+function softwareSaleSignedAgreements(sale: SoftwareSale): SoftwareSaleSignedAgreement[] {
+  if (sale.signedAgreements?.length) return sale.signedAgreements;
+  const signedAt = sale.signedAt ?? sale.signedPacketSubmittedAt;
+  if (!signedAt || !sale.signedAgreementNames?.length) return [];
+
+  return sale.signedAgreementNames.map((title, index) => ({
+    id: `legacy-${index + 1}`,
+    title,
+    signedAt,
+    signedByName: sale.signedByName ?? sale.signedPacketSubmittedByName ?? sale.contactName,
+    signedByEmail: sale.signedByEmail ?? sale.signedPacketSubmittedByEmail ?? sale.email,
+    signatureMethod: "typed_name_with_checkbox",
+  }));
+}
+
+function signingPacketCandidates(): Map<string, SoftwareSale | null> {
+  const candidates = new Map<string, SoftwareSale | null>();
+  for (const sale of api.softwareSales.list()) {
+    if (sale.signingPacketId) candidates.set(sale.signingPacketId, sale);
+  }
+  for (const packetId of locallyKnownSigningPacketIds()) {
+    if (!candidates.has(packetId)) candidates.set(packetId, null);
+  }
+  return candidates;
+}
+
+function locallyKnownSigningPacketIds(): string[] {
+  if (typeof localStorage === "undefined") return [];
+  const packetIds = new Set<string>();
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (key?.startsWith(REMOTE_SIGNING_PACKET_PREFIX)) {
+      const packetId = key.slice(REMOTE_SIGNING_PACKET_PREFIX.length);
+      if (packetId) packetIds.add(packetId);
+    }
+  }
+  try {
+    const draft = JSON.parse(localStorage.getItem(MASTER_PLAN_BUILDER_DRAFT_KEY) ?? "{}") as {
+      packetId?: string | null;
+    };
+    if (draft.packetId) packetIds.add(draft.packetId);
+  } catch {
+    // Ignore malformed browser cache; normal sale rows still drive the page.
+  }
+  return Array.from(packetIds);
+}
+
+function recoverSoftwareSaleFromCompletedPacket(packet: RemoteCheckoutPacket): SoftwareSale | null {
+  try {
+    return api.softwareSales.create({
+      agencyName: packet.agencyName,
+      contactName: packet.contactName,
+      email: packet.email,
+      phone: packet.phone,
+      website: packet.website,
+      tier: packet.tier ?? billingTierForSeats(packet.seats),
+      seats: packet.seats,
+      estimatedMonthly: packet.estimatedMonthly,
+      setupFee: packet.setupFee ?? 0,
+      websiteAppAddOn: packet.websiteAppAddOn,
+      websiteAppAddOnMonthly: packet.websiteAppAddOnMonthly,
+      termMonths: packet.termMonths,
+      termDiscountPercent: packet.termDiscountPercent,
+      termDiscountMonthly: packet.termDiscountMonthly,
+      monthlyBeforeTermDiscount: packet.monthlyBeforeTermDiscount,
+      standardEstimatedMonthly: packet.standardEstimatedMonthly,
+      customMonthlyPriceUsd: packet.customMonthlyPriceUsd,
+      customMonthlyPriceReason: packet.customMonthlyPriceReason,
+      source: packet.source ?? "master_portal",
+      paymentMode: packet.paymentMode ?? "manual_invoice",
+      notes: `Recovered from completed e-sign packet ${packet.id}.`,
+      signingPacketId: packet.id,
+      stripeCheckoutSessionId: packet.stripeCheckoutSessionId ?? `recovered_${packet.id}`,
+      invoiceEmailSentAt: packet.invoiceEmailSentAt,
+      invoiceEmailStatus: packet.invoiceEmailStatus,
+      invoiceEmailProvider: packet.invoiceEmailProvider,
+      invoiceEmailError: packet.invoiceEmailError,
+      status: packet.invoiceEmailStatus === "sent" ? "provisioning" : "paid",
+    });
+  } catch {
+    return null;
+  }
+}
+
+function signedAgreementsFromPacket(packet: RemoteCheckoutPacket): SoftwareSaleSignedAgreement[] {
+  return REQUIRED_CHECKOUT_FORMS.map((requiredForm) => {
+    const signature = packet.signatures[requiredForm.id];
+    return {
+      id: requiredForm.id,
+      title: requiredForm.title,
+      summary: requiredForm.summary,
+      version: requiredForm.version,
+      viewedAt: signature?.viewedAt,
+      signedAt: signature?.signedAt ?? packet.submittedAt ?? new Date().toISOString(),
+      signedByName: signature?.signerName?.trim() || packet.contactName,
+      signedByEmail: signature?.signedByEmail || packet.email,
+      signatureStatement: requiredForm.signatureStatement,
+      electronicRecordConsent: requiredForm.id === "electronic-records-consent",
+      signatureMethod: "typed_name_with_checkbox",
+      signerUserAgent: signature?.signerUserAgent,
+    };
+  });
+}
+
+function isCompletedSigningPacket(packet: RemoteCheckoutPacket) {
+  return Boolean(
+    packet.submittedAt &&
+      REQUIRED_CHECKOUT_FORMS.every((requiredForm) => packet.signatures[requiredForm.id]?.signedAt)
+  );
+}
+
+function normalizeAgencyName(value: string) {
+  return value.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function billingTierForSeats(seats: number): SoftwareSale["tier"] {
+  if (seats <= 10) return "minimum";
+  if (seats <= 25) return "mid";
+  return "ultra";
 }

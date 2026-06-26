@@ -369,7 +369,7 @@ describe("api.quoting workspace", () => {
     expect(quote?.providerTrace?.provider).toBe("carrier_portal_automation");
     expect(quote?.providerTrace?.transport).toBe("browser_automation");
     expect(quote?.providerTrace?.messages.join(" ")).toContain("carrier portal");
-    expect(quote?.fitReason).toContain("carrier portal quote imported");
+    expect(quote?.fitReason).toContain("adapter ready");
     expect(complete.aiSummary).toContain("AI runner workflow");
   });
 

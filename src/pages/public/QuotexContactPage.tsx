@@ -91,6 +91,7 @@ export function QuotexContactPage({ mode = "sales" }: { mode?: ContactPageMode }
 
   async function submitContact(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (submitting) return;
     setSubmitting(true);
     setError("");
     setFallback(null);
@@ -112,7 +113,7 @@ export function QuotexContactPage({ mode = "sales" }: { mode?: ContactPageMode }
     if (!result.ok) {
       setFallback(result.fallback);
       setError(
-        `Automatic delivery is not configured yet. Open your email app to send this to ${targetEmail}.`
+        `Automatic delivery is temporarily unavailable. Open your email app to send this to ${targetEmail}.`
       );
       return;
     }

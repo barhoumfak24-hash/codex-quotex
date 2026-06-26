@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from "vitest";
 import { api } from "../api";
+import { softwareSaleAgencyCode } from "../communications";
 import { db } from "../db";
 import {
   COMPANY_WEBSITE_AND_APP_BUNDLE_DISCOUNT_USD,
@@ -82,6 +83,32 @@ describe("softwareSales", () => {
 
     expect(sale.source).toBe("master_portal");
     expect(sale.paymentMode).toBe("manual_invoice");
+  });
+
+  it("uses the actual provisioned agency code for software sale invoices", () => {
+    const sale = api.softwareSales.create({
+      agencyName: "Invoice Code Match Agency",
+      contactName: "Avery Ledger",
+      email: "billing@invoice-code-match.example",
+      tier: "minimum",
+      seats: 10,
+      estimatedMonthly: softwareSaleMonthlyTotalForSeats(10, "none"),
+      setupFee: SOFTWARE_SETUP_FEE_USD,
+      websiteAppAddOn: "none",
+      websiteAppAddOnMonthly: 0,
+      source: "master_portal",
+      paymentMode: "manual_invoice",
+      stripeCheckoutSessionId: "invoice_code_match_test",
+    });
+
+    const invoiceAgencyCode = softwareSaleAgencyCode(sale);
+    const agency = api.agencies
+      .list()
+      .find((row) => row.contactEmail === "billing@invoice-code-match.example");
+
+    expect(agency).toBeTruthy();
+    expect(invoiceAgencyCode).toBe(api.agencies.revealCodeForMaster(agency!.id));
+    expect(api.agencies.byCode(invoiceAgencyCode)?.id).toBe(agency!.id);
   });
 
   it("allows the first real master portal user and blocks a second one", () => {

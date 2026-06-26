@@ -116,7 +116,9 @@ export async function validateAddress(
     });
   } catch (err) {
     // eslint-disable-next-line no-console
-    console.warn("[smartyValidation] fetch failed", err);
+    console.warn("[smartyValidation] fetch failed", {
+      message: err instanceof Error ? err.message : String(err),
+    });
     return null;
   }
 
@@ -143,7 +145,9 @@ export async function validateAddress(
     data = (await res.json()) as RawResponse;
   } catch (err) {
     // eslint-disable-next-line no-console
-    console.warn("[smartyValidation] proxy returned non-JSON", err);
+    console.warn("[smartyValidation] proxy returned non-JSON", {
+      message: err instanceof Error ? err.message : String(err),
+    });
     return null;
   }
 
@@ -155,7 +159,7 @@ export async function validateAddress(
     if (typeof performance !== "undefined") {
       const ms = Math.round(performance.now() - t0);
       // eslint-disable-next-line no-console
-      console.info(`[smartyValidation] no candidates for "${freeform}" (${ms}ms)`);
+      console.info("[smartyValidation] no candidates", { ms });
     }
     return null;
   }
@@ -163,10 +167,11 @@ export async function validateAddress(
   writeCache(key, data.result);
   if (typeof performance !== "undefined") {
     const ms = Math.round(performance.now() - t0);
+    const freeform = "redacted";
     // eslint-disable-next-line no-console
     console.info(
       `[smartyValidation] validated "${freeform}" → DPV ${data.result.dpvCode ?? "?"} (${ms}ms)`,
-      data.result
+      { dpvCode: data.result.dpvCode ?? "?", cached: false, ms }
     );
   }
   return data.result;

@@ -148,8 +148,8 @@ const propertyLocation = question(
   "textarea",
   ["Property address", "Location", "Occupancy", "Description of premises"],
   {
-    publicHints: ["Owner of record", "Square footage", "Construction type"],
-    assetHints: ["property address", "risk address", "location", "occupancy"],
+    publicHints: ["Property address", "Risk address", "Premises address", "Location address"],
+    assetHints: ["property address", "risk address", "premises address", "location address", "occupancy"],
   }
 );
 
@@ -886,7 +886,7 @@ export function buildAcordQuestionsForTemplate(
 ): QuotingQuestion[] {
   const definition = acordDefinitionForTemplate(template);
   return definition.questions
-    .filter((spec) => !resolveAcordValue(template, spec, context))
+    .filter((spec) => !shouldSuppressAcordQuestion(template, spec, context))
     .map((spec) => ({
       id: questionId(template, spec),
       section: `${definition.title} - ACORD fields`,
@@ -921,18 +921,18 @@ export function buildAcordFilledFieldsForTemplate(
       if (spec.required) missingFieldLabels.push(`ACORD ${definition.formNumber}: ${spec.label}`);
       return;
     }
-    const targetFields = targetFieldsForResolvedValue(spec);
-    if (targetFields.length === 0) {
+    const targetValues = targetFieldValuesForResolvedValue(spec, resolved.value, resolved.source);
+    if (targetValues.length === 0) {
       if (spec.required) missingFieldLabels.push(`ACORD ${definition.formNumber}: ${spec.label}`);
       return;
     }
-    targetFields.forEach((targetField) => {
-      fields[targetField] = resolved.value;
+    targetValues.forEach(({ targetField, value }) => {
+      fields[targetField] = value;
       mappings.push({
         sourceQuestionId: resolved.source === "questionnaire" ? questionId(template, spec) : undefined,
         sourceLabel: `ACORD ${definition.formNumber}: ${spec.label}`,
         targetField,
-        value: resolved.value,
+        value,
         source: resolved.source,
       });
     });
@@ -953,6 +953,27 @@ function questionId(template: AcordTemplateLike, spec: AcordQuestionSpec): strin
   return `acord-${template.templateId}-${fieldSlug(spec.key)}`;
 }
 
+function shouldSuppressAcordQuestion(
+  template: AcordTemplateLike,
+  spec: AcordQuestionSpec,
+  context: AcordFillContext
+): boolean {
+  void template;
+  void spec;
+  void context;
+  // Agents and clients must always be able to review and correct every
+  // ACORD-specific questionnaire item. Known data should prefill fields;
+  // it should never remove the question from the workflow.
+  return false;
+/*
+  const resolved = resolveAcordValue(template, spec, context);
+  if (!resolved) return false;
+  if (resolved.source === "questionnaire") return false;
+  if (targetFieldsCarrySameValue(spec.targetFields)) return true;
+  return compositeAcordQuestionComplete(spec, context);
+*/
+}
+
 function resolveAcordValue(
   template: AcordTemplateLike,
   spec: AcordQuestionSpec,
@@ -968,6 +989,7 @@ function resolveAcordValue(
   ]);
   if (
     assetEntry &&
+    sourceEntryCompatibleWithAcordQuestion(spec, assetEntry.key, assetEntry.value) &&
     evidenceAllowsAcordAutofill(context.publicFieldEvidence, assetEntry.key, "asset_detail")
   ) {
     return { value: assetEntry.value, source: "asset_detail" };
@@ -980,6 +1002,7 @@ function resolveAcordValue(
   ]);
   if (
     publicEntry &&
+    sourceEntryCompatibleWithAcordQuestion(spec, publicEntry.key, publicEntry.value) &&
     evidenceAllowsAcordAutofill(context.publicFieldEvidence, publicEntry.key, "public_record")
   ) {
     return { value: publicEntry.value, source: "public_record" };
@@ -1021,16 +1044,162 @@ function resolveAcordValue(
 }
 
 function targetFieldsForResolvedValue(spec: AcordQuestionSpec): string[] {
+  if (spec.key === "property_location") {
+    return spec.targetFields.filter((field) => {
+      const normalized = normalize(field);
+      return targetFieldKind(field) === "property_address" || normalized === "location";
+    });
+  }
   return targetFieldsCarrySameValue(spec.targetFields) ? spec.targetFields : [];
 }
 
+function targetFieldValuesForResolvedValue(
+  spec: AcordQuestionSpec,
+  resolvedValue: string,
+  source: AcordValueSource
+): { targetField: string; value: string }[] {
+  const sameValueTargets = targetFieldsForResolvedValue(spec);
+  if (sameValueTargets.length > 0) {
+    const parsedByTarget = sameValueTargets
+      .map((targetField) => ({
+        targetField,
+        value: extractCompositeTargetValue(resolvedValue, targetField),
+      }))
+      .filter((item): item is { targetField: string; value: string } => !!item.value);
+    if (parsedByTarget.length > 0) return parsedByTarget;
+    if (source === "questionnaire") {
+      return sameValueTargets.length === 1
+        ? [{ targetField: sameValueTargets[0], value: resolvedValue }]
+        : [];
+    }
+    return sameValueTargets.map((targetField) => ({ targetField, value: resolvedValue }));
+  }
+
+  const mapped = spec.targetFields
+    .map((targetField) => ({
+      targetField,
+      value: extractCompositeTargetValue(resolvedValue, targetField),
+    }))
+    .filter((item): item is { targetField: string; value: string } => !!item.value);
+  if (mapped.length > 0) return mapped;
+
+  // A human may type a single free-form answer into a grouped ACORD
+  // question. Put that answer in one field only, never every grouped
+  // field, so it remains legible and reviewable without fabricating
+  // separate component values.
+  if (source === "questionnaire") {
+    const targetField = spec.targetFields.find((field) => targetFieldKind(field) !== "generic") ?? spec.targetFields[0];
+    return targetField ? [{ targetField, value: resolvedValue }] : [];
+  }
+  return [];
+}
+
+function compositeAcordQuestionComplete(
+  spec: AcordQuestionSpec,
+  context: AcordFillContext
+): boolean {
+  const targetFields = spec.targetFields.filter((field) => targetFieldKind(field) !== "generic");
+  if (targetFields.length === 0) return false;
+  return targetFields.every((targetField) => !!knownValueForTargetField(spec, targetField, context));
+}
+
+function knownValueForTargetField(
+  spec: AcordQuestionSpec,
+  targetField: string,
+  context: AcordFillContext
+): string | null {
+  const hints = targetSpecificHints(targetField);
+  const known = findValueByHints(context.knownFields, [targetField]);
+  if (known) return known;
+
+  const assetEntry = findEntryByHints(context.assetDetails, hints);
+  if (
+    assetEntry &&
+    sourceEntryCompatibleWithAcordQuestion(spec, assetEntry.key, assetEntry.value) &&
+    evidenceAllowsAcordAutofill(context.publicFieldEvidence, assetEntry.key, "asset_detail")
+  ) {
+    return assetEntry.value;
+  }
+
+  const publicEntry = findEntryByHints(context.publicFields, hints);
+  if (
+    publicEntry &&
+    sourceEntryCompatibleWithAcordQuestion(spec, publicEntry.key, publicEntry.value) &&
+    evidenceAllowsAcordAutofill(context.publicFieldEvidence, publicEntry.key, "public_record")
+  ) {
+    return publicEntry.value;
+  }
+
+  switch (targetFieldKind(targetField)) {
+    case "insured_name":
+      return context.contactName ?? null;
+    case "agency_name":
+      return context.agencyName ?? null;
+    case "property_address":
+      return (
+        findValueByHints(context.assetDetails, [targetField, "Property address", "Risk address", "Premises address"]) ??
+        findValueByHints(context.publicFields, [targetField, "Property address", "Risk address", "Premises address"])
+      );
+    case "coverage":
+      return typeof context.estimatedValue === "number" && context.estimatedValue > 0
+        ? String(context.estimatedValue)
+        : null;
+    default:
+      return null;
+  }
+}
+
+function targetSpecificHints(targetField: string): string[] {
+  const kind = targetFieldKind(targetField);
+  const base = [targetField];
+  if (kind === "insured_name") return [...base, "Named insured", "Applicant name", "Legal business name"];
+  if (kind === "insured_mailing_address") return [...base, "Mailing address"];
+  if (kind === "property_address") return [...base, "Property address", "Risk address", "Premises address", "Location address"];
+  if (kind === "agency_name") return [...base, "Producer", "Agency", "Agency name"];
+  if (kind === "agency_phone" || kind === "insured_phone") return [...base, "Phone", "Primary phone"];
+  if (kind === "agency_email" || kind === "insured_email") return [...base, "Email", "Primary email"];
+  if (kind === "fein") return [...base, "FEIN", "EIN", "Federal EIN", "Tax ID"];
+  if (kind === "entity_type") return [...base, "Entity type", "Business entity type"];
+  if (kind === "website") return [...base, "Website", "Business website"];
+  if (kind === "years_in_business") return [...base, "Years in business", "Year established"];
+  if (kind === "industry_code") return [...base, "Primary industry", "NAICS", "SIC"];
+  if (kind === "operations") return [...base, "Business operations", "Description of operations", "Products / services"];
+  if (kind === "revenue") return [...base, "Annual revenue", "Revenue"];
+  if (kind === "payroll") return [...base, "Payroll"];
+  if (kind === "loss_history") return [...base, "Loss history", "Claims", "Losses"];
+  return base;
+}
+
+function extractCompositeTargetValue(value: string, targetField: string): string {
+  const lines = compositeAnswerLines(value);
+  if (lines.length === 0) return "";
+  const target = normalize(targetField);
+  const exact = lines.find(({ label }) => {
+    const key = normalize(label);
+    return key === target || target.includes(key) || key.includes(target);
+  });
+  if (exact) return exact.value;
+  const targetKind = targetFieldKind(targetField);
+  if (targetKind === "generic") return "";
+  const kindMatch = lines.find(({ label }) => targetFieldKind(label) === targetKind);
+  return kindMatch?.value ?? "";
+}
+
+function compositeAnswerLines(value: string): { label: string; value: string }[] {
+  return value
+    .split(/\r?\n|;\s+/)
+    .map((line) => line.trim())
+    .map((line) => line.match(/^([^:]{2,90}):\s*(.+)$/))
+    .filter((match): match is RegExpMatchArray => !!match?.[1] && !!match?.[2])
+    .map((match) => ({ label: match[1].trim(), value: match[2].trim() }))
+    .filter((line) => !!line.label && !!line.value);
+}
+
 function targetFieldsCarrySameValue(targetFields: string[]): boolean {
-  const kinds = new Set(
-    targetFields
-      .map(targetFieldKind)
-      .filter((kind) => kind !== "generic")
-  );
-  return kinds.size <= 1;
+  if (targetFields.length <= 1) return true;
+  const kinds = targetFields.map(targetFieldKind);
+  if (kinds.includes("generic")) return false;
+  return new Set(kinds).size === 1;
 }
 
 function canUseContactNameFallback(spec: AcordQuestionSpec, key: string): boolean {
@@ -1068,6 +1237,13 @@ function targetFieldKind(label: string): string {
   if (normalized.includes("payroll")) return "payroll";
   if (normalized.includes("deductible")) return "deductible";
   if (normalized.includes("coverage") || normalized.includes("limit")) return "coverage";
+  if (normalized.includes("entity")) return "entity_type";
+  if (normalized.includes("year") && (normalized.includes("business") || normalized.includes("established"))) {
+    return "years_in_business";
+  }
+  if (normalized.includes("naics") || normalized.includes("sic") || normalized.includes("industry")) {
+    return "industry_code";
+  }
   if (normalized.includes("loss") || normalized.includes("claim")) return "loss_history";
   if (normalized.includes("operation") || normalized.includes("product") || normalized.includes("service")) return "operations";
   if (normalized.includes("remark") || normalized.includes("instruction")) return "remarks";
@@ -1083,6 +1259,30 @@ function targetFieldKind(label: string): string {
     return "insured_name";
   }
   return "generic";
+}
+
+function sourceEntryCompatibleWithAcordQuestion(
+  spec: AcordQuestionSpec,
+  sourceKey: string,
+  value: string
+): boolean {
+  const key = normalize(sourceKey);
+  const fieldKinds = new Set(spec.targetFields.map(targetFieldKind));
+  const looksAddress =
+    /\d/.test(value) &&
+    /\b(st|street|rd|road|ave|avenue|dr|drive|ln|lane|blvd|boulevard|ct|court|cir|circle|way|pkwy|parkway|hwy|highway|pl|place|terrace|ter|trail|trl|mi|fl|ga|sc|ny|ca|tx|il|oh|pa|zip)\b/i.test(
+      value
+    );
+  if (spec.key === "property_location" || fieldKinds.has("property_address")) {
+    if (key.includes("owner") || key.includes("insured") || key.includes("applicant") || key.includes("name")) {
+      return false;
+    }
+    return looksAddress;
+  }
+  if (fieldKinds.has("insured_name")) {
+    return !(key.includes("property address") || key.includes("risk address") || key.includes("premises address"));
+  }
+  return true;
 }
 
 function findValueByHints(

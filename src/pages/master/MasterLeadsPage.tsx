@@ -14,6 +14,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Card, CardHeader, EmptyState, StatCard } from "@/components/ui/Card";
 import { api } from "@/lib/api";
 import { fmt } from "@/lib/format";
+import { QUOTEX_CONTACT_EMAIL } from "@/lib/quotexContact";
 import type { DemoLead, DemoLeadStatus } from "@/types";
 
 type LeadFilter = "all" | DemoLeadStatus;
@@ -116,7 +117,7 @@ export function MasterLeadsPage() {
         <div>
           <h1 className="font-display text-3xl">Leads</h1>
           <p className="mt-1 text-sm text-ink-500">
-            Walkthrough requests from the public site, plus manually added sales leads.
+            Demo leads from the public site, plus manually added sales leads.
           </p>
         </div>
         <button
@@ -133,7 +134,7 @@ export function MasterLeadsPage() {
         <StatCard
           label="Total leads"
           value={leads.length}
-          hint={`${walkthroughLeadCount} from walkthrough requests`}
+          hint={`${walkthroughLeadCount} from public demo gates`}
           icon={<Users className="h-5 w-5" />}
         />
         <StatCard
@@ -280,12 +281,18 @@ function LeadRow({
   onStatusChange: (id: string, status: DemoLeadStatus) => void;
 }) {
   const name = `${lead.firstName} ${lead.lastName}`.trim() || "Unnamed lead";
+  const emailHref = gmailLeadComposeUrl(lead);
   return (
     <tr className="align-top">
       <td className="px-4 py-4">
         <div className="font-semibold text-ink-900">{name}</div>
         <div className="mt-1 space-y-0.5 text-xs text-ink-500">
-          <a className="inline-flex items-center gap-1.5 hover:text-gold-700" href={`mailto:${lead.businessEmail}`}>
+          <a
+            className="inline-flex items-center gap-1.5 hover:text-gold-700"
+            href={emailHref}
+            target="_blank"
+            rel="noreferrer"
+          >
             <Mail className="h-3.5 w-3.5" />
             {lead.businessEmail}
           </a>
@@ -379,4 +386,28 @@ function statusTone(status: DemoLeadStatus): "neutral" | "info" | "success" | "w
 
 function statusLabel(status: DemoLeadStatus): string {
   return STATUS_OPTIONS.find((option) => option.id === status)?.label ?? status.replace(/_/g, " ");
+}
+
+function gmailLeadComposeUrl(lead: DemoLead): string {
+  const name = `${lead.firstName} ${lead.lastName}`.trim() || "there";
+  const subject = `Quotex demo follow-up for ${lead.agencyName || "your agency"}`;
+  const body = [
+    `Hi ${name},`,
+    "",
+    "Thanks for taking a look at Quotex Insurance.",
+    "",
+    "I wanted to follow up and see what questions you had after reviewing the demo.",
+    "",
+    "Best,",
+    "Quotex Insurance",
+  ].join("\n");
+  const params = new URLSearchParams({
+    authuser: QUOTEX_CONTACT_EMAIL,
+    view: "cm",
+    fs: "1",
+    to: lead.businessEmail,
+    su: subject,
+    body,
+  });
+  return `https://mail.google.com/mail/u/?${params.toString()}`;
 }

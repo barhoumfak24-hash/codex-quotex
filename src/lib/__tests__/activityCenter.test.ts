@@ -77,6 +77,55 @@ describe("Activity Center task lifecycle", () => {
     expect(api.tasks.listCompleted(agency.id).some((t) => t.id === ack.task.id)).toBe(true);
   });
 
+  it("keeps legacy status-resolved rows out of the open activity bucket", async () => {
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const task = api.tasks.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      title: "Legacy resolved activity",
+      description: "Older imported row with resolved status but no completed timestamp.",
+    });
+
+    const legacyResolved = db.update("tasks", task.id, {
+      status: "resolved",
+      completedAt: undefined,
+    })!;
+
+    expect(api.tasks.statusOf(legacyResolved)).toBe("resolved");
+    expect(api.tasks.listOpen(agency.id).some((t) => t.id === task.id)).toBe(false);
+    expect(api.tasks.listCompleted(agency.id).some((t) => t.id === task.id)).toBe(true);
+    expect(api.tasks.markInProgress(task.id)).toBeNull();
+    expect(api.tasks.snooze(task.id, 1)).toBeNull();
+  });
+
+  it("keeps legacy status-resolved rows out of the snoozed activity bucket", async () => {
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const task = api.tasks.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      title: "Legacy resolved snoozed activity",
+      description: "Older imported row with resolved status and future snooze.",
+    });
+
+    db.update("tasks", task.id, {
+      status: "resolved",
+      completedAt: undefined,
+      snoozedUntil: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    });
+
+    const reloaded = api.tasks.get(task.id)!;
+    expect(api.tasks.statusOf(reloaded)).toBe("resolved");
+    expect(api.tasks.listSnoozed(agency.id).some((t) => t.id === task.id)).toBe(false);
+    expect(api.tasks.listOpen(agency.id).some((t) => t.id === task.id)).toBe(false);
+    expect(api.tasks.listCompleted(agency.id).some((t) => t.id === task.id)).toBe(true);
+  });
+
   it("startedAt only stamps on the FIRST in-progress flip (preserves across snooze)", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];

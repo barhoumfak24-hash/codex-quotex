@@ -36,6 +36,23 @@ const MAPBOX_NORTHVILLE_RESPONSE = {
   ],
 };
 
+const NOMINATIM_ROAD_ONLY_NORTHVILLE_RESPONSE = [
+  {
+    place_id: 7001,
+    display_name: "McDonald Drive, Pheasant Hills, Northville, Oakland County, Michigan, 48167, United States",
+    address: {
+      road: "McDonald Drive",
+      village: "Northville",
+      county: "Oakland County",
+      state: "Michigan",
+      "ISO3166-2-lvl4": "US-MI",
+      postcode: "48167",
+      country: "United States",
+      country_code: "us",
+    },
+  },
+];
+
 // Mixed response simulating Nominatim's default behavior — street
 // address + several city/county/region hits that must be filtered out.
 const NOMINATIM_MIXED_RESPONSE = [
@@ -156,6 +173,28 @@ describe("searchAddresses (Nominatim default)", () => {
     expect(calledUrl).toMatch(/q=901\+McDonald/);
   });
 
+  it("biases Nominatim around device location while keeping US-only restrictions", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      json: async () => NOMINATIM_NORTHVILLE_RESPONSE,
+    });
+    const { searchAddresses } = await import("../addressSearch");
+    await searchAddresses("901 McDonald", "address", undefined, undefined, {
+      locationBias: {
+        latitude: 42.4311,
+        longitude: -83.4833,
+        radiusMeters: 25_000,
+      },
+    });
+    const calledUrl = String(
+      (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    );
+    expect(calledUrl).toContain("countrycodes=us");
+    expect(calledUrl).toContain("addressdetails=1");
+    expect(calledUrl).toContain("viewbox=");
+    expect(calledUrl).toContain("bounded=0");
+  });
+
   it("formats Nominatim results as clean US-style addresses", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       ok: true,
@@ -172,33 +211,127 @@ describe("searchAddresses (Nominatim default)", () => {
     expect(out[0].description).not.toContain("Wayne County");
   });
 
-  it("falls back to mock when Nominatim returns non-OK", async () => {
+  it("preserves the typed house number when Nominatim only returns the matching road", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ suggestions: [] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ suggestions: [] }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => NOMINATIM_ROAD_ONLY_NORTHVILLE_RESPONSE,
+      });
+
+    const { searchAddresses } = await import("../addressSearch");
+    const out = await searchAddresses("901 McDonald Dr, Northville");
+
+    expect(out).toEqual([
+      {
+        id: "7001",
+        description: "901 McDonald Drive, Northville, MI 48167",
+      },
+    ]);
+  });
+
+  it("uses the Nominatim server proxy before direct browser Nominatim when enabled", async () => {
+    vi.stubEnv("VITE_ENABLE_NOMINATIM_PROXY", "true");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        suggestions: [
+          {
+            id: "373059960",
+            description: "901 McDonald Drive, Northville, MI 48167",
+          },
+        ],
+      }),
+    });
+
+    const { searchAddresses } = await import("../addressSearch");
+    const out = await searchAddresses("901 McDonald", "address", undefined, undefined, {
+      locationBias: { latitude: 42.4314, longitude: -83.483, radiusMeters: 15_000 },
+    });
+
+    expect(out).toEqual([
+      {
+        id: "373059960",
+        description: "901 McDonald Drive, Northville, MI 48167",
+      },
+    ]);
+    const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls;
+    expect(String(calls[0][0])).toBe("/api/nominatim-search");
+    expect(calls[0][1]?.body).toContain("901 McDonald");
+  });
+
+  it("recovers when the user types an abbreviated suffix and partial city", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        suggestions: [
+          {
+            id: "901_McDonald_Dr,_Northville,_MI_48167",
+            description: "901 McDonald Dr, Northville, MI 48167",
+          },
+        ],
+      }),
+    });
+
+    const { searchAddresses, _getAddressSearchTelemetry } = await import("../addressSearch");
+    const out = await searchAddresses("901 McDonald Dr, Northville");
+
+    expect(out).toEqual([
+      {
+        id: "901_McDonald_Dr,_Northville,_MI_48167",
+        description: "901 McDonald Dr, Northville, MI 48167",
+      },
+    ]);
+    const urls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.map((call) =>
+      decodeURIComponent(String(call[0]))
+    );
+    expect(urls).toEqual(["/api/census-geocode"]);
+    expect(_getAddressSearchTelemetry().broaderQueryRetries).toBe(0);
+  });
+
+  it("returns empty by default when Nominatim returns non-OK", async () => {
     // Both the original query and the broader-query retry get 503.
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(() =>
       Promise.resolve({ ok: false, status: 503, json: async () => ({}) })
     );
     const { searchAddresses, _getAddressSearchTelemetry } = await import("../addressSearch");
-    // The mock's nationwide street pool includes "Main Street", so
-    // "123 Main" prefix-matches at least one fallback prediction.
     const out = await searchAddresses("123 Main");
-    expect(out.length).toBeGreaterThan(0); // fallback yielded predictions
-    // Every fallback result must also obey strict prefix matching.
-    out.forEach((p) => expect(p.description.toLowerCase()).toMatch(/^123 main/));
+    expect(out).toEqual([]);
     const telemetry = _getAddressSearchTelemetry();
     expect(telemetry.errors.at(-1)?.provider).toBe("nominatim");
     expect(telemetry.errors.at(-1)?.status).toBe(503);
   });
 
-  it("falls back to mock when Nominatim throws (network error)", async () => {
+  it("returns empty by default when Nominatim throws (network error)", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(() =>
       Promise.reject(new Error("network down"))
     );
     const { searchAddresses, _getAddressSearchTelemetry } = await import("../addressSearch");
     const out = await searchAddresses("456 Oak");
-    expect(out.length).toBeGreaterThan(0);
-    out.forEach((p) => expect(p.description.toLowerCase()).toMatch(/^456 oak/));
+    expect(out).toEqual([]);
     const telemetry = _getAddressSearchTelemetry();
     expect(telemetry.errors.at(-1)?.message).toMatch(/network down/);
+  });
+
+  it("uses mock fallback only when the caller explicitly opts into demo suggestions", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ok: false,
+      status: 503,
+      json: async () => ({}),
+    });
+    const { searchAddresses } = await import("../addressSearch");
+    const out = await searchAddresses("123 Main", "address", undefined, undefined, {
+      allowMockFallback: true,
+    });
+    expect(out.length).toBeGreaterThan(0);
+    out.forEach((p) => expect(p.description.toLowerCase()).toMatch(/^123 main/));
   });
 
   it("does not generate demo addresses when verified-only mode is requested", async () => {
@@ -229,6 +362,60 @@ describe("searchAddresses (Mapbox when token configured)", () => {
     expect(url).toContain("country=us");
     expect(url).toContain("access_token=pk.test_token");
     expect(out[0].description).toBe("901 McDonald Drive, Northville, Michigan 48167");
+  });
+
+  it("passes device location as Mapbox proximity and restricts short numeric searches to a bbox", async () => {
+    vi.stubEnv("VITE_MAPBOX_TOKEN", "pk.test_token");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      json: async () => MAPBOX_NORTHVILLE_RESPONSE,
+    });
+    const { searchAddresses } = await import("../addressSearch");
+    await searchAddresses("90", "address", undefined, undefined, {
+      locationBias: {
+        latitude: 42.4311,
+        longitude: -83.4833,
+        radiusMeters: 50_000,
+      },
+    });
+    const url = decodeURIComponent(
+      String((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][0])
+    );
+    expect(url).toContain("proximity=-83.4833,42.4311");
+    expect(url).toContain("bbox=");
+  });
+
+  it("keeps provider cache separated by location bias", async () => {
+    vi.stubEnv("VITE_MAPBOX_TOKEN", "pk.test_token");
+    (globalThis.fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => MAPBOX_NORTHVILLE_RESPONSE,
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          features: [
+            {
+              id: "address.456",
+              place_name: "901 McDonald Avenue, Brooklyn, New York 11218, United States",
+              place_type: ["address"],
+            },
+          ],
+        }),
+      });
+
+    const { searchAddresses } = await import("../addressSearch");
+    const first = await searchAddresses("901 McDonald", "address", undefined, undefined, {
+      locationBias: { latitude: 42.4311, longitude: -83.4833 },
+    });
+    const second = await searchAddresses("901 McDonald", "address", undefined, undefined, {
+      locationBias: { latitude: 40.6501, longitude: -73.9496 },
+    });
+
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(2);
+    expect(first[0].description).toContain("Northville");
+    expect(second[0].description).toContain("Brooklyn");
   });
 
   it("retries Mapbox with a broader query when the original returns no features", async () => {
@@ -559,6 +746,7 @@ describe("strict prefix matching (every row must start with the user's input)", 
     // Same content, varied case / spacing → still matches
     expect(matchesQueryPrefix("901 McDonald Drive, Northville, MI 48167", "901 mcdonald")).toBe(true);
     expect(matchesQueryPrefix("901 McDonald Drive, Northville, MI 48167", "  901   McDonald  ")).toBe(true);
+    expect(matchesQueryPrefix("901 McDonald Drive, Northville, MI 48167", "901 McDonald Dr, Northville")).toBe(true);
     // First character mismatch → no match
     expect(matchesQueryPrefix("901 McDonald Drive, Northville, MI 48167", "902 McDonald")).toBe(false);
     // Mid-string mismatch → no match
@@ -845,6 +1033,29 @@ const SMARTY_RESPONSE = {
 };
 
 describe("SmartyStreets provider", () => {
+  it("uses the protected Smarty proxy when enabled, without requiring a browser key", async () => {
+    vi.stubEnv("VITE_ENABLE_SMARTY_AUTOCOMPLETE_PROXY", "true");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        suggestions: [
+          { id: "901", description: "901 McDonald Dr, Northville, MI 48167" },
+        ],
+      }),
+    });
+    const { searchAddresses, getActiveProvider } = await import("../addressSearch");
+    const out = await searchAddresses("901 McDonald");
+    expect(getActiveProvider()).toBe("smarty");
+    const [calledUrl, init] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(calledUrl)).toBe("/api/smarty-autocomplete");
+    expect((init as RequestInit).method).toBe("POST");
+    expect(JSON.parse(String((init as RequestInit).body))).toEqual({
+      query: "901 McDonald",
+      maxResults: 10,
+    });
+    expect(out).toEqual([{ id: "901", description: "901 McDonald Dr, Northville, MI 48167" }]);
+  });
+
   it("is selected when VITE_SMARTY_WEBSITE_KEY is set, even if Mapbox token is also set", async () => {
     vi.stubEnv("VITE_SMARTY_WEBSITE_KEY", "smarty_test_key");
     vi.stubEnv("VITE_MAPBOX_TOKEN", "pk.test_mapbox");
@@ -897,6 +1108,158 @@ describe("SmartyStreets provider", () => {
     expect(telemetry.errors.at(-1)?.provider).toBe("smarty");
     expect(telemetry.errors.at(-1)?.status).toBe(401);
   });
+
+  it("does not let Smarty win short numeric searches when device location is available", async () => {
+    vi.stubEnv("VITE_SMARTY_WEBSITE_KEY", "smarty_test_key");
+    vi.stubEnv("VITE_ENABLE_PHOTON_AUTOCOMPLETE", "true");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        suggestions: [
+          {
+            id: "photon-local-90",
+            description: "9070 7 Mile Road, Northville, MI 48167",
+          },
+        ],
+      }),
+    });
+
+    const { searchAddresses } = await import("../addressSearch");
+    const out = await searchAddresses("90", "address", undefined, undefined, {
+      locationBias: { latitude: 42.4311, longitude: -83.4833, radiusMeters: 15_000 },
+    });
+
+    expect(out[0].description).toBe("9070 7 Mile Road, Northville, MI 48167");
+    const [calledUrl] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(calledUrl)).toBe("/api/photon-autocomplete");
+  });
+});
+
+describe("Census Geocoder fallback", () => {
+  it("uses Census before broad search for complete U.S. addresses", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          suggestions: [
+            {
+              id: "4600_Silver_Hill_Rd_Washington_DC_20233",
+              description: "4600 Silver Hill Rd, Washington, DC 20233",
+            },
+          ],
+        }),
+      });
+
+    const { searchAddresses } = await import("../addressSearch");
+    const out = await searchAddresses("4600 Silver Hill Rd, Washington, DC 20233");
+    const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
+    expect(calls).toEqual(["/api/census-geocode"]);
+    expect(out).toEqual([
+      {
+        id: "4600_Silver_Hill_Rd_Washington_DC_20233",
+        description: "4600 Silver Hill Rd, Washington, DC 20233",
+      },
+    ]);
+  });
+
+  it("uses Census for street plus city inputs even without state or ZIP", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        suggestions: [
+          {
+            id: "901_McDonald_Dr,_Northville,_MI_48167",
+            description: "901 McDonald Dr, Northville, MI 48167",
+          },
+        ],
+      }),
+    });
+
+    const { searchAddresses } = await import("../addressSearch");
+    const out = await searchAddresses("901 McDonald Dr, Northville");
+    const calls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
+
+    expect(calls).toEqual(["/api/census-geocode"]);
+    expect(out).toEqual([
+      {
+        id: "901_McDonald_Dr,_Northville,_MI_48167",
+        description: "901 McDonald Dr, Northville, MI 48167",
+      },
+    ]);
+  });
+
+  it("keeps searching when a provider returns rows that do not match the typed prefix", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          suggestions: [
+            {
+              id: "902_McDonald_Dr,_Northville,_MI_48167",
+              description: "902 McDonald Dr, Northville, MI 48167",
+            },
+          ],
+        }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => NOMINATIM_NORTHVILLE_RESPONSE,
+      });
+
+    const { searchAddresses } = await import("../addressSearch");
+    const out = await searchAddresses("901 McDonald Dr, Northville");
+
+    expect((globalThis.fetch as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(2);
+    expect(out).toEqual([
+      {
+        id: "12345",
+        description: "901 McDonald Drive, Northville, MI 48167",
+      },
+    ]);
+  });
+});
+
+describe("Photon autocomplete proxy provider", () => {
+  it("uses the keyless Photon proxy before Nominatim when enabled", async () => {
+    vi.stubEnv("VITE_ENABLE_PHOTON_AUTOCOMPLETE", "true");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        suggestions: [
+          {
+            id: "W:123:9070 7 Mile Road, Northville, MI 48167",
+            description: "9070 7 Mile Road, Northville, MI 48167",
+          },
+        ],
+      }),
+    });
+
+    const { searchAddresses } = await import("../addressSearch");
+    const out = await searchAddresses("90", "address", undefined, undefined, {
+      locationBias: {
+        latitude: 42.4311,
+        longitude: -83.4833,
+        radiusMeters: 50_000,
+      },
+    });
+
+    expect(out).toEqual([
+      {
+        id: "W:123:9070 7 Mile Road, Northville, MI 48167",
+        description: "9070 7 Mile Road, Northville, MI 48167",
+      },
+    ]);
+    const [calledUrl, init] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(calledUrl)).toBe("/api/photon-autocomplete");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      query: "90",
+      locationBias: {
+        latitude: 42.4311,
+        longitude: -83.4833,
+        radiusMeters: 50_000,
+      },
+    });
+  });
 });
 
 // =====================================================================
@@ -943,7 +1306,137 @@ const GOOGLE_PLACE_DETAILS_RESPONSE = {
 };
 
 describe("Google Places (New) provider", () => {
+  it("prefers the server-side Google proxy when it is enabled", async () => {
+    vi.stubEnv("VITE_ENABLE_GOOGLE_PLACES_PROXY", "true");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        suggestions: [
+          {
+            id: "ChIJ-proxy-1",
+            description: "901 McDonald Drive, Northville, MI 48167",
+            googlePlaceId: "ChIJ-proxy-1",
+          },
+        ],
+      }),
+    });
+
+    const { searchAddresses, getActiveProvider } = await import("../addressSearch");
+    expect(getActiveProvider()).toBe("google");
+    const out = await searchAddresses("901 McDonald Dr, Northville", "address", undefined, "tok");
+    expect(out).toEqual([
+      {
+        id: "ChIJ-proxy-1",
+        description: "901 McDonald Drive, Northville, MI 48167",
+        googlePlaceId: "ChIJ-proxy-1",
+      },
+    ]);
+    const [calledUrl, init] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(calledUrl)).toBe("/api/google-places-autocomplete");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      query: "901 McDonald Dr, Northville",
+      sessionToken: "tok",
+    });
+  });
+
+  it("passes two-character searches and location bias through the server-side Google proxy", async () => {
+    vi.stubEnv("VITE_ENABLE_GOOGLE_PLACES_PROXY", "true");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        suggestions: [
+          {
+            id: "ChIJ-proxy-90",
+            description: "9070 7 Mile Rd, Northville, MI 48167",
+            googlePlaceId: "ChIJ-proxy-90",
+          },
+        ],
+      }),
+    });
+
+    const { searchAddresses } = await import("../addressSearch");
+    const out = await searchAddresses("90", "address", undefined, "tok", {
+      locationBias: {
+        latitude: 42.4311,
+        longitude: -83.4833,
+        radiusMeters: 50_000,
+      },
+    });
+    expect(out[0].description).toContain("Northville");
+    const [calledUrl, init] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(calledUrl)).toBe("/api/google-places-autocomplete");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      query: "90",
+      sessionToken: "tok",
+      locationBias: {
+        latitude: 42.4311,
+        longitude: -83.4833,
+        radiusMeters: 50_000,
+      },
+    });
+  });
+
+  it("fetches selected-place details through the server-side Google proxy", async () => {
+    vi.stubEnv("VITE_ENABLE_GOOGLE_PLACES_PROXY", "true");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        parts: {
+          street: "901 McDonald Drive",
+          apt: "",
+          city: "Northville",
+          state: "MI",
+          zip: "48167",
+        },
+      }),
+    });
+
+    const { fetchGooglePlaceDetails } = await import("../addressSearch");
+    const parts = await fetchGooglePlaceDetails("ChIJ-proxy-1", "tok");
+    expect(parts).toEqual({
+      street: "901 McDonald Drive",
+      apt: "",
+      city: "Northville",
+      state: "MI",
+      zip: "48167",
+    });
+    const [calledUrl, init] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(calledUrl)).toBe("/api/google-place-details");
+    expect(JSON.parse(String(init?.body))).toEqual({
+      placeId: "ChIJ-proxy-1",
+      sessionToken: "tok",
+    });
+  });
+
+  it("does not use browser-exposed Google keys unless direct debug mode is explicitly enabled", async () => {
+    vi.stubEnv("VITE_GOOGLE_PLACES_API_KEY", "public-looking-key");
+    vi.stubEnv("VITE_GOOGLE_MAPS_API_KEY", "legacy-public-looking-key");
+    vi.stubEnv("VITE_SMARTY_WEBSITE_KEY", "smarty_key");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        suggestions: [
+          {
+            street_line: "901 McDonald Drive",
+            city: "Northville",
+            state: "MI",
+            zipcode: "48167",
+          },
+        ],
+      }),
+    });
+
+    const { searchAddresses, getActiveProvider } = await import("../addressSearch");
+    expect(getActiveProvider()).toBe("smarty");
+    await searchAddresses("901 McDonald");
+    const [calledUrl, init] = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(String(calledUrl)).toContain("us-autocomplete-pro.api.smarty.com");
+    expect(JSON.stringify(init)).not.toContain("public-looking-key");
+    expect(JSON.stringify(init)).not.toContain("legacy-public-looking-key");
+  });
+
   it("is selected when VITE_GOOGLE_MAPS_API_KEY is set, beating Smarty + Mapbox", async () => {
+    vi.stubEnv("VITE_ENABLE_DIRECT_GOOGLE_PLACES", "true");
     vi.stubEnv("VITE_GOOGLE_MAPS_API_KEY", "google_test_key");
     vi.stubEnv("VITE_SMARTY_WEBSITE_KEY", "smarty_key");
     vi.stubEnv("VITE_MAPBOX_TOKEN", "pk.mapbox");
@@ -976,6 +1469,7 @@ describe("Google Places (New) provider", () => {
   });
 
   it("fetchGooglePlaceDetails parses addressComponents into Street/Apt/City/State/ZIP", async () => {
+    vi.stubEnv("VITE_ENABLE_DIRECT_GOOGLE_PLACES", "true");
     vi.stubEnv("VITE_GOOGLE_MAPS_API_KEY", "k");
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       ok: true,
@@ -1000,6 +1494,7 @@ describe("Google Places (New) provider", () => {
   });
 
   it("fetchGooglePlaceDetails returns null when Google returns non-OK", async () => {
+    vi.stubEnv("VITE_ENABLE_DIRECT_GOOGLE_PLACES", "true");
     vi.stubEnv("VITE_GOOGLE_MAPS_API_KEY", "k");
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       ok: false,
@@ -1014,6 +1509,7 @@ describe("Google Places (New) provider", () => {
   });
 
   it("Google search reuses the supplied sessionToken across keystrokes", async () => {
+    vi.stubEnv("VITE_ENABLE_DIRECT_GOOGLE_PLACES", "true");
     vi.stubEnv("VITE_GOOGLE_MAPS_API_KEY", "k");
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(() =>
       Promise.resolve({ ok: true, json: async () => GOOGLE_AUTOCOMPLETE_RESPONSE })
@@ -1033,6 +1529,7 @@ describe("Google Places (New) provider", () => {
   });
 
   it("logs telemetry when Google returns 403 / 429", async () => {
+    vi.stubEnv("VITE_ENABLE_DIRECT_GOOGLE_PLACES", "true");
     vi.stubEnv("VITE_GOOGLE_MAPS_API_KEY", "k");
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(() =>
       Promise.resolve({ ok: false, status: 429, json: async () => ({}) })
@@ -1044,6 +1541,7 @@ describe("Google Places (New) provider", () => {
   });
 
   it("prefers VITE_GOOGLE_PLACES_API_KEY over the legacy VITE_GOOGLE_MAPS_API_KEY when both are set", async () => {
+    vi.stubEnv("VITE_ENABLE_DIRECT_GOOGLE_PLACES", "true");
     vi.stubEnv("VITE_GOOGLE_PLACES_API_KEY", "places_key_v2");
     vi.stubEnv("VITE_GOOGLE_MAPS_API_KEY", "legacy_maps_key");
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
@@ -1059,6 +1557,7 @@ describe("Google Places (New) provider", () => {
   });
 
   it("falls back to the legacy VITE_GOOGLE_MAPS_API_KEY when only that var is set", async () => {
+    vi.stubEnv("VITE_ENABLE_DIRECT_GOOGLE_PLACES", "true");
     vi.stubEnv("VITE_GOOGLE_PLACES_API_KEY", "");
     vi.stubEnv("VITE_GOOGLE_MAPS_API_KEY", "legacy_only_key");
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
@@ -1074,6 +1573,7 @@ describe("Google Places (New) provider", () => {
   });
 
   it("uses the new key for fetchGooglePlaceDetails as well", async () => {
+    vi.stubEnv("VITE_ENABLE_DIRECT_GOOGLE_PLACES", "true");
     vi.stubEnv("VITE_GOOGLE_PLACES_API_KEY", "places_key_v2");
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
       ok: true,
@@ -1097,6 +1597,7 @@ describe("Google Places (New) provider", () => {
 
 describe("Google Places (New) — JS SDK transport", () => {
   it("uses the JS SDK when it loads, never hits the REST endpoint", async () => {
+    vi.stubEnv("VITE_ENABLE_DIRECT_GOOGLE_PLACES", "true");
     vi.stubEnv("VITE_GOOGLE_PLACES_API_KEY", "test-key");
     const fetchSpy = vi.fn();
     vi.doMock("../googleMapsLoader", () => ({
@@ -1143,6 +1644,7 @@ describe("Google Places (New) — JS SDK transport", () => {
   });
 
   it("falls back to REST when the JS SDK fails to load", async () => {
+    vi.stubEnv("VITE_ENABLE_DIRECT_GOOGLE_PLACES", "true");
     vi.stubEnv("VITE_GOOGLE_PLACES_API_KEY", "test-key");
     vi.doMock("../googleMapsLoader", () => ({
       loadGoogleMaps: vi.fn().mockRejectedValue(new Error("CSP blocked maps.googleapis.com")),
@@ -1161,6 +1663,7 @@ describe("Google Places (New) — JS SDK transport", () => {
   });
 
   it("falls back to REST when the SDK returns zero predictions for a partial-word query", async () => {
+    vi.stubEnv("VITE_ENABLE_DIRECT_GOOGLE_PLACES", "true");
     vi.stubEnv("VITE_GOOGLE_PLACES_API_KEY", "test-key");
     vi.doMock("../googleMapsLoader", () => ({
       loadGoogleMaps: vi.fn().mockResolvedValue({
@@ -1187,6 +1690,7 @@ describe("Google Places (New) — JS SDK transport", () => {
   });
 
   it("logs REQUEST_DENIED with a remediation hint when the SDK throws it", async () => {
+    vi.stubEnv("VITE_ENABLE_DIRECT_GOOGLE_PLACES", "true");
     vi.stubEnv("VITE_GOOGLE_PLACES_API_KEY", "test-key");
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.doMock("../googleMapsLoader", () => ({
@@ -1214,6 +1718,7 @@ describe("Google Places (New) — JS SDK transport", () => {
   });
 
   it("logs OVER_QUERY_LIMIT with a billing remediation hint", async () => {
+    vi.stubEnv("VITE_ENABLE_DIRECT_GOOGLE_PLACES", "true");
     vi.stubEnv("VITE_GOOGLE_PLACES_API_KEY", "test-key");
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.doMock("../googleMapsLoader", () => ({
@@ -1241,6 +1746,7 @@ describe("Google Places (New) — JS SDK transport", () => {
   });
 
   it("Place.fetchFields parses Street/Apt/City/State/ZIP via the JS SDK", async () => {
+    vi.stubEnv("VITE_ENABLE_DIRECT_GOOGLE_PLACES", "true");
     vi.stubEnv("VITE_GOOGLE_PLACES_API_KEY", "test-key");
     vi.doMock("../googleMapsLoader", () => ({
       loadGoogleMaps: vi.fn().mockResolvedValue({

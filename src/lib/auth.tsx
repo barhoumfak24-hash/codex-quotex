@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { Role, User } from "@/types";
 import { api } from "./api";
+import { apiBaseUrl } from "./apiBase";
 import { subscribeToDbChanges } from "./db";
 import { isLockingMasterAccount } from "./masterAccount";
 import { isStaffRole, type StaffRole } from "./roles";
@@ -30,7 +31,7 @@ interface AuthContextValue {
     newPassword: string
   ) => { ok: true } | { ok: false; reason: string };
   // Staff sign-in: business email/username + password. Tenant is derived from the staff user.
-  signInStaff: (identifier: string, password: string) => User | null;
+  signInStaff: (identifier: string, password: string) => Promise<User | null>;
   signInMaster: (email: string, password: string) => User | null;
   createMasterAccount: (input: {
     name: string;
@@ -65,6 +66,9 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 // `storage` event.
 const STORAGE_KEY = "quotex.auth.userId.v1";
 const CLIENT_IP_KEY = "quotex.security.clientIp.v1";
+const AUTH_TOKEN_KEY = "quotex.authToken";
+const LEGACY_AUTH_TOKEN_KEY = "quotex.jwt";
+const SERVER_AUTH_USER_KEY = "quotex.auth.serverUser.v1";
 
 // Generates a 10-char alphanumeric temporary password for the
 // customer reset flow. Demo-grade — production hashes a one-time
@@ -110,8 +114,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (u && !accessBlockForUser(u)) {
         lastIdRef.current = u.id;
         setUser(u);
+      } else {
+        const serverUser = loadServerSessionUser();
+        if (serverUser && serverUser.id === id && !accessBlockForUser(serverUser)) {
+          lastIdRef.current = serverUser.id;
+          setUser(serverUser);
+        } else if (typeof window !== "undefined") {
+          window.localStorage.removeItem(STORAGE_KEY);
+          clearServerSessionUser();
+        }
+      }
+    } else {
+      const serverUser = loadServerSessionUser();
+      if (serverUser && !accessBlockForUser(serverUser)) {
+        lastIdRef.current = serverUser.id;
+        setUser(serverUser);
       } else if (typeof window !== "undefined") {
-        window.localStorage.removeItem(STORAGE_KEY);
+        clearServerSessionUser();
       }
     }
     setLoading(false);
@@ -135,6 +154,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         lastIdRef.current = nextId;
         setUser(u);
       } else {
+        const serverUser = loadServerSessionUser();
+        if (serverUser && serverUser.id === nextId && !accessBlockForUser(serverUser)) {
+          lastIdRef.current = nextId;
+          setUser(serverUser);
+          return;
+        }
         lastIdRef.current = null;
         setUser(null);
         window.localStorage.removeItem(STORAGE_KEY);
@@ -149,14 +174,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(u);
     if (typeof window === "undefined") return;
     if (u) window.localStorage.setItem(STORAGE_KEY, u.id);
-    else window.localStorage.removeItem(STORAGE_KEY);
+    else {
+      window.localStorage.removeItem(STORAGE_KEY);
+      clearServerSessionToken();
+    }
   }, []);
 
   useEffect(() => {
     if (!user) return;
     return subscribeToDbChanges(() => {
       const fresh = api.users.get(user.id) ?? null;
-      if (!fresh || accessBlockForUser(fresh)) {
+      if (!fresh) {
+        const serverUser = loadServerSessionUser();
+        if (serverUser && serverUser.id === user.id && !accessBlockForUser(serverUser)) {
+          lastIdRef.current = serverUser.id;
+          setUser(serverUser);
+          return;
+        }
+        persist(null);
+        return;
+      }
+      if (accessBlockForUser(fresh)) {
         persist(null);
         return;
       }
@@ -197,6 +235,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (!u.active || accessBlockForUser(u)) return null;
       if (!u.generatedPassword && !allowsPasswordlessLocalFallback()) return null;
       if (u.generatedPassword && u.generatedPassword !== password) return null;
+      clearServerSessionToken();
       return persistIfAllowed(u);
     },
     [persistIfAllowed]
@@ -239,8 +278,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const signInStaff = useCallback(
-    (identifier: string, password: string) => {
-      const u = api.users.byIdentifier(identifier.trim());
+    async (identifier: string, password: string) => {
+      const normalizedIdentifier = identifier.trim();
+      const serverSession = await establishServerStaffSession(normalizedIdentifier, password);
+      if (serverSession.ok) {
+        const serverUser = resolveServerStaffUser(serverSession.user, normalizedIdentifier);
+        if (!serverUser) return null;
+        const signedIn = persistIfAllowed(serverUser);
+        if (signedIn) storeServerSessionUser(signedIn);
+        return signedIn;
+      }
+
+      if (!serverSession.allowLocalFallback) return null;
+      const u = api.users.byIdentifier(normalizedIdentifier);
       if (!u || !isStaffRole(u.role)) return null;
       const agency = u.tenantId ? api.agencies.get(u.tenantId) : undefined;
       if (!agency || !agency.active) return null;
@@ -250,7 +300,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // sign-in when an explicit local env flag is enabled.
       if (!u.generatedPassword && !allowsPasswordlessLocalFallback()) return null;
       if (u.generatedPassword && u.generatedPassword !== password) return null;
-      return persistIfAllowed(u);
+      clearServerSessionUser();
+      const signedIn = persistIfAllowed(u);
+      return signedIn;
     },
     [persistIfAllowed]
   );
@@ -261,6 +313,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (!u || !isLockingMasterAccount(u)) return null;
       if (!u.generatedPassword && !allowsPasswordlessLocalFallback()) return null;
       if (u.generatedPassword && u.generatedPassword !== password) return null;
+      clearServerSessionToken();
       return persistIfAllowed(u);
     },
     [persistIfAllowed]
@@ -286,6 +339,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           passwordUpdatedAt: new Date().toISOString(),
           profileCompleted: true,
         });
+        clearServerSessionToken();
         persistIfAllowed(user);
         return { ok: true as const, user };
       } catch {
@@ -319,9 +373,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const refreshUser = useCallback(() => {
     if (!user) return null;
     const fresh = api.users.get(user.id) ?? null;
-    setUser(fresh);
-    lastIdRef.current = fresh?.id ?? null;
-    return fresh;
+    const next = fresh ?? loadServerSessionUser();
+    setUser(next);
+    lastIdRef.current = next?.id ?? null;
+    return next;
   }, [user]);
 
   const hasRole = useCallback(
@@ -363,6 +418,178 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+}
+
+type ServerSessionResult =
+  | { ok: true; user: ServerSessionUser }
+  | { ok: false; allowLocalFallback: boolean; reason: string };
+
+type ServerSessionUser = {
+  id: string;
+  tenantId: string | null;
+  branchId?: string | null;
+  role: string;
+  email: string;
+  name: string;
+};
+
+async function establishServerStaffSession(identifier: string, password: string): Promise<ServerSessionResult> {
+  if (typeof window === "undefined") return { ok: false, allowLocalFallback: false, reason: "browser_unavailable" };
+  const payload = JSON.stringify({ identifier, password });
+  const candidates = uniqueAuthUrls([
+    `${apiBaseUrl()}/auth/employee/login`,
+    "/api/auth/employee/login",
+    "/api/app/api/auth/employee/login",
+  ]);
+  let sawReachableAuthRoute = false;
+  for (const url of candidates) {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: payload,
+      });
+      if (response.status === 404 || response.status === 405) continue;
+      sawReachableAuthRoute = true;
+      const json = (await response.json().catch(() => null)) as
+        | { ok?: boolean; token?: string; reason?: string; user?: Partial<ServerSessionUser> }
+        | null;
+      if (response.ok && json?.ok && typeof json.token === "string" && json.token.trim() && isServerStaffUser(json.user)) {
+        storeServerSessionToken(json.token);
+        return { ok: true, user: json.user };
+      }
+      clearServerSessionToken();
+      clearServerSessionUser();
+      return {
+        ok: false,
+        allowLocalFallback: import.meta.env.DEV,
+        reason: json?.reason || `auth_http_${response.status}`,
+      };
+    } catch {
+      continue;
+    }
+  }
+  clearServerSessionToken();
+  clearServerSessionUser();
+  return {
+    ok: false,
+    allowLocalFallback: import.meta.env.DEV && !sawReachableAuthRoute,
+    reason: "auth_route_unavailable",
+  };
+}
+
+function resolveServerStaffUser(serverUser: ServerSessionUser, identifier: string): User | null {
+  if (!isStaffRole(serverUser.role as Role)) return null;
+  const local =
+    api.users.get(serverUser.id) ??
+    api.users.byIdentifier(serverUser.email) ??
+    api.users.byIdentifier(identifier);
+  if (local && isStaffRole(local.role)) {
+    return {
+      ...local,
+      tenantId: serverUser.tenantId,
+      branchId: serverUser.branchId ?? local.branchId,
+      email: serverUser.email,
+      businessEmail: local.businessEmail ?? serverUser.email,
+      name: serverUser.name || local.name,
+      active: local.active !== false,
+    };
+  }
+  return {
+    id: serverUser.id,
+    tenantId: serverUser.tenantId,
+    branchId: serverUser.branchId ?? undefined,
+    role: serverUser.role as StaffRole,
+    email: serverUser.email,
+    businessEmail: serverUser.email,
+    name: serverUser.name || serverUser.email,
+    staffAccessStatus: "active",
+    profileCompleted: true,
+    active: true,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function isServerStaffUser(value: unknown): value is ServerSessionUser {
+  const user = value as Partial<ServerSessionUser> | null | undefined;
+  return Boolean(
+    user &&
+      typeof user.id === "string" &&
+      typeof user.email === "string" &&
+      typeof user.name === "string" &&
+      (user.tenantId === null || typeof user.tenantId === "string") &&
+      isStaffRole(user.role as Role)
+  );
+}
+
+function storeServerSessionToken(token: string) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(AUTH_TOKEN_KEY, token);
+  window.localStorage.setItem(LEGACY_AUTH_TOKEN_KEY, token);
+}
+
+function clearServerSessionToken() {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(AUTH_TOKEN_KEY);
+  window.localStorage.removeItem(LEGACY_AUTH_TOKEN_KEY);
+  clearServerSessionUser();
+}
+
+function storeServerSessionUser(user: User) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(SERVER_AUTH_USER_KEY, JSON.stringify(user));
+}
+
+function loadServerSessionUser(): User | null {
+  if (typeof window === "undefined") return null;
+  if (!window.localStorage.getItem(AUTH_TOKEN_KEY) && !window.localStorage.getItem(LEGACY_AUTH_TOKEN_KEY)) {
+    clearServerSessionUser();
+    return null;
+  }
+  const raw = window.localStorage.getItem(SERVER_AUTH_USER_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<User>;
+    if (
+      typeof parsed.id === "string" &&
+      typeof parsed.email === "string" &&
+      typeof parsed.name === "string" &&
+      isStaffRole(parsed.role)
+    ) {
+      return {
+        id: parsed.id,
+        tenantId: typeof parsed.tenantId === "string" ? parsed.tenantId : null,
+        branchId: typeof parsed.branchId === "string" ? parsed.branchId : undefined,
+        role: parsed.role,
+        email: parsed.email,
+        businessEmail: parsed.businessEmail ?? parsed.email,
+        name: parsed.name,
+        staffAccessStatus: parsed.staffAccessStatus ?? "active",
+        profileCompleted: parsed.profileCompleted ?? true,
+        active: parsed.active !== false,
+        createdAt: typeof parsed.createdAt === "string" ? parsed.createdAt : new Date().toISOString(),
+      };
+    }
+  } catch {
+    // Ignore corrupt persisted auth shadow data.
+  }
+  clearServerSessionUser();
+  return null;
+}
+
+function clearServerSessionUser() {
+  if (typeof window === "undefined") return;
+  window.localStorage.removeItem(SERVER_AUTH_USER_KEY);
+}
+
+function uniqueAuthUrls(values: string[]): string[] {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    const normalized = value.replace(/\/+$/, "");
+    if (!normalized || seen.has(normalized)) return false;
+    seen.add(normalized);
+    return true;
+  });
 }
 
 export function useAuth() {

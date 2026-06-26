@@ -128,10 +128,10 @@ function useAnchoredMessageScroll(
 }
 
 // =====================================================================
-// Activity Center â†’ Messages. Two-column inbox:
-//   â€¢ Left  â†’ Client + prospect + holder threads (Communications + AI / custom
+// Activity Center -> Messages. Two-column inbox:
+//   - Left -> Client + prospect + holder threads (Communications + AI / custom
 //              marketing messages aggregated per contact).
-//   â€¢ Right â†’ Internal staff DMs / group threads.
+//   - Right -> Internal staff DMs / group threads.
 // Both columns mirror an iPhone-style threads list with search,
 // last-message preview, urgency-colored dot, and an active thread
 // pane. External conversations are email-only; internal threads stay
@@ -207,13 +207,13 @@ export function MessagesPage() {
   const [clientQuery, setClientQuery] = useState("");
   const [internalQuery, setInternalQuery] = useState("");
   const [carrierQuery, setCarrierQuery] = useState("");
-  // Unified "New send" modal â€” start a fresh conversation in whichever
+  // Unified "New send" modal - start a fresh conversation in whichever
   // card the button was clicked (clients/prospects/holders, internal, carriers).
   const [newSend, setNewSend] = useState<null | "contact" | "internal" | "carrier">(null);
   // Count of inbound messages the AI triaged into activities or notices this
-  // visit â€” drives the "AI triaged your inbox" banner.
+  // visit - drives the "AI triaged your inbox" banner.
   const [aiTriaged, setAiTriaged] = useState(0);
-  // Active selections â€” keep them in URL so deep-links from the
+  // Active selections - keep them in URL so deep-links from the
   // dashboard notification card land you on the right thread.
   const activeContactKey = searchParams.get("contact") ?? null;
   const activeInternalId = searchParams.get("thread") ?? null;
@@ -352,7 +352,7 @@ export function MessagesPage() {
         });
       });
     // Surface carrier contacts as their own threads in the
-    // Carriers card â€” NOT mixed into the clients & prospects
+    // Carriers card - NOT mixed into the clients & prospects
     // column. The merging happens below in the separate
     // carrierThreads useMemo.
     return Array.from(map.values())
@@ -532,7 +532,7 @@ export function MessagesPage() {
       )}
 
       <div className="grid lg:grid-cols-2 gap-4">
-        {/* LEFT â€” Clients, prospects, and holders */}
+        {/* LEFT - Clients, prospects, and holders */}
         <ExpandableCard
           className={MESSAGE_CARD_CLASS}
           title="Clients, prospects, and holders"
@@ -602,7 +602,7 @@ export function MessagesPage() {
           )}
         </ExpandableCard>
 
-        {/* RIGHT â€” Internal */}
+        {/* RIGHT - Internal */}
         <ExpandableCard
           className={MESSAGE_CARD_CLASS}
           title="Internal"
@@ -624,7 +624,7 @@ export function MessagesPage() {
                 <SearchInput
                   value={internalQuery}
                   onChange={setInternalQuery}
-                  placeholder="Search teammates or topicâ€¦"
+                  placeholder="Search teammates or topic..."
                 />
               }
               renderList={(fill, compact) => (
@@ -656,7 +656,7 @@ export function MessagesPage() {
       </div>
 
       <div className="grid lg:grid-cols-2 gap-4">
-        {/* LEFT â€” Carriers */}
+        {/* LEFT - Carriers */}
         <ExpandableCard
           className={MESSAGE_CARD_CLASS}
           title="Carriers"
@@ -690,7 +690,7 @@ export function MessagesPage() {
                 <SearchInput
                   value={carrierQuery}
                   onChange={setCarrierQuery}
-                  placeholder="Search carrier reps, bodyâ€¦"
+                  placeholder="Search carrier reps, body..."
                 />
               }
               renderList={(fill, compact) => (
@@ -726,7 +726,7 @@ export function MessagesPage() {
           )}
         </ExpandableCard>
 
-        {/* RIGHT â€” Email signature, sized to half-width so the
+        {/* RIGHT - Email signature, sized to half-width so the
             editor doesn't dominate the bottom of the page. */}
         <EmailSignatureCard
           user={user}
@@ -934,8 +934,8 @@ function ContactThreadsList({
 // Small absolute-positioned pin / unpin chip on the right edge of
 // each threads-list row. Catches its own click so it doesn't open
 // the thread.
-// Per-thread "â‹¯" actions menu. Opens a small popover with all of a
-// conversation's settings â€” pin, mute, and room to grow. Replaces the
+// Per-thread "..." actions menu. Opens a small popover with all of a
+// conversation's settings - pin, mute, and room to grow. Replaces the
 // old single pin chip.
 function ThreadActionsMenu({
   tenantId,
@@ -1330,7 +1330,7 @@ function ActiveContactPane({
             <div className="text-[11px] text-ink-500 truncate">{contact.subtitle}</div>
           )}
           <div className="text-[11px] text-ink-500 truncate">
-            {contact.email ?? contact.phone ?? "â€”"} Â·{" "}
+            {contact.email ?? contact.phone ?? "-"} -{" "}
             <Badge
               tone={
                 contact.kind === "client"
@@ -1417,9 +1417,9 @@ function ActiveContactPane({
                       : isOutboundComm
                       ? "You"
                       : "AI send"}
-                    {" Â· "}
+                    {" - "}
                     {String(channelChip).toUpperCase()}
-                    {" Â· "}
+                    {" - "}
                     {fmt.dateTime(at)}
                   </div>
                   {r.row.subject && (
@@ -1487,7 +1487,7 @@ function ActiveContactPane({
                         to={`/employee/tasks?focus=${aiTaskId}`}
                         className="shrink-0 inline-flex items-center gap-1 font-medium text-violet-700 hover:text-violet-900"
                       >
-                        Go to activity â†’
+                        Go to activity
                       </Link>
                     </div>
                   )}
@@ -1744,14 +1744,14 @@ function ActiveInternalPane({
         <div ref={scrollContentRef} className="space-y-2.5">
           {msgs.length === 0 ? (
             <div className="text-sm text-ink-400 text-center py-6">
-              Empty thread â€” send the first message below.
+              Empty thread - send the first message below.
             </div>
           ) : (
             msgs.map((m) => {
             const mine = m.fromUserId === user.id;
             const fromName = mine
               ? "You"
-              : staff.find((s) => s.id === m.fromUserId)?.name ?? "â€”";
+              : staff.find((s) => s.id === m.fromUserId)?.name ?? "-";
             const bg = mine
               ? "bg-gold-100 text-ink-900"
               : m.urgency === "urgent"
@@ -1770,7 +1770,7 @@ function ActiveInternalPane({
                     {m.urgency && m.urgency !== "info" && (
                       <UrgencyDot urgency={m.urgency} />
                     )}
-                    <span>Â· {fmt.dateTime(m.createdAt)}</span>
+                    <span>- {fmt.dateTime(m.createdAt)}</span>
                   </div>
                   <p className="whitespace-pre-wrap break-words leading-snug">{m.body}</p>
                 </div>
@@ -1790,7 +1790,7 @@ function ActiveInternalPane({
         <textarea
           ref={taRef}
           className="input text-sm w-full min-h-[60px] max-h-72 resize-none overflow-y-auto"
-          placeholder="Write a messageâ€¦"
+          placeholder="Write a message..."
           value={body}
           onChange={(e) => setBody(e.target.value)}
         />
@@ -1802,7 +1802,7 @@ function ActiveInternalPane({
             disabled={busy || !body.trim()}
           >
             <Send className="h-3.5 w-3.5" />
-            {busy ? "Sendingâ€¦" : "Send"}
+            {busy ? "Sending..." : "Send"}
           </button>
         </div>
       </div>
@@ -1811,7 +1811,7 @@ function ActiveInternalPane({
 }
 
 // Unified "New send" composer. Start a fresh conversation in any of
-// the three message cards â€” clients/prospects/holders, internal staff, or
+// the three message cards - clients/prospects/holders, internal staff, or
 // carrier reps. You can only pick a contact you don't already have a
 // conversation with; choose an email subject / internal urgency, write
 // the first message, and send.
@@ -2024,7 +2024,7 @@ function NewSendModal({
 
         <div>
           <label className="label">Recipient</label>
-          <SearchInput value={query} onChange={setQuery} placeholder="Search by name or emailâ€¦" />
+          <SearchInput value={query} onChange={setQuery} placeholder="Search by name or email..." />
           <div className="mt-2 rounded-md border border-ink-100 max-h-[220px] overflow-y-auto divide-y divide-ink-100">
             {filtered.length === 0 ? (
               <div className="px-3 py-4 text-sm text-ink-400">
@@ -2084,7 +2084,7 @@ function NewSendModal({
           <label className="label">Message</label>
           <textarea
             className="input text-sm min-h-[100px]"
-            placeholder="Write your messageâ€¦"
+            placeholder="Write your message..."
             value={body}
             onChange={(e) => setBody(e.target.value)}
           />
@@ -2151,7 +2151,7 @@ function NewSendModal({
             onClick={send}
             disabled={busy || attaching || !canSend}
           >
-            <Send className="h-3.5 w-3.5" /> {busy ? "Sendingâ€¦" : "Send"}
+            <Send className="h-3.5 w-3.5" /> {busy ? "Sending..." : "Send"}
           </button>
         </div>
       </div>

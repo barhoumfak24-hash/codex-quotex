@@ -3,10 +3,12 @@ import { Loader2, MapPin } from "lucide-react";
 import {
   fetchGooglePlaceDetails,
   getActiveProvider,
+  reverseGeocodeCurrentLocation,
   searchAddresses,
   type AddressParts,
   type AddressPrediction,
   type AddressSearchMode,
+  type LocationBias,
 } from "@/lib/addressSearch";
 import { AddressFields, parseAddress } from "./AddressFields";
 
@@ -14,6 +16,9 @@ import { AddressFields, parseAddress } from "./AddressFields";
 // "structured" swaps to street / apt / city / state / zip inputs.
 type InputMode = "auto" | "structured";
 const MODE_STORAGE_KEY = "quotex.address.inputMode.v1";
+const LOCATION_BIAS_STORAGE_KEY = "quotex.address.locationBias.v1";
+const LOCATION_BIAS_MAX_AGE_MS = 30 * 60 * 1000;
+const DEFAULT_LOCATION_BIAS_RADIUS_METERS = 15_000;
 
 function loadModePreference(): InputMode {
   if (typeof window === "undefined") return "auto";
@@ -25,6 +30,49 @@ function loadModePreference(): InputMode {
 function saveModePreference(m: InputMode) {
   if (typeof window === "undefined") return;
   window.localStorage.setItem(MODE_STORAGE_KEY, m);
+}
+
+function isValidLocationBias(value: unknown): value is LocationBias {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<LocationBias>;
+  return (
+    typeof candidate.latitude === "number" &&
+    Number.isFinite(candidate.latitude) &&
+    candidate.latitude >= -90 &&
+    candidate.latitude <= 90 &&
+    typeof candidate.longitude === "number" &&
+    Number.isFinite(candidate.longitude) &&
+    candidate.longitude >= -180 &&
+    candidate.longitude <= 180
+  );
+}
+
+function loadLocationBias(): LocationBias | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.sessionStorage.getItem(LOCATION_BIAS_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { bias?: unknown; at?: unknown };
+    if (typeof parsed.at !== "number" || Date.now() - parsed.at > LOCATION_BIAS_MAX_AGE_MS) {
+      window.sessionStorage.removeItem(LOCATION_BIAS_STORAGE_KEY);
+      return null;
+    }
+    return isValidLocationBias(parsed.bias) ? parsed.bias : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveLocationBias(bias: LocationBias) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(
+      LOCATION_BIAS_STORAGE_KEY,
+      JSON.stringify({ bias, at: Date.now() })
+    );
+  } catch {
+    /* ignore */
+  }
 }
 
 // =====================================================================
@@ -79,7 +127,7 @@ export function AddressAutocomplete({
   className,
   minQueryLength = 2,
   disableModeToggle = false,
-  allowMockFallback = true,
+  allowMockFallback = false,
 }: Props) {
   // Per-browser persisted preference. When the user clicks "Type
   // address manually" they're switched to the structured form for
@@ -90,10 +138,15 @@ export function AddressAutocomplete({
   const [predictions, setPredictions] = useState<AddressPrediction[]>([]);
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [locating, setLocating] = useState(false);
+  const [locationBias, setLocationBias] = useState<LocationBias | null>(() => loadLocationBias());
   const [activeIndex, setActiveIndex] = useState(-1);
+  const [statusMessage, setStatusMessage] = useState("");
   const wrapperRef = useRef<HTMLDivElement>(null);
   const lastQueryRef = useRef<string>("");
+  const requestSeqRef = useRef(0);
   const justSelectedRef = useRef(false);
+  const locationPromptedRef = useRef(false);
   // Google Places (New) session token. The same token MUST be passed
   // through every autocomplete request in one user session and the
   // matching Place Details call — that's how Google groups keystroke
@@ -106,7 +159,49 @@ export function AddressAutocomplete({
     googleSessionToken.current = newSessionToken();
   }
 
-  // Debounce the query: schedule a search 180ms after the user stops
+  async function ensureLocationBias({ forcePrompt = false } = {}): Promise<LocationBias | null> {
+    if (mode !== "address" || typeof navigator === "undefined" || !navigator.geolocation) {
+      return null;
+    }
+    if (locationBias) return locationBias;
+
+    let permissionState: PermissionState | null = null;
+    try {
+      if (navigator.permissions?.query) {
+        const permission = await navigator.permissions.query({
+          name: "geolocation" as PermissionName,
+        });
+        permissionState = permission.state;
+      }
+    } catch {
+      permissionState = null;
+    }
+
+    if (permissionState === "denied") return null;
+    if (!forcePrompt && permissionState !== "granted") return null;
+
+    try {
+      const position = await new Promise<GeolocationPosition>((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, {
+          enableHighAccuracy: false,
+          timeout: 5000,
+          maximumAge: LOCATION_BIAS_MAX_AGE_MS,
+        });
+      });
+      const bias: LocationBias = {
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        radiusMeters: DEFAULT_LOCATION_BIAS_RADIUS_METERS,
+      };
+      saveLocationBias(bias);
+      setLocationBias(bias);
+      return bias;
+    } catch {
+      return null;
+    }
+  }
+
+  // Debounce the query: schedule a search shortly after the user stops
   // typing. Skip when the latest char came from a selection commit.
   // Each render's effect creates an AbortController so the previous
   // in-flight request is cancelled when the user types another key.
@@ -117,40 +212,58 @@ export function AddressAutocomplete({
     }
     const q = value.trim();
     if (q.length < minQueryLength) {
+      requestSeqRef.current += 1;
+      lastQueryRef.current = "";
       setPredictions([]);
       setOpen(false);
       setLoading(false);
       return;
     }
+    const requestSeq = requestSeqRef.current + 1;
+    requestSeqRef.current = requestSeq;
     setLoading(true);
     const controller = new AbortController();
     const handle = window.setTimeout(async () => {
       lastQueryRef.current = q;
       try {
+        let effectiveLocationBias = locationBias;
+        if (!effectiveLocationBias && !locationPromptedRef.current && mode === "address") {
+          locationPromptedRef.current = true;
+          effectiveLocationBias = await ensureLocationBias({ forcePrompt: true });
+          if (requestSeqRef.current !== requestSeq || lastQueryRef.current !== q) return;
+        }
         const out = await searchAddresses(q, mode, controller.signal, googleSessionToken.current, {
           allowMockFallback,
+          locationBias: effectiveLocationBias,
         });
-        // Drop late responses for stale queries.
-        if (lastQueryRef.current !== q) return;
+        // Drop late responses for stale queries or older location-bias searches.
+        if (requestSeqRef.current !== requestSeq || lastQueryRef.current !== q) return;
         setPredictions(out);
-        setOpen(out.length > 0);
+        if (out.length > 0) {
+          setStatusMessage("");
+          setOpen(true);
+        } else {
+          setStatusMessage("");
+          setOpen(false);
+        }
         setActiveIndex(out.length > 0 ? 0 : -1);
         setLoading(false);
       } catch (err: unknown) {
         if ((err as { name?: string })?.name === "AbortError") return;
         // Any other failure: clear the dropdown and stop the spinner.
-        if (lastQueryRef.current === q) {
+        if (requestSeqRef.current === requestSeq && lastQueryRef.current === q) {
           setPredictions([]);
+          setStatusMessage("");
           setOpen(false);
           setLoading(false);
         }
       }
-    }, 250);
+    }, 140);
     return () => {
       window.clearTimeout(handle);
       controller.abort();
     };
-  }, [value, mode, minQueryLength]);
+  }, [value, mode, minQueryLength, allowMockFallback, locationBias]);
 
   // Close on outside click.
   useEffect(() => {
@@ -168,6 +281,7 @@ export function AddressAutocomplete({
     justSelectedRef.current = true;
     onChange(p.description);
     onSelect?.(p.description);
+    setStatusMessage("");
     setOpen(false);
     setPredictions([]);
 
@@ -183,6 +297,49 @@ export function AddressAutocomplete({
     }
     // Rotate the Google session token for the next address.
     newSessionTokenInline();
+  }
+
+  async function useCurrentLocation() {
+    if (mode !== "address" || typeof navigator === "undefined" || !navigator.geolocation) {
+      setStatusMessage("Current location is not available in this browser.");
+      setPredictions([]);
+      setOpen(true);
+      return;
+    }
+    setStatusMessage("");
+    setLocating(true);
+    const controller = new AbortController();
+    try {
+      const position = await new Promise<GeolocationPosition>((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, {
+          enableHighAccuracy: true,
+          timeout: 9000,
+          maximumAge: 60_000,
+        });
+      });
+      const bias: LocationBias = {
+        latitude: position.coords.latitude,
+        longitude: position.coords.longitude,
+        radiusMeters: DEFAULT_LOCATION_BIAS_RADIUS_METERS,
+      };
+      saveLocationBias(bias);
+      setLocationBias(bias);
+      const match = await reverseGeocodeCurrentLocation(position.coords, controller.signal);
+      if (!match) {
+        setStatusMessage("Current location could not be resolved to a street address.");
+        setPredictions([]);
+        setOpen(true);
+        return;
+      }
+      await commitSelection(match);
+    } catch {
+      setStatusMessage("Location access was not approved or could not be read.");
+      setPredictions([]);
+      setOpen(true);
+    } finally {
+      controller.abort();
+      setLocating(false);
+    }
   }
 
   function handleKey(e: React.KeyboardEvent<HTMLInputElement>) {
@@ -242,7 +399,11 @@ export function AddressAutocomplete({
           required={required}
           placeholder={placeholder}
           autoComplete="off"
-          onChange={(e) => onChange(e.target.value)}
+          onChange={(e) => {
+            const nextValue = e.target.value;
+            setStatusMessage("");
+            onChange(nextValue);
+          }}
           onFocus={() => {
             if (predictions.length > 0) setOpen(true);
           }}
@@ -250,9 +411,20 @@ export function AddressAutocomplete({
           aria-autocomplete="list"
           aria-expanded={open}
         />
-        <span className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3 text-ink-400">
-          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <MapPin className="h-4 w-4" />}
-        </span>
+        <button
+          type="button"
+          className="absolute inset-y-0 right-0 flex items-center pr-3 text-ink-400 hover:text-gold-700 focus:outline-none focus:text-gold-700 disabled:cursor-wait"
+          onClick={useCurrentLocation}
+          aria-label="Use current location"
+          title="Use current location"
+          disabled={loading || locating || mode !== "address"}
+        >
+          {loading || locating ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <MapPin className="h-4 w-4" />
+          )}
+        </button>
       </div>
       {!disableModeToggle && mode === "address" && (
         <button
@@ -297,13 +469,12 @@ export function AddressAutocomplete({
         </ul>
       )}
 
-      {open && predictions.length === 0 && !loading && value.trim().length >= minQueryLength && (
+      {open && statusMessage && predictions.length === 0 && !loading && (
         <div className="absolute z-30 mt-1 w-full rounded-md border border-ink-200 bg-white shadow-luxe text-xs text-ink-500 px-3 py-2">
-          {allowMockFallback
-            ? `No matches — keep typing or use the "Type address manually" option.`
-            : `No verified address matches yet — keep typing or use the "Type address manually" option.`}
+          {statusMessage}
         </div>
       )}
+
     </div>
   );
 }

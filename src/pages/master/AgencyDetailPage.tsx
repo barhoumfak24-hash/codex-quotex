@@ -48,6 +48,7 @@ import {
   defaultWebsiteAuthRedirects,
   normalizeConnectionDomains,
 } from "@/lib/websiteConnection";
+import { QUOTEX_WEBSITE_ORIGIN } from "@/lib/quotexContact";
 import type {
   Agency,
   CarrierDownloadRunnerFeed,
@@ -880,8 +881,8 @@ function WebsiteConnectionCard({
   const [rotated, setRotated] = useState<string | null>(null);
   const [savedAt, setSavedAt] = useState<string | null>(null);
 
-  const apiEndpoint = "/api/website/prospects";
-  const syncEndpoint = "/api/website/sync";
+  const apiEndpoint = `${QUOTEX_WEBSITE_ORIGIN}/api/app/api/website/prospects`;
+  const syncEndpoint = `${QUOTEX_WEBSITE_ORIGIN}/api/app/api/website/sync`;
   const websiteApiKey = api.agencies.revealWebsiteApiKeyForMaster(agency.id) ?? "";
   const webhookSecret = api.agencies.revealWebsiteWebhookSecretForMaster(agency.id) ?? "";
   const connectionStatus = agency.websiteLastWebhookStatus ?? "not_tested";

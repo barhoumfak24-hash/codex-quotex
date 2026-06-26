@@ -16,6 +16,8 @@ import { api } from "@/lib/api";
 import { fmt } from "@/lib/format";
 import { isRoutingManagerRole } from "@/lib/roles";
 import { downloadContactDossier } from "@/lib/contactDossier";
+import { isContactProfileActivity } from "@/lib/taskFilters";
+import { scrollAnchorIntoView } from "@/lib/scrollAnchors";
 import { ContactMessageThread } from "@/components/messages/ContactMessageThread";
 import { ProspectQuotingCard } from "@/components/quoting/ClientQuotingCard";
 import type { ProspectStatus } from "@/types";
@@ -31,16 +33,34 @@ export function ProspectDetailPage() {
   const [, setRev] = useState(0);
   const [createActivityOpen, setCreateActivityOpen] = useState(false);
 
-  // Hash-based deep-link (e.g. #messages-thread from the Activity
-  // timeline detail modal). Scroll the target card into view once
-  // the page mounts.
+  // Deep-links from elsewhere in the app. Hash links still work for
+  // ordinary anchors; quote-flow links use a query flag so the browser
+  // does not force the workspace to the top before React can center it.
   useEffect(() => {
-    if (!location.hash) return;
-    const id = location.hash.slice(1);
-    window.setTimeout(() => {
-      document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
-    }, 80);
-  }, [location.hash]);
+    const query = new URLSearchParams(location.search);
+    const quoteWorkspaceExpanded = query.get("quoteWorkspace") === "expanded";
+    if (quoteWorkspaceExpanded && !location.hash) return;
+    const id = location.hash
+      ? location.hash.slice(1)
+      : quoteWorkspaceExpanded
+      ? "ai-quoting-workspace"
+      : "";
+    if (!id) return;
+    const scrollToTarget = () => {
+      const shouldCenter = id === "ai-quoting-workspace" && quoteWorkspaceExpanded;
+      scrollAnchorIntoView(document.getElementById(id), {
+        behavior: "smooth",
+        block: shouldCenter ? "center" : "start",
+      });
+    };
+    const first = window.setTimeout(scrollToTarget, 100);
+    const second =
+      id === "ai-quoting-workspace" ? window.setTimeout(scrollToTarget, 700) : undefined;
+    return () => {
+      window.clearTimeout(first);
+      if (second) window.clearTimeout(second);
+    };
+  }, [location.hash, location.search]);
 
   if (!prospectId || !agency || !user) return null;
   const prospect = api.prospects.get(prospectId);
@@ -58,10 +78,12 @@ export function ProspectDetailPage() {
     : [];
   const openActivities = api.tasks
     .listOpen(agency.id)
-    .filter((t) => t.prospectId === prospect.id);
+    .filter((t) => t.prospectId === prospect.id)
+    .filter(isContactProfileActivity);
   const resolvedActivities = api.tasks
     .listCompleted(agency.id)
-    .filter((t) => t.prospectId === prospect.id);
+    .filter((t) => t.prospectId === prospect.id)
+    .filter(isContactProfileActivity);
   const events = api.status.listFor({ prospectId: prospect.id });
   const agentOptions = api.users
     .list(agency.id)

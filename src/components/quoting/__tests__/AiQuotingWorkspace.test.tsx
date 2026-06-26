@@ -69,6 +69,9 @@ describe("AiQuotingWorkspace component", () => {
 
     await click(buttonByText(host, /Commercial lines/i));
 
+    expect(host.textContent).not.toContain("Setup incomplete");
+    expect(host.textContent).not.toContain("Setup status");
+
     const acordButton = buttons(host).find((button) =>
       /^ACORD\s+\d+/i.test((button.textContent ?? "").trim())
     );
@@ -101,8 +104,10 @@ describe("AiQuotingWorkspace component", () => {
     await click(acordButton as HTMLButtonElement);
     await click(buttonByText(host, /Start AI Mapping/i));
 
+    const remapSpy = vi.spyOn(api.quoting, "runAcordAiMapping");
     await click(buttonByText(host, /^Next$/i));
 
+    expect(remapSpy).toHaveBeenCalledWith(api.quoting.getForCustomer(customer.id)?.id);
     expect(api.quoting.getForCustomer(customer.id)?.commercialQuestionnairePreparedAt).toBeTruthy();
     expect(host.textContent).toContain("Review the ACORD and handle the remaining fields");
     expect(host.textContent).not.toContain("Expand AI quoting workspace");
@@ -132,6 +137,7 @@ describe("AiQuotingWorkspace component", () => {
     );
     expect(carrierSendButton?.textContent).toBeTruthy();
     await click(carrierSendButton as HTMLButtonElement);
+    expect(host.querySelectorAll('[role="dialog"]')).toHaveLength(1);
 
     const draftSendButton = buttons(host).find((button) =>
       /Send to selected carriers/i.test(button.textContent ?? "")

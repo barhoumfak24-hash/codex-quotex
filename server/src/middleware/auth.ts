@@ -129,11 +129,14 @@ function verifyJwt(token: string): AuthContext | null {
   const secret = process.env.JWT_SECRET;
   if (!secret) return null;
   try {
-    const decoded = jwt.verify(token, secret, {
+    const options: jwt.VerifyOptions = {
       algorithms: ["HS256"],
-      issuer: process.env.JWT_ISSUER || undefined,
-      audience: process.env.JWT_AUDIENCE || undefined,
-    });
+    };
+    const issuer = process.env.JWT_ISSUER?.trim();
+    const audience = process.env.JWT_AUDIENCE?.trim();
+    if (issuer) options.issuer = issuer;
+    if (audience) options.audience = audience;
+    const decoded = jwt.verify(token, secret, options);
     if (typeof decoded === "string") return null;
     return authFromPayload(decoded);
   } catch {

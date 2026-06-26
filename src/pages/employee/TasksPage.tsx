@@ -58,6 +58,7 @@ import {
 } from "@/lib/roles";
 import { subscribeToDbChanges } from "@/lib/db";
 import { summarizeQuotingWorkflow } from "@/lib/quotingWorkflows";
+import { isRoutingAssignmentTask } from "@/lib/taskFilters";
 import type {
   AssetType,
   CustomerProfile,
@@ -115,6 +116,11 @@ interface QuotingWorkflowRow {
   completedAt?: string;
   task?: Task;
   quote?: QuoteRequest;
+}
+
+function quoteWorkspaceDeepLink(path: string): string {
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}quoteWorkspace=expanded`;
 }
 
 export function TasksPage() {
@@ -205,10 +211,7 @@ export function TasksPage() {
   // belongs to that agent (so the manager never sees assigned-clients'
   // work as unrouted in their own queue). Falls back to "" (unowned).
   function isRoutingFollowUpTask(t: Task): boolean {
-    return (
-      t.title.startsWith("New prospect assigned:") ||
-      t.title.startsWith("New client assigned:")
-    );
+    return isRoutingAssignmentTask(t);
   }
 
   function uniqueIds(ids: Array<string | undefined>): string[] {
@@ -343,9 +346,9 @@ export function TasksPage() {
       const contactName = customer?.name ?? prospect?.name ?? "Unknown contact";
       const contactKind = customer ? "Client" : prospect ? "Prospect" : "Contact";
       const href = customer
-        ? `/employee/clients/${customer.id}#ai-quoting-workspace`
+        ? quoteWorkspaceDeepLink(`/employee/clients/${customer.id}`)
         : prospect
-        ? `/employee/prospects/${prospect.id}#ai-quoting-workspace`
+        ? quoteWorkspaceDeepLink(`/employee/prospects/${prospect.id}`)
         : "/employee/tasks";
       const implementedAt = session.quotes.find((quote) => quote.implementation?.implementedAt)?.implementation
         ?.implementedAt;
@@ -412,7 +415,7 @@ export function TasksPage() {
         contactName: customer?.name ?? "Unknown customer",
         contactKind: "Client",
         href: customer
-          ? `/employee/clients/${customer.id}#client-remarks`
+          ? quoteWorkspaceDeepLink(`/employee/clients/${customer.id}`)
           : "/employee/tasks",
         ownerLabel,
         assetLabel: categoryLabel,
@@ -1065,7 +1068,7 @@ function quoteFlowClientTarget(client: CustomerProfile): QuoteFlowTarget {
     email: client.email,
     lineLabel,
     detail,
-    href: `/employee/clients/${client.id}#ai-quoting-workspace`,
+    href: quoteWorkspaceDeepLink(`/employee/clients/${client.id}`),
   };
 }
 
@@ -1077,7 +1080,7 @@ function quoteFlowProspectTarget(prospect: Prospect): QuoteFlowTarget {
     email: prospect.email,
     lineLabel: prospect.lineOfBusiness === "commercial" ? "Commercial" : "Personal",
     detail: api.helpers.assetTypeLabel(prospect.assetType),
-    href: `/employee/prospects/${prospect.id}#ai-quoting-workspace`,
+    href: quoteWorkspaceDeepLink(`/employee/prospects/${prospect.id}`),
   };
 }
 
@@ -2391,11 +2394,12 @@ function ActivityCard({
             if (task.customerId) {
               const c = api.customers.get(task.customerId);
               if (c && api.customers.canSee(c, user ? { id: user.id, role: user.role } : undefined)) {
-                const quoteHash = task.quoteSessionId || task.quoteRequestId || task.expressQuoteFollowUp
-                  ? "#ai-quoting-workspace"
-                  : "";
+                const profileHref =
+                  task.quoteSessionId || task.quoteRequestId || task.expressQuoteFollowUp
+                    ? quoteWorkspaceDeepLink(`/employee/clients/${task.customerId}`)
+                    : `/employee/clients/${task.customerId}`;
                 return (
-                  <Link to={`/employee/clients/${task.customerId}${quoteHash}`} className="btn-primary text-xs inline-flex">
+                  <Link to={profileHref} className="btn-primary text-xs inline-flex">
                     <User className="h-3.5 w-3.5" /> Go to client profile
                   </Link>
                 );
@@ -2403,8 +2407,12 @@ function ActivityCard({
               return null;
             }
             if (task.prospectId) {
+              const profileHref =
+                task.quoteSessionId || task.quoteRequestId || task.expressQuoteFollowUp
+                  ? quoteWorkspaceDeepLink(`/employee/prospects/${task.prospectId}`)
+                  : `/employee/prospects/${task.prospectId}`;
               return (
-                <Link to={`/employee/prospects/${task.prospectId}`} className="btn-primary text-xs inline-flex">
+                <Link to={profileHref} className="btn-primary text-xs inline-flex">
                   <UserSearch className="h-3.5 w-3.5" /> Go to prospect profile
                 </Link>
               );

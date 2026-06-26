@@ -19,10 +19,16 @@ import { subscribeToDbChanges } from "@/lib/db";
 import { fmt } from "@/lib/format";
 import { isRoutingManagerRole } from "@/lib/roles";
 import { sweepGoalAchievements } from "@/lib/performanceGoals";
+import { isRoutingAssignmentTask } from "@/lib/taskFilters";
 import { NewReminderModal } from "@/components/tasks/NewReminderModal";
 import { PerformanceGoalsMiniCard } from "@/components/analytics/PerformanceGoalsMiniCard";
 import { ImportanceIcon } from "@/components/tasks/ImportancePicker";
 import type { Reminder } from "@/types";
+
+function quoteWorkspaceDeepLink(path: string): string {
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}quoteWorkspace=expanded`;
+}
 
 export function EmployeeDashboard() {
   const { agency } = useTenant();
@@ -85,14 +91,8 @@ export function EmployeeDashboard() {
   const messages = api.marketing
     .listMessages(agency.id)
     .filter((m) => !m.customerId || visibleIds.has(m.customerId));
-  const hidesManagerAssignmentFollowUp = (t: import("@/types").Task) => {
-    const title = typeof t.title === "string" ? t.title : "";
-    return (
-      user.role === "manager" &&
-      (title.startsWith("New prospect assigned:") ||
-        title.startsWith("New client assigned:"))
-    );
-  };
+  const hidesManagerAssignmentFollowUp = (t: import("@/types").Task) =>
+    user.role === "manager" && isRoutingAssignmentTask(t);
   const assignedToViewer = (r: {
     assignedToId?: string;
     additionalAssignedToIds?: string[];
@@ -106,8 +106,17 @@ export function EmployeeDashboard() {
   const routingClients = isManager
     ? api.customers.list(agency.id).filter((c) => !c.assignedAgentId)
     : [];
+  const routingProspectIds = new Set(routingProspects.map((p) => p.id));
+  const routingClientIds = new Set(routingClients.map((c) => c.id));
   const routingTasks = isManager
-    ? api.tasks.listOpen(agency.id).filter((t) => t.awaitingManagerAssignment)
+    ? api.tasks
+        .listOpen(agency.id)
+        .filter((t) => t.awaitingManagerAssignment)
+        .filter(
+          (t) =>
+            !(t.prospectId && routingProspectIds.has(t.prospectId)) &&
+            !(t.customerId && routingClientIds.has(t.customerId))
+        )
     : [];
   const routingCount = routingProspects.length + routingClients.length + routingTasks.length;
   const assignedActivityNotifications = api.aiNotifications
@@ -983,9 +992,9 @@ function NotificationsList({
       title: n.title,
       detail: n.summary,
       href: n.customerId
-        ? `/employee/clients/${n.customerId}#ai-quoting-workspace`
+        ? quoteWorkspaceDeepLink(`/employee/clients/${n.customerId}`)
         : n.prospectId
-        ? `/employee/prospects/${n.prospectId}#ai-quoting-workspace`
+        ? quoteWorkspaceDeepLink(`/employee/prospects/${n.prospectId}`)
         : "/employee",
       urgency: n.severity ?? "info",
       onOpen: () => api.aiNotifications.dismiss(n.id, userId),

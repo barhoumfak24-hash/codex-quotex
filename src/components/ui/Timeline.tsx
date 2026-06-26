@@ -428,6 +428,11 @@ type RelatedRemarkTarget = {
   label: string;
 };
 
+function quoteWorkspaceDeepLink(path: string): string {
+  const separator = path.includes("?") ? "&" : "?";
+  return `${path}${separator}quoteWorkspace=expanded`;
+}
+
 function relatedRemarkTarget(
   event: StatusEvent,
   context: "employee" | "customer",
@@ -448,13 +453,13 @@ function relatedRemarkTarget(
   if (quoteSessionId) {
     if (event.customerId) {
       return {
-        to: `/employee/clients/${event.customerId}#ai-quoting-workspace`,
+        to: quoteWorkspaceDeepLink(`/employee/clients/${event.customerId}`),
         label: openTo("AI quoting workspace"),
       };
     }
     if (event.prospectId) {
       return {
-        to: `/employee/prospects/${event.prospectId}#ai-quoting-workspace`,
+        to: quoteWorkspaceDeepLink(`/employee/prospects/${event.prospectId}`),
         label: openTo("AI quoting workspace"),
       };
     }
@@ -599,9 +604,9 @@ function InlineMessagePreview({
                   <div className="truncate font-semibold text-ink-900">{attachment.fileName}</div>
                   <div className="text-[11px] text-ink-500">
                     {attachment.fileType || "Attachment"}
-                    {attachment.sizeBytes ? ` Â· ${formatAttachmentSize(attachment.sizeBytes)}` : ""}
+                    {attachment.sizeBytes ? ` - ${formatAttachmentSize(attachment.sizeBytes)}` : ""}
                     {typeof attachment.filledFieldCount === "number"
-                      ? ` Â· ${attachment.filledFieldCount} mapped fields`
+                      ? ` - ${attachment.filledFieldCount} mapped fields`
                       : ""}
                   </div>
                 </div>

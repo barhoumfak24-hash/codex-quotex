@@ -26,7 +26,7 @@
 //         the credential or stack trace)
 // =====================================================================
 
-import { applyRateLimit } from "./_rateLimit";
+import { applyRateLimit } from "./_rateLimit.js";
 
 const SMARTY_US_STREET_BASE = "https://us-street.api.smarty.com/street-address";
 

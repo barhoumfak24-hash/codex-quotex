@@ -94,11 +94,13 @@ export function validateServerEnv(): EnvValidationResult {
   }
 
   validateAiProvider(errors, warnings, production);
+  validateAddressProvider(errors, warnings, production);
   validateCarrierWorker(errors);
+  validateManagerStepUp(errors, production);
   validateSharedRateLimit(errors, warnings, production);
   validateStripe(errors);
   validateMailboxOAuth(errors, warnings, production);
-  validateEmailDelivery(warnings, production);
+  validateEmailDelivery(errors, warnings, production);
   validateSentry(errors, warnings, production);
   validateDisasterRecovery(errors, warnings, production);
   validateNoPublicSecrets(errors);
@@ -139,9 +141,11 @@ function warnIfMissing(name: string, warnings: string[], message: string) {
 }
 
 function validateAiProvider(errors: string[], warnings: string[], production: boolean) {
-  const provider = (process.env.AI_PROVIDER ?? "stub").toLowerCase();
+  const provider = configuredAiProvider();
   if (production && provider === "stub" && process.env.ALLOW_AI_STUB_IN_PRODUCTION !== "true") {
-    errors.push("AI_PROVIDER must be a real provider in production unless ALLOW_AI_STUB_IN_PRODUCTION=true.");
+    errors.push(
+      "A real AI provider key is required in production unless ALLOW_AI_STUB_IN_PRODUCTION=true."
+    );
     return;
   }
   const providerKey: Record<string, string> = {
@@ -155,6 +159,17 @@ function validateAiProvider(errors: string[], warnings: string[], production: bo
   const message = `${requiredKey} is required when AI_PROVIDER=${provider}.`;
   if (production) errors.push(message);
   else warnings.push(`${message} AI routes will use deterministic fallback behavior.`);
+}
+
+function configuredAiProvider(): "openai" | "anthropic" | "gemini" | "stub" {
+  const explicit = process.env.AI_PROVIDER?.trim().toLowerCase();
+  if (explicit === "openai" || explicit === "anthropic" || explicit === "gemini" || explicit === "stub") {
+    return explicit;
+  }
+  if (process.env.OPENAI_API_KEY?.trim()) return "openai";
+  if (process.env.ANTHROPIC_API_KEY?.trim()) return "anthropic";
+  if (process.env.GEMINI_API_KEY?.trim()) return "gemini";
+  return "stub";
 }
 
 function validateCarrierWorker(errors: string[]) {
@@ -174,6 +189,12 @@ function validateCarrierWorker(errors: string[]) {
   }
 }
 
+function validateManagerStepUp(errors: string[], production: boolean) {
+  if (production && process.env.MANAGER_2FA_STORE === "memory") {
+    errors.push("MANAGER_2FA_STORE=memory is not allowed in production.");
+  }
+}
+
 function validateSharedRateLimit(errors: string[], warnings: string[], production: boolean) {
   const store = process.env.RATE_LIMIT_STORE?.trim().toLowerCase();
   if (production) {
@@ -183,9 +204,25 @@ function validateSharedRateLimit(errors: string[], warnings: string[], productio
     if (!process.env.DATABASE_URL?.trim()) {
       errors.push("DATABASE_URL is required for production shared API rate limits.");
     }
+    requireSecret("UPSTASH_REDIS_REST_TOKEN", errors);
+    requirePresent("UPSTASH_REDIS_REST_URL", errors);
     return;
   }
   warnings.push("Local API rate limits use in-memory buckets unless DATABASE_URL is configured.");
+}
+
+function validateAddressProvider(errors: string[], warnings: string[], production: boolean) {
+  const hasGoogle = Boolean(
+    process.env.GOOGLE_PLACES_API_KEY?.trim() ||
+      process.env.GOOGLE_MAPS_API_KEY?.trim() ||
+      process.env.GOOGLE_GEOCODING_API_KEY?.trim()
+  );
+  const hasSmarty = Boolean(process.env.SMARTY_AUTH_ID?.trim() && process.env.SMARTY_AUTH_TOKEN?.trim());
+  if (hasGoogle || hasSmarty) return;
+  const message =
+    "A production address autocomplete provider is required. Set GOOGLE_PLACES_API_KEY or SMARTY_AUTH_ID/SMARTY_AUTH_TOKEN server-side.";
+  if (production) errors.push(message);
+  else warnings.push(`${message} Local development may fall back to public geocoders.`);
 }
 
 function validateStripe(errors: string[]) {
@@ -228,17 +265,36 @@ function validateMailboxOAuth(errors: string[], warnings: string[], production: 
   }
 }
 
-function validateEmailDelivery(warnings: string[], production: boolean) {
+function validateEmailDelivery(errors: string[], warnings: string[], production: boolean) {
   const hasSendGrid = Boolean(process.env.SENDGRID_API_KEY?.trim());
   const hasResend = Boolean(process.env.RESEND_API_KEY?.trim());
   const hasSmtp = Boolean(
     process.env.SMTP_HOST?.trim() && process.env.SMTP_USER?.trim() && process.env.SMTP_PASS?.trim()
   );
-  if (hasSendGrid || hasResend || hasSmtp) return;
+  const hasProvider = hasSendGrid || hasResend || hasSmtp;
+  const from = (
+    process.env.EMAIL_FROM ||
+    process.env.SENDGRID_FROM_EMAIL ||
+    process.env.RESEND_FROM_EMAIL ||
+    process.env.SMTP_FROM_EMAIL ||
+    ""
+  ).trim();
+
+  if (hasProvider && (!production || /^[^@\s]+@[^@\s]+\.[^@\s]+$|^.+<[^@\s]+@[^@\s]+\.[^@\s]+>$/.test(from))) {
+    return;
+  }
 
   const message =
     "No transactional email provider is configured. Add SENDGRID_API_KEY, RESEND_API_KEY, or SMTP_HOST/SMTP_USER/SMTP_PASS before relying on website forms, invoices, or e-sign emails.";
-  warnings.push(production ? `${message} Contact forms will fail closed until this is configured.` : message);
+  if (!hasProvider) {
+    if (production) errors.push(message);
+    else warnings.push(message);
+    return;
+  }
+  const fromMessage =
+    "EMAIL_FROM, SENDGRID_FROM_EMAIL, RESEND_FROM_EMAIL, or SMTP_FROM_EMAIL must be set to a verified sender address in production.";
+  if (production) errors.push(fromMessage);
+  else warnings.push(fromMessage);
 }
 
 function validateSentry(errors: string[], warnings: string[], production: boolean) {
