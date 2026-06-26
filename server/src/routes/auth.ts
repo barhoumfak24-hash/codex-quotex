@@ -148,6 +148,7 @@ authRoutes.post("/employee/login", async (req, res) => {
   const identifier = parsed.data.identifier.trim().toLowerCase();
   let user = await prisma.user.findFirst({
     where: {
+      role: { in: [...SNAPSHOT_STAFF_ROLES] },
       OR: [{ email: { equals: identifier, mode: "insensitive" } }],
     },
     include: { agency: true },
@@ -172,7 +173,17 @@ authRoutes.post("/employee/login", async (req, res) => {
     });
   }
   if (!verifyPasswordHashForLogin(parsed.data.password, user.passwordHash)) {
-    return res.status(401).json({ ok: false, error: "invalid_credentials" });
+    const repairedUser = await promoteSnapshotStaffForLogin(identifier, parsed.data.password, user.tenantId);
+    if (
+      !repairedUser ||
+      blockedStaffStatus(repairedUser.status) ||
+      !repairedUser.agency?.active ||
+      !repairedUser.passwordHash ||
+      !verifyPasswordHashForLogin(parsed.data.password, repairedUser.passwordHash)
+    ) {
+      return res.status(401).json({ ok: false, error: "invalid_credentials" });
+    }
+    user = repairedUser;
   }
 
   const token = issueSessionJwt({
@@ -606,7 +617,7 @@ async function promoteLocalStaffAccount(input: LocalStaffPromotionInput): Promis
   return { ok: true, user };
 }
 
-async function promoteSnapshotStaffForLogin(identifier: string, password: string) {
+async function promoteSnapshotStaffForLogin(identifier: string, password: string, requiredTenantId?: string | null) {
   const snapshot = await loadCurrentAppStateSnapshot();
   if (!snapshot) return null;
   const userSnapshot = snapshotArray(snapshot, "users").find((user) => snapshotUserMatches(user, identifier));
@@ -616,6 +627,7 @@ async function promoteSnapshotStaffForLogin(identifier: string, password: string
 
   const tenantId = fieldString(userSnapshot.tenantId);
   if (!tenantId) return null;
+  if (requiredTenantId && tenantId !== requiredTenantId) return null;
   const agencySnapshot = snapshotArray(snapshot, "agencies").find((agency) => fieldString(agency.id) === tenantId);
   if (!agencySnapshot) return null;
   const agencyCode = snapshotAgencyCode(agencySnapshot);
@@ -633,7 +645,10 @@ async function promoteSnapshotStaffForLogin(identifier: string, password: string
   if (!SNAPSHOT_STAFF_ROLES.has(role)) return null;
 
   const existing = await prisma.user.findFirst({
-    where: { email: { equals: email.toLowerCase(), mode: "insensitive" } },
+    where: {
+      role: { in: [...SNAPSHOT_STAFF_ROLES] },
+      email: { equals: email.toLowerCase(), mode: "insensitive" },
+    },
     include: { agency: true },
   });
   if (existing && existing.tenantId !== agency.id) return null;

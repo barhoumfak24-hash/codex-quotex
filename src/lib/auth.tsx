@@ -477,13 +477,29 @@ type ServerSessionUser = {
 };
 
 function localStaffWithMatchingPassword(identifier: string, password: string): User | null {
-  const u = api.users.byIdentifier(identifier);
+  const u = localStaffByIdentifier(identifier);
   if (!u || !isStaffRole(u.role)) return null;
   const agency = u.tenantId ? api.agencies.get(u.tenantId) : undefined;
   if (!agency || !agency.active) return null;
   if (accessBlockForUser(u)) return null;
   if (!u.generatedPassword || u.generatedPassword !== password) return null;
   return u;
+}
+
+function localStaffByIdentifier(identifier: string, tenantId?: string | null): User | null {
+  const normalized = identifier.trim().toLowerCase();
+  if (!normalized) return null;
+  return (
+    api.users
+      .list(tenantId ?? undefined)
+      .find(
+        (row) =>
+          isStaffRole(row.role) &&
+          ((row.username?.toLowerCase() ?? "") === normalized ||
+            row.email.toLowerCase() === normalized ||
+            row.businessEmail?.toLowerCase() === normalized)
+      ) ?? null
+  );
 }
 
 function serializeAgencyForStaffPromotion(agency: Agency) {
@@ -537,7 +553,7 @@ async function establishServerStaffSession(identifier: string, password: string)
       if (response.status === 404 || response.status === 405) continue;
       sawReachableAuthRoute = true;
       const json = (await response.json().catch(() => null)) as
-        | { ok?: boolean; token?: string; reason?: string; user?: Partial<ServerSessionUser> }
+        | { ok?: boolean; token?: string; error?: string; reason?: string; user?: Partial<ServerSessionUser> }
         | null;
       if (response.ok && json?.ok && typeof json.token === "string" && json.token.trim() && isServerStaffUser(json.user)) {
         storeServerSessionToken(json.token);
@@ -548,7 +564,7 @@ async function establishServerStaffSession(identifier: string, password: string)
       return {
         ok: false,
         allowLocalFallback: import.meta.env.DEV,
-        reason: json?.reason || `auth_http_${response.status}`,
+        reason: json?.error || json?.reason || `auth_http_${response.status}`,
       };
     } catch {
       continue;
@@ -695,8 +711,8 @@ function resolveServerStaffUser(serverUser: ServerSessionUser, identifier: strin
   if (!isStaffRole(serverUser.role as Role)) return null;
   const local =
     api.users.get(serverUser.id) ??
-    api.users.byIdentifier(serverUser.email) ??
-    api.users.byIdentifier(identifier);
+    localStaffByIdentifier(serverUser.email, serverUser.tenantId) ??
+    localStaffByIdentifier(identifier, serverUser.tenantId);
   if (local && isStaffRole(local.role)) {
     return {
       ...local,
