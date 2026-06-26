@@ -537,14 +537,20 @@ async function createServerStaffAccount(input: StaffRegisterInput): Promise<Staf
 }
 
 async function promoteLocalStaffAccount(input: LocalStaffPromotionInput): Promise<StaffAccountResult> {
-  const email = fieldString(input.user.businessEmail) || fieldString(input.user.email);
+  const requestedEmail = (fieldString(input.user.businessEmail) || fieldString(input.user.email)).toLowerCase();
+  const trustedSnapshot = await trustedSnapshotForLocalPromotion(input, requestedEmail, input.password);
+  if (!trustedSnapshot) return { ok: false, error: "invalid_credentials" };
+
+  const email = fieldString(trustedSnapshot.user.businessEmail) || fieldString(trustedSnapshot.user.email) || requestedEmail;
   const normalizedEmail = email.toLowerCase();
-  const name = fieldString(input.user.name) || normalizedEmail;
+  const name = fieldString(trustedSnapshot.user.name) || fieldString(input.user.name) || normalizedEmail;
+  const tenantId = fieldString(trustedSnapshot.user.tenantId) || fieldString(input.user.tenantId);
+  const role = fieldString(trustedSnapshot.user.role) || input.user.role;
   if (
     !normalizedEmail ||
     input.password.length < 8 ||
-    !SNAPSHOT_STAFF_ROLES.has(input.user.role) ||
-    fieldString(input.user.tenantId) !== fieldString(input.agency.id)
+    !SNAPSHOT_STAFF_ROLES.has(role) ||
+    tenantId !== fieldString(input.agency.id)
   ) {
     return { ok: false, error: "missing_fields" };
   }
@@ -558,19 +564,26 @@ async function promoteLocalStaffAccount(input: LocalStaffPromotionInput): Promis
   }
   if (input.agency.active === false) return { ok: false, error: "inactive_agency" };
 
-  const agency = await resolveExistingAgencyForLocalPromotion(input.agency, input.user.tenantId, normalizedEmail);
+  const agency = await resolveExistingAgencyForLocalPromotion(input.agency, tenantId, normalizedEmail, trustedSnapshot.agency);
   if (!agency?.active) return { ok: false, error: "inactive_agency" };
 
-  const branchId = await upsertBranchFromLocalPromotion(input.branch, agency.id, input.user.branchId ?? undefined);
+  const branchId = await upsertBranchFromLocalPromotion(
+    input.branch,
+    agency.id,
+    (fieldString(trustedSnapshot.user.branchId) || input.user.branchId) ?? undefined
+  );
   const existing = await prisma.user.findFirst({
-    where: { email: { equals: normalizedEmail, mode: "insensitive" } },
+    where: {
+      role: { in: [...SNAPSHOT_STAFF_ROLES] },
+      email: { equals: normalizedEmail, mode: "insensitive" },
+    },
     include: { agency: true },
   });
   if (existing && existing.tenantId !== agency.id) return { ok: false, error: "duplicate_email" };
   if (existing && blockedStaffStatus(existing.status)) return { ok: false, error: "invalid_credentials" };
 
-  const firstName = fieldString(input.user.firstName) || firstNameFromFullName(name);
-  const lastName = fieldString(input.user.lastName) || lastNameFromFullName(name);
+  const firstName = fieldString(trustedSnapshot.user.firstName) || fieldString(input.user.firstName) || firstNameFromFullName(name);
+  const lastName = fieldString(trustedSnapshot.user.lastName) || fieldString(input.user.lastName) || lastNameFromFullName(name);
   const profile = {
     ...(existing && isRecord(existing.profile) ? existing.profile : {}),
     firstName,
@@ -587,8 +600,8 @@ async function promoteLocalStaffAccount(input: LocalStaffPromotionInput): Promis
           tenantId: agency.id,
           branchId,
           name,
-          phone: nullableFieldString(input.user.phone) ?? existing.phone,
-          role: input.user.role,
+          phone: nullableFieldString(trustedSnapshot.user.phone) ?? nullableFieldString(input.user.phone) ?? existing.phone,
+          role,
           status: "active",
           passwordHash,
           passwordChangedAt: new Date(),
@@ -603,8 +616,8 @@ async function promoteLocalStaffAccount(input: LocalStaffPromotionInput): Promis
           branchId,
           name,
           email: normalizedEmail,
-          phone: nullableFieldString(input.user.phone),
-          role: input.user.role,
+          phone: nullableFieldString(trustedSnapshot.user.phone) ?? nullableFieldString(input.user.phone),
+          role,
           status: "active",
           passwordHash,
           passwordChangedAt: new Date(),
@@ -615,6 +628,30 @@ async function promoteLocalStaffAccount(input: LocalStaffPromotionInput): Promis
       });
 
   return { ok: true, user };
+}
+
+async function trustedSnapshotForLocalPromotion(
+  input: LocalStaffPromotionInput,
+  requestedEmail: string,
+  password: string
+): Promise<{ user: SnapshotRecord; agency: SnapshotRecord } | null> {
+  const snapshot = await loadCurrentAppStateSnapshot();
+  if (!snapshot) return null;
+  const tenantId = fieldString(input.user.tenantId);
+  const userId = fieldString(input.user.id);
+  const userSnapshot = snapshotArray(snapshot, "users").find((user) => {
+    if (blockedSnapshotStaff(user)) return false;
+    if (fieldString(user.tenantId) !== tenantId) return false;
+    const byId = userId && fieldString(user.id) === userId;
+    const byIdentifier = snapshotUserMatches(user, requestedEmail);
+    return Boolean(byId || byIdentifier);
+  });
+  if (!userSnapshot) return null;
+  const snapshotPassword = fieldString(userSnapshot.generatedPassword);
+  if (!snapshotPassword || !timingSafeEqualString(snapshotPassword, password)) return null;
+  const agencySnapshot = snapshotArray(snapshot, "agencies").find((agency) => fieldString(agency.id) === tenantId);
+  if (!agencySnapshot) return null;
+  return { user: userSnapshot, agency: agencySnapshot };
 }
 
 async function promoteSnapshotStaffForLogin(identifier: string, password: string, requiredTenantId?: string | null) {
@@ -757,7 +794,8 @@ async function upsertAgencyFromSnapshot(snapshotAgency: SnapshotRecord, agencyCo
 async function resolveExistingAgencyForLocalPromotion(
   input: LocalStaffPromotionInput["agency"],
   tenantId: string,
-  fallbackEmail: string
+  fallbackEmail: string,
+  trustedSnapshotAgency?: SnapshotRecord
 ) {
   const agencyCode = normalizeAgencyCode(
     fieldString(input.agencyCode) || decryptSnapshotAgencyCode(fieldString(input.agencyCodeEncrypted)) || ""
@@ -774,7 +812,12 @@ async function resolveExistingAgencyForLocalPromotion(
       ],
     },
   });
-  if (!existing || existing.id !== id) return null;
+  if (!existing || existing.id !== id) {
+    if (!trustedSnapshotAgency || fieldString(trustedSnapshotAgency.id) !== id) return null;
+    const snapshotCode = snapshotAgencyCode(trustedSnapshotAgency);
+    if (agencyCode && snapshotCode && snapshotCode !== agencyCode) return null;
+    return upsertAgencyFromSnapshot(trustedSnapshotAgency, snapshotCode || agencyCode, fallbackEmail);
+  }
   if (!existing.active || input.active === false) return existing;
 
   const name = fieldString(input.name) || "Agency";
