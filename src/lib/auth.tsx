@@ -47,9 +47,10 @@ interface AuthContextValue {
     phone: string;
     businessEmail: string;
     password: string;
-  }) =>
+  }) => Promise<
     | { ok: true; user: User; agencyId: string }
-    | { ok: false; reason: ReturnType<typeof api.users.registerStaff> extends { ok: false; reason: infer R } ? R : string };
+    | { ok: false; reason: ReturnType<typeof api.users.registerStaff> extends { ok: false; reason: infer R } ? R : string }
+  >;
   signOut: () => void;
   // Re-fetch the current user from the data layer. Use after mutating the
   // signed-in user (e.g. completing first-login profile) so the in-memory
@@ -350,7 +351,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const registerStaff = useCallback(
-    (input: {
+    async (input: {
       agencyCode: string;
       branchId?: string;
       role: StaffRole;
@@ -360,6 +361,33 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       businessEmail: string;
       password: string;
     }) => {
+      const serverSession = await establishServerStaffRegistration(input);
+      if (serverSession.ok) {
+        const serverUser = resolveServerStaffUser(serverSession.user, input.businessEmail);
+        if (!serverUser) return { ok: false as const, reason: "server_session_invalid" };
+        const localResult = api.users.registerStaff(input);
+        const localUser = localResult.ok
+          ? api.users.update(localResult.user.id, { generatedPassword: undefined }) ?? localResult.user
+          : api.users.byIdentifier(input.businessEmail);
+        const signedIn = persistIfAllowed(localUser && isStaffRole(localUser.role)
+          ? {
+              ...localUser,
+              id: serverUser.id,
+              tenantId: serverUser.tenantId,
+              branchId: serverUser.branchId ?? localUser.branchId,
+              email: serverUser.email,
+              businessEmail: localUser.businessEmail ?? serverUser.email,
+              name: serverUser.name || localUser.name,
+              generatedPassword: undefined,
+            }
+          : serverUser);
+        if (!signedIn) return { ok: false as const, reason: "access_blocked" };
+        storeServerSessionUser(signedIn);
+        return { ok: true as const, user: signedIn, agencyId: signedIn.tenantId ?? serverUser.tenantId ?? "" };
+      }
+      if (!serverSession.allowLocalFallback) {
+        return { ok: false as const, reason: serverSession.reason };
+      }
       const result = api.users.registerStaff(input);
       if (!result.ok) return result;
       persistIfAllowed(result.user);
@@ -464,6 +492,60 @@ async function establishServerStaffSession(identifier: string, password: string)
         ok: false,
         allowLocalFallback: import.meta.env.DEV,
         reason: json?.reason || `auth_http_${response.status}`,
+      };
+    } catch {
+      continue;
+    }
+  }
+  clearServerSessionToken();
+  clearServerSessionUser();
+  return {
+    ok: false,
+    allowLocalFallback: import.meta.env.DEV && !sawReachableAuthRoute,
+    reason: "auth_route_unavailable",
+  };
+}
+
+async function establishServerStaffRegistration(input: {
+  agencyCode: string;
+  branchId?: string;
+  role: StaffRole;
+  firstName: string;
+  lastName: string;
+  phone: string;
+  businessEmail: string;
+  password: string;
+}): Promise<ServerSessionResult> {
+  if (typeof window === "undefined") return { ok: false, allowLocalFallback: false, reason: "browser_unavailable" };
+  const payload = JSON.stringify(input);
+  const candidates = uniqueAuthUrls([
+    `${apiBaseUrl()}/auth/employee/register`,
+    "/api/auth/employee/register",
+    "/api/app/api/auth/employee/register",
+  ]);
+  let sawReachableAuthRoute = false;
+  for (const url of candidates) {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: payload,
+      });
+      if (response.status === 404 || response.status === 405) continue;
+      sawReachableAuthRoute = true;
+      const json = (await response.json().catch(() => null)) as
+        | { ok?: boolean; token?: string; error?: string; reason?: string; user?: Partial<ServerSessionUser> }
+        | null;
+      if (response.ok && json?.ok && typeof json.token === "string" && json.token.trim() && isServerStaffUser(json.user)) {
+        storeServerSessionToken(json.token);
+        return { ok: true, user: json.user };
+      }
+      clearServerSessionToken();
+      clearServerSessionUser();
+      return {
+        ok: false,
+        allowLocalFallback: import.meta.env.DEV,
+        reason: json?.error || json?.reason || `auth_http_${response.status}`,
       };
     } catch {
       continue;

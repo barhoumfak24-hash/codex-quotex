@@ -101,7 +101,7 @@ export function EmployeeLoginPage() {
                 setError("Passwords don't match.");
                 return;
               }
-              const result = registerStaff({
+              const result = await registerStaff({
                 agencyCode: code,
                 branchId: selectedBranchId || undefined,
                 role,
