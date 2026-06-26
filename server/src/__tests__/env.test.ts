@@ -43,8 +43,6 @@ describe("server environment validation", () => {
     expect(result.errors).toContain("WEBSITE_WEBHOOK_SECRET is required.");
     expect(result.errors).toContain("FRONTEND_ORIGIN must be set in production; wildcard CORS is not allowed.");
     expect(result.errors).toContain("DATABASE_URL is required for production shared API rate limits.");
-    expect(result.errors).toContain("UPSTASH_REDIS_REST_URL is required.");
-    expect(result.errors).toContain("UPSTASH_REDIS_REST_TOKEN is required.");
     expect(result.errors).toContain(
       "A production address autocomplete provider is required. Set GOOGLE_PLACES_API_KEY or SMARTY_AUTH_ID/SMARTY_AUTH_TOKEN server-side."
     );
@@ -78,6 +76,7 @@ describe("server environment validation", () => {
     vi.stubEnv("VITE_SUPABASE_ACCESS_TOKEN", "leaked-token");
     vi.stubEnv("VITE_STRIPE_PUBLISHABLE_KEY", "pk_live_browser_safe");
     vi.stubEnv("VITE_GOOGLE_PLACES_API_KEY", "browser-restricted-key");
+    vi.stubEnv("VITE_VERCEL_GIT_COMMIT_AUTHOR_NAME", "barhoumfak24-hash");
 
     const result = validateServerEnv();
 
@@ -89,6 +88,9 @@ describe("server environment validation", () => {
     );
     expect(result.errors).not.toContain(
       "VITE_GOOGLE_PLACES_API_KEY looks like a secret and must not use the VITE_ browser-exposed prefix."
+    );
+    expect(result.errors).not.toContain(
+      "VITE_VERCEL_GIT_COMMIT_AUTHOR_NAME looks like a secret and must not use the VITE_ browser-exposed prefix."
     );
   });
 
@@ -147,6 +149,16 @@ describe("server environment validation", () => {
 
     expect(result.ok).toBe(false);
     expect(result.errors).toContain("RATE_LIMIT_STORE=memory is not allowed in production.");
+  });
+
+  it("rejects unsupported production rate-limit stores", () => {
+    stubGoodProductionEnv();
+    vi.stubEnv("RATE_LIMIT_STORE", "upstash");
+
+    const result = validateServerEnv();
+
+    expect(result.ok).toBe(false);
+    expect(result.errors).toContain("RATE_LIMIT_STORE must be database/postgres in production.");
   });
 
   it("rejects production memory-only manager 2FA challenges", () => {

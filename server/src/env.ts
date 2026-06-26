@@ -201,11 +201,12 @@ function validateSharedRateLimit(errors: string[], warnings: string[], productio
     if (store === "memory") {
       errors.push("RATE_LIMIT_STORE=memory is not allowed in production.");
     }
+    if (store && !["database", "postgres", "postgresql"].includes(store)) {
+      errors.push("RATE_LIMIT_STORE must be database/postgres in production.");
+    }
     if (!process.env.DATABASE_URL?.trim()) {
       errors.push("DATABASE_URL is required for production shared API rate limits.");
     }
-    requireSecret("UPSTASH_REDIS_REST_TOKEN", errors);
-    requirePresent("UPSTASH_REDIS_REST_URL", errors);
     return;
   }
   warnings.push("Local API rate limits use in-memory buckets unless DATABASE_URL is configured.");
@@ -396,7 +397,7 @@ function validateNoPublicSecrets(errors: string[]) {
 }
 
 function looksLikeSecretEnvName(key: string): boolean {
-  return /(?:SECRET|TOKEN|PASSWORD|PRIVATE|SERVICE_ROLE|DATABASE_URL|DIRECT_URL|JWT|AUTH|CREDENTIAL|ACCESS_KEY|API_KEY)/i.test(
+  return /(?:SECRET|TOKEN|PASSWORD|PRIVATE|SERVICE_ROLE|DATABASE_URL|DIRECT_URL|JWT|CREDENTIAL|ACCESS_KEY|API_KEY|(?:^|_)AUTH(?:_|$))/i.test(
     key
   );
 }
