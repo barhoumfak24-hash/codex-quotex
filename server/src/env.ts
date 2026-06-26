@@ -49,6 +49,8 @@ aliasEnv("POSTGRES_URL_NON_POOLING", ["DIRECT_URL"]);
 aliasEnv("JWT_SECRET", ["SUPABASE_JWT_SECRET"]);
 aliasEnv("SUPABASE_SERVICE_ROLE_KEY", ["SUPABASE_SECRET_KEY"]);
 aliasEnv("SUPABASE_URL", ["NEXT_PUBLIC_SUPABASE_URL"]);
+aliasEnv("STATE_SYNC_TOKEN", ["SUPABASE_STATE_SYNC_TOKEN"]);
+aliasEnv("STATE_SYNC_ID", ["SUPABASE_STATE_SYNC_ID"]);
 
 const PLACEHOLDER_VALUES = new Set(["", "change-me", "changeme", "replace-me", "your-secret"]);
 

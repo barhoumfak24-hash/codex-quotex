@@ -74,6 +74,34 @@ const employeeLoginSchema = z.object({
   password: z.string().min(1).max(500),
 });
 
+const staffAgencySnapshotSchema = z.object({
+  id: z.string().min(1).max(120),
+  name: z.string().min(1).max(240),
+  contactEmail: z.string().email().max(254).optional(),
+  phone: z.string().max(80).optional(),
+  address: z.string().max(500).optional(),
+  website: z.string().max(500).optional(),
+  websiteSlug: z.string().max(120).optional(),
+  websiteEnabled: z.boolean().optional(),
+  tier: z.string().max(80).optional(),
+  active: z.boolean().optional(),
+  allowedUsers: z.number().int().min(1).max(1000).optional(),
+  agencyCode: z.string().max(80).optional(),
+  agencyCodeEncrypted: z.string().max(500).optional(),
+  agencyCodePreview: z.string().max(40).optional(),
+});
+
+const staffBranchSnapshotSchema = z.object({
+  id: z.string().min(1).max(120),
+  agencyId: z.string().min(1).max(120),
+  name: z.string().min(1).max(120),
+  address: z.string().max(500).optional(),
+  city: z.string().max(120).optional(),
+  state: z.string().max(40).optional(),
+  zip: z.string().max(40).optional(),
+  phone: z.string().max(80).optional(),
+});
+
 const employeeRegisterSchema = z.object({
   agencyCode: z.string().min(3).max(80),
   branchId: z.string().max(120).optional(),
@@ -83,6 +111,8 @@ const employeeRegisterSchema = z.object({
   phone: z.string().min(1).max(80),
   businessEmail: z.string().email().max(254),
   password: z.string().min(8).max(500),
+  agency: staffAgencySnapshotSchema.optional(),
+  branch: staffBranchSnapshotSchema.optional().nullable(),
 });
 
 const employeeLocalPromotionSchema = z.object({
@@ -101,35 +131,8 @@ const employeeLocalPromotionSchema = z.object({
     active: z.boolean().optional(),
     staffAccessStatus: z.enum(["active", "banned", "deleted", "inactive"]).optional(),
   }),
-  agency: z.object({
-    id: z.string().min(1).max(120),
-    name: z.string().min(1).max(240),
-    contactEmail: z.string().email().max(254).optional(),
-    phone: z.string().max(80).optional(),
-    address: z.string().max(500).optional(),
-    website: z.string().max(500).optional(),
-    websiteSlug: z.string().max(120).optional(),
-    websiteEnabled: z.boolean().optional(),
-    tier: z.string().max(80).optional(),
-    active: z.boolean().optional(),
-    allowedUsers: z.number().int().min(1).max(1000).optional(),
-    agencyCode: z.string().max(80).optional(),
-    agencyCodeEncrypted: z.string().max(500).optional(),
-    agencyCodePreview: z.string().max(40).optional(),
-  }),
-  branch: z
-    .object({
-      id: z.string().min(1).max(120),
-      agencyId: z.string().min(1).max(120),
-      name: z.string().min(1).max(120),
-      address: z.string().max(500).optional(),
-      city: z.string().max(120).optional(),
-      state: z.string().max(40).optional(),
-      zip: z.string().max(40).optional(),
-      phone: z.string().max(80).optional(),
-    })
-    .optional()
-    .nullable(),
+  agency: staffAgencySnapshotSchema,
+  branch: staffBranchSnapshotSchema.optional().nullable(),
 });
 
 authRoutes.get("/", (_req, res) => res.json({ resource: "auth", endpoints }));
@@ -497,11 +500,14 @@ async function createServerStaffAccount(input: StaffRegisterInput): Promise<Staf
   }
   if (input.password.length < 8) return { ok: false, error: "weak_password" };
 
-  const agency = await resolveAgencyForStaffRegistration(agencyCode, email);
+  const agency = await resolveAgencyForStaffRegistration(agencyCode, email, input.agency);
   if (!agency) return { ok: false, error: "agency_not_found" };
   if (!agency.active) return { ok: false, error: "inactive_agency" };
 
-  const branchId = await resolveBranchForStaff(input.branchId, agency.id);
+  let branchId = await resolveBranchForStaff(input.branchId, agency.id);
+  if (!branchId && input.branchId?.trim() && input.branch) {
+    branchId = await upsertBranchFromLocalPromotion(input.branch, agency.id, input.branchId);
+  }
   if (input.branchId?.trim() && !branchId) return { ok: false, error: "missing_fields" };
 
   const existing = await prisma.user.findFirst({
@@ -769,7 +775,11 @@ async function promoteSnapshotStaffForLogin(identifier: string, password: string
   return user;
 }
 
-async function resolveAgencyForStaffRegistration(agencyCode: string, fallbackEmail: string) {
+async function resolveAgencyForStaffRegistration(
+  agencyCode: string,
+  fallbackEmail: string,
+  submittedAgency?: StaffRegisterInput["agency"]
+) {
   const storedHash = agencyCodeHashForStorage(agencyCode);
   const rawHash = storedHash.replace(/^hmac\$sha256\$/, "");
   const direct = await prisma.agency.findFirst({
@@ -781,7 +791,24 @@ async function resolveAgencyForStaffRegistration(agencyCode: string, fallbackEma
   const snapshotAgency = snapshot
     ? snapshotArray(snapshot, "agencies").find((agency) => snapshotAgencyCode(agency) === agencyCode)
     : null;
-  return snapshotAgency ? upsertAgencyFromSnapshot(snapshotAgency, agencyCode, fallbackEmail) : null;
+  if (snapshotAgency) return upsertAgencyFromSnapshot(snapshotAgency, agencyCode, fallbackEmail);
+
+  const verifiedSubmittedAgency = verifiedRegistrationAgencySnapshot(submittedAgency, agencyCode);
+  return verifiedSubmittedAgency ? upsertAgencyFromSnapshot(verifiedSubmittedAgency, agencyCode, fallbackEmail) : null;
+}
+
+function verifiedRegistrationAgencySnapshot(
+  submittedAgency: StaffRegisterInput["agency"],
+  agencyCode: string
+): SnapshotRecord | null {
+  if (!submittedAgency) return null;
+  const candidate = submittedAgency as SnapshotRecord;
+  if (!fieldString(candidate.id) || !fieldString(candidate.name)) return null;
+  const protectedCode = snapshotAgencyCode(candidate);
+  if (!protectedCode || protectedCode !== agencyCode) return null;
+  const preview = fieldString(candidate.agencyCodePreview);
+  if (preview && preview !== agencyCode.slice(-4)) return null;
+  return candidate;
 }
 
 async function upsertAgencyFromSnapshot(snapshotAgency: SnapshotRecord, agencyCode: string, fallbackEmail: string) {

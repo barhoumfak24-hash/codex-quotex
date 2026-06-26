@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useMemo, useRef, use
 import type { Agency, Branch, Role, User } from "@/types";
 import { api } from "./api";
 import { apiBaseUrl, envValue } from "./apiBase";
-import { subscribeToDbChanges } from "./db";
+import { db, subscribeToDbChanges } from "./db";
 import { isLockingMasterAccount } from "./masterAccount";
 import { isStaffRole, type StaffRole } from "./roles";
 
@@ -596,7 +596,16 @@ async function establishServerStaffRegistration(input: {
   password: string;
 }): Promise<ServerSessionResult> {
   if (typeof window === "undefined") return { ok: false, allowLocalFallback: false, reason: "browser_unavailable" };
-  const payload = JSON.stringify(input);
+  const agency = api.agencies.byCode(input.agencyCode);
+  const branch = input.branchId && agency
+    ? api.branches.listByAgency(agency.id).find((candidate) => candidate.id === input.branchId)
+    : undefined;
+  if (agency) await db.syncNow().catch(() => false);
+  const payload = JSON.stringify({
+    ...input,
+    agency: agency ? serializeAgencyForStaffPromotion(agency) : undefined,
+    branch: branch ? serializeBranchForStaffPromotion(branch) : undefined,
+  });
   const candidates = uniqueAuthUrls([
     `${apiBaseUrl()}/auth/employee/register`,
     "/api/auth/employee/register",
