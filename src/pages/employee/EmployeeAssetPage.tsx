@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, FileText, User } from "lucide-react";
+import { ArrowLeft, Check, FileText, Pencil, User, X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Card, CardHeader, EmptyState } from "@/components/ui/Card";
 import { DocumentList } from "@/components/ui/DocumentList";
@@ -10,6 +10,7 @@ import { Timeline } from "@/components/ui/Timeline";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
+import { formatAssetValue } from "@/lib/assetLabels";
 import { fmt } from "@/lib/format";
 
 // =====================================================================
@@ -25,7 +26,10 @@ export function EmployeeAssetPage() {
   const { user } = useAuth();
   const navigate = useNavigate();
   const [, setRev] = useState(0);
+  const [renaming, setRenaming] = useState(false);
+  const [assetLabelDraft, setAssetLabelDraft] = useState("");
   if (!assetId || !customerId || !agency || !user) return null;
+  const resolvedAssetId = assetId;
   const customer = api.customers.get(customerId);
   // Same access gate as ClientDetailPage — agents can only see clients
   // assigned to them, so we hide assets that hang off invisible
@@ -41,10 +45,39 @@ export function EmployeeAssetPage() {
   if (!asset || asset.customerId !== customer.id) {
     return <EmptyState title="Asset not found" />;
   }
-  const policies = api.policies.listByAsset(assetId);
-  const documents = api.documents.listByEntity({ assetId });
+  const policies = api.policies.listByAsset(resolvedAssetId);
+  const documents = api.documents.listByEntity({ assetId: resolvedAssetId });
   // Staff timeline shows everything — internal-only events included.
-  const events = api.status.listFor({ assetId });
+  const events = api.status.listFor({ assetId: resolvedAssetId });
+
+  function startRename() {
+    const current = api.assets.get(resolvedAssetId);
+    if (!current) return;
+    setAssetLabelDraft(current.label);
+    setRenaming(true);
+  }
+
+  function cancelRename() {
+    setAssetLabelDraft("");
+    setRenaming(false);
+  }
+
+  function saveRename() {
+    const next = assetLabelDraft.trim();
+    if (!next) return;
+    const current = api.assets.get(resolvedAssetId);
+    if (!current) return;
+    api.assets.update(current.id, {
+      label: next,
+      details: {
+        ...(current.details ?? {}),
+        customLabel: next,
+      },
+    });
+    setRenaming(false);
+    setAssetLabelDraft("");
+    setRev((r) => r + 1);
+  }
 
   return (
     <div className="space-y-6">
@@ -58,9 +91,37 @@ export function EmployeeAssetPage() {
       </Button>
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="font-display text-3xl">{asset.label}</h1>
+          {renaming ? (
+            <div className="flex items-center gap-2 flex-wrap">
+              <input
+                className="input min-w-[18rem]"
+                value={assetLabelDraft}
+                onChange={(event) => setAssetLabelDraft(event.target.value)}
+                autoFocus
+                aria-label="Asset name"
+              />
+              <Button size="xs" onClick={saveRename} icon={<Check className="h-3.5 w-3.5" />}>
+                Save
+              </Button>
+              <Button size="xs" variant="outline" onClick={cancelRename} icon={<X className="h-3.5 w-3.5" />}>
+                Cancel
+              </Button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 flex-wrap">
+              <h1 className="font-display text-3xl">{asset.label}</h1>
+              <Button
+                size="xs"
+                variant="ghost"
+                onClick={startRename}
+                icon={<Pencil className="h-3.5 w-3.5" />}
+              >
+                Rename
+              </Button>
+            </div>
+          )}
           <p className="text-ink-500 text-sm mt-1">
-            {api.helpers.assetTypeLabel(asset.type)} · {fmt.money(asset.estimatedValue)}
+            {api.helpers.assetTypeLabel(asset.type)} · {formatAssetValue(asset.estimatedValue)}
           </p>
         </div>
         <Button

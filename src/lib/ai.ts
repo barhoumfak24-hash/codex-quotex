@@ -39,6 +39,11 @@ import {
   summarizeQuoteAssetDetails,
 } from "@/lib/quoteAssetIntake";
 import {
+  decodeVinViaNhtsa,
+  normalizeVin,
+  vinValidationIssue,
+} from "@/lib/assetLabels";
+import {
   aiEvidenceAllowsDocumentAutofill,
   publicFieldIsSafeForDocument,
 } from "@/lib/aiProductionGuards";
@@ -1703,46 +1708,6 @@ function synthesizeCoastalHomeFields(geo: GeocodeResult): {
 // (Manheim, KBB, NADA, J.D. Power) — that's marked unavailable.
 // ---------------------------------------------------------------------
 
-interface NhtsaVariable {
-  Variable: string;
-  Value: string | null;
-}
-interface NhtsaResponse {
-  Results: NhtsaVariable[];
-}
-
-async function decodeVinViaNhtsa(vin: string): Promise<{
-  year?: number;
-  make?: string;
-  model?: string;
-  bodyClass?: string;
-  errorCode?: string;
-} | null> {
-  if (!vin) return null;
-  const url = `https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVin/${encodeURIComponent(vin)}?format=json`;
-  try {
-    const res = await fetchPublicLookup(url);
-    if (!res.ok) return null;
-    const data = (await res.json()) as NhtsaResponse;
-    const get = (variable: string): string | undefined => {
-      const r = data.Results?.find((row) => row.Variable === variable);
-      const v = r?.Value;
-      return typeof v === "string" && v.trim() !== "" ? v : undefined;
-    };
-    const yearStr = get("Model Year");
-    const year = yearStr ? Number(yearStr) : undefined;
-    return {
-      year: Number.isFinite(year) ? year : undefined,
-      make: get("Make"),
-      model: get("Model"),
-      bodyClass: get("Body Class"),
-      errorCode: get("Error Code"),
-    };
-  } catch {
-    return null;
-  }
-}
-
 async function enrichLuxuryVehicle(seed: Record<string, unknown>): Promise<AiAssetEnrichment> {
   const vin = normalizeVin(seed.vin);
   const vinIssue = vinValidationIssue(vin);
@@ -1814,22 +1779,6 @@ async function enrichLuxuryVehicle(seed: Record<string, unknown>): Promise<AiAss
       ? "VIN decoded via NHTSA's federal database. Market value requires a paid valuation provider (Manheim / KBB / NADA / J.D. Power) wired through the production backend."
       : `NHTSA returned partial results (error code ${errorCode}). Confirm the VIN and any missing fields with your agent.`,
   };
-}
-
-function normalizeVin(value: unknown): string {
-  return String(value ?? "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
-}
-
-function vinValidationIssue(vin: string): string | null {
-  if (!vin) return "Enter a VIN to look up vehicle records.";
-  if (/[IOQ]/.test(vin)) return "VIN contains I, O, or Q, which are not valid in standard VINs.";
-  if (vin.length < 17) {
-    return "VIN is too short. A standard 17-character VIN is required before Quotex decodes vehicle records.";
-  }
-  if (vin.length > 17) {
-    return "VIN is too long. A standard 17-character VIN is required before Quotex decodes vehicle records.";
-  }
-  return null;
 }
 
 async function enrichYacht(seed: Record<string, unknown>): Promise<AiAssetEnrichment> {

@@ -236,6 +236,10 @@ export function EmployeeLayout() {
   // an in-place archive / approval / status change on a child page.
   const [, setRev] = useState(0);
   useEffect(() => subscribeToDbChanges(() => setRev((r) => r + 1)), []);
+  useEffect(() => {
+    if (!agency?.id) return;
+    api.assets.backfillLabels(agency.id);
+  }, [agency?.id]);
 
   const role = isStaffRole(user?.role) ? user.role : undefined;
   const viewer = role && user ? { id: user.id, role } : undefined;

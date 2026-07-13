@@ -78,6 +78,14 @@ import {
   prepareCarrierPolicyBinding,
   runCarrierPolicyBinding,
 } from "./carrierBindingProviders";
+import {
+  assetTypeDisplayName as sharedAssetTypeDisplayName,
+  decodeVinViaNhtsa,
+  deriveAssetLabel,
+  looksLikeVin,
+  normalizeVin,
+  vinValidationIssue,
+} from "./assetLabels";
 import { isLockingMasterAccount } from "./masterAccount";
 import { TIER_LIMITS } from "./tiers";
 import {
@@ -3999,16 +4007,64 @@ function addOnePolicyYear(iso: string): string {
 }
 
 function assetTypeDisplayName(type: AssetType): string {
-  const map: Record<AssetType, string> = {
-    coastal_home: "Coastal Home",
-    luxury_vehicle: "Luxury Vehicle",
-    yacht: "Yacht",
-    jewelry: "Jewelry",
-    umbrella_liability: "Umbrella Liability",
-    full_portfolio: "Full Portfolio",
-    other: "Other",
+  return sharedAssetTypeDisplayName(type);
+}
+
+const assetLabelBackfillTenantIds = new Set<string>();
+
+function assetDetails(asset: Pick<Asset, "details">): Record<string, unknown> {
+  return (asset.details ?? {}) as Record<string, unknown>;
+}
+
+function detailVin(details: Record<string, unknown>): string {
+  return normalizeVin(details.vin ?? details.vehicleVin ?? details.assetIdentifier);
+}
+
+function assetNeedsVinDecode(asset: Asset): boolean {
+  if (asset.type !== "luxury_vehicle") return false;
+  const details = assetDetails(asset);
+  const vin = detailVin(details);
+  if (!vin || vinValidationIssue(vin)) return false;
+  return !(details.year && details.make && details.model);
+}
+
+async function upgradeVehicleAssetLabelFromVin(assetId: string, expectedLabel?: string): Promise<Asset | undefined> {
+  const asset = db.list("assets").find((row) => row.id === assetId);
+  if (!asset || asset.type !== "luxury_vehicle") return asset;
+  const details = assetDetails(asset);
+  if (details.customLabel) return asset;
+  if (expectedLabel && asset.label !== expectedLabel) return asset;
+  const vin = detailVin(details);
+  if (!vin || vinValidationIssue(vin)) return asset;
+
+  const decoded = await decodeVinViaNhtsa(vin);
+  const clean = (decoded?.errorCode ?? "") === "0" || (decoded?.errorCode ?? "") === "";
+  if (!clean || !decoded?.year || !decoded.make || !decoded.model) return asset;
+
+  const latest = db.list("assets").find((row) => row.id === assetId);
+  if (!latest) return undefined;
+  const latestDetails = assetDetails(latest);
+  if (latestDetails.customLabel) return latest;
+  if (expectedLabel && latest.label !== expectedLabel) return latest;
+
+  const nextDetails = {
+    ...latestDetails,
+    year: decoded.year,
+    make: decoded.make,
+    model: decoded.model,
+    previousLabel: latestDetails.previousLabel ?? latest.label,
+    labelSource: "nhtsa_vin_decode",
   };
-  return map[type];
+  const nextLabel = deriveAssetLabel(latest.type, nextDetails);
+  if (nextLabel === latest.label) return latest;
+  return db.update("assets", latest.id, {
+    label: nextLabel,
+    details: nextDetails,
+  }) ?? undefined;
+}
+
+function queueVehicleLabelUpgrade(assetId: string, expectedLabel?: string): void {
+  void upgradeVehicleAssetLabelFromVin(assetId, expectedLabel);
 }
 
 type CommercialAcordTemplateSelection = NonNullable<QuotingSession["commercialAcordTemplates"]>[number];
@@ -7654,6 +7710,55 @@ export const api = {
     },
     update(id: string, patch: Partial<Asset>) {
       return db.update("assets", id, patch);
+    },
+    upgradeVehicleLabelFromVin(assetId: string, expectedLabel?: string) {
+      return upgradeVehicleAssetLabelFromVin(assetId, expectedLabel);
+    },
+    backfillLabels(tenantId: string): number {
+      if (!tenantId || assetLabelBackfillTenantIds.has(tenantId)) return 0;
+      assetLabelBackfillTenantIds.add(tenantId);
+      const decodeQueue: Array<{ id: string; label: string }> = [];
+      let repaired = 0;
+
+      tenantFilter(db.list("assets"), tenantId).forEach((asset) => {
+        const details = assetDetails(asset);
+        if (details.customLabel || details.labelAutoFixedAt) return;
+        const rawLabel = String(asset.label ?? "").trim();
+        const vin = detailVin(details);
+        const labelVin = normalizeVin(rawLabel);
+        const candidate =
+          !rawLabel ||
+          looksLikeVin(rawLabel) ||
+          (vin.length > 0 && labelVin === vin);
+        if (!candidate) return;
+
+        const nextDetails = {
+          ...details,
+          previousLabel: details.previousLabel ?? rawLabel,
+          labelSource: "backfill_derive",
+          labelAutoFixedAt: nowIso(),
+        };
+        const nextLabel = deriveAssetLabel(asset.type, nextDetails);
+        const updated = db.update("assets", asset.id, {
+          label: nextLabel,
+          details: nextDetails,
+        });
+        if (!updated) return;
+        repaired += 1;
+        if (decodeQueue.length < 100 && assetNeedsVinDecode(updated)) {
+          decodeQueue.push({ id: updated.id, label: updated.label });
+        }
+      });
+
+      if (decodeQueue.length > 0) {
+        void (async () => {
+          for (const item of decodeQueue) {
+            await upgradeVehicleAssetLabelFromVin(item.id, item.label);
+          }
+        })();
+      }
+
+      return repaired;
     },
   },
 
@@ -15150,15 +15255,18 @@ export const api = {
 
       let asset = session.assetId ? db.list("assets").find((a) => a.id === session.assetId) : undefined;
       if (!asset) {
+        const sessionAddress = String(session.assetDetails?.address ?? "").trim();
+        const publicPropertyAddress = String(session.publicFields["Property address"] ?? "").trim();
+        const assetDetailsForLabel = {
+          ...(session.assetDetails ?? {}),
+          address: sessionAddress || publicPropertyAddress,
+        };
+        const label = deriveAssetLabel(session.assetType, assetDetailsForLabel);
         asset = api.assets.create({
           tenantId: session.tenantId,
           customerId,
           type: session.assetType,
-          label:
-            String(session.assetDetails?.assetName ?? "").trim() ||
-            String(session.assetDetails?.address ?? "").trim() ||
-            String(session.publicFields["Property address"] ?? "").trim() ||
-            assetTypeDisplayName(session.assetType),
+          label,
           estimatedValue: session.estimatedValue || 0,
           details: {
             ...(session.assetDetails ?? {}),
@@ -15167,6 +15275,7 @@ export const api = {
           },
           status: "insured",
         });
+        queueVehicleLabelUpgrade(asset.id, asset.label);
       } else if (asset.status !== "insured") {
         db.update("assets", asset.id, { status: "insured" });
       }

@@ -5,6 +5,11 @@ import { Disclaimer } from "@/components/ui/Disclaimer";
 import { FileDropZone } from "@/components/ui/FileDropZone";
 import { api } from "@/lib/api";
 import { aiExtractPolicyFromFile } from "@/lib/ai";
+import {
+  deriveAssetLabel,
+  looksLikeVin,
+  normalizeVin,
+} from "@/lib/assetLabels";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import type { AssetType, Policy, PolicyStatus, RenewalStatus } from "@/types";
@@ -229,15 +234,23 @@ export function AddPolicyModal({
     // policy attaches to a real asset id.
     let finalAssetId = assetId;
     if (assetId === NEW_ASSET) {
+      const rawLabel = newAssetLabel.trim();
+      const details = looksLikeVin(rawLabel)
+        ? { vin: normalizeVin(rawLabel) }
+        : { customLabel: rawLabel };
+      const label = deriveAssetLabel(newAssetType, details);
       const created = api.assets.create({
         tenantId: agency!.id,
         customerId: selectedCustomerId,
         type: newAssetType,
-        label: newAssetLabel.trim(),
+        label,
         estimatedValue: newAssetValue ? Number(newAssetValue) : 0,
-        details: {},
+        details,
         status: "insured",
       });
+      if (newAssetType === "luxury_vehicle") {
+        api.assets.upgradeVehicleLabelFromVin(created.id, created.label);
+      }
       finalAssetId = created.id;
     }
 

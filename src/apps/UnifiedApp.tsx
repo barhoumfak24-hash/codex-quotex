@@ -41,6 +41,7 @@ import { EmployeeClaimsPage } from "@/pages/employee/EmployeeClaimsPage";
 import { EmployeeHrPage } from "@/pages/employee/EmployeeHrPage";
 import { EmployeePoliciesPage } from "@/pages/employee/EmployeePoliciesPage";
 import { EmployeePolicyPage } from "@/pages/employee/EmployeePolicyPage";
+import { EmployeeQuoteFlowWorkspacePage } from "@/pages/employee/EmployeeQuoteFlowWorkspacePage";
 import { EmployeeStatusUpdatesPage } from "@/pages/employee/EmployeeStatusUpdatesPage";
 import { EmployeeTrainingPage } from "@/pages/employee/EmployeeTrainingPage";
 import { EmployeeWelcomePage } from "@/pages/employee/EmployeeWelcomePage";
@@ -180,8 +181,10 @@ export function UnifiedApp() {
         <Route path="/employee/calendar" element={<EmployeeCalendarPage />} />
         <Route path="/employee/prospects" element={<ProspectsPage />} />
         <Route path="/employee/prospects/:prospectId" element={<ProspectDetailPage />} />
+        <Route path="/employee/prospects/:prospectId/quote-flow" element={<EmployeeQuoteFlowWorkspacePage />} />
         <Route path="/employee/clients" element={<ClientsPage />} />
         <Route path="/employee/clients/:customerId" element={<ClientDetailPage />} />
+        <Route path="/employee/clients/:customerId/quote-flow" element={<EmployeeQuoteFlowWorkspacePage />} />
         <Route path="/employee/clients/:customerId/assets/:assetId" element={<EmployeeAssetPage />} />
         <Route path="/employee/policies" element={<EmployeePoliciesPage />} />
         <Route path="/employee/policies/:policyId" element={<EmployeePolicyPage />} />

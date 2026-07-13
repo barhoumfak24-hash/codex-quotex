@@ -5,6 +5,10 @@ import { aiExtractContactFromFile } from "@/lib/ai";
 import { api } from "@/lib/api";
 import { readAiFileForExtraction } from "@/lib/fileIntakeExtraction";
 import { nowIso, uid } from "@/lib/id";
+import {
+  assetTypeDisplayName,
+  deriveAssetLabel,
+} from "@/lib/assetLabels";
 import type {
   Agency,
   AssetType,
@@ -728,8 +732,16 @@ function customerName(record: BookImportParsedRecord): string {
 }
 
 function assetLabelFor(record: BookImportParsedRecord, customer: CustomerProfile): string {
-  if (record.assetType === "coastal_home" && record.mailingAddress) return record.mailingAddress;
-  if (record.assetType) return api.helpers.assetTypeLabel(record.assetType);
+  if (record.assetType) {
+    const label = deriveAssetLabel(record.assetType, {
+      assetName: normalizeText(record.originalRow?.assetName),
+      propertyAddress: record.mailingAddress,
+      address: record.mailingAddress,
+      riskAddress: record.mailingAddress,
+    });
+    if (label && label !== assetTypeDisplayName(record.assetType)) return label;
+    return api.helpers.assetTypeLabel(record.assetType);
+  }
   return `${customer.name} account asset`;
 }
 

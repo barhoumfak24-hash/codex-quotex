@@ -30,6 +30,7 @@ import { aiExtractPolicyFromFile } from "@/lib/ai";
 import { isRoutingManagerRole } from "@/lib/roles";
 import { buildDocumentTemplateFields, documentTypeLabelForTemplate } from "@/lib/documentTemplateFields";
 import { fmt } from "@/lib/format";
+import { formatAssetValue, normalizeVin, shortVin } from "@/lib/assetLabels";
 import { subscribeToDbChanges } from "@/lib/db";
 import { downloadContactDossier } from "@/lib/contactDossier";
 import { requestManagerStepUp, verifyManagerStepUp } from "@/lib/managerStepUp";
@@ -950,26 +951,33 @@ export function ClientDetailPage() {
             <div className="text-sm text-ink-400">No assets.</div>
           ) : (
             <ul className="divide-y divide-ink-100">
-              {assets.map((a) => (
-                <li
-                  key={a.id}
-                  className="py-3 flex items-center justify-between gap-3"
-                >
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium truncate">{a.label}</div>
-                    <div className="text-xs text-ink-500">
-                      {api.helpers.assetTypeLabel(a.type)} · {fmt.money(a.estimatedValue)}
-                    </div>
-                  </div>
-                  <Button
-                    size="xs"
-                    to={`/employee/clients/${customer.id}/assets/${a.id}`}
-                    className="shrink-0"
+              {assets.map((a) => {
+                const details = (a.details ?? {}) as Record<string, unknown>;
+                const vin = normalizeVin(details.vin ?? details.vehicleVin ?? details.assetIdentifier);
+                const vinText = vin ? shortVin(vin) : "";
+                const showVin = vinText && !a.label.endsWith(vinText);
+                return (
+                  <li
+                    key={a.id}
+                    className="py-3 flex items-center justify-between gap-3"
                   >
-                    View
-                  </Button>
-                </li>
-              ))}
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium truncate">{a.label}</div>
+                      <div className="text-xs text-ink-500">
+                        {api.helpers.assetTypeLabel(a.type)} · {formatAssetValue(a.estimatedValue)}
+                        {showVin ? ` · ${vinText}` : ""}
+                      </div>
+                    </div>
+                    <Button
+                      size="xs"
+                      to={`/employee/clients/${customer.id}/assets/${a.id}`}
+                      className="shrink-0"
+                    >
+                      View
+                    </Button>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </Card>
@@ -1005,6 +1013,7 @@ export function ClientDetailPage() {
             userId={user.id}
             customer={customer}
             onChanged={refresh}
+            variant="launcher"
           />
         </div>
 

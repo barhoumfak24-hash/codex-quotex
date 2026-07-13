@@ -52,6 +52,10 @@ const EmployeeClaimsPage = lazyPage(() => import("@/pages/employee/EmployeeClaim
 const EmployeeHrPage = lazyPage(() => import("@/pages/employee/EmployeeHrPage"), "EmployeeHrPage");
 const EmployeePoliciesPage = lazyPage(() => import("@/pages/employee/EmployeePoliciesPage"), "EmployeePoliciesPage");
 const EmployeePolicyPage = lazyPage(() => import("@/pages/employee/EmployeePolicyPage"), "EmployeePolicyPage");
+const EmployeeQuoteFlowWorkspacePage = lazyPage(
+  () => import("@/pages/employee/EmployeeQuoteFlowWorkspacePage"),
+  "EmployeeQuoteFlowWorkspacePage"
+);
 const EmployeeStatusUpdatesPage = lazyPage(
   () => import("@/pages/employee/EmployeeStatusUpdatesPage"),
   "EmployeeStatusUpdatesPage"
@@ -122,8 +126,10 @@ export function SoftwareApp() {
         <Route path="/employee/calendar" element={<EmployeeCalendarPage />} />
         <Route path="/employee/prospects" element={<ProspectsPage />} />
         <Route path="/employee/prospects/:prospectId" element={<ProspectDetailPage />} />
+        <Route path="/employee/prospects/:prospectId/quote-flow" element={<EmployeeQuoteFlowWorkspacePage />} />
         <Route path="/employee/clients" element={<ClientsPage />} />
         <Route path="/employee/clients/:customerId" element={<ClientDetailPage />} />
+        <Route path="/employee/clients/:customerId/quote-flow" element={<EmployeeQuoteFlowWorkspacePage />} />
         <Route path="/employee/clients/:customerId/assets/:assetId" element={<EmployeeAssetPage />} />
         <Route path="/employee/policies" element={<EmployeePoliciesPage />} />
         <Route path="/employee/policies/:policyId" element={<EmployeePolicyPage />} />

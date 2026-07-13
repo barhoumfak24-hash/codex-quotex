@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { AlertTriangle, Building2, Check, Plus, Search, User, X } from "lucide-react";
+import { AlertTriangle, ArrowRight, Building2, Check, ClipboardList, Plus, Search, User, X } from "lucide-react";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { AddressAutocomplete } from "@/components/ui/AddressAutocomplete";
 import { AiQuotingWorkspace } from "@/components/quoting/AiQuotingWorkspace";
 import { api } from "@/lib/api";
 import { categoryQuestionnaire } from "@/lib/categoryQuestionnaires";
 import { fmt } from "@/lib/format";
+import { deriveAssetLabel } from "@/lib/assetLabels";
 import { subscribeToDbChanges } from "@/lib/db";
 import {
   cleanQuoteAssetDetails,
@@ -124,11 +125,13 @@ export function ClientQuotingCard({
   userId,
   customer,
   onChanged,
+  variant = "workspace",
 }: {
   tenantId: string;
   userId: string;
   customer: CustomerProfile;
   onChanged?: () => void;
+  variant?: "workspace" | "launcher";
 }) {
   return (
     <ContactQuotingCard
@@ -136,6 +139,7 @@ export function ClientQuotingCard({
       userId={userId}
       contact={{ kind: "client", record: customer }}
       onChanged={onChanged}
+      variant={variant}
     />
   );
 }
@@ -145,11 +149,13 @@ export function ProspectQuotingCard({
   userId,
   prospect,
   onChanged,
+  variant = "workspace",
 }: {
   tenantId: string;
   userId: string;
   prospect: Prospect;
   onChanged?: () => void;
+  variant?: "workspace" | "launcher";
 }) {
   return (
     <ContactQuotingCard
@@ -157,6 +163,7 @@ export function ProspectQuotingCard({
       userId={userId}
       contact={{ kind: "prospect", record: prospect }}
       onChanged={onChanged}
+      variant={variant}
     />
   );
 }
@@ -166,6 +173,7 @@ function ContactQuotingCard({
   userId,
   contact,
   onChanged,
+  variant,
 }: {
   tenantId: string;
   userId: string;
@@ -173,6 +181,7 @@ function ContactQuotingCard({
     | { kind: "client"; record: CustomerProfile }
     | { kind: "prospect"; record: Prospect };
   onChanged?: () => void;
+  variant: "workspace" | "launcher";
 }) {
   const location = useLocation();
   const [, setRev] = useState(0);
@@ -338,13 +347,7 @@ function ContactQuotingCard({
         ? parsedEstimatedValue
         : 0;
     const label =
-      String(details.assetName ?? "").trim() ||
-      String(details.propertyAddress ?? "").trim() ||
-      String(details.riskAddress ?? "").trim() ||
-      String(details.address ?? "").trim() ||
-      String(details.primaryResidenceAddress ?? "").trim() ||
-      String(details.garagingAddress ?? "").trim() ||
-      String(details.vin ?? "").trim() ||
+      deriveAssetLabel(selectedNewCategory.assetType, details) ||
       `New ${selectedNewCategory.label}`;
     const customerIdForAsset = customer?.id ?? prospect?.customerId;
     const asset = customerIdForAsset
@@ -374,6 +377,8 @@ function ContactQuotingCard({
         };
     if (!customerIdForAsset) {
       setProspectDraftAssets((current) => [asset, ...current.filter((row) => row.id !== asset.id)]);
+    } else if (selectedNewCategory.assetType === "luxury_vehicle") {
+      api.assets.upgradeVehicleLabelFromVin(asset.id, asset.label);
     }
     setSelectedAssetIds((current) => [asset.id, ...current.filter((id) => id !== asset.id)]);
     setShowNewAssetForm(false);
@@ -387,6 +392,49 @@ function ContactQuotingCard({
     api.quoting.reset(existing.id);
     setShowImplementedQuoteAudit(false);
     refresh();
+  }
+
+  if (variant === "launcher") {
+    const quoteFlowPath =
+      contact.kind === "client"
+        ? `/employee/clients/${contactId}/quote-flow`
+        : `/employee/prospects/${contactId}/quote-flow`;
+    const lineLabel =
+      existing?.lineOfBusiness === "commercial"
+        ? "Commercial lines"
+        : existing?.lineOfBusiness === "personal"
+        ? "Personal lines"
+        : selectedLineOfBusiness === "commercial"
+        ? "Commercial lines"
+        : selectedLineOfBusiness === "personal"
+        ? "Personal lines"
+        : "Setup pending";
+    const actionLabel = existing ? "Continue quote flow" : "Start quote flow";
+
+    return (
+      <Card id="ai-quoting-workspace" className="relative">
+        <div className="flex items-start gap-4">
+          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md border border-gold-200 bg-gold-50 text-gold-700">
+            <ClipboardList className="h-6 w-6" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-gold-700">
+              AI quoting workspace
+            </div>
+            <h3 className="mt-1 text-lg font-semibold text-ink-900">AI Quoting Workspace</h3>
+            <p className="mt-1 text-sm text-ink-500">
+              {lineLabel} - {existing ? "Quote flow in progress" : "Ready to start"}
+            </p>
+          </div>
+        </div>
+        <div className="mt-5 flex justify-end">
+          <Link to={quoteFlowPath} className="btn-primary text-sm inline-flex">
+            {actionLabel}
+            <ArrowRight className="h-3.5 w-3.5" />
+          </Link>
+        </div>
+      </Card>
+    );
   }
 
   return (
