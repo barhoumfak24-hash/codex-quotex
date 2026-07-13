@@ -165,9 +165,6 @@ authRoutes.post("/employee/login", async (req, res) => {
   if (!user || user.status === "banned" || user.status === "deleted" || user.status === "inactive") {
     return res.status(401).json({ ok: false, error: "invalid_credentials" });
   }
-  if (!user.agency?.active) {
-    return res.status(403).json({ ok: false, error: "inactive_agency" });
-  }
   if (!user.passwordHash) {
     return res.status(403).json({
       ok: false,
@@ -188,6 +185,19 @@ authRoutes.post("/employee/login", async (req, res) => {
     }
     user = repairedUser;
   }
+  if (!user.agency?.active) {
+    const repairedAgency = await repairAgencyActivationFromSnapshot(user.tenantId, user.email);
+    if (repairedAgency?.active) {
+      const reloadedUser = await prisma.user.findFirst({
+        where: { id: user.id },
+        include: { agency: true },
+      });
+      if (reloadedUser) user = reloadedUser;
+    }
+    if (!user.agency?.active) {
+      return res.status(403).json({ ok: false, error: "inactive_agency" });
+    }
+  }
 
   const token = issueSessionJwt({
     userId: user.id,
@@ -201,19 +211,7 @@ authRoutes.post("/employee/login", async (req, res) => {
     data: { lastLoginAt: new Date() },
   }).catch(() => null);
 
-  return res.json({
-    ok: true,
-    token,
-    expiresIn: SESSION_TTL,
-    user: {
-      id: user.id,
-      tenantId: user.tenantId,
-      branchId: user.branchId,
-      role: user.role,
-      email: user.email,
-      name: user.name,
-    },
-  });
+  return res.json(staffSessionResponse(token, user));
 });
 
 authRoutes.post("/employee/register", async (req, res) => {
@@ -255,19 +253,7 @@ authRoutes.post("/employee/register", async (req, res) => {
     data: { lastLoginAt: new Date() },
   }).catch(() => null);
 
-  return res.json({
-    ok: true,
-    token,
-    expiresIn: SESSION_TTL,
-    user: {
-      id: user.id,
-      tenantId: user.tenantId,
-      branchId: user.branchId,
-      role: user.role,
-      email: user.email,
-      name: user.name,
-    },
-  });
+  return res.json(staffSessionResponse(token, user));
 });
 
 authRoutes.post("/employee/promote-local", async (req, res) => {
@@ -308,19 +294,7 @@ authRoutes.post("/employee/promote-local", async (req, res) => {
     data: { lastLoginAt: new Date() },
   }).catch(() => null);
 
-  return res.json({
-    ok: true,
-    token,
-    expiresIn: SESSION_TTL,
-    user: {
-      id: user.id,
-      tenantId: user.tenantId,
-      branchId: user.branchId,
-      role: user.role,
-      email: user.email,
-      name: user.name,
-    },
-  });
+  return res.json(staffSessionResponse(token, user));
 });
 
 authRoutes.post("/manager-2fa/request", requireAuth, async (req, res) => {
@@ -487,6 +461,103 @@ function localPromotionErrorCode(input: unknown, error: z.ZodError<z.infer<typeo
   const fields = error.flatten().fieldErrors;
   if (fields.password?.length) return "weak_password";
   return "missing_fields";
+}
+
+function staffSessionResponse(
+  token: string,
+  user: {
+    id: string;
+    tenantId: string;
+    branchId?: string | null;
+    role: string;
+    email: string;
+    name: string;
+    agency?: {
+      id: string;
+      name: string;
+      contactEmail: string;
+      phone?: string | null;
+      address?: string | null;
+      website?: string | null;
+      websiteSlug?: string | null;
+      websiteEnabled?: boolean | null;
+      tier?: string | null;
+      active?: boolean | null;
+      allowedUsers?: number | null;
+      allowedProspectsPerMonth?: number | null;
+      allowedAiMessagesPerMonth?: number | null;
+      allowedCarriers?: number | null;
+      agencyCodePreview?: string | null;
+    } | null;
+  }
+) {
+  return {
+    ok: true,
+    token,
+    expiresIn: SESSION_TTL,
+    user: {
+      id: user.id,
+      tenantId: user.tenantId,
+      branchId: user.branchId,
+      role: user.role,
+      email: user.email,
+      name: user.name,
+    },
+    agency: user.agency
+      ? {
+          id: user.agency.id,
+          name: user.agency.name,
+          contactEmail: user.agency.contactEmail,
+          phone: user.agency.phone,
+          address: user.agency.address,
+          website: user.agency.website,
+          websiteSlug: user.agency.websiteSlug,
+          websiteEnabled: user.agency.websiteEnabled,
+          tier: user.agency.tier,
+          active: user.agency.active,
+          allowedUsers: user.agency.allowedUsers,
+          allowedProspectsPerMonth: user.agency.allowedProspectsPerMonth,
+          allowedAiMessagesPerMonth: user.agency.allowedAiMessagesPerMonth,
+          allowedCarriers: user.agency.allowedCarriers,
+          agencyCodePreview: user.agency.agencyCodePreview,
+        }
+      : null,
+  };
+}
+
+async function repairAgencyActivationFromSnapshot(tenantId: string | null, fallbackEmail: string) {
+  if (!tenantId) return null;
+  const snapshot = await loadCurrentAppStateSnapshot();
+  if (!snapshot) return null;
+  const snapshotAgency = snapshotArray(snapshot, "agencies").find((agency) => fieldString(agency.id) === tenantId);
+  if (!snapshotAgency || snapshotAgency.active === false) return null;
+
+  const existing = await prisma.agency.findFirst({ where: { id: tenantId } });
+  const agencyCode = snapshotAgencyCode(snapshotAgency);
+  if (!existing) return upsertAgencyFromSnapshot(snapshotAgency, agencyCode, fallbackEmail);
+
+  const codeFields = agencyCode
+    ? {
+        agencyCodeHash: agencyCodeHashForStorage(agencyCode),
+        agencyCodePreview: agencyCode.slice(-4),
+      }
+    : {};
+  return prisma.agency.update({
+    where: { id: existing.id },
+    data: {
+      name: fieldString(snapshotAgency.name) || existing.name,
+      contactEmail: fieldString(snapshotAgency.contactEmail) || existing.contactEmail || fallbackEmail,
+      phone: nullableFieldString(snapshotAgency.phone),
+      address: nullableFieldString(snapshotAgency.address),
+      website: nullableFieldString(snapshotAgency.website),
+      websiteSlug: nullableFieldString(snapshotAgency.websiteSlug),
+      websiteEnabled: booleanField(snapshotAgency.websiteEnabled, existing.websiteEnabled),
+      tier: fieldString(snapshotAgency.tier) || existing.tier,
+      active: true,
+      allowedUsers: boundedInteger(snapshotAgency.allowedUsers, 1, 1000, existing.allowedUsers),
+      ...codeFields,
+    },
+  });
 }
 
 async function createServerStaffAccount(input: StaffRegisterInput): Promise<StaffAccountResult> {

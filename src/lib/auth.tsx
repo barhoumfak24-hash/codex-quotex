@@ -283,6 +283,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       const normalizedIdentifier = identifier.trim();
       const serverSession = await establishServerStaffSession(normalizedIdentifier, password);
       if (serverSession.ok) {
+        syncServerSessionContext(serverSession);
         const serverUser = resolveServerStaffUser(serverSession.user, normalizedIdentifier);
         if (!serverUser) return null;
         const signedIn = persistIfAllowed(serverUser);
@@ -294,6 +295,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (legacyStaff) {
         const promotedSession = await establishServerStaffLocalPromotion(legacyStaff, password);
         if (promotedSession.ok) {
+          syncServerSessionContext(promotedSession);
           const serverUser = resolveServerStaffUser(promotedSession.user, normalizedIdentifier);
           if (!serverUser) return null;
           const signedIn = persistIfAllowed(serverUser);
@@ -378,6 +380,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }) => {
       const serverSession = await establishServerStaffRegistration(input);
       if (serverSession.ok) {
+        syncServerSessionContext(serverSession);
         const serverUser = resolveServerStaffUser(serverSession.user, input.businessEmail);
         if (!serverUser) return { ok: false as const, reason: "server_session_invalid" };
         const localResult = api.users.registerStaff(input);
@@ -464,7 +467,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 }
 
 type ServerSessionResult =
-  | { ok: true; user: ServerSessionUser }
+  | { ok: true; user: ServerSessionUser; agency?: ServerSessionAgency | null }
   | { ok: false; allowLocalFallback: boolean; reason: string };
 
 type ServerSessionUser = {
@@ -476,12 +479,31 @@ type ServerSessionUser = {
   name: string;
 };
 
+type ServerSessionAgency = {
+  id: string;
+  name: string;
+  contactEmail?: string | null;
+  phone?: string | null;
+  address?: string | null;
+  website?: string | null;
+  websiteSlug?: string | null;
+  websiteEnabled?: boolean | null;
+  tier?: string | null;
+  active?: boolean | null;
+  allowedUsers?: number | null;
+  allowedProspectsPerMonth?: number | null;
+  allowedAiMessagesPerMonth?: number | null;
+  allowedCarriers?: number | null;
+  agencyCodePreview?: string | null;
+};
+
 type AuthRouteJson = {
   ok?: boolean;
   token?: string;
   error?: string;
   reason?: string;
   user?: Partial<ServerSessionUser>;
+  agency?: Partial<ServerSessionAgency> | null;
 };
 
 function localStaffWithMatchingPassword(identifier: string, password: string): User | null {
@@ -542,6 +564,72 @@ function serializeBranchForStaffPromotion(branch: Branch) {
   };
 }
 
+function syncServerSessionContext(session: { agency?: ServerSessionAgency | null }) {
+  if (!session.agency) return;
+  const serverAgency = session.agency;
+  const existing = db.list("agencies").find((agency) => agency.id === serverAgency.id);
+  const agencyPatch: Partial<Agency> = {
+    name: serverAgency.name,
+    contactEmail: serverAgency.contactEmail ?? existing?.contactEmail ?? serverAgency.name,
+    phone: serverAgency.phone ?? existing?.phone,
+    address: serverAgency.address ?? existing?.address,
+    website: serverAgency.website ?? existing?.website,
+    websiteSlug: serverAgency.websiteSlug ?? existing?.websiteSlug,
+    websiteEnabled: serverAgency.websiteEnabled ?? existing?.websiteEnabled ?? false,
+    tier: normalizeServerAgencyTier(serverAgency.tier ?? existing?.tier),
+    active: serverAgency.active !== false,
+    allowedUsers: boundedSessionNumber(serverAgency.allowedUsers, existing?.allowedUsers ?? 1),
+    allowedProspectsPerMonth: boundedSessionNumber(
+      serverAgency.allowedProspectsPerMonth,
+      existing?.allowedProspectsPerMonth ?? 100
+    ),
+    allowedAiMessagesPerMonth: boundedSessionNumber(
+      serverAgency.allowedAiMessagesPerMonth,
+      existing?.allowedAiMessagesPerMonth ?? 500
+    ),
+    allowedCarriers: boundedSessionNumber(serverAgency.allowedCarriers, existing?.allowedCarriers ?? 10),
+    agencyCodePreview: serverAgency.agencyCodePreview ?? existing?.agencyCodePreview ?? "",
+  };
+
+  if (existing) {
+    db.update("agencies", existing.id, agencyPatch);
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const agency: Agency = {
+    id: serverAgency.id,
+    name: serverAgency.name,
+    contactEmail: serverAgency.contactEmail ?? serverAgency.name,
+    phone: serverAgency.phone ?? undefined,
+    address: serverAgency.address ?? undefined,
+    website: serverAgency.website ?? undefined,
+    websiteSlug: serverAgency.websiteSlug ?? undefined,
+    websiteEnabled: serverAgency.websiteEnabled ?? false,
+    serviceAreas: [],
+    agencyCodeEncrypted: "",
+    agencyCodePreview: serverAgency.agencyCodePreview ?? "",
+    tier: normalizeServerAgencyTier(serverAgency.tier),
+    active: serverAgency.active !== false,
+    allowedUsers: boundedSessionNumber(serverAgency.allowedUsers, 1),
+    allowedProspectsPerMonth: boundedSessionNumber(serverAgency.allowedProspectsPerMonth, 100),
+    allowedAiMessagesPerMonth: boundedSessionNumber(serverAgency.allowedAiMessagesPerMonth, 500),
+    allowedCarriers: boundedSessionNumber(serverAgency.allowedCarriers, 10),
+    createdAt: now,
+  };
+  db.insert("agencies", agency);
+}
+
+function normalizeServerAgencyTier(value: unknown): Agency["tier"] {
+  return value === "mid" || value === "ultra" ? value : "minimum";
+}
+
+function boundedSessionNumber(value: unknown, fallback: number): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(0, Math.floor(parsed));
+}
+
 async function establishServerStaffSession(identifier: string, password: string): Promise<ServerSessionResult> {
   if (typeof window === "undefined") return { ok: false, allowLocalFallback: false, reason: "browser_unavailable" };
   const payload = JSON.stringify({ identifier, password });
@@ -563,7 +651,7 @@ async function establishServerStaffSession(identifier: string, password: string)
       sawReachableAuthRoute = true;
       if (response.ok && json?.ok && typeof json.token === "string" && json.token.trim() && isServerStaffUser(json.user)) {
         storeServerSessionToken(json.token);
-        return { ok: true, user: json.user };
+        return { ok: true, user: json.user, agency: isServerSessionAgency(json.agency) ? json.agency : null };
       }
       clearServerSessionToken();
       clearServerSessionUser();
@@ -624,7 +712,7 @@ async function establishServerStaffRegistration(input: {
       sawReachableAuthRoute = true;
       if (response.ok && json?.ok && typeof json.token === "string" && json.token.trim() && isServerStaffUser(json.user)) {
         storeServerSessionToken(json.token);
-        return { ok: true, user: json.user };
+        return { ok: true, user: json.user, agency: isServerSessionAgency(json.agency) ? json.agency : null };
       }
       clearServerSessionToken();
       clearServerSessionUser();
@@ -696,7 +784,7 @@ async function establishServerStaffLocalPromotion(localUser: User, password: str
       sawReachableAuthRoute = true;
       if (response.ok && json?.ok && typeof json.token === "string" && json.token.trim() && isServerStaffUser(json.user)) {
         storeServerSessionToken(json.token);
-        return { ok: true, user: json.user };
+        return { ok: true, user: json.user, agency: isServerSessionAgency(json.agency) ? json.agency : null };
       }
       clearServerSessionToken();
       clearServerSessionUser();
@@ -759,6 +847,15 @@ function isServerStaffUser(value: unknown): value is ServerSessionUser {
       typeof user.name === "string" &&
       (user.tenantId === null || typeof user.tenantId === "string") &&
       isStaffRole(user.role as Role)
+  );
+}
+
+function isServerSessionAgency(value: unknown): value is ServerSessionAgency {
+  const agency = value as Partial<ServerSessionAgency> | null | undefined;
+  return Boolean(
+    agency &&
+      typeof agency.id === "string" &&
+      typeof agency.name === "string"
   );
 }
 
