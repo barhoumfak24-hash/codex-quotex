@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // =====================================================================
 
 beforeEach(async () => {
+  vi.unstubAllEnvs();
+  vi.stubEnv("VITE_AI_MODE", "browser");
   if (typeof window !== "undefined" && window.localStorage) window.localStorage.clear();
   const { db } = await import("../db");
   db.reset();

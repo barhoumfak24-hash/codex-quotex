@@ -41,6 +41,8 @@
     "quality": "pnpm run lint && pnpm run test && pnpm run build && pnpm run security:audit && pnpm run quality:server"
   },
   "dependencies": {
+    "@e965/xlsx": "^0.20.3",
+    "fflate": "^0.8.3",
     "lucide-react": "^0.460.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

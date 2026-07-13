@@ -31,6 +31,7 @@ import {
 import { Card, CardHeader } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { EmployeeBackButton } from "@/components/layout/EmployeeBackButton";
+import { AgencyDataImportCard as RealAgencyDataImportCard } from "@/components/settings/AgencyDataImportCard";
 import { FileDropZone } from "@/components/ui/FileDropZone";
 import { MapLink } from "@/components/ui/MapLink";
 import { aiExtractContactFromFile } from "@/lib/ai";
@@ -1273,7 +1274,7 @@ export function AgencySettingsPage() {
         </div>
       </Card>
 
-      <AgencyDataImportCard agency={agency} currentUserId={user?.id ?? "ai"} />
+      <RealAgencyDataImportCard agency={agency} currentUserId={user?.id ?? "ai"} />
 
       <AgencyLogoCard
         agency={agency}

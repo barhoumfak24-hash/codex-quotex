@@ -115,6 +115,7 @@ import type {
   Asset,
   AssetType,
   AuditLog,
+  BookImportBatch,
   CalendarEvent,
   Carrier,
   CarrierAgencyLink,
@@ -6115,6 +6116,81 @@ export const api = {
     },
   },
 
+  // ------------ Agency book-of-business import batches ------------
+  importBatches: {
+    list(tenantId: string): BookImportBatch[] {
+      return tenantFilter(db.list("importBatches"), tenantId).sort((a, b) =>
+        a.uploadedAt < b.uploadedAt ? 1 : -1
+      );
+    },
+    get(id: string): BookImportBatch | undefined {
+      return db.list("importBatches").find((batch) => batch.id === id);
+    },
+    upsert(batch: BookImportBatch): BookImportBatch {
+      const existing = this.get(batch.id);
+      if (existing) {
+        return db.update("importBatches", batch.id, {
+          ...batch,
+          updatedAt: nowIso(),
+        })!;
+      }
+      db.insert("importBatches", batch);
+      return batch;
+    },
+    update(id: string, patch: Partial<BookImportBatch>): BookImportBatch | null {
+      return db.update("importBatches", id, { ...patch, updatedAt: nowIso() });
+    },
+    remove(id: string): boolean {
+      const batch = this.get(id);
+      if (!batch || batch.status === "imported") return false;
+      return db.remove("importBatches", id);
+    },
+    undo(id: string, actorId?: string): BookImportBatch | null {
+      const batch = this.get(id);
+      const report = batch?.report;
+      if (!batch || !report || batch.status !== "imported") return batch ?? null;
+      const removed: Record<string, number> = {
+        users: 0,
+        customers: 0,
+        assets: 0,
+        policies: 0,
+        documents: 0,
+        notes: 0,
+        carriers: 0,
+        carrierLinks: 0,
+        statusEvents: 0,
+        renewals: 0,
+      };
+      const removeTagged = <K extends keyof ReturnType<typeof db.snapshot>>(
+        table: K,
+        ids: string[],
+        bucket: keyof typeof removed
+      ) => {
+        ids.forEach((rowId) => {
+          const row = (db.list(table) as any[]).find((item) => item.id === rowId);
+          if (!row || row.importBatchId !== id) return;
+          if (db.remove(table, rowId)) removed[bucket] += 1;
+        });
+      };
+      removeTagged("policies", report.createdIds.policies, "policies");
+      removeTagged("assets", report.createdIds.assets, "assets");
+      removeTagged("documents", report.createdIds.documents, "documents");
+      removeTagged("notes", report.createdIds.notes, "notes");
+      removeTagged("statusEvents", report.createdIds.statusEvents, "statusEvents");
+      removeTagged("renewals", report.createdIds.renewals, "renewals");
+      removeTagged("carrierLinks", report.createdIds.carrierLinks, "carrierLinks");
+      removeTagged("carriers", report.createdIds.carriers, "carriers");
+      removeTagged("customers", report.createdIds.customers, "customers");
+      removeTagged("users", report.createdIds.users, "users");
+      const undo = {
+        undoneAt: nowIso(),
+        undoneById: actorId,
+        removed,
+      };
+      return this.update(id, { status: "undone", report: { ...report, undo } });
+    },
+  },
+
   // ------------ Agencies (master) ------------
   agencies: {
     list(): Agency[] {
@@ -7343,6 +7419,9 @@ export const api = {
 
   // ------------ Customers ------------
   customers: {
+    all(): CustomerProfile[] {
+      return db.list("customers");
+    },
     // Default view hides archived. Pass `{ includeArchived: true }` from
     // the Archive tab.
     list(tenantId: string, opts?: { includeArchived?: boolean }): CustomerProfile[] {
@@ -8880,7 +8959,11 @@ export const api = {
     links(): CarrierAgencyLink[] {
       return db.list("carrierLinks");
     },
-    linkToAgency(carrierId: string, tenantId: string): CarrierAgencyLink {
+    linkToAgency(
+      carrierId: string,
+      tenantId: string,
+      options?: { importBatchId?: string }
+    ): CarrierAgencyLink {
       const existing = db
         .list("carrierLinks")
         .find((l) => l.carrierId === carrierId && l.tenantId === tenantId);
@@ -8904,6 +8987,7 @@ export const api = {
         carrierId,
         tenantId,
         active: true,
+        importBatchId: options?.importBatchId,
         createdAt: nowIso(),
       };
       db.insert("carrierLinks", row);
@@ -9424,6 +9508,7 @@ export const api = {
       required?: boolean;
       customerEsignRequired?: boolean;
       agentEsignRequired?: boolean;
+      importBatchId?: string;
     }): Document {
       const uploadedAt = nowIso();
       const row: Document = {
@@ -9458,6 +9543,7 @@ export const api = {
         policyId: input.policyId,
         claimId: input.claimId,
         documentId: row.id,
+        importBatchId: input.importBatchId,
         createdAt: nowIso(),
         createdById: input.uploadedById,
       });
@@ -11599,6 +11685,7 @@ export const api = {
           customerId: input.customerId,
           prospectId: input.prospectId,
           attachments: row.attachments,
+          importBatchId: input.importBatchId,
           createdAt: nowIso(),
           createdById: input.authorId,
         });

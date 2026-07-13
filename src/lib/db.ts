@@ -25,6 +25,7 @@ import type {
   Agency,
   AccountingSettings,
   Branch,
+  BookImportBatch,
   AiNotification,
   Asset,
   AuditLog,
@@ -83,6 +84,7 @@ const QUOTE_WORKFLOW_STORAGE_KEY = `${STORAGE_KEY}.quote-workflows`;
 const LEGACY_KEYS = ["quotex.db.v1", "quotex.db.v2", "quotex.db.v3", "quotex.db.v4", "quotex.db.v5", "quotex.db.v6", "quotex.db.v7", "quotex.db.v8", "quotex.db.v9", "quotex.db.v10", "quotex.db.v11", "quotex.db.v12", "quotex.db.v13", "quotex.db.v14", "quotex.db.v15", "quotex.db.v16", "quotex.db.v17", "quotex.db.v18", "quotex.db.v19", "quotex.db.v20", "quotex.db.v21", "quotex.db.v22", "quotex.db.v23", "quotex.db.v24", "quotex.db.v25", "quotex.db.v26", "quotex.db.v27", "quotex.db.v28", "quotex.db.v29", "quotex.db.v30"];
 const CRITICAL_TABLES: (keyof DbShape)[] = [
   "quotingSessions",
+  "importBatches",
   "communications",
   "documents",
   "notes",
@@ -145,6 +147,7 @@ interface DbShape {
   agencies: Agency[];
   branches: Branch[];
   users: User[];
+  importBatches: BookImportBatch[];
   customers: CustomerProfile[];
   assets: Asset[];
   policies: Policy[];
@@ -199,6 +202,7 @@ function freshSeed(): DbShape {
     agencies: structuredClone(seed.SEED_AGENCIES),
     branches: [],
     users: structuredClone(seed.SEED_USERS),
+    importBatches: [],
     customers: structuredClone(seed.SEED_CUSTOMERS),
     assets: structuredClone(seed.SEED_ASSETS),
     policies: structuredClone(seed.SEED_POLICIES),

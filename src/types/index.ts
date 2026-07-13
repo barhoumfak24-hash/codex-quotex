@@ -683,6 +683,7 @@ export interface User {
   profileCompleted?: boolean;
   active: boolean;
   createdAt: string;
+  importBatchId?: string;
 }
 
 export type MailProvider = "gmail" | "outlook" | "apple" | "yahoo" | "other";
@@ -875,6 +876,7 @@ export interface CustomerProfile {
   archived?: boolean;
   archivedAt?: string;
   createdAt: string;
+  importBatchId?: string;
 }
 
 export interface Asset {
@@ -887,6 +889,7 @@ export interface Asset {
   details: Record<string, unknown>;
   status: "pending" | "insured" | "lapsed";
   createdAt: string;
+  importBatchId?: string;
 }
 
 export interface QuoteRequest {
@@ -974,6 +977,7 @@ export interface Policy {
   closedAt?: string;
   closedById?: string;
   createdAt: string;
+  importBatchId?: string;
 }
 
 export type PolicyBillingMethod =
@@ -1192,6 +1196,8 @@ export interface Carrier {
   };
   status: "active" | "inactive";
   createdAt: string;
+  importBatchId?: string;
+  createdByImport?: boolean;
 }
 
 // Personal vs commercial line of business. Mirrors the Policy
@@ -1222,6 +1228,7 @@ export interface CarrierAgencyLink {
   tenantId: string;
   active: boolean;
   createdAt: string;
+  importBatchId?: string;
 }
 
 export type CarrierDownloadKind =
@@ -1468,6 +1475,7 @@ export interface Document {
   // republished. Cleared once a published successor exists.
   needsRenewalUpdate?: boolean;
   renewalForRenewalId?: string;
+  importBatchId?: string;
 }
 
 export interface StatusEvent {
@@ -1498,6 +1506,7 @@ export interface StatusEvent {
   attachments?: NoteAttachment[];
   createdAt: string;
   createdById?: string;
+  importBatchId?: string;
 }
 
 export interface MarketingCampaign {
@@ -1728,6 +1737,7 @@ export interface Renewal {
   recommendedCarrierIds?: string[];
   nonRenewalNotes?: string[];
   createdAt: string;
+  importBatchId?: string;
 }
 
 export interface Claim {
@@ -1756,6 +1766,7 @@ export interface Note {
   visibility: "internal" | "customer_visible";
   attachments?: NoteAttachment[];
   createdAt: string;
+  importBatchId?: string;
 }
 
 export interface NoteAttachment {
@@ -1767,6 +1778,150 @@ export interface NoteAttachment {
   textPreview?: string;
   aiSummary: string;
   addedAt: string;
+}
+
+export type BookImportTargetField =
+  | "ignore"
+  | "name"
+  | "businessName"
+  | "email"
+  | "phone"
+  | "mailingAddress"
+  | "clientCode"
+  | "lineOfBusiness"
+  | "assetType"
+  | "estimatedValue"
+  | "policyNumber"
+  | "carrierName"
+  | "premiumEstimate"
+  | "effectiveDate"
+  | "renewalDate"
+  | "notes";
+
+export type BookImportExceptionReason =
+  | "missing_name"
+  | "cross_tenant_email"
+  | "file_parse_error"
+  | "file_too_large"
+  | "batch_too_large"
+  | "unsupported_format"
+  | "empty_record"
+  | "ai_unavailable";
+
+export interface BookImportSourceFile {
+  name: string;
+  size: number;
+  type: string;
+  extension: string;
+  status: "parsed" | "ai_limited" | "unsupported" | "failed";
+  records: number;
+  error?: string;
+  detail?: string;
+}
+
+export interface BookImportColumnMapping {
+  sourceFileName: string;
+  sheetName?: string;
+  header: string;
+  targetField: BookImportTargetField;
+  samples: string[];
+  aiSuggested?: boolean;
+}
+
+export interface BookImportParsedRecord {
+  id: string;
+  sourceFileName: string;
+  sheetName?: string;
+  rowNumber?: number;
+  originalRow?: Record<string, string>;
+  clientCode?: string;
+  name?: string;
+  businessName?: string;
+  email?: string;
+  phone?: string;
+  mailingAddress?: string;
+  lineOfBusiness?: "personal" | "commercial";
+  assetType?: AssetType;
+  estimatedValue?: number;
+  policyNumber?: string;
+  carrierName?: string;
+  premiumEstimate?: number;
+  finalPremium?: number;
+  effectiveDate?: string;
+  renewalDate?: string;
+  notes?: string;
+  confidence: number;
+  sources: string[];
+  aiDerived?: boolean;
+  aiUnavailable?: boolean;
+}
+
+export interface BookImportException {
+  id: string;
+  recordId?: string;
+  sourceFileName: string;
+  sheetName?: string;
+  rowNumber?: number;
+  reason: BookImportExceptionReason;
+  message: string;
+  originalRow?: Record<string, string>;
+  fixedRecord?: Partial<BookImportParsedRecord>;
+  resolvedAt?: string;
+}
+
+export interface BookImportReport {
+  importedAt: string;
+  importedById: string;
+  createdClients: number;
+  updatedClients: number;
+  portalInviteNeeded: { customerId: string; name: string }[];
+  createdPolicies: number;
+  createdAssets: number;
+  createdDocuments: number;
+  createdNotes: number;
+  createdPlaceholderCarriers: number;
+  exceptionsByReason: Record<string, number>;
+  createdIds: {
+    users: string[];
+    customers: string[];
+    assets: string[];
+    policies: string[];
+    documents: string[];
+    notes: string[];
+    carriers: string[];
+    carrierLinks: string[];
+    statusEvents: string[];
+    renewals: string[];
+  };
+  undo?: {
+    undoneAt: string;
+    undoneById?: string;
+    removed: Record<string, number>;
+  };
+}
+
+export interface BookImportBatch {
+  id: string;
+  tenantId: string;
+  sourceLabel: string;
+  uploadedAt: string;
+  uploadedById: string;
+  fileCount: number;
+  totalBytes: number;
+  files: BookImportSourceFile[];
+  columnMappings: BookImportColumnMapping[];
+  records: BookImportParsedRecord[];
+  exceptions: BookImportException[];
+  status: "staged" | "importing" | "imported" | "undone" | "failed";
+  progress?: {
+    processed: number;
+    total: number;
+    label?: string;
+    cancelled?: boolean;
+  };
+  report?: BookImportReport;
+  lastError?: string;
+  updatedAt: string;
 }
 
 export interface CommunicationAttachment {
