@@ -36,6 +36,7 @@
     "dr:tenant-snapshot": "node scripts/dr-export-tenant-snapshot.mjs",
     "deploy:prod": "node scripts/deploy-quotex-production.mjs",
     "publish:latest": "node scripts/publish-latest.mjs",
+    "scope:check": "node scripts/check-deploy-scope.mjs",
     "publish:install-hooks": "node scripts/install-auto-push-hooks.mjs",
     "quality:server": "pnpm run server:build && pnpm run server:security:audit",
     "quality": "pnpm run lint && pnpm run test && pnpm run build && pnpm run security:audit && pnpm run quality:server"

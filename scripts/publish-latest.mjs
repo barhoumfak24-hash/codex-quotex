@@ -31,6 +31,12 @@ function main() {
     run("Quality gate", pnpm, ["run", "quality"]);
   }
 
+  run(
+    "Deploy scope guard",
+    process.execPath,
+    ["scripts/check-deploy-scope.mjs", ...(args.allowBranding ? ["--allow-branding"] : [])]
+  );
+
   const statusBefore = gitOutput(["status", "--porcelain"]);
   if (!statusBefore.trim()) {
     console.log("No local changes to publish.");
@@ -63,6 +69,7 @@ function parseArgs(values) {
     message: "",
     noPush: false,
     skipQuality: false,
+    allowBranding: false,
   };
 
   for (let index = 0; index < normalizedValues.length; index += 1) {
@@ -76,6 +83,8 @@ function parseArgs(values) {
       parsed.noPush = true;
     } else if (value === "--skip-quality") {
       parsed.skipQuality = true;
+    } else if (value === "--allow-branding") {
+      parsed.allowBranding = true;
     } else {
       throw new Error(`Unknown publish option: ${value}`);
     }
