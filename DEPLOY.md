@@ -14,7 +14,7 @@ Use pnpm for every install, build, test, and deployment command.
    - Output directory: `dist`
 4. Set production environment variables in Vercel.
    - `VITE_APP_NAME=Quotex Insurance`
-   - `VITE_API_BASE_URL=/api/app/api` or leave it blank to use the production default.
+   - `VITE_API_BASE_URL=/api` or leave it blank to use the production default.
    - `VITE_SENTRY_DSN`, `VITE_SENTRY_ENVIRONMENT`, and `VITE_SENTRY_RELEASE` for frontend error tracking.
    - `DIAG_TOKEN` and `CRON_SECRET` as long random server-only tokens. Do not prefix them with `VITE_`.
    - `DATABASE_URL` and `DIRECT_URL`; use the pooled runtime URL for `DATABASE_URL` and the direct Postgres URL for `DIRECT_URL`.
@@ -129,6 +129,6 @@ Do not move real sensitive agency data into production until:
 
 - 404 on app routes after refresh: confirm the SPA rewrite still exists in `vercel.json`.
 - Build cannot find dependencies: run pnpm install commands above and commit lockfile changes.
-- API calls fail in production: confirm `VITE_API_BASE_URL` is blank or `/api/app/api`, not localhost.
+- API calls fail in production: confirm `VITE_API_BASE_URL` is blank or `/api`, not localhost.
 - Mailbox OAuth redirects to localhost: set `MAILBOX_OAUTH_PUBLIC_API_ORIGIN=https://your-domain.com/api/app`.
 - Public pages should be indexed: remove or narrow `X-Robots-Tag: noindex, nofollow` only when the public site is ready.

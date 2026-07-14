@@ -9,6 +9,7 @@ import { AiCustomFilterChip } from "@/components/ui/AiCustomFilterChip";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import { aiAssetTypeAliases, matchesAiCustomFilter } from "@/lib/aiCustomFilters";
 import { fmt } from "@/lib/format";
 import type { CustomerProfile, Prospect } from "@/types";
@@ -341,7 +342,7 @@ function customerSearchText(c: CustomerProfile): string {
     c.garagingAddress,
     ...contactOwnerNames(c),
     hasContactOwner(c) ? "" : "unassigned",
-    ...assets.flatMap((a) => [a.label, a.type, api.helpers.assetTypeLabel(a.type), ...aiAssetTypeAliases(a.type)]),
+    ...assets.flatMap((a) => [assetDisplayName(a), a.type, api.helpers.assetTypeLabel(a.type), ...aiAssetTypeAliases(a.type)]),
     ...policies.flatMap((p) => [
       p.policyNumber,
       fmt.policyRef(p),
@@ -456,7 +457,7 @@ function customerArchiveSubject(c: CustomerProfile, tenantId: string) {
       c.garagingAddress,
       ...contactOwnerNames(c),
       hasContactOwner(c) ? "" : "unassigned",
-      ...assets.flatMap((a) => [a.label, a.type, api.helpers.assetTypeLabel(a.type), ...aiAssetTypeAliases(a.type)]),
+      ...assets.flatMap((a) => [assetDisplayName(a), a.type, api.helpers.assetTypeLabel(a.type), ...aiAssetTypeAliases(a.type)]),
       ...policies.flatMap((p) => [
         p.policyNumber,
         fmt.policyRef(p),

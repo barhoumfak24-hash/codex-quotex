@@ -40,7 +40,7 @@ This review tracks the deployment/security controls requested from the attached 
 - Vercel/serverless API functions now use a shared rate-limit helper that enforces buckets through Upstash Redis in production and falls back to in-memory local buckets only outside production.
 - Website handoff endpoints require signed HMAC payloads in production.
 - Production rejects accidentally exposed `VITE_*` server secrets such as `VITE_OPENAI_API_KEY` and `VITE_SUPABASE_SERVICE_ROLE_KEY`.
-- Production rejects stub AI unless explicitly allowed with `ALLOW_AI_STUB_IN_PRODUCTION=true`.
+- Production rejects unsupported AI providers and requires server-side OpenAI configuration.
 - Server security regression tests cover auth, tenant mismatch, and environment validation.
 - Shared accessibility foundations are in place: skip links, landmarks, accessible loading/error states, modal dialog semantics/focus trapping, disabled link-button tab handling, visible focus defaults, reduced-motion handling, and forced-colors support.
 - Backup and restore runner scripts exist for Supabase Postgres and private storage buckets, with configuration validation and backup verification scripts.
@@ -78,16 +78,16 @@ FRONTEND_ORIGIN=
 WEBSITE_WEBHOOK_SECRET=
 AI_PROVIDER=openai
 OPENAI_API_KEY=
-AI_REASONING_MODEL=gpt-5.5
-AI_FAST_MODEL=gpt-5.4-mini
-AI_DOCUMENT_MODEL=gpt-5.5
-AI_AUTOFILL_MODEL=gpt-5.5
-AI_RUNNER_MODEL=gpt-5.5
-AI_PRICING_MODEL=gpt-5.5
-AI_SORT_MODEL=gpt-5.4-mini
-AI_MARKETING_MODEL=gpt-5.4-mini
-AI_PORTAL_ASSISTANT_MODEL=gpt-5.4-mini
-OPENAI_IMAGE_MODEL=gpt-image-2
+AI_REASONING_MODEL=gpt-4o-mini
+AI_FAST_MODEL=gpt-4o-mini
+AI_DOCUMENT_MODEL=gpt-4o-mini
+AI_AUTOFILL_MODEL=gpt-4o-mini
+AI_RUNNER_MODEL=gpt-4o-mini
+AI_PRICING_MODEL=gpt-4o-mini
+AI_SORT_MODEL=gpt-4o-mini
+AI_MARKETING_MODEL=gpt-4o-mini
+AI_PORTAL_ASSISTANT_MODEL=gpt-4o-mini
+OPENAI_IMAGE_MODEL=dall-e-3
 OPENAI_EMBEDDING_MODEL=text-embedding-3-large
 AI_MAX_PAYLOAD_BYTES=2000000
 AI_MAX_REQUESTS_PER_MINUTE=120

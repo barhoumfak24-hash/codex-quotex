@@ -19,6 +19,7 @@ import { EmployeeBackButton } from "@/components/layout/EmployeeBackButton";
 import { useTenant } from "@/lib/tenant";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import { matchesAiCustomFilter } from "@/lib/aiCustomFilters";
 import { fmt, renewalStatusLabel } from "@/lib/format";
 import type { Renewal, RenewalStatus } from "@/types";
@@ -101,7 +102,7 @@ export function RenewalsPage() {
         api.helpers.clientCodeFor(customer),
         policy?.policyNumber,
         fmt.policyRef(policy),
-        asset?.label,
+        asset ? assetDisplayName(asset) : undefined,
         asset ? api.helpers.assetTypeLabel(asset.type) : undefined,
         api.helpers.departmentLabel(policy),
         carrier?.name,
@@ -321,7 +322,7 @@ export function RenewalsPage() {
                   <td className="px-4 py-5 align-middle">
                     <div className="font-mono text-sm font-semibold text-ink-900">{fmt.policyRef(policy)}</div>
                     <div className="mt-0.5 text-[11px] text-ink-400">
-                      {asset?.label ?? "-"} · {api.helpers.departmentLabel(policy)}
+                      {asset ? assetDisplayName(asset) : "-"} · {api.helpers.departmentLabel(policy)}
                     </div>
                   </td>
                   <td className="px-4 py-5 align-middle">
@@ -495,7 +496,7 @@ function RenewalDetailModal({
           </div>
           <div>
             <div className="label">Asset</div>
-            <div className="font-medium text-ink-900">{asset?.label ?? "-"}</div>
+            <div className="font-medium text-ink-900">{asset ? assetDisplayName(asset) : "-"}</div>
             <div className="text-xs text-ink-500">
               {asset ? api.helpers.assetTypeLabel(asset.type) : ""}
             </div>

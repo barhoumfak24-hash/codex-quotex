@@ -103,13 +103,23 @@ npm run prisma:migrate
 npm run dev
 ```
 
-The server is a route-complete scaffold. Each handler returns a `501 not_implemented` payload that documents what it should do. AI routes (`/api/ai/*`) call into `server/src/services/ai/` which is provider-pluggable (`AI_PROVIDER=anthropic|gemini|openai`).
+The server routes AI calls through `server/src/services/ai/`. Quotex production AI is OpenAI-only and requires a server-side `OPENAI_API_KEY`; unsupported AI providers fail closed.
 
 ---
 
 ## Environment variables
 
 See `.env.example`. The **frontend** only consumes safe public values (`VITE_*`). All secrets — model keys, Stripe secret, Twilio tokens, SES creds, S3 creds — live in `server/.env` and are read on the server only.
+
+## Live mailbox receive path
+
+Inbound email mirroring uses provider API polling, not IMAP, in-process loops, Gmail Pub/Sub, or Microsoft Graph subscriptions. Vercel Cron calls `/api/mailboxes/poll`, the backend reads each connected mailbox with Gmail history IDs or Microsoft Graph delta links, then stores inbound replies as `Communication` rows with `mailboxOrigin: "provider_sync"`.
+
+Required one-time production checks:
+
+1. Reconnect every staff mailbox after read scopes are added. Existing send-only OAuth tokens cannot read inbound mail until the user approves the new Google `gmail.readonly` or Microsoft `Mail.Read` permission.
+2. Confirm the Vercel Cron job for `/api/mailboxes/poll` is visible and running in the Vercel project dashboard. The endpoint is protected by `CRON_SECRET` / `DIAG_TOKEN`. Vercel Hobby only allows daily cron runs; upgrade the project to Pro and change the schedule to `* * * * *` for near-real-time inbound mirroring.
+3. Use **Employee account settings -> Message-center mailbox -> Mailbox sync** to confirm read scope, token status, cursor presence, last poll counts, inbound count, and last error.
 
 ---
 
@@ -120,7 +130,7 @@ See `.env.example`. The **frontend** only consumes safe public values (`VITE_*`)
 | Three portal layouts, role-based routing, protected routes | ✅ wired |
 | Tenant isolation (every record carries `tenantId`) | ✅ wired in mock + Prisma |
 | Quote intake flow (asset select → AI parse → details → docs → review → submit) | ✅ wired |
-| AI parser / premium estimate / carrier match | ✅ stubbed deterministically (front) + provider-pluggable on server |
+| AI parser / premium estimate / carrier match | ✅ routed through server-side OpenAI with deterministic guardrails |
 | Customer dashboard / asset / policy / payments / claims / settings | ✅ wired |
 | Prospects: auto-created on submit, abandonment ready, AI summary, convert-to-client | ✅ wired |
 | Client directory + client detail (notes, comms, docs, timeline) | ✅ wired |
@@ -147,7 +157,7 @@ See `.env.example`. The **frontend** only consumes safe public values (`VITE_*`)
 1. **Replace `lib/db.ts` with real `fetch` calls** to the Express API. The shape of `api.*` already matches the route map in `server/src/routes/`.
 2. **Implement Prisma handlers** for each route. Use `tenantScope(req)` from `server/src/middleware/auth.ts` on every query to enforce tenant isolation.
 3. **Wire real auth.** Google OAuth callback exchange, password+MFA for employees, hardware MFA / SSO for master. Set `httpOnly`, `Secure`, `SameSite=Lax` session cookies.
-4. **Configure the AI provider.** Set `AI_PROVIDER` and the matching `*_API_KEY` in `server/.env`. Never ship a model key to the browser.
+4. **Configure OpenAI.** Set `OPENAI_API_KEY` and optional OpenAI model-routing variables in the server/Vercel environment. Never ship a model key to the browser.
 5. **Stripe.** Subscriptions for agencies (per tier + seats), PaymentIntents for customer deposits. Mount `/api/stripe/webhook` with raw-body middleware and verify the signature.
 6. **Twilio + SendGrid/SES.** Implement durable unsubscribe storage; honor STOP, HELP, opt-out across the platform. Apply per-user, per-channel, per-day rate limits server-side.
 7. **S3.** Use server-issued presigned URLs (short TTL). Encrypt at rest with SSE-KMS. Restrict bucket policy.
@@ -161,7 +171,7 @@ See `.env.example`. The **frontend** only consumes safe public values (`VITE_*`)
 ## Security warnings (what to verify on day one)
 
 - **No secrets in the browser bundle.** Any key starting with anything other than `VITE_` must stay on the server.
-- **All AI calls server-side.** The frontend `src/lib/ai.ts` is a deterministic local stub for the demo — replace its body with `fetch('/api/ai/...')` so the real provider key never leaves the server.
+- **All AI calls server-side.** Browser code calls the server AI gateway; real provider keys never leave the server.
 - **Tenant scope on every query.** A missing `where: { tenantId }` is a cross-tenant data leak.
 - **Customers see only their own data.** `RequireRole` gates routes; the API must additionally verify `resource.customerId === session.customer.id` (or `resource.tenantId === session.tenantId` for agency users).
 - **Marketing compliance.** TCPA: SMS requires express written consent; honor STOP durably. CAN-SPAM: every commercial email includes physical address + one-click unsubscribe.

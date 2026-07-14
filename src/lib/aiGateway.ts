@@ -11,8 +11,11 @@ type AiPath =
   | "/ai/extract-contact"
   | "/ai/extract-policy"
   | "/ai/enrich-asset"
+  | "/ai/property-imagery"
+  | "/ai/document-map"
   | "/ai/acord-map"
   | "/ai/parse-carrier-appetite"
+  | "/ai/parse-carrier-reply"
   | "/ai/draft-campaign"
   | "/ai/marketing-creative"
   | "/ai/draft-pamphlet"
@@ -20,7 +23,12 @@ type AiPath =
   | "/ai/sort-intent";
 
 export function serverAiEnabled(): boolean {
-  return envValue("VITE_AI_MODE") === "server";
+  const mode = aiMode();
+  if (aiModeDisabled(mode)) return false;
+  if (mode === "server") return true;
+  if (apiBaseUrl()) return true;
+  if (isProductionBuild()) return true;
+  return false;
 }
 
 export function aiApiBaseUrl(): string {
@@ -43,12 +51,35 @@ export type AiGatewayFailureDetail = {
   error?: string;
 };
 
+export class AiGatewayUnavailableError extends Error {
+  readonly detail: AiGatewayFailureDetail;
+
+  constructor(detail: AiGatewayFailureDetail) {
+    super(detail.message);
+    this.name = "AiGatewayUnavailableError";
+    this.detail = detail;
+  }
+}
+
 export async function postServerAi<T>(
   path: AiPath,
   payload: Record<string, unknown>,
-  opts: { timeoutMs?: number } = {}
+  opts: { timeoutMs?: number; requireServer?: boolean } = {}
 ): Promise<T | null> {
-  if (!serverAiEnabled()) return null;
+  const mode = aiMode();
+  const canUseServer = serverAiEnabled() || (opts.requireServer === true && !aiModeDisabled(mode));
+  if (!canUseServer) {
+    const detail: AiGatewayFailureDetail = {
+      path,
+      message: "Server AI is not enabled for this environment.",
+      error: "server_ai_disabled",
+    };
+    if (opts.requireServer) {
+      reportAiGatewayFailure(detail);
+      throw new AiGatewayUnavailableError(detail);
+    }
+    return null;
+  }
   try {
     return await runGovernedAiJob<T | null>(
       {
@@ -70,17 +101,27 @@ export async function postServerAi<T>(
           if (fetchAcceptsAbortSignal(controller.signal)) init.signal = controller.signal;
           const url = `${aiApiBaseUrl()}${path}`;
           if (url.startsWith("/") && (typeof window === "undefined" || isTestRuntime()) && !fetchIsMocked()) {
+            if (opts.requireServer) {
+              const detail: AiGatewayFailureDetail = {
+                path,
+                message: "Server AI requires a browser or absolute API base URL.",
+                error: "server_ai_unreachable",
+              };
+              reportAiGatewayFailure(detail);
+              throw new AiGatewayUnavailableError(detail);
+            }
             return null;
           }
           const res = await fetch(url, init);
           if (!res.ok) {
             const body = await parseErrorBody(res);
-            reportAiGatewayFailure({
+            const detail = normalizeAiGatewayFailureDetail({
               path,
               status: res.status,
               message: body?.message || body?.error || `AI request failed with HTTP ${res.status}.`,
               error: body?.error,
             });
+            handleAiGatewayFailure(detail);
             return null;
           }
           return (await res.json()) as T;
@@ -90,12 +131,64 @@ export async function postServerAi<T>(
       }
     );
   } catch (error) {
-    reportAiGatewayFailure({
+    if (error instanceof AiGatewayUnavailableError) throw error;
+    const detail = normalizeAiGatewayFailureDetail({
       path,
       message: error instanceof Error ? error.message : "AI request could not be completed.",
       error: error instanceof Error ? error.name : "ai_request_failed",
     });
+    handleAiGatewayFailure(detail);
     return null;
+  }
+}
+
+function normalizeAiGatewayFailureDetail(detail: AiGatewayFailureDetail): AiGatewayFailureDetail {
+  const message = detail.message ?? "";
+  const error = detail.error ?? "";
+  const combined = `${message} ${error}`.toLowerCase();
+  const timedOut =
+    detail.status === 504 ||
+    combined.includes("function_invocation_timeout") ||
+    combined.includes("timeout") ||
+    combined.includes("aborterror") ||
+    combined.includes("aborted");
+  if (!timedOut) return detail;
+  return {
+    ...detail,
+    message:
+      "AI mapping is taking longer than expected. Any unanswered fields will stay blank for review.",
+    error: "timeout",
+  };
+}
+
+function aiMode(): string {
+  return envValue("VITE_AI_MODE").toLowerCase();
+}
+
+function aiModeDisabled(mode = aiMode()): boolean {
+  return mode === "off" || mode === "disabled";
+}
+
+export function browserAiFallbacksAllowed(): boolean {
+  return !productionAiRequired() && envValue("VITE_ALLOW_BROWSER_AI_FALLBACKS") === "true";
+}
+
+function productionAiRequired(): boolean {
+  return isProductionBuild();
+}
+
+function isProductionBuild(): boolean {
+  try {
+    return Boolean((import.meta as { env?: { PROD?: boolean } })?.env?.PROD);
+  } catch {
+    return false;
+  }
+}
+
+function handleAiGatewayFailure(detail: AiGatewayFailureDetail): void {
+  reportAiGatewayFailure(detail);
+  if (!browserAiFallbacksAllowed()) {
+    throw new AiGatewayUnavailableError(detail);
   }
 }
 
@@ -151,10 +244,10 @@ async function parseErrorBody(res: Response): Promise<{ message?: string; error?
 
 function reportAiGatewayFailure(detail: AiGatewayFailureDetail): void {
   if (typeof console !== "undefined") {
-    console.warn("[quotex:ai-gateway-failure]", detail);
+    console.warn("[quotex-ai-gateway-failure]", detail);
   }
   if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent<AiGatewayFailureDetail>("quotex:ai-gateway-failure", { detail }));
+  window.dispatchEvent(new CustomEvent<AiGatewayFailureDetail>("quotex-ai-gateway-failure", { detail }));
 }
 
 function authHeaders(): HeadersInit {

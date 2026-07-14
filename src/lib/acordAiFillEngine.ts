@@ -144,6 +144,10 @@ export function fillAcordFromClientDossier(input: {
   kind: "application" | "supplemental";
 }): AcordAiFillResult {
   const candidates = buildClientDossierCandidates(input.dossier);
+  const canonicalFields = canonicalCandidateFields(candidates);
+  const nonQuestionnaireCanonicalFields = canonicalCandidateFields(
+    candidates.filter((candidate) => candidate.source !== "questionnaire")
+  );
   const baseline = buildAcordFilledFieldsForTemplate(input.template, {
     contactName: input.dossier.contact?.name,
     agencyName: input.dossier.agency?.name,
@@ -153,6 +157,10 @@ export function fillAcordFromClientDossier(input: {
     publicFieldEvidence: input.dossier.session.publicFieldEvidence,
     assetDetails: input.dossier.session.assetDetails,
     responses: input.dossier.responses,
+    knownFields: {
+      ...stripSystemTemplateFields(input.dossier.templateDocument?.templateFields),
+      ...nonQuestionnaireCanonicalFields,
+    },
   });
   const safeBaselineFields = filterUnsafeBaselineFields(baseline.fields, input.dossier);
   const safeBaselineMappings = baseline.mappings.filter((mapping) =>
@@ -161,7 +169,7 @@ export function fillAcordFromClientDossier(input: {
   const fields: TemplateFieldMap = {
     ...stripSystemTemplateFields(input.dossier.templateDocument?.templateFields),
     ...safeBaselineFields,
-    ...canonicalCandidateFields(candidates),
+    ...canonicalFields,
   };
 
   const mappings: AcordMappedField[] = [...safeBaselineMappings];
@@ -493,12 +501,15 @@ function canonicalCandidateFields(candidates: CandidateValue[]): TemplateFieldMa
         break;
       case "insured_name":
         set(candidate.label, value);
-        set("Applicant name", value);
-        set("Client name", value);
-        set("Named insured", value);
-        set("Insured", value);
-        set("Business legal name", value);
-        set("Legal business name", value);
+        if (isApplicantContactNameCandidate(candidate.label)) {
+          set("Applicant name", value);
+          set("Client name", value);
+        } else {
+          set("Named insured", value);
+          set("Insured", value);
+          set("Business legal name", value);
+          set("Legal business name", value);
+        }
         break;
       case "insured_mailing_address":
         set(candidate.label, value);
@@ -553,6 +564,11 @@ function canonicalCandidateFields(candidates: CandidateValue[]): TemplateFieldMa
     }
   });
   return fields;
+}
+
+function isApplicantContactNameCandidate(label: string): boolean {
+  const normalized = normalize(label);
+  return normalized === "applicant name" || normalized === "client name" || normalized === "primary contact";
 }
 
 function aliasesForField(label: string): string[] {

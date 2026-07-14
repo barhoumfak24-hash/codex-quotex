@@ -25,15 +25,20 @@ import {
   type CommunicationResult,
 } from "@/lib/communications";
 import { fmt } from "@/lib/format";
-import { provisionAgencyForCompletedSale } from "@/lib/softwareSaleProvisioning";
+import { provisionAgencyForCompletedSale, reconcilePaidSoftwareSalesToAgencies } from "@/lib/softwareSaleProvisioning";
+import {
+  createSoftwareSaleStripeCheckoutSession,
+  getSoftwareSaleStripeCheckoutSession,
+} from "@/lib/stripeCheckout";
+import type { StripeCheckoutSessionSummary } from "@/lib/stripeCheckout";
 import {
   COMPANY_APP_MONTHLY_ADD_ON_USD,
   COMPANY_WEBSITE_AND_APP_BUNDLE_DISCOUNT_USD,
   COMPANY_WEBSITE_MONTHLY_ADD_ON_USD,
   SOFTWARE_SETUP_FEE_USD,
-  SOFTWARE_USER_MONTHLY_PRICE_USD,
   WEBSITE_APP_ADD_ON_OPTIONS,
   normalizeSoftwareUserCount,
+  softwareSeatMonthlyPrice,
   softwareUserMonthlySubtotal,
   websiteAppAddOnMonthlyUsd,
 } from "@/lib/tiers";
@@ -52,6 +57,7 @@ import {
 import type {
   SoftwareSale,
   SoftwareSaleSignedAgreement,
+  SoftwareProduct,
   SoftwareSaleWebsiteAppAddOn,
   SubscriptionTier,
 } from "@/types";
@@ -71,6 +77,7 @@ type MasterPlanForm = {
   email: string;
   phone: string;
   website: string;
+  product: SoftwareProduct;
   seats: string;
   websiteAppAddOn: SoftwareSaleWebsiteAppAddOn;
   notes: string;
@@ -82,6 +89,7 @@ const blankForm: MasterPlanForm = {
   email: "",
   phone: "",
   website: "",
+  product: "full_platform",
   seats: "",
   websiteAppAddOn: "none",
   notes: "",
@@ -107,7 +115,6 @@ export function MasterPlanBuilderPage() {
   const [shareStatus, setShareStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [invoiceSending, setInvoiceSending] = useState(false);
-  const [autoInvoiceSaleId, setAutoInvoiceSaleId] = useState<string | null>(null);
   const [customPriceEditing, setCustomPriceEditing] = useState(false);
   const [customPriceActive, setCustomPriceActive] = useState(draftSeed.customPriceActive);
   const [customPriceValue, setCustomPriceValue] = useState(draftSeed.customPriceValue);
@@ -117,14 +124,16 @@ export function MasterPlanBuilderPage() {
   const parsedSeats = Number.parseInt(form.seats, 10);
   const hasSelectedUsers = form.seats.trim() !== "" && Number.isFinite(parsedSeats) && parsedSeats > 0;
   const seats = hasSelectedUsers ? normalizeSoftwareUserCount(parsedSeats) : 0;
-  const userSubtotal = hasSelectedUsers ? softwareUserMonthlySubtotal(seats) : 0;
-  const addOnMonthly = websiteAppAddOnMonthlyUsd(form.websiteAppAddOn);
+  const effectiveWebsiteAppAddOn = form.websiteAppAddOn;
+  const productSeatPrice = softwareSeatMonthlyPrice(form.product);
+  const userSubtotal = hasSelectedUsers ? softwareUserMonthlySubtotal(seats, form.product) : 0;
+  const addOnMonthly = websiteAppAddOnMonthlyUsd(effectiveWebsiteAppAddOn);
   const websiteAppRetailMonthly =
-    form.websiteAppAddOn === "website_app"
+    effectiveWebsiteAppAddOn === "website_app"
       ? COMPANY_WEBSITE_MONTHLY_ADD_ON_USD + COMPANY_APP_MONTHLY_ADD_ON_USD
       : addOnMonthly;
   const bundleDiscount =
-    form.websiteAppAddOn === "website_app" ? COMPANY_WEBSITE_AND_APP_BUNDLE_DISCOUNT_USD : 0;
+    effectiveWebsiteAppAddOn === "website_app" ? COMPANY_WEBSITE_AND_APP_BUNDLE_DISCOUNT_USD : 0;
   const monthlyBeforeTermDiscount = hasSelectedUsers ? userSubtotal + websiteAppRetailMonthly - bundleDiscount : 0;
   const selectedTerm = TERM_OPTIONS.find((term) => term.months === termMonths) ?? TERM_OPTIONS[0];
   const termDiscountMonthly =
@@ -134,14 +143,13 @@ export function MasterPlanBuilderPage() {
   const standardEstimatedMonthly = Math.max(0, monthlyBeforeTermDiscount - termDiscountMonthly);
   const parsedCustomPrice = Number.parseInt(customPriceValue, 10);
   const hasCustomPrice =
-    customPriceActive && Number.isFinite(parsedCustomPrice) && parsedCustomPrice >= 0;
+    customPriceActive && Number.isFinite(parsedCustomPrice) && parsedCustomPrice > 0;
   const estimatedMonthly = hasCustomPrice ? parsedCustomPrice : standardEstimatedMonthly;
   const customPriceDelta = hasSelectedUsers && hasCustomPrice ? standardEstimatedMonthly - estimatedMonthly : 0;
   const packet = useMemo(
     () => (packetId ? readRemoteSigningPacket(packetId) : null),
     [packetId, packetSyncRevision]
   );
-  const signingLink = packet ? signingLinkForPacket(packet) : "";
   const signedCount = packet
     ? REQUIRED_CHECKOUT_FORMS.filter((requiredForm) => packet.signatures[requiredForm.id]?.signedAt).length
     : 0;
@@ -160,6 +168,73 @@ export function MasterPlanBuilderPage() {
       customPriceReason,
     });
   }, [customPriceActive, customPriceReason, customPriceValue, form, packetId, sale?.id, termMonths]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const sessionId = params.get("session_id")?.trim();
+    const saleId = params.get("sale_id")?.trim();
+    const stripeSuccess = params.get("stripe_success") === "1";
+    const stripeCancelled = params.get("stripe_cancelled") === "1";
+    if (!stripeSuccess && !stripeCancelled) return;
+
+    const clearStripeParams = () => window.history.replaceState({}, "", "/master/build-plan");
+
+    if (stripeCancelled) {
+      setShareStatus("Stripe checkout was cancelled. No invoice or agency code was sent.");
+      clearStripeParams();
+      return;
+    }
+
+    if (!sessionId || !saleId) {
+      setError("Stripe returned without the checkout session details.");
+      clearStripeParams();
+      return;
+    }
+
+    let cancelled = false;
+    const finishStripeCheckout = async () => {
+      setShareStatus("Verifying Stripe payment...");
+      const checkout = await getSoftwareSaleStripeCheckoutSession(sessionId);
+      if (cancelled) return;
+      if (!checkout.ok || !checkout.session) {
+        setError(checkout.message || checkout.error || "Stripe checkout could not be verified.");
+        clearStripeParams();
+        return;
+      }
+      const { session } = checkout;
+      if (session.paymentStatus !== "paid" && session.status !== "complete") {
+        setError("Stripe checkout is not paid yet. No invoice or agency code was sent.");
+        clearStripeParams();
+        return;
+      }
+      const existingSale = api.softwareSales.get(saleId) ?? sale;
+      if (!existingSale || existingSale.id !== saleId) {
+        setError("Stripe confirmed payment, but the master sale record was not found.");
+        clearStripeParams();
+        return;
+      }
+      const updated = api.softwareSales.update(existingSale.id, {
+        ...paidSalePatchFromCheckoutSession(session),
+      });
+      const paidSale = updated ?? existingSale;
+      setSale(paidSale);
+      const provisionedAgency = provisionAgencyForCompletedSale(paidSale);
+      const paidPacket =
+        paidSale.signingPacketId ? readRemoteSigningPacket(paidSale.signingPacketId) : packetId ? readRemoteSigningPacket(packetId) : null;
+      if (!paidPacket) {
+        setShareStatus(`Stripe payment verified. Agency provisioned: ${provisionedAgency.name}. Send the invoice once the signed packet is visible again.`);
+        clearStripeParams();
+        return;
+      }
+      clearStripeParams();
+      await sendInvoiceForSale(paidSale, paidPacket, true);
+    };
+
+    void finishStripeCheckout();
+    return () => {
+      cancelled = true;
+    };
+  }, [packetId, sale]);
 
   useEffect(() => {
     if (!packetId) return;
@@ -211,21 +286,51 @@ export function MasterPlanBuilderPage() {
             invoiceEmailStatus: nextPacket.invoiceEmailStatus,
             invoiceEmailProvider: nextPacket.invoiceEmailProvider,
             invoiceEmailError: nextPacket.invoiceEmailError,
-            status: nextPacket.invoiceEmailStatus === "sent" ? "provisioning" : existingSale.status,
+            status: nextPacket.invoiceEmailStatus === "sent" ? "closed" : existingSale.status,
           });
       if (!updated) return;
       if (!alreadySynced) setSale(updated);
       if (updated.invoiceEmailStatus === "sent" || updated.invoiceEmailSentAt) {
         const provisionedAgency = provisionAgencyForCompletedSale(updated);
+        const closedSale = api.softwareSales.update(updated.id, { status: "closed" }) ?? updated;
+        setSale(closedSale);
         clearCompletedPlan(`Invoice sent. Agency provisioned: ${provisionedAgency.name}.`);
         return;
       }
-      if (
-        autoInvoiceSaleId !== updated.id &&
-        !updated.invoiceEmailSentAt
-      ) {
-        setAutoInvoiceSaleId(updated.id);
-        void sendInvoiceForSale(updated, nextPacket, true);
+      if (!stripePaymentConfirmed(updated) && nextPacket.stripeCheckoutSessionId && !invoiceSending) {
+        setShareStatus("Signed packet received. Verifying Stripe payment...");
+        const checkout = await getSoftwareSaleStripeCheckoutSession(nextPacket.stripeCheckoutSessionId);
+        if (cancelled) return;
+        const checkoutSession = checkout.session;
+        if (
+          checkout.ok &&
+          checkoutSession &&
+          (checkoutSession.status === "complete" || checkoutSession.paymentStatus === "paid")
+        ) {
+          const paidSale =
+            api.softwareSales.update(updated.id, {
+              ...paidSalePatchFromCheckoutSession(checkoutSession, updated.stripePaidAt ?? new Date().toISOString()),
+              signingPacketId: nextPacket.id,
+              signedAgreementNames,
+              signedAgreements,
+              signedByName: signedAgreements[0]?.signedByName,
+              signedByEmail: signedAgreements[0]?.signedByEmail,
+              signedAt,
+              signedPacketSubmittedAt: nextPacket.submittedAt,
+              signedPacketSubmittedByName: nextPacket.submittedByName ?? signedAgreements[0]?.signedByName,
+              signedPacketSubmittedByEmail: nextPacket.submittedByEmail ?? signedAgreements[0]?.signedByEmail,
+              invoiceEmailSentAt: nextPacket.invoiceEmailSentAt,
+              invoiceEmailStatus: nextPacket.invoiceEmailStatus,
+              invoiceEmailProvider: nextPacket.invoiceEmailProvider,
+              invoiceEmailError: nextPacket.invoiceEmailError,
+            }) ?? updated;
+          setSale(paidSale);
+          await sendInvoiceForSale(paidSale, nextPacket, true);
+          return;
+        }
+      }
+      if (!stripePaymentConfirmed(updated)) {
+        setShareStatus("Signed payment packet received. Open Stripe Checkout to start the recurring monthly subscription.");
       }
     };
 
@@ -238,10 +343,13 @@ export function MasterPlanBuilderPage() {
       window.clearInterval(interval);
       window.removeEventListener("storage", handleStorage);
     };
-  }, [autoInvoiceSaleId, packetId, sale]);
+  }, [invoiceSending, packetId, sale]);
 
   function setField<K extends keyof MasterPlanForm>(key: K, value: MasterPlanForm[K]) {
-    setForm((prev) => ({ ...prev, [key]: value }));
+    setForm((prev) => ({
+      ...prev,
+      [key]: value,
+    }));
     resetPreparedPlan();
   }
 
@@ -262,7 +370,7 @@ export function MasterPlanBuilderPage() {
     if (!/^\S+@\S+\.\S+$/.test(form.email.trim())) return "Add a valid billing email.";
     if (!form.phone.trim()) return "Add the billing phone number.";
     if (!hasSelectedUsers) return "Select the number of users.";
-    if (customPriceActive && !hasCustomPrice) return "Add a valid custom monthly price or clear it.";
+    if (customPriceActive && !hasCustomPrice) return "Add a custom monthly price greater than $0 or clear it.";
     return null;
   }
 
@@ -276,11 +384,12 @@ export function MasterPlanBuilderPage() {
       email: form.email.trim(),
       phone: form.phone.trim(),
       website: form.website.trim() || undefined,
+      product: form.product,
       tier: billingTierForSeats(seats),
       seats,
       estimatedMonthly,
       setupFee: SOFTWARE_SETUP_FEE_USD,
-      websiteAppAddOn: form.websiteAppAddOn,
+      websiteAppAddOn: effectiveWebsiteAppAddOn,
       websiteAppAddOnMonthly: addOnMonthly,
       termMonths,
       termDiscountPercent: selectedTerm.discountPercent,
@@ -290,9 +399,9 @@ export function MasterPlanBuilderPage() {
       customMonthlyPriceUsd: hasCustomPrice ? estimatedMonthly : undefined,
       customMonthlyPriceReason: hasCustomPrice ? customPriceReason.trim() || undefined : undefined,
       source: "master_portal" as const,
-      paymentMode: "manual_invoice" as const,
+      paymentMode: "stripe_checkout" as const,
+      status: "checkout_pending" as const,
       notes: form.notes.trim() || undefined,
-      stripeCheckoutSessionId: `master_plan_${Date.now()}`,
     };
     const nextSale = existingSale
       ? api.softwareSales.update(existingSale.id, saleInput)
@@ -308,9 +417,13 @@ export function MasterPlanBuilderPage() {
     setSale(saleWithPacketId);
     setPacketId(nextPacket.id);
     setPacketSyncRevision((current) => current + 1);
-    setShareStatus("Plan saved. Send the e-sign packet when ready.");
+    setShareStatus("Plan saved. Send the payment authorization packet when ready.");
     setError(null);
   }
+
+  useEffect(() => {
+    reconcilePaidSoftwareSalesToAgencies();
+  }, []);
 
   function createPacketForSale(nextSale: SoftwareSale): RemoteCheckoutPacket {
     const existing =
@@ -329,6 +442,7 @@ export function MasterPlanBuilderPage() {
       email: nextSale.email,
       phone: nextSale.phone ?? "",
       website: nextSale.website,
+      product: nextSale.product,
       tier: nextSale.tier,
       seats: nextSale.seats,
       estimatedMonthly: nextSale.estimatedMonthly,
@@ -414,7 +528,7 @@ export function MasterPlanBuilderPage() {
   async function emailDocs() {
     const link = ensurePacketLink();
     if (!link) return;
-    setShareStatus("Sending e-sign email...");
+    setShareStatus("Sending payment authorization email...");
     const result = await sendSoftwareSaleSigningEmail({
       agencyName: form.agencyName.trim(),
       contactName: form.contactName.trim(),
@@ -426,24 +540,29 @@ export function MasterPlanBuilderPage() {
         version: requiredForm.version,
       })),
     });
-    setShareStatus(formatCommunicationStatus(result, "E-sign email"));
+    setShareStatus(formatCommunicationStatus(result, "Payment authorization email"));
   }
 
   async function sendInvoice() {
     if (!sale) return;
     if (!allSigned || !packet || !packetSubmitted) {
-      return setShareStatus("The customer must sign and submit the e-sign packet before sending the invoice.");
+      return setShareStatus("The customer must submit the payment authorization packet before sending the invoice.");
     }
     await sendInvoiceForSale(sale, packet, false);
   }
 
   async function sendInvoiceForSale(targetSale: SoftwareSale, targetPacket: RemoteCheckoutPacket, automatic: boolean) {
     if (invoiceSending) return;
+    if (!stripePaymentConfirmed(targetSale)) {
+      await startStripeCheckoutForSale(targetSale, targetPacket, automatic);
+      return;
+    }
     if (
       targetSale.invoiceEmailSentAt ||
       targetSale.invoiceEmailStatus === "sent"
     ) {
       const provisionedAgency = provisionAgencyForCompletedSale(targetSale);
+      api.softwareSales.update(targetSale.id, { status: "closed" });
       clearCompletedPlan(`Agency provisioned: ${provisionedAgency.name}. Build A Plan is ready for the next sale.`);
       return;
     }
@@ -467,7 +586,7 @@ export function MasterPlanBuilderPage() {
     try {
       const result = await sendSoftwareSaleInvoiceEmail(saleForEmail);
       const updated = api.softwareSales.update(targetSale.id, {
-        status: result.ok && result.result?.status === "sent" ? "provisioning" : targetSale.status,
+        status: result.ok && result.result?.status === "sent" ? "closed" : targetSale.status,
         signingPacketId: targetPacket.id,
         signedAgreementNames: saleForEmail.signedAgreementNames,
         signedAgreements: saleForEmail.signedAgreements,
@@ -484,10 +603,65 @@ export function MasterPlanBuilderPage() {
       if (result.ok && result.result?.status === "sent") {
         const completedSale = updated ?? { ...targetSale, ...softwareSaleInvoicePatchFromResult(result) };
         const provisionedAgency = provisionAgencyForCompletedSale(completedSale);
+        api.softwareSales.update(completedSale.id, { status: "closed" });
         clearCompletedPlan(`${statusMessage} Agency provisioned: ${provisionedAgency.name}.`);
         return;
       }
       setShareStatus(statusMessage);
+    } finally {
+      setInvoiceSending(false);
+    }
+  }
+
+  async function startStripeCheckoutForSale(targetSale: SoftwareSale, targetPacket: RemoteCheckoutPacket, automatic: boolean) {
+    setShareStatus("Opening Stripe Checkout for the recurring monthly subscription...");
+    setInvoiceSending(true);
+    const signedAgreements = signedAgreementsFromPacket(targetPacket);
+    const signedAtValues = signedAgreements.map((agreement) => agreement.signedAt).sort();
+    const signedAt = signedAtValues[signedAtValues.length - 1];
+    const saleForCheckout =
+      api.softwareSales.update(targetSale.id, {
+        status: "checkout_pending",
+        paymentMode: "stripe_checkout",
+        signingPacketId: targetPacket.id,
+        signedAgreementNames: signedAgreements.map((agreement) => agreement.title),
+        signedAgreements,
+        signedByName: signedAgreements[0]?.signedByName,
+        signedByEmail: signedAgreements[0]?.signedByEmail,
+        signedAt,
+        signedPacketSubmittedAt: targetPacket.submittedAt,
+        signedPacketSubmittedByName: targetPacket.submittedByName ?? signedAgreements[0]?.signedByName,
+        signedPacketSubmittedByEmail: targetPacket.submittedByEmail ?? signedAgreements[0]?.signedByEmail,
+      }) ?? targetSale;
+    setSale(saleForCheckout);
+    try {
+      const origin = window.location.origin;
+      const session = await createSoftwareSaleStripeCheckoutSession(saleForCheckout, {
+        master: true,
+        successUrl: `${origin}/master/build-plan?stripe_success=1&session_id={CHECKOUT_SESSION_ID}&sale_id=${encodeURIComponent(
+          saleForCheckout.id
+        )}`,
+        cancelUrl: `${origin}/master/build-plan?stripe_cancelled=1&sale_id=${encodeURIComponent(saleForCheckout.id)}`,
+      });
+      if (!session.ok || !session.url) {
+        setShareStatus(session.message || session.error || "Stripe Checkout could not be started.");
+        return;
+      }
+      const updatedSale =
+        api.softwareSales.update(saleForCheckout.id, {
+          stripeCheckoutSessionId: session.id,
+          stripePaymentStatus: "checkout_pending",
+        }) ?? saleForCheckout;
+      setSale(updatedSale);
+      const nextPacket = { ...targetPacket, stripeCheckoutSessionId: session.id, updatedAt: new Date().toISOString() };
+      writeRemoteSigningPacket(nextPacket);
+      void writeSharedRemoteSigningPacket(nextPacket).catch(() => undefined);
+      setPacketSyncRevision((current) => current + 1);
+      if (automatic) {
+        setShareStatus("Signed packet received. Open Stripe Checkout to collect the recurring subscription payment.");
+        return;
+      }
+      window.location.assign(session.url);
     } finally {
       setInvoiceSending(false);
     }
@@ -504,7 +678,6 @@ export function MasterPlanBuilderPage() {
     setCustomPriceReason("");
     setCustomPriceEditing(false);
     setCustomPriceError(null);
-    setAutoInvoiceSaleId(null);
     setError(null);
     try {
       localStorage.removeItem(MASTER_PLAN_BUILDER_DRAFT_KEY);
@@ -529,12 +702,12 @@ export function MasterPlanBuilderPage() {
           <h1 className="font-display text-3xl">Build A Plan</h1>
           <p className="mt-1 max-w-2xl text-sm text-ink-500">
             Master-side plan builder for phone sales. Build the monthly software plan, save it to
-            billing, then send the required e-sign documents from here.
+            billing, then send the secure payment authorization packet from here.
           </p>
         </div>
         {sale && (
           <Badge tone={packetSubmitted ? "success" : allSigned ? "gold" : "warn"}>
-            {packetSubmitted ? "Packet complete" : allSigned ? "Awaiting submit" : "Docs pending"}
+            {packetSubmitted ? "Packet complete" : allSigned ? "Awaiting submit" : "Packet pending"}
           </Badge>
         )}
       </div>
@@ -562,7 +735,10 @@ export function MasterPlanBuilderPage() {
           </Card>
 
           <Card>
-            <CardHeader title="Monthly plan" subtitle="$300 per user per month, plus selected website or Quotex app add-ons." />
+            <CardHeader
+              title="Monthly plan"
+              subtitle={`${fmt.money(productSeatPrice)} per user per month, plus selected website or Quotex app add-ons.`}
+            />
             <div className="grid gap-5 lg:grid-cols-[280px_minmax(0,1fr)]">
               <div>
                 <label className="label">Staff users</label>
@@ -668,8 +844,21 @@ export function MasterPlanBuilderPage() {
               subtitle={hasSelectedUsers ? "Save the plan before sending documents." : "Select users to calculate the plan."}
             />
             <div className="space-y-3 text-sm">
-              <PlanRow label="Staff users" value={hasSelectedUsers ? `${fmt.money(userSubtotal)}/mo` : "Pending"} detail={hasSelectedUsers ? `${seats} x ${fmt.money(SOFTWARE_USER_MONTHLY_PRICE_USD)}` : undefined} />
-              <PlanRow label="Website / Quotex app package" value={websiteAppRetailMonthly ? `${fmt.money(websiteAppRetailMonthly)}/mo` : "None"} detail={WEBSITE_APP_ADD_ON_OPTIONS[form.websiteAppAddOn].label} />
+              <PlanRow
+                label="Product"
+                value="Full software"
+                detail="Full Quotex software"
+              />
+              <PlanRow
+                label="Staff users"
+                value={hasSelectedUsers ? `${fmt.money(userSubtotal)}/mo` : "Pending"}
+                detail={hasSelectedUsers ? `${seats} x ${fmt.money(productSeatPrice)}` : undefined}
+              />
+              <PlanRow
+                label="Website / Quotex app package"
+                value={websiteAppRetailMonthly ? `${fmt.money(websiteAppRetailMonthly)}/mo` : "None"}
+                detail={WEBSITE_APP_ADD_ON_OPTIONS[effectiveWebsiteAppAddOn].label}
+              />
               {bundleDiscount > 0 && <PlanRow label="Bundle discount" value={`-${fmt.money(bundleDiscount)}/mo`} />}
               {termDiscountMonthly > 0 && (
                 <PlanRow
@@ -785,14 +974,14 @@ export function MasterPlanBuilderPage() {
             )}
 
             <button type="button" className="btn-gold mt-5 w-full justify-center" onClick={savePlanAndPrepareDocs}>
-              <ReceiptText className="h-4 w-4" /> Save plan and prepare documents
+              <ReceiptText className="h-4 w-4" /> Save plan and prepare payment packet
             </button>
           </Card>
 
           <Card>
             <CardHeader
-              title="Send e-sign documents"
-              subtitle="Send the required plan documents from master during an over-the-phone sale."
+              title="Send payment authorization"
+              subtitle="Send one secure packet for electronic signatures, then open Stripe Checkout for the recurring subscription."
             />
             {sale ? (
               <div className="space-y-4">
@@ -800,7 +989,7 @@ export function MasterPlanBuilderPage() {
                   <div className="flex items-center justify-between gap-3">
                     <div>
                       <div className="font-semibold text-ink-900">{sale.agencyName}</div>
-                      <div className="text-xs text-ink-500">{sale.contactName} · {sale.email}</div>
+                      <div className="text-xs text-ink-500">{sale.contactName} - {sale.email}</div>
                     </div>
                     <Badge tone={packetSubmitted ? "success" : allSigned ? "gold" : "warn"}>
                       {packetSubmitted ? "Submitted" : `${signedCount}/${REQUIRED_CHECKOUT_FORMS.length} signed`}
@@ -815,11 +1004,6 @@ export function MasterPlanBuilderPage() {
                   {packet?.paymentMethodEntry && (
                     <div className="mt-3 rounded-md border border-gold-100 bg-white px-3 py-2 text-xs text-gold-800">
                       Payment method saved: {paymentEntryLabel(packet.paymentMethodEntry.label, packet.paymentMethodEntry.last4)}.
-                    </div>
-                  )}
-                  {signingLink && (
-                    <div className="mt-3 break-all rounded-md border border-ink-100 bg-white px-3 py-2 text-xs text-ink-500">
-                      {signingLink}
                     </div>
                   )}
                 </div>
@@ -842,7 +1026,13 @@ export function MasterPlanBuilderPage() {
                   onClick={sendInvoice}
                 >
                   <ReceiptText className="h-4 w-4" />{" "}
-                  {invoiceSent ? "Invoice and agency code sent" : invoiceSending ? "Sending invoice..." : "Send invoice and agency code"}
+                  {invoiceSent
+                    ? "Invoice and agency code sent"
+                    : invoiceSending
+                      ? "Working..."
+                      : stripePaymentConfirmed(sale)
+                        ? "Send invoice and agency code"
+                        : "Open recurring Stripe checkout"}
                 </button>
 
                 {shareStatus && (
@@ -874,7 +1064,7 @@ export function MasterPlanBuilderPage() {
               </div>
             ) : (
               <div className="rounded-md border border-dashed border-ink-200 bg-ink-50 px-4 py-6 text-center text-sm text-ink-500">
-                Save the plan first, then send the required e-sign documents from here.
+                Save the plan first, then send the payment authorization packet from here.
               </div>
             )}
           </Card>
@@ -958,6 +1148,28 @@ function isPlanTermMonths(value: unknown): value is PlanTermMonths {
   return value === 12 || value === 24 || value === 36;
 }
 
+function stripePaymentConfirmed(sale: SoftwareSale): boolean {
+  return sale.stripePaymentStatus === "paid" || !!sale.stripePaidAt;
+}
+
+function paidSalePatchFromCheckoutSession(
+  session: StripeCheckoutSessionSummary,
+  paidAt = new Date().toISOString()
+): Partial<SoftwareSale> {
+  return {
+    status: "paid",
+    paymentMode: "stripe_checkout",
+    stripeCheckoutSessionId: session.id,
+    stripeCustomerId: session.customerId,
+    stripeSubscriptionId: session.subscriptionId,
+    stripePaymentStatus: session.paymentStatus ?? "paid",
+    stripePaidAt: paidAt,
+    stripeSubscriptionTermStartedAt: session.subscriptionTermStartedAt,
+    stripeSubscriptionTermEndsAt: session.subscriptionTermEndsAt,
+    stripeSubscriptionCancelAt: session.subscriptionTermEndsAt,
+  };
+}
+
 function paymentEntryLabel(label: string, last4: string) {
   return `${label} ending in ${last4}`;
 }
@@ -978,6 +1190,7 @@ function recoverSoftwareSaleFromPacket(packet: RemoteCheckoutPacket): SoftwareSa
       email: packet.email,
       phone: packet.phone,
       website: packet.website,
+      product: packet.product,
       tier: packet.tier ?? billingTierForSeats(packet.seats),
       seats: packet.seats,
       estimatedMonthly: packet.estimatedMonthly,
@@ -992,9 +1205,9 @@ function recoverSoftwareSaleFromPacket(packet: RemoteCheckoutPacket): SoftwareSa
       customMonthlyPriceUsd: packet.customMonthlyPriceUsd,
       customMonthlyPriceReason: packet.customMonthlyPriceReason,
       source: packet.source ?? "master_portal",
-      paymentMode: packet.paymentMode ?? "manual_invoice",
-      notes: `Recovered from submitted e-sign packet ${packet.id}.`,
-      stripeCheckoutSessionId: packet.stripeCheckoutSessionId ?? `recovered_${packet.id}`,
+      paymentMode: packet.paymentMode ?? "stripe_checkout",
+      notes: `Recovered from submitted signing packet ${packet.id}.`,
+      stripeCheckoutSessionId: packet.stripeCheckoutSessionId,
       invoiceEmailSentAt: packet.invoiceEmailSentAt,
       invoiceEmailStatus: packet.invoiceEmailStatus,
       invoiceEmailProvider: packet.invoiceEmailProvider,

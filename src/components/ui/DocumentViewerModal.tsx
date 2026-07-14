@@ -438,17 +438,12 @@ export function FilledAcordDocumentPreview({
       {highlightedLabels.length > 0 && source ? (
         <div className={showStatus ? "space-y-3" : ""}>
           <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-950">
-            Required missing ACORD fields are highlighted below. These are the fields that triggered
-            the incomplete-send warning.
+            Required missing ACORD fields triggered the incomplete-send warning: {highlightedLabels.join(", ")}.
           </div>
-          <DocumentTemplateFieldOverlay
-            layout={source.layout}
-            fields={source.overlayFields}
-            fileUrl={source.fileUrl}
-            sourceFileName={source.sourceFileName}
-            title="Required missing ACORD fields"
-            highlightLabels={highlightedLabels}
-            showOnlyHighlighted
+          <iframe
+            title={`Selected ${source.sourceFileName}`}
+            src={viewerUrl(source.fileUrl)}
+            className={frameClassName}
           />
         </div>
       ) : filledAcroPdf.status === "ready" ? (
@@ -468,13 +463,22 @@ export function FilledAcordDocumentPreview({
             className={frameClassName}
           />
         </div>
-      ) : filledAcroPdf.status === "loading" ? (
-        <div className={`flex items-center justify-center rounded-md border border-blue-200 bg-blue-50 px-3 py-6 text-center text-sm text-blue-900 ${frameClassName}`}>
-          Preparing the native filled ACORD PDF...
+      ) : filledAcroPdf.status === "loading" && source ? (
+        <div className={showStatus ? "space-y-3" : ""}>
+          {showStatus && (
+            <div className="rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
+              Preparing the native filled ACORD PDF. The original remains available while it loads.
+            </div>
+          )}
+          <iframe
+            title={`Selected ${source.sourceFileName}`}
+            src={viewerUrl(source.fileUrl)}
+            className={frameClassName}
+          />
         </div>
       ) : source ? (
         <iframe
-          title={`Source ${source.sourceFileName}`}
+          title={`Selected ${source.sourceFileName}`}
           src={viewerUrl(source.fileUrl)}
           className={frameClassName}
         />

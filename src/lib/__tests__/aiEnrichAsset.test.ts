@@ -35,12 +35,36 @@ const FEMA_FLOOD_ZONE_AE = {
 
 const NHTSA_VIN_RESPONSE = {
   Results: [
-    { Variable: "Error Code", Value: "0" },
-    { Variable: "Make", Value: "PORSCHE" },
-    { Variable: "Model", Value: "911" },
-    { Variable: "Model Year", Value: "2022" },
-    { Variable: "Body Class", Value: "Coupe" },
-    { Variable: "Other", Value: "Skip me" },
+    {
+      ErrorCode: "0",
+      ErrorText: "0 - VIN decoded clean. Check Digit (9th position) is correct",
+      Make: "HONDA",
+      Model: "Accord",
+      ModelYear: "2003",
+      BodyClass: "Coupe",
+      Trim: "EX-V6",
+      Series: "",
+      VehicleType: "PASSENGER CAR",
+      FuelTypePrimary: "Gasoline",
+      EngineCylinders: "6",
+      DisplacementL: "3.0",
+      CurbWeightLB: "",
+      BasePrice: "",
+    },
+  ],
+};
+
+const NHTSA_INVALID_CHECK_DIGIT_RESPONSE = {
+  Results: [
+    {
+      ErrorCode: "1",
+      ErrorText: "1 - Check Digit (9th position) does not calculate properly",
+      Make: "PORSCHE",
+      Model: "911",
+      ModelYear: "2022",
+      BodyClass: "Coupe",
+      Trim: "Turbo / Turbo S",
+    },
   ],
 };
 
@@ -96,6 +120,7 @@ beforeEach(() => {
   // loads any project-local .env at test time, which would otherwise
   // leak the real key into these unit tests.
   vi.stubEnv("VITE_AI_MODE", "");
+  vi.stubEnv("VITE_ALLOW_BROWSER_AI_FALLBACKS", "true");
   vi.stubEnv("VITE_GOOGLE_PLACES_API_KEY", "");
   vi.stubEnv("VITE_GOOGLE_MAPS_API_KEY", "");
 });
@@ -125,28 +150,28 @@ describe("aiEnrichAsset — coastal home", () => {
     expect(out.fields.floodZone).toBe("AE");
     expect(out.evidence?.floodZone?.sourceKind).toBe("government_api");
     expect(out.evidence?.floodZone?.allowDocumentAutofill).toBe(true);
-    // AI-estimated property characteristics are also populated so
-    // the intake form auto-fills with sensible defaults. These are
-    // deterministic for the same address.
-    expect(out.fields).toHaveProperty("yearBuilt");
-    expect(out.evidence?.yearBuilt?.sourceKind).toBe("model_estimate");
-    expect(out.evidence?.yearBuilt?.allowDocumentAutofill).toBe(false);
-    expect(out.fields).toHaveProperty("squareFootage");
-    expect(out.fields).toHaveProperty("constructionType");
-    expect(out.fields).toHaveProperty("roofMaterial");
-    expect(out.fields).toHaveProperty("estimatedValue");
+    // Property characteristics must stay blank unless a real source backs them.
+    expect(out.fields.yearBuilt).toBeUndefined();
+    expect(out.fields.squareFootage).toBeUndefined();
+    expect(out.fields.constructionType).toBeUndefined();
+    expect(out.fields.roofMaterial).toBeUndefined();
+    expect(out.fields.estimatedValue).toBeUndefined();
+    expect(out.evidence?.yearBuilt).toBeUndefined();
 
-    // Only wind mitigation is truly unavailable (homeowner-submitted).
-    expect(out.unavailableFields).toEqual(["windMitigation"]);
-
-    // Sources cite both the FEMA layer and the AI estimator.
-    expect(out.sources).toEqual(
+    expect(out.unavailableFields).toEqual(
       expect.arrayContaining([
-        "FEMA National Flood Hazard Layer (NFHL)",
-        "AI property estimator",
+        "yearBuilt",
+        "squareFootage",
+        "constructionType",
+        "roofMaterial",
+        "estimatedValue",
+        "windMitigation",
       ])
     );
-    expect(out.notes).toMatch(/FEMA NFHL/);
+
+    expect(out.sources).toEqual(expect.arrayContaining(["FEMA National Flood Hazard Layer (NFHL)"]));
+    expect(out.sources).not.toContain("AI property estimator");
+    expect(out.notes).toMatch(/source-backed/i);
   });
 
   it("calls FEMA with the geocoded lat/lon in WGS84 (esriGeometryPoint)", async () => {
@@ -179,9 +204,7 @@ describe("aiEnrichAsset — coastal home", () => {
     const { aiEnrichAsset } = await import("../ai");
     const out = await aiEnrichAsset("coastal_home", { address: "901 McDonald Drive, Northville, MI 48167" });
     expect(out.fields.floodZone).toBeUndefined();
-    // AI-estimated property defaults still populate so the form
-    // doesn't sit empty.
-    expect(out.fields).toHaveProperty("yearBuilt");
+    expect(out.fields.yearBuilt).toBeUndefined();
     expect(out.unavailableFields).toContain("floodZone");
   });
 
@@ -200,7 +223,9 @@ describe("aiEnrichAsset — coastal home", () => {
     // Critically: every field stays editable with no "Not in public
     // records" chip — we couldn't attempt the lookup so don't pretend
     // we got a definitive "no" from the database.
-    expect(out.unavailableFields).toEqual([]);
+    expect(out.unavailableFields).toEqual(
+      expect.arrayContaining(["address", "floodZone", "yearBuilt", "squareFootage", "estimatedValue"])
+    );
   });
 });
 
@@ -240,12 +265,10 @@ describe("aiPreparePublicFields - evidence gate", () => {
       estimatedValue: 1_500_000,
     });
 
-    expect(out.publicFields["Year built"]).toBeTruthy();
-    expect(out.publicFieldEvidence["Year built"]?.sourceKind).toBe("model_estimate");
-    expect(out.publicFieldEvidence["Year built"]?.allowDocumentAutofill).toBe(false);
+    expect(out.publicFields["Year built"]).toBeUndefined();
+    expect(out.publicFieldEvidence["Year built"]).toBeUndefined();
     expect(out.missingFields).toContain("Year built");
-    expect(out.summary).toContain("kept");
-    expect(out.summary).toContain("out of document autofill");
+    expect(out.summary).toContain("Prepared");
   });
 });
 
@@ -507,11 +530,15 @@ describe("aiEnrichAsset — luxury vehicle", () => {
       return Promise.reject(new Error("unexpected"));
     });
     const { aiEnrichAsset } = await import("../ai");
-    const out = await aiEnrichAsset("luxury_vehicle", { vin: "WP0AD2A99NS260123" });
-    expect(out.fields).toEqual({
-      year: 2022,
-      make: "PORSCHE",
-      model: "911",
+    const out = await aiEnrichAsset("luxury_vehicle", { vin: "1HGCM82633A004352" });
+    expect(out.fields).toMatchObject({
+      year: 2003,
+      make: "HONDA",
+      model: "Accord EX-V6",
+      bodyClass: "Coupe",
+      trim: "EX-V6",
+      fuelType: "Gasoline",
+      engineDescription: "3.0L 6 cylinder Gasoline",
     });
     expect(out.evidence?.year?.sourceKind).toBe("government_api");
     expect(out.evidence?.year?.allowDocumentAutofill).toBe(true);
@@ -522,15 +549,40 @@ describe("aiEnrichAsset — luxury vehicle", () => {
   });
 
   it("URL-encodes the VIN in the NHTSA request", async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
-      ok: true,
-      json: async () => NHTSA_VIN_RESPONSE,
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation((u: string) => {
+      const url = String(u);
+      if (url.includes("vpic.nhtsa.dot.gov")) {
+        return Promise.resolve({ ok: true, json: async () => NHTSA_VIN_RESPONSE });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
     });
     const { aiEnrichAsset } = await import("../ai");
-    await aiEnrichAsset("luxury_vehicle", { vin: "WP0AD2A99NS260123" });
-    const url = String((globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls[0][0]);
+    await aiEnrichAsset("luxury_vehicle", { vin: "1HGCM82633A004352" });
+    const nhtsaCall = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.find((call) =>
+      String(call[0]).includes("vpic.nhtsa.dot.gov")
+    );
+    const url = String(nhtsaCall?.[0]);
     expect(url).toBe(
-      "https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVin/WP0AD2A99NS260123?format=json"
+      "https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValuesExtended/1HGCM82633A004352?format=json"
+    );
+  });
+
+  it("does not trust partial NHTSA data when VIN check digit fails", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation((u: string) => {
+      const url = String(u);
+      if (url.includes("vpic.nhtsa.dot.gov")) {
+        return Promise.resolve({ ok: true, json: async () => NHTSA_INVALID_CHECK_DIGIT_RESPONSE });
+      }
+      return Promise.reject(new Error(`Unexpected URL ${url}`));
+    });
+    const { aiEnrichAsset } = await import("../ai");
+    const out = await aiEnrichAsset("luxury_vehicle", { vin: "WP0AD2A99NS260123" });
+    expect(out.fields).toEqual({});
+    expect(out.evidence?.year).toBeUndefined();
+    expect(out.confidence).toBe(0);
+    expect(out.notes).toMatch(/Check Digit/i);
+    expect(out.unavailableFields).toEqual(
+      expect.arrayContaining(["year", "make", "model", "bodyClass", "trim", "estimatedValue"])
     );
   });
 

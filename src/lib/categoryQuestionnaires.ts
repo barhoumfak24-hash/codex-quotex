@@ -36,26 +36,134 @@ function dedupe(questions: CategoryQuestion[]): CategoryQuestion[] {
   return out;
 }
 
+function homeQuoteSheetQuestions(): CategoryQuestion[] {
+  return [
+    q("propertyAddress", "Property address", "address", {
+      required: true,
+      placeholder: "Street, city, state, ZIP",
+    }),
+    q("occupancy", "Occupancy", "select", {
+      options: ["Primary", "Secondary / seasonal", "Tenant occupied", "Vacant", "Condo", "Dwelling fire"],
+      required: true,
+    }),
+    q("ownershipAndLien", "Ownership and lien details", "textarea", {
+      placeholder: "Owner, trust/LLC, mortgagee, escrow, loan number, ISAOA/ATIMA if applicable",
+    }),
+    q("countyTownship", "County and township / municipality", "text"),
+    q("priorOrMailingAddress", "Prior or mailing address in the last 3 years", "address"),
+    q("yearBuilt", "Year built", "number"),
+    q("squareFootageAndUnits", "Square footage, number of units, and wall height", "textarea"),
+    q("homeStyle", "Home style", "select", {
+      options: [
+        "1 story",
+        "1.5 story",
+        "1.75 story",
+        "2 story",
+        "Split-level",
+        "Condo",
+        "Apartment",
+        "Manufactured home",
+        "Other",
+      ],
+    }),
+    q("foundationDetails", "Foundation details", "textarea", {
+      placeholder: "Basement, slab, crawl space, block, concrete, brick, fieldstone, piers, walkout/daylight, percent finished",
+    }),
+    q("frameAndExterior", "Frame and exterior materials", "textarea", {
+      placeholder: "2x4/2x6/log/steel/insulated panels plus siding, brick, stone, stucco, hardiboard, percentages if known",
+    }),
+    q("roofShapePitchMaterial", "Roof shape, pitch, material, and skylights", "textarea", {
+      placeholder: "Gable/hip/flat, simple/elaborate, slight/moderate/steep, asphalt/architectural/metal/wood, skylights",
+    }),
+    q("attachedStructures", "Attached structures", "textarea", {
+      placeholder: "Porches, decks, breezeway, balcony, columns, attached garage, built-in garage, carport",
+    }),
+    q("detachedStructuresAndRecreation", "Detached structures and recreational features", "textarea", {
+      placeholder: "Detached garage, shed, gazebo, pool, hot tub, trampoline, fencing, diving board, slide",
+    }),
+    q("interiorFinishes", "Interior walls, ceilings, and floors", "textarea"),
+    q("kitchenBathQuality", "Kitchen and bathroom quality", "textarea", {
+      placeholder: "Kitchen grade, number of full/half/three-quarter baths, custom vanity, jacuzzi",
+    }),
+    q("interiorFeatures", "Interior features", "textarea", {
+      placeholder: "Wet bar, fireplaces, wood stove, spiral staircase, attic access, central vacuum/stereo",
+    }),
+    q("heatingCoolingSystems", "Heating and cooling systems", "textarea", {
+      placeholder: "Fuel, system type, location, central AC, ductwork, high-efficiency units",
+    }),
+    q("electricalAndSafetySystems", "Electrical and safety systems", "textarea", {
+      placeholder: "Amps, fuses, fire/burglar/temp/water leak alarms, sprinklers, surveillance, motion lights",
+    }),
+    q("homeUpdates", "Updates and remodels", "textarea", {
+      placeholder: "Roof receipt, heating, plumbing, electrical, additions, remodels, dates and materials",
+    }),
+    q("animalsAndLiabilityExposures", "Animals, business, rental, and liability exposures", "textarea", {
+      placeholder: "Dogs/bite history/breeds, daycare, business or hobbies, structures rented, vacant land, ponds, rec vehicles",
+    }),
+    q("scheduledProperty", "Jewelry, watches, guns, furs, art, collections, medical equipment, vault or safe", "textarea"),
+    q("priorCarrierAndLosses", "Prior carrier, coverage, policy number, expiration date, deductible, and losses", "textarea"),
+    q("requestedHomeEndorsements", "Requested endorsements and special coverages", "textarea", {
+      placeholder: "Guaranteed replacement, water backup, personal injury, med pay, ordinance/law, loss assessment, quake/sinkhole, service line, equipment breakdown, ID theft",
+    }),
+    q("homeDiscountsAndProtection", "Discounts and protection details", "textarea", {
+      placeholder: "Full pay, escrow, non-smoker, group, generator, protective devices, hydrant/fire-station distance, mortgage free, multi-policy",
+    }),
+  ];
+}
+
+function autoQuoteSheetQuestions(): CategoryQuestion[] {
+  return [
+    q("vin", "VIN", "text", { required: true, placeholder: "17-character VIN" }),
+    q("yearMakeModel", "Year, make, model, and stated value", "textarea"),
+    q("purchaseAndOwnership", "Purchase date, new/used, own/lien/lease, and name on title", "textarea"),
+    q("garagingAddressIfDifferent", "Garaging address if different from home", "address"),
+    q("lienholderOrLessor", "Lienholder or lessor name and address", "textarea"),
+    q("primaryUse", "Primary use", "select", {
+      options: ["Pleasure", "Work or school", "Business", "Artisan", "Farm", "Seasonal / collector"],
+    }),
+    q("businessDeliveryRideshareUse", "Business, delivery, rideshare, advertising, or wrapped vehicle use", "textarea"),
+    q("commuteAndAnnualMileage", "Distance one way, days per week, and annual mileage", "textarea"),
+    q("principalOperator", "Principal operator", "text"),
+    q("vehicleSafetyAndDamage", "Safety features and existing damage", "textarea", {
+      placeholder: "Blind spot, automatic braking, OnStar/telematics, current damage",
+    }),
+    q("customEquipmentOrModifications", "Customized equipment or modifications", "textarea", {
+      placeholder: "Lift, cap, tires, snow plow, custom value, performance parts",
+    }),
+    q("coverageLimits", "Requested liability, property damage, and UM/UIM limits", "textarea", {
+      placeholder: "Split limits, CSL, property damage, uninsured/underinsured motorist",
+    }),
+    q("physicalDamageDeductibles", "Comprehensive and collision coverage / deductibles", "textarea", {
+      placeholder: "Comp, collision regular/broad, glass, selected deductibles",
+    }),
+    q("roadsideRentalGap", "Roadside, rental, glass, gap, and travel coverage", "textarea"),
+    q("driverOneDetails", "Driver 1 details", "textarea", {
+      placeholder: "Relation, license number, DOB, occupation/city, education, student GPA, student distance",
+    }),
+    q("driverTwoDetails", "Driver 2 details", "textarea", {
+      placeholder: "Relation, license number, DOB, occupation/city, education, student GPA, student distance",
+    }),
+    q("additionalDriversAndHousehold", "Additional drivers and household members", "textarea", {
+      placeholder: "Household size, all household members, youthful drivers, company cars, dependents",
+    }),
+    q("ticketsAccidentsClaims", "Tickets, accidents, PIP, deer, glass, or other claims", "textarea"),
+    q("priorAutoCarrier", "Prior carrier, policy number, expiration date, term, and loss-free years", "textarea"),
+    q("autoDiscountsAndPayment", "Discounts, groups, payment plan, health insurance, and deductible choices", "textarea"),
+    q("ratingResidence", "Residence/rating details", "textarea", {
+      placeholder: "Own/rent/other, house/apartment/condo/manufactured home/other, multi-policy details",
+    }),
+    q("motorcycleOrSpecialVehicleDetails", "Motorcycle or special vehicle details, if applicable", "textarea", {
+      placeholder: "Custom value, years owned/riding, medical benefits, helmet, cycle endorsement",
+    }),
+  ];
+}
+
 function baseAssetQuestions(assetType: AssetType): CategoryQuestion[] {
   switch (assetType) {
     case "coastal_home":
-      return [
-        q("propertyAddress", "Property address", "address", { required: true }),
-        q("occupancy", "Occupancy", "select", {
-          options: ["Primary", "Secondary", "Rental", "Vacant", "Mixed use"],
-          required: true,
-        }),
-      ];
+      return homeQuoteSheetQuestions();
     case "luxury_vehicle":
-      return [
-        q("vin", "VIN", "text", { required: true, placeholder: "17-character VIN" }),
-        q("garagingAddressIfDifferent", "Garaging address if different from home", "address"),
-        q("annualMileage", "Annual mileage", "number"),
-        q("primaryUse", "Primary use", "select", {
-          options: ["Pleasure", "Commute", "Business", "Collector", "Seasonal"],
-        }),
-        q("driverExceptions", "Drivers not already listed in your profile", "textarea"),
-      ];
+      return autoQuoteSheetQuestions();
     case "yacht":
       return [
         q("hin", "Hull ID / HIN", "text"),
@@ -273,7 +381,13 @@ export function categoryQuestionnaire(
   const categorySpecific = category.lineOfBusiness === "commercial"
     ? [...commercialBaseQuestions(), ...commercialRefinements(category.label, category.assetType)]
     : [...baseAssetQuestions(category.assetType), ...personalRefinements(category.label)];
-  const maxQuestions = category.lineOfBusiness === "commercial" ? 9 : 8;
+  const maxQuestions = category.lineOfBusiness === "commercial"
+    ? 9
+    : category.assetType === "coastal_home"
+    ? 30
+    : category.assetType === "luxury_vehicle"
+    ? 28
+    : 8;
 
   return dedupe([
     ...categorySpecific,

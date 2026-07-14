@@ -1,4 +1,4 @@
-import { postServerAi, serverAiEnabled } from "./aiGateway";
+import { browserAiFallbacksAllowed, postServerAi, serverAiEnabled } from "./aiGateway";
 import { cleanClosingBlock, createCampaignDraft, interpretCreativeBrief } from "./campaignCreative";
 
 export type MarketingStudioChannel = "email";
@@ -170,8 +170,11 @@ export async function draftMarketingStudioCampaign(input: {
       },
       { timeoutMs: 60_000 }
     );
-    return raw ? ensureStudioDraftCompliance(normalizeStudioDraft(raw), input) : localDraft;
-  } catch {
+    if (raw) return ensureStudioDraftCompliance(normalizeStudioDraft(raw), input);
+    if (!browserAiFallbacksAllowed()) throw new Error("Marketing AI provider unavailable");
+    return localDraft;
+  } catch (error) {
+    if (!browserAiFallbacksAllowed()) throw error;
     return localDraft;
   }
 }

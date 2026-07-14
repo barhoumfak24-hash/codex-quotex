@@ -3,7 +3,7 @@ import {
   type DraftCampaignAudience,
   type DraftedCampaign,
 } from "./ai";
-import { postServerAi } from "./aiGateway";
+import { browserAiFallbacksAllowed, postServerAi } from "./aiGateway";
 
 // =====================================================================
 // LLM-driven campaign drafting.
@@ -55,7 +55,8 @@ export async function aiDraftCampaignLLM(input: {
   try {
     const llm = await fetchCampaignDraftFromLLM(input, base);
     return mergeLLMCampaignDraft(base, llm, input);
-  } catch {
+  } catch (error) {
+    if (!browserAiFallbacksAllowed()) throw error;
     return base;
   }
 }

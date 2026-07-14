@@ -27,10 +27,10 @@ export interface AiModelRoute {
   reasoningEffort: AiReasoningEffort;
 }
 
-const DEFAULT_REASONING_MODEL = "gpt-5.5";
-const DEFAULT_FAST_MODEL = "gpt-5.4-mini";
-const DEFAULT_FALLBACK_MODELS = ["gpt-5.4", "gpt-5.4-mini"];
-const DEFAULT_IMAGE_MODEL = "gpt-image-2";
+const DEFAULT_REASONING_MODEL = "gpt-5";
+const DEFAULT_FAST_MODEL = "gpt-4o-mini";
+const DEFAULT_FALLBACK_MODELS = ["gpt-4o", "gpt-4o-mini"];
+const DEFAULT_IMAGE_MODEL = "dall-e-3";
 const DEFAULT_EMBEDDING_MODEL = "text-embedding-3-large";
 
 export function resolveOpenAiModelRoute(input: AiModelRoutingInput): AiModelRoute {
@@ -81,7 +81,7 @@ export function profileForSchema(schemaName: string | undefined): AiModelProfile
 
 function configuredModel(profile: AiModelProfile, quality: AiModelRoutingInput["quality"]): string {
   if (quality === "maximum") {
-    return env("OPENAI_MAX_REASONING_MODEL") || env("AI_REASONING_MODEL") || env("OPENAI_MODEL") || DEFAULT_REASONING_MODEL;
+    return env("OPENAI_MAX_REASONING_MODEL") || env("AI_REASONING_MODEL") || DEFAULT_REASONING_MODEL;
   }
   switch (profile) {
     case "document_extraction":

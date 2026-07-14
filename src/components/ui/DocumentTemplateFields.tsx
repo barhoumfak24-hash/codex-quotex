@@ -236,9 +236,10 @@ export function DocumentTemplateFieldOverlay({
                   </div>
                 ) : box.multiline ? (
                   <textarea
-                    className={`${controlClass} resize-none`}
+                    className={`${controlClass} resize-none disabled:opacity-100`}
                     value={value}
                     readOnly={!editable}
+                    disabled={!editable}
                     onChange={(event) => update(box.label, event.target.value)}
                     placeholder={box.label}
                   />
@@ -253,9 +254,10 @@ export function DocumentTemplateFieldOverlay({
                   />
                 ) : (
                   <input
-                    className={controlClass}
+                    className={`${controlClass} disabled:opacity-100`}
                     value={value}
                     readOnly={!editable}
+                    disabled={!editable}
                     onChange={(event) => update(box.label, event.target.value)}
                     placeholder={box.label}
                     inputMode={box.kind === "number" || box.kind === "currency" ? "decimal" : undefined}

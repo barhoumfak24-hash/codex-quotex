@@ -12,6 +12,19 @@ export type EmailSendResult = {
   error?: string;
 };
 
+export type EmailAttachment = {
+  fileName: string;
+  fileType?: string;
+  dataUrl?: string;
+  contentBase64?: string;
+};
+
+type NormalizedEmailAttachment = {
+  fileName: string;
+  fileType?: string;
+  contentBase64: string;
+};
+
 export async function sendEmail(args: {
   to: string;
   subject: string;
@@ -19,7 +32,9 @@ export async function sendEmail(args: {
   text?: string;
   from?: string;
   replyTo?: string;
+  headers?: Record<string, string>;
   categories?: string[];
+  attachments?: EmailAttachment[];
 }): Promise<EmailSendResult> {
   const provider = preferredEmailProvider();
   const from = args.from ?? emailFromAddress();
@@ -84,9 +99,13 @@ async function sendWithSendGrid(args: {
   text?: string;
   from: string;
   replyTo?: string;
+  headers?: Record<string, string>;
   categories?: string[];
+  attachments?: EmailAttachment[];
 }): Promise<EmailSendResult> {
   try {
+    const attachments = normalizeAttachments(args.attachments);
+    const headers = normalizeHeaders(args.headers);
     const res = await fetch("https://api.sendgrid.com/v3/mail/send", {
       method: "POST",
       headers: {
@@ -94,7 +113,7 @@ async function sendWithSendGrid(args: {
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        personalizations: [{ to: [{ email: args.to }] }],
+        personalizations: [{ to: [{ email: args.to }], ...(headers ? { headers } : {}) }],
         from: parseEmailAddress(args.from),
         ...(args.replyTo ? { reply_to: parseEmailAddress(args.replyTo) } : {}),
         subject: args.subject,
@@ -103,6 +122,16 @@ async function sendWithSendGrid(args: {
           { type: "text/html", value: args.html },
         ],
         categories: args.categories?.slice(0, 10),
+        ...(attachments.length
+          ? {
+              attachments: attachments.map((attachment) => ({
+                content: attachment.contentBase64,
+                filename: attachment.fileName,
+                type: attachment.fileType,
+                disposition: "attachment",
+              })),
+            }
+          : {}),
       }),
     });
 
@@ -140,8 +169,12 @@ async function sendWithResend(args: {
   text?: string;
   from: string;
   replyTo?: string;
+  headers?: Record<string, string>;
+  attachments?: EmailAttachment[];
 }): Promise<EmailSendResult> {
   try {
+    const attachments = normalizeAttachments(args.attachments);
+    const headers = normalizeHeaders(args.headers);
     const res = await fetch("https://api.resend.com/emails", {
       method: "POST",
       headers: {
@@ -155,6 +188,15 @@ async function sendWithResend(args: {
         subject: args.subject,
         html: args.html,
         text: args.text,
+        ...(headers ? { headers } : {}),
+        ...(attachments.length
+          ? {
+              attachments: attachments.map((attachment) => ({
+                filename: attachment.fileName,
+                content: attachment.contentBase64,
+              })),
+            }
+          : {}),
       }),
     });
     const json = (await safeJson(res)) as { id?: string; message?: string; error?: string } | null;
@@ -193,8 +235,12 @@ async function sendWithSmtp(args: {
   text?: string;
   from: string;
   replyTo?: string;
+  headers?: Record<string, string>;
+  attachments?: EmailAttachment[];
 }): Promise<EmailSendResult> {
   try {
+    const attachments = normalizeAttachments(args.attachments);
+    const headers = normalizeHeaders(args.headers);
     const transporter = nodemailer.createTransport({
       host: env("SMTP_HOST"),
       port: smtpPort(),
@@ -212,6 +258,12 @@ async function sendWithSmtp(args: {
       subject: args.subject,
       html: args.html,
       text: args.text,
+      headers,
+      attachments: attachments.map((attachment) => ({
+        filename: attachment.fileName,
+        content: Buffer.from(attachment.contentBase64, "base64"),
+        contentType: attachment.fileType,
+      })),
     });
 
     return {
@@ -259,6 +311,39 @@ function parseEmailAddress(from: string): { email: string; name?: string } {
   const [, rawName, email] = match;
   const name = rawName.trim().replace(/^"|"$/g, "");
   return name ? { email: email.trim(), name } : { email: email.trim() };
+}
+
+function normalizeAttachments(attachments: EmailAttachment[] | undefined): NormalizedEmailAttachment[] {
+  const normalized: NormalizedEmailAttachment[] = [];
+  for (const attachment of attachments ?? []) {
+    const contentBase64 = attachment.contentBase64 || dataUrlContentBase64(attachment.dataUrl);
+    if (!contentBase64) continue;
+    normalized.push({
+      fileName: attachment.fileName,
+      fileType: attachment.fileType,
+      contentBase64,
+    });
+  }
+  return normalized;
+}
+
+function normalizeHeaders(headers: Record<string, string> | undefined) {
+  const normalized: Record<string, string> = {};
+  for (const [rawKey, rawValue] of Object.entries(headers ?? {})) {
+    const key = rawKey.trim();
+    const value = String(rawValue).replace(/[\r\n]+/g, " ").trim();
+    if (!key || !value || !/^[A-Za-z0-9-]+$/.test(key)) continue;
+    normalized[key] = value;
+  }
+  return Object.keys(normalized).length ? normalized : undefined;
+}
+
+function dataUrlContentBase64(value: string | undefined) {
+  if (!value) return "";
+  const marker = ";base64,";
+  const index = value.indexOf(marker);
+  if (index === -1) return "";
+  return value.slice(index + marker.length).trim();
 }
 
 async function safeJson(res: Response): Promise<unknown | null> {

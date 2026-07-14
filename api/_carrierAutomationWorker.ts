@@ -385,7 +385,7 @@ export function workerConfigFromEnv(env: Record<string, string | undefined>): Ca
     mode: env.CARRIER_AUTOMATION_WORKER_MODE === "playwright" ? "playwright" : "plan_only",
     allowedHosts: parseRunnerList(env.CARRIER_AUTOMATION_ALLOWED_HOSTS),
     aiPlannerEnabled: env.CARRIER_AUTOMATION_ENABLE_AI_PLANNER === "true",
-    aiPlannerModel: env.AI_RUNNER_MODEL || env.AI_REASONING_MODEL || env.OPENAI_MODEL || "gpt-5.5",
+    aiPlannerModel: env.AI_RUNNER_MODEL || env.AI_REASONING_MODEL || env.OPENAI_MODEL || "gpt-4o-mini",
     openAiApiKey: env.OPENAI_API_KEY,
   };
 }

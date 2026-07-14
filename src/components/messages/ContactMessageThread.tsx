@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { DependencyList, RefObject } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { Bot, ExternalLink, FileText, Paperclip, Reply, Zap } from "lucide-react";
+import { Bot, ExternalLink, FileText, Paperclip, RefreshCw, Reply, Zap } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { DocumentViewerModal } from "@/components/ui/DocumentViewerModal";
 import {
@@ -14,6 +14,8 @@ import { api } from "@/lib/api";
 import { subscribeToDbChanges } from "@/lib/db";
 import { fmt } from "@/lib/format";
 import { inferMailProvider, mailboxThreadUrl, mailProviderShortLabel } from "@/lib/mailProvider";
+import { sendCommunicationThroughLiveMailbox, syncCommunicationsFromLiveMailbox } from "@/lib/liveMailbox";
+import { listMailboxConnections } from "@/lib/mailboxOAuth";
 import type { Communication, CommunicationAttachment, Document, MarketingMessage, User } from "@/types";
 
 const MESSAGE_SCROLL_PANE_CLASS = "message-scroll-pane flex-1 overflow-y-auto overflow-x-hidden p-3";
@@ -26,6 +28,9 @@ type ConnectedMailbox = {
   address: string;
   provider: NonNullable<User["mailProvider"]>;
   providerName: string;
+  connectionId?: string;
+  status?: string;
+  authMode?: string;
 };
 
 type ContactSummary = {
@@ -90,7 +95,21 @@ function replyTargetFor(row: Communication | MarketingMessage): ReplyTarget {
   const threadId = (row as Communication).threadId ?? `thread_msg_${row.id}`;
   const rawSubject = row.subject?.trim() || "your message";
   const subject = /^re:/i.test(rawSubject) ? rawSubject : `Re: ${rawSubject}`;
-  return { threadId, subject, replyToId: row.id, toSummary: rawSubject };
+  const comm = "mailboxOrigin" in row ? row : undefined;
+  const references = [
+    ...(comm?.references ?? []),
+    comm?.messageIdHeader,
+    comm?.externalMessageId,
+  ].filter((value): value is string => Boolean(value));
+  return {
+    threadId,
+    subject,
+    replyToId: row.id,
+    toSummary: rawSubject,
+    externalThreadId: comm?.externalThreadId,
+    replyToMessageIdHeader: comm?.messageIdHeader ?? comm?.externalMessageId,
+    references,
+  };
 }
 
 function attachmentPreviewDocument(
@@ -162,6 +181,8 @@ function mailboxForUser(userId: string): ConnectedMailbox {
     address,
     provider,
     providerName: mailProviderShortLabel(provider),
+    connectionId: staffMailbox?.id,
+    status: staffMailbox?.status,
   };
 }
 
@@ -179,6 +200,8 @@ function mailboxUrlForContact(
     threadId: comm?.threadId,
     externalThreadId: comm?.externalThreadId,
     externalUrl: comm?.externalUrl,
+    rfc822MessageId: comm?.rfc822MessageId,
+    messageIdHeader: comm?.messageIdHeader,
   });
 }
 
@@ -230,6 +253,7 @@ export function ContactMessageThread({
   fillHeight?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
   const [previewDocument, setPreviewDocument] = useState<Document | null>(null);
   const [, setRev] = useState(0);
@@ -239,13 +263,48 @@ export function ContactMessageThread({
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const scrollContentRef = useRef<HTMLDivElement | null>(null);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
+  const [serverMailbox, setServerMailbox] = useState<ConnectedMailbox | null>(null);
   const contact = contactSummary(contactKind, contactId);
-  const mailbox = mailboxForUser(userId);
+  const fallbackMailbox = mailboxForUser(userId);
+  const mailbox = serverMailbox ?? fallbackMailbox;
   const visibleRows = rowsForContact(tenantId, contactKind, contactId);
   const latestEmailRow = visibleRows.length ? visibleRows[visibleRows.length - 1].row : undefined;
   const threadUrl = mailboxUrlForContact(mailbox, contact, latestEmailRow);
 
   useEffect(() => subscribeToDbChanges(() => setRev((r) => r + 1)), []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const user = api.users.get(userId);
+    if (!user) {
+      setServerMailbox(null);
+      return;
+    }
+    void listMailboxConnections({ user, tenantId, mineOnly: true }).then((result) => {
+      if (cancelled) return;
+      if (!result.ok) {
+        setServerMailbox(null);
+        return;
+      }
+      const connection = result.connections.find((row) => row.userId === userId) ?? result.connections[0];
+      setServerMailbox(
+        connection
+          ? {
+              address: connection.address,
+              provider: connection.provider,
+              providerName: mailProviderShortLabel(connection.provider),
+              connectionId: connection.id,
+              status: connection.status,
+              authMode: connection.authMode,
+            }
+          : null
+      );
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [tenantId, userId]);
+
   useAnchoredMessageScroll(scrollRef, scrollContentRef, [contactId, fillHeight, visibleRows.length]);
 
   useEffect(() => {
@@ -266,10 +325,10 @@ export function ContactMessageThread({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetMessageId, contactId, visibleRows.length]);
 
-  function send(msg: ComposedMessage) {
+  async function send(msg: ComposedMessage) {
     setBusy(true);
     try {
-      api.communications.create({
+      const comm = api.communications.create({
         tenantId,
         customerId: contactKind === "client" ? contactId : undefined,
         prospectId: contactKind === "prospect" ? contactId : undefined,
@@ -278,10 +337,21 @@ export function ContactMessageThread({
         subject: msg.subject,
         threadId: msg.threadId,
         replyToId: msg.replyToId,
+        bodyHtml: msg.bodyHtml,
+        cc: msg.cc,
+        bcc: msg.bcc,
+        externalThreadId: msg.externalThreadId,
+        inReplyToHeader: msg.replyToMessageIdHeader,
+        references: msg.references,
         body: msg.body,
         attachments: msg.attachments,
         createdById: userId,
       });
+      const sender = api.users.get(userId);
+      if (sender) {
+        const liveResult = await sendCommunicationThroughLiveMailbox({ tenantId, user: sender, communication: comm });
+        if (!liveResult.ok) alert(liveResult.message);
+      }
       setReplyTarget(null);
       setRev((r) => r + 1);
       onChanged?.();
@@ -289,6 +359,36 @@ export function ContactMessageThread({
       setBusy(false);
     }
   }
+
+  async function refreshThread(options: { silent?: boolean } = {}) {
+    if (!options.silent) setRefreshing(true);
+    try {
+      const user = api.users.get(userId);
+      if (user) {
+        const sync = await syncCommunicationsFromLiveMailbox({
+          tenantId,
+          user,
+          connectionId: mailbox.connectionId,
+          maxResults: 25,
+        });
+        if (!sync.ok && mailbox.status === "connected" && !options.silent) alert(sync.message);
+      }
+      setRev((r) => r + 1);
+      onChanged?.();
+    } finally {
+      if (!options.silent) window.setTimeout(() => setRefreshing(false), 250);
+    }
+  }
+
+  useEffect(() => {
+    if (mailbox.status !== "connected") return;
+    const interval = window.setInterval(() => {
+      void refreshThread({ silent: true });
+    }, 60_000);
+    return () => window.clearInterval(interval);
+    // Polling is tied to the active contact and connected mailbox.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tenantId, userId, contactKind, contactId, mailbox.connectionId, mailbox.status]);
 
   return (
     <>
@@ -305,16 +405,28 @@ export function ContactMessageThread({
               <Badge tone={contact.kind === "client" ? "info" : "neutral"}>{contact.kind}</Badge>
             </div>
           </div>
-          <a
-            href={threadUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="btn-outline text-xs inline-flex shrink-0"
-            title={`Open this thread in ${mailbox.providerName} (${mailbox.address})`}
-          >
-            <ExternalLink className="h-3.5 w-3.5" />
-            Open in {mailbox.providerName}
-          </a>
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+            <button
+              type="button"
+              className="btn-outline text-xs inline-flex"
+              onClick={() => void refreshThread()}
+              disabled={refreshing}
+              title="Refresh this message thread"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? "animate-spin" : ""}`} />
+              Refresh
+            </button>
+            <a
+              href={threadUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-outline text-xs inline-flex"
+              title={`Open this thread in ${mailbox.providerName} (${mailbox.address})`}
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              Open in {mailbox.providerName}
+            </a>
+          </div>
         </div>
         <div ref={scrollRef} className={MESSAGE_SCROLL_PANE_CLASS}>
           <div ref={scrollContentRef} className="space-y-2.5">
@@ -375,7 +487,7 @@ export function ContactMessageThread({
                         )}
                       </div>
                       {row.subject && <div className="font-medium mb-0.5">{row.subject}</div>}
-                      <RichMessageBody body={body} tenantId={tenantId} />
+                      <RichMessageBody body={body} tenantId={tenantId} message={commRow} />
                       {attachments.length > 0 && (
                         <div className="mt-2 space-y-1.5">
                           {attachments.map((attachment) => (

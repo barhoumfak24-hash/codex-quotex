@@ -14,6 +14,8 @@ beforeEach(async () => {
   db.reset();
 });
 afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   vi.unstubAllEnvs();
   if (typeof window !== "undefined" && window.localStorage) window.localStorage.clear();
 });
@@ -56,19 +58,115 @@ describe("api.quoting workspace", () => {
 
   it("uses agent-provided new-asset details to seed AI public-field prep", async () => {
     const { api, agency, agent } = await seed();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((u: string) => {
+        const url = String(u);
+        if (url === "/api/ai/enrich-asset") {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              fields: {
+                year: 2003,
+                make: "HONDA",
+                model: "Accord EX-V6",
+                bodyClass: "Coupe",
+                trim: "EX-V6",
+              },
+              evidence: {
+                year: {
+                  fieldKey: "year",
+                  sourceKind: "government_api",
+                  sourceLabel: "NHTSA VIN decoder (vpic.nhtsa.dot.gov)",
+                  confidence: 0.95,
+                  verified: true,
+                  allowDocumentAutofill: true,
+                  collectedAt: "2026-06-28T00:00:00.000Z",
+                },
+                make: {
+                  fieldKey: "make",
+                  sourceKind: "government_api",
+                  sourceLabel: "NHTSA VIN decoder (vpic.nhtsa.dot.gov)",
+                  confidence: 0.95,
+                  verified: true,
+                  allowDocumentAutofill: true,
+                  collectedAt: "2026-06-28T00:00:00.000Z",
+                },
+                model: {
+                  fieldKey: "model",
+                  sourceKind: "government_api",
+                  sourceLabel: "NHTSA VIN decoder (vpic.nhtsa.dot.gov)",
+                  confidence: 0.95,
+                  verified: true,
+                  allowDocumentAutofill: true,
+                  collectedAt: "2026-06-28T00:00:00.000Z",
+                },
+                trim: {
+                  fieldKey: "trim",
+                  sourceKind: "government_api",
+                  sourceLabel: "NHTSA VIN decoder (vpic.nhtsa.dot.gov)",
+                  confidence: 0.95,
+                  verified: true,
+                  allowDocumentAutofill: true,
+                  collectedAt: "2026-06-28T00:00:00.000Z",
+                },
+              },
+              sources: ["NHTSA VIN decoder (vpic.nhtsa.dot.gov)"],
+              confidence: 0.95,
+              unavailableFields: ["estimatedValue"],
+            }),
+          });
+        }
+        if (url.includes("vpic.nhtsa.dot.gov")) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              Results: [
+                {
+                  ErrorCode: "0",
+                  ErrorText: "0 - VIN decoded clean. Check Digit (9th position) is correct",
+                  Make: "HONDA",
+                  Model: "Accord",
+                  ModelYear: "2003",
+                  BodyClass: "Coupe",
+                  Trim: "EX-V6",
+                  FuelTypePrimary: "Gasoline",
+                  EngineCylinders: "6",
+                  DisplacementL: "3.0",
+                },
+              ],
+            }),
+          });
+        }
+        return Promise.reject(new Error(`Unexpected URL ${url}`));
+      })
+    );
+    const customer = api.customers.list(agency.id)[0];
+    const asset = api.assets.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      type: "luxury_vehicle",
+      label: "1hgcm82633a004352",
+      estimatedValue: 310000,
+      details: {
+        vin: "1hgcm82633a004352",
+      },
+      status: "pending",
+    });
     const session = await api.quoting.startSession({
       tenantId: agency.id,
-      customerId: api.customers.list(agency.id)[0].id,
+      customerId: customer.id,
+      assetId: asset.id,
       createdById: agent.id,
       assetType: "luxury_vehicle",
       contactName: "Avery Stone",
       estimatedValue: 310000,
       address: "1 Ocean Drive, Palm Coast, FL 32137",
       assetDetails: {
-        vin: "W1K6G7GB7RA123456",
-        year: "2024",
-        make: "Mercedes-Benz",
-        model: "S 580",
+        vin: "1HGCM82633A004352",
+        year: "2003",
+        make: "HONDA",
+        model: "Accord EX-V6",
         garagingAddress: "1 Ocean Drive, Palm Coast, FL 32137",
         annualMileage: "3500",
         primaryUse: "Pleasure",
@@ -76,13 +174,14 @@ describe("api.quoting workspace", () => {
       lineOfBusiness: "personal",
     });
 
-    expect(session.assetDetails?.vin).toBe("W1K6G7GB7RA123456");
-    expect(session.publicFields["Year / make / model"]).toBe("2024 Mercedes-Benz S 580");
-    expect(session.publicFields["VIN-decoded trim"]).toBe("W1K6G7GB7RA123456");
+    expect(session.assetDetails?.vin).toBe("1HGCM82633A004352");
+    expect(session.publicFields["Year / make / model"]).toBe("2003 HONDA Accord EX-V6");
+    expect(session.publicFields["VIN-decoded trim"]).toBe("EX-V6");
     expect(session.publicFields["Garaging address"]).toBe("1 Ocean Drive, Palm Coast, FL 32137");
     expect(session.missingFields).not.toContain("Annual mileage estimate");
     expect(session.missingFields).not.toContain("Primary use (pleasure / commute / business)");
     expect(session.aiSummary).toContain("agent-provided lookup");
+    expect(api.assets.get(asset.id)?.label).toBe("2003 HONDA Accord EX-V6");
   });
 
   it("shows AI-filled personal questionnaire fields as editable shared answers", async () => {
@@ -111,7 +210,9 @@ describe("api.quoting workspace", () => {
     const questions = session.questionnaireQuestions ?? [];
     const yearBuilt = questions.find((question) => /year built/i.test(question.label));
     const squareFootage = questions.find((question) => /square footage/i.test(question.label));
-    const roofMaterial = questions.find((question) => /roof material/i.test(question.label));
+    const roofMaterial = questions.find((question) =>
+      /roof.*(material|shape|pitch|skylight)/i.test(question.label)
+    );
 
     expect(yearBuilt).toBeTruthy();
     expect(squareFootage).toBeTruthy();
@@ -120,9 +221,262 @@ describe("api.quoting workspace", () => {
     expect(session.questionnaireResponses?.[squareFootage!.id]).toBe("4200");
     expect(session.questionnaireResponses?.[roofMaterial!.id]).toBe("Metal");
     expect(session.questionnaireResponseMeta?.[yearBuilt!.id]?.updatedByRole).toBe("ai");
+    expect(session.questionnaireResponseMeta?.[yearBuilt!.id]?.sourceKind).toBe("agent_seed");
+    expect(session.questionnaireResponseMeta?.[yearBuilt!.id]?.sourceLabel).toBe("QuoteX intake");
   });
 
-  it("does not prefill estimate-only sweep answers as confirmed questionnaire responses", async () => {
+  it("uses OpenAI research mappings to prefill personal property questionnaire answers", async () => {
+    vi.resetModules();
+    const ai = await import("../ai");
+    const evidence = (fieldKey: string) => ({
+      fieldKey,
+      sourceKind: "public_web" as const,
+      sourceLabel: "OpenAI public property research",
+      sourceUrl: "https://example.com/property",
+      confidence: 0.76,
+      verified: false,
+      allowDocumentAutofill: false,
+      collectedAt: "2026-06-26T12:00:00.000Z",
+      notes: "Source-backed property fact for editable questionnaire review only.",
+    });
+    const mapSpy = vi.spyOn(ai, "aiMapAcordFields").mockImplementation(async (input) => {
+      const fieldId = (pattern: RegExp) =>
+        input.fields.find((field) => pattern.test(field.label))?.id;
+      const propertyAddressId = fieldId(/property address/i);
+      const yearBuiltId = fieldId(/year built/i);
+      const squareFootageId = fieldId(/square footage/i);
+      const constructionTypeId = fieldId(/construction type/i);
+      const roofMaterialId = fieldId(/roof material/i);
+      return {
+        fields: {
+          "Year built": "1952",
+          "Square footage": "2148",
+          "Construction type": "Masonry",
+          "Roof material": "Asphalt shingle",
+          "Property address": "3901 North Nora Avenue, Chicago, IL 60634",
+        },
+        publicFieldEvidence: {
+          "Year built": evidence("Year built"),
+          "Square footage": evidence("Square footage"),
+          "Construction type": evidence("Construction type"),
+          "Roof material": evidence("Roof material"),
+          "Property address": {
+            ...evidence("Property address"),
+            sourceKind: "public_geocoder",
+            sourceLabel: "Verified public geocoder",
+            confidence: 0.92,
+            verified: true,
+          },
+        },
+        mappings: [
+          {
+            targetId: propertyAddressId,
+            targetField: "Property address",
+            value: "Quote Tester",
+            sourceLabel: "OpenAI public property research",
+            sourceKind: "public_web",
+            sourceUrl: "https://example.com/profile",
+            confidence: 0.76,
+            verified: false,
+            rationale: "Deliberate mismatch that must not replace the address.",
+          },
+          {
+            targetId: yearBuiltId,
+            targetField: "Year built",
+            value: "1952",
+            sourceLabel: "OpenAI public property research",
+            sourceKind: "public_web",
+            sourceUrl: "https://example.com/property",
+            confidence: 0.76,
+            verified: false,
+            rationale: "Public property record year built.",
+          },
+          {
+            targetId: squareFootageId,
+            targetField: "Square footage",
+            value: "2148",
+            sourceLabel: "OpenAI public property research",
+            sourceKind: "public_web",
+            sourceUrl: "https://example.com/property",
+            confidence: 0.76,
+            verified: false,
+            rationale: "Public property record living area.",
+          },
+          {
+            targetId: constructionTypeId,
+            targetField: "Construction type",
+            value: "Masonry",
+            sourceLabel: "OpenAI public property research",
+            sourceKind: "public_web",
+            sourceUrl: "https://example.com/property",
+            confidence: 0.76,
+            verified: false,
+            rationale: "Public property record construction.",
+          },
+          {
+            targetId: roofMaterialId,
+            targetField: "Roof material",
+            value: "Asphalt shingle",
+            sourceLabel: "OpenAI public property research",
+            sourceKind: "public_web",
+            sourceUrl: "https://example.com/listing",
+            confidence: 0.76,
+            verified: false,
+            rationale: "Public listing roof material.",
+          },
+        ],
+        missingFields: [],
+        webSources: [],
+        summary: "Mapped public property facts into editable personal questionnaire answers.",
+        confidence: 0.76,
+      };
+    });
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    db.reset();
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const category = api.categories.get("cat_primary_home")!;
+    const prospect = api.prospects.create({
+      tenantId: agency.id,
+      name: "Quote Tester",
+      email: "qt@example.com",
+      assetType: "coastal_home",
+      estimatedValue: 1_500_000,
+      aiSummary: "x",
+      lastAction: "x",
+      lastActivityAt: new Date().toISOString(),
+      recommendedFollowUp: "x",
+      marketingStatus: "none",
+      status: "new",
+    });
+
+    const session = await api.quoting.startSession({
+      tenantId: agency.id,
+      prospectId: prospect.id,
+      createdById: agent.id,
+      assetType: category.assetType,
+      categoryId: category.id,
+      categoryLabel: category.label,
+      contactName: prospect.name,
+      address: "3901 North Nora Avenue, Chicago, IL 60634",
+      assetDetails: {
+        propertyAddress: "3901 North Nora Avenue, Chicago, IL 60634",
+      },
+      lineOfBusiness: "personal",
+    });
+
+    const questions = session.questionnaireQuestions ?? [];
+    const answerFor = (pattern: RegExp) => {
+      const question = questions.find((candidate) => pattern.test(candidate.label));
+      expect(question).toBeTruthy();
+      return session.questionnaireResponses?.[question!.id];
+    };
+    expect(mapSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        intent: "questionnaire_prefill",
+        template: expect.objectContaining({ documentName: "Personal lines questionnaire" }),
+        fields: expect.arrayContaining([
+          expect.objectContaining({ label: expect.stringMatching(/year built/i) }),
+          expect.objectContaining({ label: expect.stringMatching(/square footage/i) }),
+        ]),
+      })
+    );
+    expect(answerFor(/property address/i)).toBe("3901 North Nora Avenue, Chicago, IL 60634");
+    expect(answerFor(/occupancy/i)).toBe("Primary");
+    expect(answerFor(/year built/i)).toBe("1952");
+    expect(answerFor(/square footage/i)).toBe("2148");
+    expect(answerFor(/construction type/i)).toBe("Masonry");
+    expect(answerFor(/roof.*(material|shape|pitch|skylight)/i)).toBe("Asphalt shingle");
+    expect(answerFor(/property address/i)).not.toBe("Quote Tester");
+    const yearBuiltQuestion = questions.find((candidate) => /year built/i.test(candidate.label));
+    expect(session.questionnaireResponseMeta?.[yearBuiltQuestion!.id]?.sourceUrl).toBe("https://example.com/property");
+    expect(session.questionnaireResponseMeta?.[yearBuiltQuestion!.id]?.sourceKind).toBe("public_web");
+    expect(session.missingFields).not.toEqual(
+      expect.arrayContaining(["Occupancy", "Year built", "Square footage"])
+    );
+  });
+
+  it("trusts exact OpenAI target ids even when the returned field wording is descriptive", async () => {
+    vi.resetModules();
+    const ai = await import("../ai");
+    vi.spyOn(ai, "aiMapAcordFields").mockImplementation(async (input) => {
+      const yearBuilt = input.fields.find((field) => /year built/i.test(field.label));
+      const targetField = "Public record result - year built";
+      return {
+        fields: {},
+        publicFieldEvidence: {
+          [targetField]: {
+            fieldKey: targetField,
+            sourceKind: "web_search",
+            sourceLabel: "OpenAI public-data sweep",
+            sourceUrl: "https://example.com/property",
+            confidence: 0.72,
+            verified: false,
+            allowDocumentAutofill: false,
+            collectedAt: "2026-06-26T12:00:00.000Z",
+            notes: "Editable questionnaire prefill only.",
+          },
+        },
+        mappings: [
+          {
+            targetId: yearBuilt?.id,
+            targetField,
+            value: "2007",
+            sourceLabel: "OpenAI public-data sweep",
+            sourceUrl: "https://example.com/property",
+            sourceKind: "web_search",
+            confidence: 0.72,
+            verified: false,
+            rationale: "Public records indicate the property year built.",
+          },
+        ],
+        missingFields: [],
+        webSources: [],
+        summary: "Mapped public property facts into editable personal questionnaire answers.",
+        confidence: 0.72,
+      };
+    });
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    db.reset();
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const category = api.categories.get("cat_primary_home")!;
+    const prospect = api.prospects.create({
+      tenantId: agency.id,
+      name: "Quote Tester",
+      email: "qt@example.com",
+      assetType: "coastal_home",
+      estimatedValue: 1_500_000,
+      aiSummary: "x",
+      lastAction: "x",
+      lastActivityAt: new Date().toISOString(),
+      recommendedFollowUp: "x",
+      marketingStatus: "none",
+      status: "new",
+    });
+
+    const session = await api.quoting.startSession({
+      tenantId: agency.id,
+      prospectId: prospect.id,
+      createdById: agent.id,
+      assetType: category.assetType,
+      categoryId: category.id,
+      categoryLabel: category.label,
+      contactName: prospect.name,
+      address: "901 McDonald Dr, Northville, MI 48167",
+      lineOfBusiness: "personal",
+    });
+
+    const yearBuilt = session.questionnaireQuestions?.find((question) => /year built/i.test(question.label));
+    expect(yearBuilt).toBeTruthy();
+    expect(session.questionnaireResponses?.[yearBuilt!.id]).toBe("2007");
+    expect(session.questionnaireResponseMeta?.[yearBuilt!.id]?.updatedByRole).toBe("ai");
+    expect(session.questionnaireResponseMeta?.[yearBuilt!.id]?.sourceUrl).toBe("https://example.com/property");
+  });
+
+  it("does not prefill low-confidence estimate-only sweep answers into editable questionnaire responses", async () => {
     const { api, agency, agent } = await seed();
     const customer = api.customers.list(agency.id)[0];
     const category = api.categories.get("cat_primary_home")!;
@@ -174,9 +528,85 @@ describe("api.quoting workspace", () => {
     expect(squareFootage).toBeTruthy();
     expect(expanded.questionnaireResponses?.[yearBuilt!.id]).toBeUndefined();
     expect(expanded.questionnaireResponses?.[squareFootage!.id]).toBeUndefined();
+    expect(expanded.questionnaireResponseMeta?.[yearBuilt!.id]).toBeUndefined();
     expect(expanded.missingFields).toEqual(
       expect.arrayContaining([yearBuilt!.label, squareFootage!.label])
     );
+  });
+
+  it("prefills high-confidence source-backed public sweep answers into editable questionnaire responses", async () => {
+    const { api, agency, agent } = await seed();
+    const customer = api.customers.list(agency.id)[0];
+    const category = api.categories.get("cat_primary_home")!;
+    const session = api.quoting.upsertCustomerIntakeSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      quoteRequestId: "quote_request_chatgpt_style_estimates",
+      assetType: category.assetType,
+      categoryId: category.id,
+      categoryLabel: category.label,
+      contactName: customer.name,
+      address: "901 McDonald Dr, Northville, MI 48167",
+      estimatedValue: 1_250_000,
+      assetDetails: {
+        propertyAddress: "901 McDonald Dr, Northville, MI 48167",
+        yearBuilt: "2007",
+        squareFootage: "4,100 above grade / 6,500 total listed living area",
+        roofAge: "Unknown; if original, approx. 19 years",
+      },
+      publicFieldEvidence: {
+        yearBuilt: {
+          fieldKey: "yearBuilt",
+          sourceKind: "web_search",
+          sourceLabel: "OpenAI public-data sweep",
+          sourceUrl: "https://example.com/property",
+          confidence: 0.72,
+          verified: false,
+          allowDocumentAutofill: false,
+          collectedAt: "2026-06-26T12:00:00.000Z",
+        },
+        squareFootage: {
+          fieldKey: "squareFootage",
+          sourceKind: "web_search",
+          sourceLabel: "OpenAI public-data sweep",
+          sourceUrl: "https://example.com/property",
+          confidence: 0.72,
+          verified: false,
+          allowDocumentAutofill: false,
+          collectedAt: "2026-06-26T12:00:00.000Z",
+        },
+        roofAge: {
+          fieldKey: "roofAge",
+          sourceKind: "model_estimate",
+          sourceLabel: "OpenAI public-data sweep",
+          confidence: 0.72,
+          verified: false,
+          allowDocumentAutofill: false,
+          collectedAt: "2026-06-26T12:00:00.000Z",
+        },
+      },
+      lineOfBusiness: "personal",
+      createdById: agent.id,
+      status: "submitted_to_agent",
+    });
+
+    const expanded = api.quoting.get(session.id)!;
+    const yearBuilt = expanded.questionnaireQuestions?.find((question) => /year built/i.test(question.label));
+    const squareFootage = expanded.questionnaireQuestions?.find((question) => /square footage/i.test(question.label));
+    const roofAge = expanded.questionnaireQuestions?.find((question) => /roof age/i.test(question.label));
+
+    expect(yearBuilt).toBeTruthy();
+    expect(squareFootage).toBeTruthy();
+    expect(expanded.questionnaireResponses?.[yearBuilt!.id]).toBe("2007");
+    expect(expanded.questionnaireResponses?.[squareFootage!.id]).toBe(
+      "4,100 above grade / 6,500 total listed living area"
+    );
+    if (roofAge) {
+      expect(expanded.questionnaireResponses?.[roofAge.id]).toBeUndefined();
+      expect(expanded.questionnaireResponseMeta?.[roofAge.id]).toBeUndefined();
+    }
+    expect(expanded.questionnaireResponseMeta?.[yearBuilt!.id]?.updatedByRole).toBe("ai");
+    expect(expanded.questionnaireResponseMeta?.[yearBuilt!.id]?.sourceUrl).toBe("https://example.com/property");
   });
 
   it("keeps personal-lines sessions on AI mapping until the agent advances to questionnaire", async () => {
@@ -197,6 +627,7 @@ describe("api.quoting workspace", () => {
 
     expect(initial.lineOfBusiness).toBe("personal");
     expect(initial.questionnaireQuestions?.length).toBeGreaterThan(0);
+    expect(initial.questionnaireQuestions?.every((question) => question.required)).toBe(true);
     expect(initial.personalQuestionnairePreparedAt).toBeUndefined();
 
     const prepared = api.quoting.preparePersonalQuestionnaire(initial.id)!;
@@ -206,6 +637,53 @@ describe("api.quoting workspace", () => {
     const steppedBack = api.quoting.stepBack(initial.id)!;
     expect(steppedBack.personalQuestionnairePreparedAt).toBeUndefined();
     expect(steppedBack.questionnaireQuestions?.length).toBe(initial.questionnaireQuestions?.length);
+  });
+
+  it("keeps the quote flow moving when the provider times out before answers return", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/ai/acord-map")) {
+          return new Response(
+            JSON.stringify({
+              fields: {},
+              publicFieldEvidence: {},
+              mappings: [],
+              missingFields: ["Year built"],
+              webSources: [],
+              summary: "OpenAI public-data sweep timed out before answers were returned.",
+              confidence: 0,
+              providerError: "OpenAI public-data sweep timed out before answers were returned.",
+              providerErrorCode: "timeout",
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+
+    const { api, agency, agent } = await seed();
+    const customer = api.customers.list(agency.id)[0];
+    const asset = api.assets.listByCustomer(customer.id).find((a) => a.type === "coastal_home");
+    const initial = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      assetId: asset?.id,
+      createdById: agent.id,
+      assetType: asset?.type ?? "coastal_home",
+      contactName: customer.name,
+      estimatedValue: asset?.estimatedValue ?? 1_500_000,
+      address: customer.mailingAddress,
+      lineOfBusiness: "personal",
+    });
+
+    expect(initial.aiProviderErrorCode).toBe("timeout");
+    const prepared = api.quoting.preparePersonalQuestionnaire(initial.id)!;
+    expect(prepared.personalQuestionnairePreparedAt).toBeTruthy();
+    expect(prepared.aiProviderErrorCode).toBe("timeout");
+    expect(prepared.missingFields.length).toBeGreaterThan(0);
   });
 
   it("draftQuestionnaire writes a message body the agent can review", async () => {

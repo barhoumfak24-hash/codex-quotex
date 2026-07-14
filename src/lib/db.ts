@@ -6,6 +6,8 @@
 
 import * as seed from "./seed";
 import { apiBaseUrl, envValue } from "./apiBase";
+import { serverSessionHeaders } from "./serverSession";
+import { isLargeInlineDataUrl, storeStateBlob } from "./stateBlobs";
 import {
   generateAgencyCode,
   normalizeAgencyCode,
@@ -78,14 +80,42 @@ import type {
 
 // Bump this whenever DbShape gets a new table that older localStorage caches
 // won't have, so visitors automatically get the fresh seed.
-const STORAGE_KEY = "quotex.db.v31";
+const STORAGE_KEY = "quotex.db.v32";
 const CRITICAL_STORAGE_KEY = `${STORAGE_KEY}.critical`;
 const QUOTE_WORKFLOW_STORAGE_KEY = `${STORAGE_KEY}.quote-workflows`;
-const LEGACY_KEYS = ["quotex.db.v1", "quotex.db.v2", "quotex.db.v3", "quotex.db.v4", "quotex.db.v5", "quotex.db.v6", "quotex.db.v7", "quotex.db.v8", "quotex.db.v9", "quotex.db.v10", "quotex.db.v11", "quotex.db.v12", "quotex.db.v13", "quotex.db.v14", "quotex.db.v15", "quotex.db.v16", "quotex.db.v17", "quotex.db.v18", "quotex.db.v19", "quotex.db.v20", "quotex.db.v21", "quotex.db.v22", "quotex.db.v23", "quotex.db.v24", "quotex.db.v25", "quotex.db.v26", "quotex.db.v27", "quotex.db.v28", "quotex.db.v29", "quotex.db.v30"];
+const LEGACY_KEYS = ["quotex.db.v1", "quotex.db.v2", "quotex.db.v3", "quotex.db.v4", "quotex.db.v5", "quotex.db.v6", "quotex.db.v7", "quotex.db.v8", "quotex.db.v9", "quotex.db.v10", "quotex.db.v11", "quotex.db.v12", "quotex.db.v13", "quotex.db.v14", "quotex.db.v15", "quotex.db.v16", "quotex.db.v17", "quotex.db.v18", "quotex.db.v19", "quotex.db.v20", "quotex.db.v21", "quotex.db.v22", "quotex.db.v23", "quotex.db.v24", "quotex.db.v25", "quotex.db.v26", "quotex.db.v27", "quotex.db.v28", "quotex.db.v29", "quotex.db.v30", "quotex.db.v31"];
+// Every table that can contain agency-entered or workflow-generated data is
+// treated as recoverable. Refreshing, deploying a new bundle, or bumping the
+// local schema version must never silently fall back to seed data and hide real
+// in-app state.
 const CRITICAL_TABLES: (keyof DbShape)[] = [
+  "agencies",
+  "branches",
+  "users",
+  "customers",
+  "assets",
+  "policies",
+  "quoteRequests",
+  "prospects",
+  "carriers",
+  "carrierLinks",
+  "carrierDownloads",
+  "carrierRunnerJobs",
+  "carrierContacts",
+  "deposits",
+  "payments",
+  "renewals",
+  "claims",
+  "campaigns",
+  "messages",
+  "categoryLinks",
+  "categories",
+  "customMessages",
+  "customDocumentTypes",
   "quotingSessions",
   "importBatches",
   "communications",
+  "connectedMailboxes",
   "documents",
   "notes",
   "statusEvents",
@@ -96,7 +126,36 @@ const CRITICAL_TABLES: (keyof DbShape)[] = [
   "masterAgencyActivities",
   "securityIncidents",
   "securityBans",
+  "accountingSettings",
+  "timesheets",
+  "hrSubmissions",
+  "calendarEvents",
+  "deletedRows",
 ];
+
+interface DeletedRow {
+  id: string;
+  table: string;
+  rowId: string;
+  deletedAt: string;
+}
+
+export type SyncStatusKind = "synced" | "saving" | "error" | "local-only";
+export type SyncErrorReason =
+  | "unauthorized"
+  | "not_configured"
+  | "too_large"
+  | "network"
+  | "conflict"
+  | "local_quota"
+  | "unknown";
+
+export interface SyncStatus {
+  status: SyncStatusKind;
+  reason?: SyncErrorReason;
+  message?: string;
+  updatedAt: string;
+}
 
 const CARRIER_AGENT_SIGN_IN_URLS: Record<string, string> = {
   carrier_chubb: "https://www.chubb.com/us-en/agents-brokers.html",
@@ -195,6 +254,7 @@ interface DbShape {
   timesheets: Timesheet[];
   hrSubmissions: HrSubmission[];
   calendarEvents: CalendarEvent[];
+  deletedRows: DeletedRow[];
 }
 
 function freshSeed(): DbShape {
@@ -250,6 +310,7 @@ function freshSeed(): DbShape {
     timesheets: [],
     hrSubmissions: [],
     calendarEvents: [],
+    deletedRows: [],
   };
 }
 
@@ -655,17 +716,22 @@ function withCategoryLibraryDefaults(data: DbShape): DbShape {
   data.categoryLinks ??= [];
 
   const seededById = new Map(seed.SEED_CATEGORIES.map((category) => [category.id, category]));
-  data.categories = data.categories.map((category) => {
+  const normalizedCategories: InsuranceCategory[] = [];
+  const seenCategoryIds = new Set<string>();
+  for (const category of data.categories) {
+    if (seenCategoryIds.has(category.id)) continue;
+    seenCategoryIds.add(category.id);
     const seeded = seededById.get(category.id);
     const existingLine = (category as InsuranceCategory & { lineOfBusiness?: InsuranceLineOfBusiness })
       .lineOfBusiness;
-    return {
+    normalizedCategories.push({
       ...category,
       lineOfBusiness: existingLine ?? seeded?.lineOfBusiness ?? "personal",
       sortOrder: category.sortOrder ?? seeded?.sortOrder ?? 9999,
       active: category.active ?? true,
-    };
-  });
+    });
+  }
+  data.categories = normalizedCategories;
 
   const existingCategoryIds = new Set(data.categories.map((category) => category.id));
   for (const category of seed.SEED_CATEGORIES) {
@@ -674,6 +740,22 @@ function withCategoryLibraryDefaults(data: DbShape): DbShape {
       existingCategoryIds.add(category.id);
     }
   }
+
+  const linksByKey = new Map<string, CategoryAgencyLink>();
+  for (const link of data.categoryLinks) {
+    const key = `${link.tenantId}:${link.categoryId}`;
+    const existing = linksByKey.get(key);
+    if (!existing) {
+      linksByKey.set(key, link);
+      continue;
+    }
+    linksByKey.set(key, {
+      ...existing,
+      active: existing.active || link.active,
+      createdAt: existing.createdAt < link.createdAt ? existing.createdAt : link.createdAt,
+    });
+  }
+  data.categoryLinks = [...linksByKey.values()];
 
   const existingLinkKeys = new Set(
     data.categoryLinks.map((link) => `${link.tenantId}:${link.categoryId}`)
@@ -705,24 +787,23 @@ function hasCurrentAcordTemplateDefaults(data: DbShape): boolean {
   const currentAcordTemplates = currentAcordTemplateSeeds();
   const currentById = new Map(currentAcordTemplates.map((document) => [document.id, document]));
   const existingAcordTemplates = (data.documents ?? []).filter(isAcordAgencyTemplate);
-  return (
-    existingAcordTemplates.length === currentAcordTemplates.length &&
-    existingAcordTemplates.every((document) => {
-      const current = currentById.get(document.id);
-      return (
-        current?.fileName === document.fileName &&
-        current.storagePath === document.storagePath &&
-        current.downloadUrl === document.downloadUrl
-      );
-    })
-  );
+  const existingById = new Map(existingAcordTemplates.map((document) => [document.id, document]));
+  return currentAcordTemplates.every((current) => {
+    const existing = existingById.get(current.id);
+    return (
+      existing?.fileName === current.fileName &&
+      existing.storagePath === current.storagePath &&
+      existing.downloadUrl === current.downloadUrl
+    );
+  });
 }
 
 function withAcordTemplateDefaults(data: DbShape): DbShape {
   data.documents ??= [];
   if (hasCurrentAcordTemplateDefaults(data)) return data;
   const currentAcordTemplates = currentAcordTemplateSeeds();
-  data.documents = data.documents.filter((document) => !isAcordAgencyTemplate(document));
+  const currentAcordTemplateIds = new Set(currentAcordTemplates.map((document) => document.id));
+  data.documents = data.documents.filter((document) => !currentAcordTemplateIds.has(document.id));
   data.documents.unshift(...structuredClone(currentAcordTemplates));
   return data;
 }
@@ -936,16 +1017,26 @@ function withDefaultMigrations(data: DbShape): DbShape {
   );
 }
 
+function latestLegacySnapshotRaw(): string | null {
+  if (typeof window === "undefined") return null;
+  for (let i = LEGACY_KEYS.length - 1; i >= 0; i -= 1) {
+    const raw = window.localStorage.getItem(LEGACY_KEYS[i]);
+    if (raw) return raw;
+  }
+  return null;
+}
+
+function removeLegacySnapshots() {
+  if (typeof window === "undefined") return;
+  for (const key of LEGACY_KEYS) window.localStorage.removeItem(key);
+}
+
 function load(): DbShape {
   if (typeof window === "undefined") {
     return withDefaultMigrations(freshSeed());
   }
   try {
-    // Drop any older versioned caches so visitors who came in before a schema
-    // change don't see partial or empty pages.
-    for (const k of LEGACY_KEYS) window.localStorage.removeItem(k);
-
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = window.localStorage.getItem(STORAGE_KEY) ?? latestLegacySnapshotRaw();
     const critical =
       normalizeCriticalSnapshot(window.sessionStorage.getItem(CRITICAL_STORAGE_KEY)) ??
       normalizeCriticalSnapshot(window.localStorage.getItem(CRITICAL_STORAGE_KEY));
@@ -958,6 +1049,7 @@ function load(): DbShape {
         quoteWorkflows
       );
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
+      removeLegacySnapshots();
       return fresh;
     }
     const parsed = JSON.parse(raw) as Partial<DbShape>;
@@ -971,6 +1063,7 @@ function load(): DbShape {
       quoteWorkflows
     );
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
+    removeLegacySnapshots();
     return migrated;
   } catch {
     const critical =
@@ -992,14 +1085,52 @@ function load(): DbShape {
 
 let cache: DbShape = load();
 let remoteHydrated = false;
+let remoteLoadedOk = false;
 let remoteHydrating = false;
 let remoteDirtyDuringHydrate = false;
 let remoteWriteTimer: ReturnType<typeof setTimeout> | undefined;
+let remoteRetryTimer: ReturnType<typeof setTimeout> | undefined;
+let remoteRetryIndex = 0;
+let remoteRevision: number | null = null;
+let remotePersistPromise: Promise<boolean> | undefined;
+let remoteDirtyDuringPersist = false;
 let externalSyncStarted = false;
 let dbChangeChannel: BroadcastChannel | undefined;
 const DB_CHANGE_CHANNEL = `${STORAGE_KEY}.changes`;
 const DB_INSTANCE_ID = Math.random().toString(36).slice(2);
+const ACTIVE_DB_INSTANCE_KEY = "__quotexActiveDbInstanceId";
 const REMOTE_LIVE_SYNC_INTERVAL_MS = 2500;
+const REMOTE_WRITE_DEBOUNCE_MS = 300;
+const REMOTE_RETRY_DELAYS_MS = [1000, 2000, 5000, 15000, 60000];
+const REMOTE_SNAPSHOT_WARN_BYTES = 1.5 * 1024 * 1024;
+const LOCAL_CACHE_INLINE_DATA_URL_WARN_BYTES = 150_000;
+const TOMBSTONE_TTL_MS = 60 * 24 * 60 * 60 * 1000;
+
+function activateDbInstance() {
+  if (typeof window === "undefined") return;
+  (window as Window & { __quotexActiveDbInstanceId?: string })[ACTIVE_DB_INSTANCE_KEY] =
+    DB_INSTANCE_ID;
+}
+
+function isActiveDbInstance() {
+  if (typeof window === "undefined") return true;
+  return (
+    (window as Window & { __quotexActiveDbInstanceId?: string })[ACTIVE_DB_INSTANCE_KEY] ===
+    DB_INSTANCE_ID
+  );
+}
+
+activateDbInstance();
+
+let syncStatus: SyncStatus = {
+  status: remoteSyncEnabled() ? "saving" : "local-only",
+  reason: remoteSyncEnabled() ? undefined : "not_configured",
+  message: remoteSyncEnabled() ? "Saving changes." : "Cloud backup is not connected in this environment.",
+  updatedAt: new Date().toISOString(),
+};
+
+type SyncStatusListener = (status: SyncStatus) => void;
+const syncStatusListeners = new Set<SyncStatusListener>();
 
 function remoteSyncEnabled(): boolean {
   return envValue("VITE_STATE_SYNC_MODE") === "supabase";
@@ -1014,11 +1145,65 @@ function remoteStateId(): string {
 }
 
 function remoteHeaders(): HeadersInit {
-  const token = envValue("VITE_STATE_SYNC_TOKEN");
   return {
     "content-type": "application/json",
-    ...(token ? { "x-state-sync-token": token } : {}),
+    ...serverSessionHeaders(),
   };
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function setSyncStatus(next: Omit<SyncStatus, "updatedAt">) {
+  syncStatus = { ...next, updatedAt: nowIso() };
+  syncStatusListeners.forEach((listener) => {
+    try {
+      listener(syncStatus);
+    } catch {
+      /* sync status listeners must not break persistence */
+    }
+  });
+}
+
+function syncFailureReason(status: number, fallback: SyncErrorReason = "unknown"): SyncErrorReason {
+  if (status === 401 || status === 403) return "unauthorized";
+  if (status === 409) return "conflict";
+  if (status === 413) return "too_large";
+  if (status === 503) return "not_configured";
+  return fallback;
+}
+
+function isNewerIso(candidate: string | undefined, current: string | undefined) {
+  if (!candidate) return false;
+  if (!current) return true;
+  return candidate > current;
+}
+
+function newestIso(...values: (string | undefined)[]) {
+  return values.filter(Boolean).sort().at(-1) ?? nowIso();
+}
+
+function stampInsertedRow<T>(row: T): T {
+  if (!row || typeof row !== "object") return row;
+  const now = nowIso();
+  const next = { ...(row as Record<string, unknown>) };
+  if (typeof next.createdAt !== "string" || !next.createdAt) next.createdAt = now;
+  next.updatedAt = newestIso(typeof next.updatedAt === "string" ? next.updatedAt : undefined, now);
+  return next as T;
+}
+
+function stampUpdatedRow<T>(current: T, patch: Partial<T>): T {
+  const now = nowIso();
+  const merged = { ...(current as Record<string, unknown>), ...(patch as Record<string, unknown>) };
+  const currentUpdatedAt = typeof (current as Record<string, unknown>).updatedAt === "string"
+    ? ((current as Record<string, unknown>).updatedAt as string)
+    : undefined;
+  const patchUpdatedAt = typeof (patch as Record<string, unknown>).updatedAt === "string"
+    ? ((patch as Record<string, unknown>).updatedAt as string)
+    : undefined;
+  merged.updatedAt = newestIso(currentUpdatedAt, patchUpdatedAt, now);
+  return merged as T;
 }
 
 function normalizeRemoteSnapshot(value: unknown): DbShape | null {
@@ -1086,12 +1271,15 @@ function mergeCriticalSnapshot(data: DbShape, critical: Partial<DbShape> | null)
   CRITICAL_TABLES.forEach((table) => {
     const criticalRows = critical[table] as unknown;
     if (!Array.isArray(criticalRows)) return;
-    writeable[table] = mergeRows(
-      criticalRows as { id?: string }[],
-      merged[table] as unknown as { id?: string }[]
-    );
+    writeable[table] =
+      table === "deletedRows"
+        ? mergeTombstones(criticalRows as DeletedRow[], merged.deletedRows)
+        : mergeRows(
+            criticalRows as { id?: string }[],
+            merged[table] as unknown as { id?: string }[]
+          );
   });
-  return withDefaultMigrations(merged);
+  return withDefaultMigrations(applyTombstones(merged));
 }
 
 function mergeQuoteWorkflowSnapshot(
@@ -1116,6 +1304,17 @@ function rowSyncStamp(row: unknown) {
   return value.updatedAt ?? value.lastTouchedAt ?? value.submittedAt ?? value.completedAt ?? value.createdAt ?? "";
 }
 
+function tombstoneId(table: string, id: string) {
+  return `${table}:${id}`;
+}
+
+function purgeOldTombstones(rows: DeletedRow[], now = Date.now()) {
+  return rows.filter((row) => {
+    const deletedAt = Date.parse(row.deletedAt);
+    return Number.isNaN(deletedAt) || now - deletedAt < TOMBSTONE_TTL_MS;
+  });
+}
+
 function mergeRows<T extends { id?: string }>(localRows: T[], remoteRows: T[]): T[] {
   const byId = new Map<string, T>();
   const noIdRows: T[] = [];
@@ -1138,16 +1337,58 @@ function mergeRows<T extends { id?: string }>(localRows: T[], remoteRows: T[]): 
   return [...byId.values(), ...noIdRows];
 }
 
+function mergeTombstones(localRows: DeletedRow[] = [], remoteRows: DeletedRow[] = []): DeletedRow[] {
+  return purgeOldTombstones(mergeRows(localRows, remoteRows));
+}
+
+function applyTombstones(data: DbShape): DbShape {
+  const next = { ...data, deletedRows: mergeTombstones(data.deletedRows ?? [], []) } as DbShape;
+  const writeable = next as Record<keyof DbShape, unknown>;
+  const retainedTombstones: DeletedRow[] = [];
+
+  for (const tombstone of next.deletedRows) {
+    if (!tombstone.table || tombstone.table === "deletedRows") {
+      retainedTombstones.push(tombstone);
+      continue;
+    }
+    const table = tombstone.table as keyof DbShape;
+    const rows = writeable[table] as unknown;
+    if (!Array.isArray(rows)) {
+      retainedTombstones.push(tombstone);
+      continue;
+    }
+    const rowIndex = (rows as { id?: string }[]).findIndex((row) => row.id === tombstone.rowId);
+    if (rowIndex === -1) {
+      retainedTombstones.push(tombstone);
+      continue;
+    }
+    const row = (rows as unknown[])[rowIndex];
+    const rowStamp = rowSyncStamp(row);
+    if (rowStamp && rowStamp > tombstone.deletedAt) {
+      continue;
+    }
+    (rows as unknown[]).splice(rowIndex, 1);
+    retainedTombstones.push(tombstone);
+  }
+
+  next.deletedRows = purgeOldTombstones(retainedTombstones);
+  return next;
+}
+
 function mergeDbShapes(local: DbShape, remote: DbShape): DbShape {
   const merged = { ...local } as DbShape;
   const writeable = merged as Record<keyof DbShape, unknown>;
   (Object.keys(local) as (keyof DbShape)[]).forEach((table) => {
+    if (table === "deletedRows") {
+      writeable[table] = mergeTombstones(local.deletedRows, remote.deletedRows);
+      return;
+    }
     writeable[table] = mergeRows(
       local[table] as unknown as { id?: string }[],
       remote[table] as unknown as { id?: string }[]
     );
   });
-  return merged;
+  return applyTombstones(merged);
 }
 
 function dbChangeBroadcastChannel(): BroadcastChannel | undefined {
@@ -1186,31 +1427,44 @@ function applyLocalStorageSnapshot(source: "storage" | "broadcast") {
 
 async function hydrateFromRemote(options: { force?: boolean; merge?: boolean } = {}) {
   if (
+    !isActiveDbInstance() ||
     !remoteSyncEnabled() ||
     typeof window === "undefined" ||
     (!options.force && remoteHydrated) ||
     remoteHydrating
   ) {
+    if (!remoteSyncEnabled()) {
+      setSyncStatus({
+        status: "local-only",
+        reason: "not_configured",
+        message: "Cloud backup is not connected in this environment.",
+      });
+    }
     return;
   }
   remoteHydrating = true;
+  if (!remoteLoadedOk) {
+    setSyncStatus({ status: "saving", message: "Connecting cloud state." });
+  }
   try {
     const res = await fetch(`${remoteApiBase()}/state/${encodeURIComponent(remoteStateId())}`, {
       method: "GET",
       headers: remoteHeaders(),
     });
-    if (!res.ok) throw new Error(`State read failed: ${res.status}`);
-    const payload = (await res.json()) as { found?: boolean; snapshot?: unknown };
+    if (!res.ok) {
+      throw new Error(`State read failed: ${res.status}`);
+    }
+    const payload = (await res.json()) as { found?: boolean; scoped?: boolean; snapshot?: unknown; revision?: number };
+    if (!isActiveDbInstance()) return;
+    remoteLoadedOk = true;
+    remoteHydrated = true;
+    if (typeof payload.revision === "number") remoteRevision = payload.revision;
     const remote = normalizeRemoteSnapshot(payload.snapshot);
     if (!payload.found || !remote) {
-      scheduleRemotePersist(50);
+      scheduleRemotePersist(50, { skipStatus: true });
       return;
     }
-    if (remoteDirtyDuringHydrate && !options.force) {
-      scheduleRemotePersist(50);
-      return;
-    }
-    const next = options.merge ? mergeDbShapes(cache, remote) : remote;
+    const next = options.merge === false || payload.scoped === true ? remote : mergeDbShapes(cache, remote);
     const changed = JSON.stringify(next) !== JSON.stringify(cache);
     cache = next;
     if (changed) {
@@ -1218,35 +1472,282 @@ async function hydrateFromRemote(options: { force?: boolean; merge?: boolean } =
       notify();
       broadcastDbChange("remote");
     }
-    if (options.merge && JSON.stringify(next) !== JSON.stringify(remote)) {
-      scheduleRemotePersist(100);
+    if ((options.merge && JSON.stringify(next) !== JSON.stringify(remote)) || remoteDirtyDuringHydrate) {
+      scheduleRemotePersist(100, { skipStatus: true });
+    } else if (!remoteWriteTimer && !remoteRetryTimer) {
+      setSyncStatus({ status: "synced", message: "All changes saved." });
     }
+    remoteDirtyDuringHydrate = false;
   } catch (err) {
     console.warn("[db] Supabase state hydrate failed", err);
+    remoteLoadedOk = false;
+    remoteHydrated = false;
+    setSyncStatus({
+      status: "error",
+      reason: err instanceof Error && /401|403/.test(err.message) ? "unauthorized" : "network",
+      message: err instanceof Error ? err.message : "Cloud state could not be loaded.",
+    });
   } finally {
     remoteHydrating = false;
-    remoteHydrated = true;
   }
 }
 
-function scheduleRemotePersist(delayMs = 650) {
-  if (!remoteSyncEnabled() || typeof window === "undefined") return;
+function scheduleRemotePersist(
+  delayMs = REMOTE_WRITE_DEBOUNCE_MS,
+  options: { skipStatus?: boolean } = {}
+) {
+  if (!isActiveDbInstance() || !remoteSyncEnabled() || typeof window === "undefined") return;
   if (remoteHydrating) remoteDirtyDuringHydrate = true;
+  if (!options.skipStatus) setSyncStatus({ status: "saving", message: "Saving changes." });
   if (remoteWriteTimer) clearTimeout(remoteWriteTimer);
   remoteWriteTimer = setTimeout(() => {
+    remoteWriteTimer = undefined;
+    if (!isActiveDbInstance()) return;
     void persistRemote();
   }, delayMs);
 }
 
-async function persistRemote() {
+function clearRemoteRetry() {
+  if (remoteRetryTimer) clearTimeout(remoteRetryTimer);
+  remoteRetryTimer = undefined;
+  remoteRetryIndex = 0;
+}
+
+function scheduleRemoteRetry(reason: SyncErrorReason, message: string) {
+  if (!remoteSyncEnabled() || typeof window === "undefined" || reason === "too_large") return;
+  const delay = REMOTE_RETRY_DELAYS_MS[Math.min(remoteRetryIndex, REMOTE_RETRY_DELAYS_MS.length - 1)];
+  remoteRetryIndex += 1;
+  if (remoteRetryTimer) clearTimeout(remoteRetryTimer);
+  remoteRetryTimer = setTimeout(() => {
+    remoteRetryTimer = undefined;
+    if (!isActiveDbInstance()) return;
+    void persistRemote();
+  }, delay);
+  setSyncStatus({
+    status: "error",
+    reason,
+    message: `${message} Retrying in ${Math.round(delay / 1000)}s.`,
+  });
+}
+
+function serializedSnapshot(snapshot: DbShape = cache, baseRevision: number | null = remoteRevision) {
+  return JSON.stringify({ snapshot, baseRevision });
+}
+
+export function stateSnapshotByteLength(snapshot: unknown): number {
+  return JSON.stringify(snapshot).length;
+}
+
+function isOversizedLocalInlinePayload(value?: string | null): value is string {
+  return typeof value === "string" && value.startsWith("data:") && value.length > LOCAL_CACHE_INLINE_DATA_URL_WARN_BYTES;
+}
+
+function compactDocumentForLocalCache(document: Document): Document {
+  if (!isOversizedLocalInlinePayload(document.downloadUrl) && !isOversizedLocalInlinePayload(document.storagePath)) {
+    return document;
+  }
+
+  const compact = { ...document };
+  if (isOversizedLocalInlinePayload(compact.downloadUrl)) {
+    if (compact.storagePath?.startsWith("blob:")) {
+      compact.downloadUrl = compact.storagePath;
+    } else {
+      delete compact.downloadUrl;
+    }
+  }
+  if (isOversizedLocalInlinePayload(compact.storagePath)) {
+    compact.storagePath = compact.downloadUrl?.startsWith("blob:") ? compact.downloadUrl : "";
+  }
+  return compact;
+}
+
+function compactCommunicationForLocalCache(communication: Communication): Communication {
+  const attachments = communication.attachments ?? [];
+  if (!attachments.some((attachment) => isOversizedLocalInlinePayload(attachment.dataUrl))) return communication;
+
+  return {
+    ...communication,
+    attachments: attachments.map((attachment) => {
+      if (!isOversizedLocalInlinePayload(attachment.dataUrl)) return attachment;
+      const compact = { ...attachment };
+      if (compact.storagePath?.startsWith("blob:")) {
+        compact.dataUrl = compact.storagePath;
+      } else {
+        delete compact.dataUrl;
+      }
+      return compact;
+    }),
+  };
+}
+
+function compactSnapshotForLocalCache(snapshot: DbShape): DbShape {
+  return {
+    ...snapshot,
+    documents: snapshot.documents.map(compactDocumentForLocalCache),
+    communications: snapshot.communications.map(compactCommunicationForLocalCache),
+  };
+}
+
+function logLargeSnapshotTables(serializedLength: number) {
+  const sizes = (Object.keys(cache) as (keyof DbShape)[])
+    .map((table) => ({
+      table,
+      bytes: JSON.stringify(cache[table]).length,
+    }))
+    .sort((a, b) => b.bytes - a.bytes)
+    .slice(0, 8);
+  console.warn("[db] State snapshot too large for safe sync", {
+    bytes: serializedLength,
+    biggestTables: sizes,
+  });
+}
+
+async function migrateLargeInlineFilesToBlobRefs(): Promise<boolean> {
+  if (!remoteSyncEnabled() || !remoteLoadedOk) return false;
+  let changed = false;
+
+  for (const document of cache.documents) {
+    if (!isLargeInlineDataUrl(document.downloadUrl)) continue;
+    try {
+      const ref = await storeStateBlob(document.downloadUrl, document.fileType);
+      if (ref.startsWith("blob:")) {
+        document.downloadUrl = ref;
+        if (!document.storagePath || document.storagePath.startsWith("data:")) {
+          document.storagePath = ref;
+        }
+        changed = true;
+      }
+    } catch (err) {
+      console.warn("[db] State blob upload failed for document", document.id, err);
+    }
+  }
+
+  for (const communication of cache.communications) {
+    for (const attachment of communication.attachments ?? []) {
+      if (!isLargeInlineDataUrl(attachment.dataUrl)) continue;
+      try {
+        const ref = await storeStateBlob(attachment.dataUrl, attachment.fileType);
+        if (ref.startsWith("blob:")) {
+          attachment.dataUrl = ref;
+          attachment.storagePath ??= ref;
+          changed = true;
+        }
+      } catch (err) {
+        console.warn("[db] State blob upload failed for communication attachment", attachment.id, err);
+      }
+    }
+  }
+
+  if (changed) persistLocalOnly();
+  return changed;
+}
+
+async function persistRemote(options: { keepalive?: boolean; attempt?: number } = {}): Promise<boolean> {
+  if (!isActiveDbInstance()) return false;
+  if (remotePersistPromise && !options.keepalive) {
+    remoteDirtyDuringPersist = true;
+    return remotePersistPromise;
+  }
+  const run = persistRemoteInner(options);
+  if (!options.keepalive) {
+    remotePersistPromise = run;
+    void run.finally(() => {
+      if (remotePersistPromise === run) remotePersistPromise = undefined;
+      if (remoteDirtyDuringPersist) {
+        remoteDirtyDuringPersist = false;
+        scheduleRemotePersist(0, { skipStatus: true });
+      }
+    });
+  }
+  return run;
+}
+
+async function persistRemoteInner(options: { keepalive?: boolean; attempt?: number } = {}): Promise<boolean> {
+  if (!isActiveDbInstance()) return false;
+  if (!remoteSyncEnabled()) {
+    setSyncStatus({
+      status: "local-only",
+      reason: "not_configured",
+      message: "Cloud backup is not connected in this environment.",
+    });
+    return false;
+  }
+  if (!remoteLoadedOk) {
+    setSyncStatus({
+      status: "saving",
+      message: "Waiting for cloud state before uploading local changes.",
+    });
+    return false;
+  }
+  await migrateLargeInlineFilesToBlobRefs();
+  const body = serializedSnapshot();
+  if (body.length > REMOTE_SNAPSHOT_WARN_BYTES) {
+    remoteDirtyDuringPersist = false;
+    if (remoteWriteTimer) {
+      clearTimeout(remoteWriteTimer);
+      remoteWriteTimer = undefined;
+    }
+    logLargeSnapshotTables(body.length);
+    setSyncStatus({
+      status: "error",
+      reason: "too_large",
+      message: "Changes are saved locally, but the cloud snapshot is too large to sync.",
+    });
+    return false;
+  }
+  setSyncStatus({ status: "saving", message: "Saving changes." });
   try {
-    await fetch(`${remoteApiBase()}/state/${encodeURIComponent(remoteStateId())}`, {
+    const res = await fetch(`${remoteApiBase()}/state/${encodeURIComponent(remoteStateId())}`, {
       method: "PUT",
       headers: remoteHeaders(),
-      body: JSON.stringify({ snapshot: cache }),
+      body,
+      keepalive: options.keepalive,
     });
+    const payload = (await res.json().catch(() => null)) as
+      | { ok?: boolean; scoped?: boolean; snapshot?: unknown; revision?: number; error?: string }
+      | null;
+    if (!isActiveDbInstance()) return false;
+    if (res.status === 409) {
+      const remote = normalizeRemoteSnapshot(payload?.snapshot);
+      if (remote) {
+        if (typeof payload?.revision === "number") remoteRevision = payload.revision;
+        cache = payload?.scoped === true ? remote : mergeDbShapes(cache, remote);
+        persistLocalOnly();
+        notify();
+      }
+      if ((options.attempt ?? 0) < 5) {
+        return persistRemoteInner({ attempt: (options.attempt ?? 0) + 1 });
+      }
+      setSyncStatus({
+        status: "error",
+        reason: "conflict",
+        message: "Cloud save conflict could not be resolved automatically.",
+      });
+      scheduleRemoteRetry("conflict", "Cloud save conflict.");
+      return false;
+    }
+    if (!res.ok) {
+      const reason = syncFailureReason(res.status);
+      const message = payload?.error ? `Cloud save failed: ${payload.error}.` : `Cloud save failed: ${res.status}.`;
+      setSyncStatus({ status: "error", reason, message });
+      scheduleRemoteRetry(reason, message);
+      return false;
+    }
+    if (typeof payload?.revision === "number") remoteRevision = payload.revision;
+    const remote = normalizeRemoteSnapshot(payload?.snapshot);
+    if (remote) {
+      cache = payload?.scoped === true ? remote : mergeDbShapes(cache, remote);
+      persistLocalOnly();
+    }
+    clearRemoteRetry();
+    setSyncStatus({ status: "synced", message: "All changes saved." });
+    return true;
   } catch (err) {
     console.warn("[db] Supabase state write failed", err);
+    const message = err instanceof Error ? err.message : "Network error while saving cloud state.";
+    setSyncStatus({ status: "error", reason: "network", message });
+    scheduleRemoteRetry("network", message);
+    return false;
   }
 }
 
@@ -1277,7 +1778,33 @@ function persistLocalOnly() {
       /* quota - session backup already attempted */
     }
   } catch {
-    /* quota — ignore */
+    try {
+      const compact = JSON.stringify(compactSnapshotForLocalCache(cache));
+      window.localStorage.setItem(STORAGE_KEY, compact);
+      try {
+        window.localStorage.setItem(QUOTE_WORKFLOW_STORAGE_KEY, quoteWorkflows);
+      } catch {
+        /* quota - session backup already attempted */
+      }
+      try {
+        window.localStorage.setItem(CRITICAL_STORAGE_KEY, critical);
+      } catch {
+        /* quota - session backup already attempted */
+      }
+      if (remoteSyncEnabled() && syncStatus.status !== "saving") {
+        setSyncStatus({ status: "saving", message: "Saving changes securely." });
+      }
+    } catch {
+      if (remoteSyncEnabled()) {
+        setSyncStatus({ status: "saving", reason: "local_quota", message: "Saving changes securely." });
+      } else {
+        setSyncStatus({
+          status: "local-only",
+          reason: "local_quota",
+          message: "Cloud backup is not connected in this environment.",
+        });
+      }
+    }
   }
 }
 
@@ -1318,16 +1845,26 @@ export function subscribeToDbChanges(fn: Listener): () => void {
   };
 }
 
-void hydrateFromRemote();
+export function subscribeToSyncStatus(fn: SyncStatusListener): () => void {
+  syncStatusListeners.add(fn);
+  fn(syncStatus);
+  return () => {
+    syncStatusListeners.delete(fn);
+  };
+}
+
+void hydrateFromRemote({ merge: true });
 
 function startExternalSync() {
   if (typeof window === "undefined" || externalSyncStarted) return;
   externalSyncStarted = true;
   window.addEventListener("storage", (event) => {
+    if (!isActiveDbInstance()) return;
     if (event.key !== STORAGE_KEY || !event.newValue) return;
     applyIncomingSnapshot(normalizeLocalSnapshot(event.newValue) ?? cache, "storage");
   });
   dbChangeBroadcastChannel()?.addEventListener("message", (event) => {
+    if (!isActiveDbInstance()) return;
     const message = event.data as {
       type?: string;
       key?: string;
@@ -1344,9 +1881,29 @@ function startExternalSync() {
   });
   if (remoteSyncEnabled()) {
     window.setInterval(() => {
+      if (!isActiveDbInstance()) return;
       void hydrateFromRemote({ force: true, merge: true });
     }, REMOTE_LIVE_SYNC_INTERVAL_MS);
+  } else {
+    setSyncStatus({
+      status: "local-only",
+      reason: "not_configured",
+      message: "Cloud backup is not connected in this environment.",
+    });
   }
+  const flushPendingRemoteWrite = () => {
+    if (!isActiveDbInstance()) return;
+    if (!remoteSyncEnabled() || (!remoteWriteTimer && syncStatus.status !== "saving")) return;
+    if (remoteWriteTimer) {
+      clearTimeout(remoteWriteTimer);
+      remoteWriteTimer = undefined;
+    }
+    void persistRemote({ keepalive: true });
+  };
+  window.addEventListener("pagehide", flushPendingRemoteWrite);
+  window.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") flushPendingRemoteWrite();
+  });
 }
 
 startExternalSync();
@@ -1354,16 +1911,20 @@ startExternalSync();
 export const db = {
   reset() {
     cache = withDefaultMigrations(freshSeed());
-    persist();
+    persistLocalOnly();
+    broadcastDbChange("local");
     notify();
   },
   snapshot(): DbShape {
     return cache;
   },
+  syncStatus(): SyncStatus {
+    return syncStatus;
+  },
   async syncNow(): Promise<boolean> {
     if (!remoteSyncEnabled()) return false;
-    await persistRemote();
-    return true;
+    if (!remoteLoadedOk) await hydrateFromRemote({ force: true, merge: true });
+    return persistRemote();
   },
   // Generic read helpers — array per table; copies returned to keep callers immutable.
   list<K extends keyof DbShape>(table: K): DbShape[K] {
@@ -1371,10 +1932,11 @@ export const db = {
     return structuredClone(cache[table]) as DbShape[K];
   },
   insert<K extends keyof DbShape>(table: K, row: DbShape[K] extends Array<infer T> ? T : never) {
-    (cache[table] as unknown as unknown[]).push(row);
+    const stamped = table === "deletedRows" ? row : stampInsertedRow(row);
+    (cache[table] as unknown as unknown[]).push(stamped);
     persist();
     notify();
-    return row;
+    return stamped;
   },
   update<K extends keyof DbShape>(
     table: K,
@@ -1384,7 +1946,10 @@ export const db = {
     const arr = cache[table] as unknown as { id: string }[];
     const idx = arr.findIndex((r) => r.id === id);
     if (idx === -1) return null;
-    arr[idx] = { ...arr[idx], ...patch };
+    arr[idx] =
+      table === "deletedRows"
+        ? { ...arr[idx], ...patch }
+        : stampUpdatedRow(arr[idx], patch as Partial<{ id: string }>);
     persist();
     notify();
     return arr[idx] as DbShape[K] extends Array<infer T> ? T : never;
@@ -1394,6 +1959,18 @@ export const db = {
     const idx = arr.findIndex((r) => r.id === id);
     if (idx === -1) return false;
     arr.splice(idx, 1);
+    if (table !== "deletedRows") {
+      const deletedAt = nowIso();
+      const row: DeletedRow = {
+        id: tombstoneId(String(table), id),
+        table: String(table),
+        rowId: id,
+        deletedAt,
+      };
+      const existing = cache.deletedRows.findIndex((deleted) => deleted.id === row.id);
+      if (existing === -1) cache.deletedRows.push(row);
+      else cache.deletedRows[existing] = row;
+    }
     persist();
     notify();
     return true;

@@ -1,7 +1,7 @@
 import app from "../server/dist/app.js";
 
 export const config = {
-  maxDuration: 60,
+  maxDuration: 300,
 };
 
 export default function handler(req, res) {

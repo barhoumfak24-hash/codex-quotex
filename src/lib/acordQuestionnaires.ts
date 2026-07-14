@@ -55,10 +55,17 @@ interface AcordQuestionnaireDefinition {
   questions: AcordQuestionSpec[];
 }
 
+interface AcordTargetSplit {
+  knownTargets: { targetField: string; value: string }[];
+  missingTargets: string[];
+  nonGenericTargets: string[];
+}
+
 const yesNo = ["Yes", "No", "Not sure"];
 const entityTypes = ["LLC", "C-Corp", "S-Corp", "Partnership", "Sole proprietor", "Other"];
 const cancellationMethods = ["Flat", "Pro rata", "Short rate", "Other"];
 const coverageActions = ["Add", "Change", "Delete", "Cancel", "Other"];
+const ALWAYS_ASK_ACORD_QUESTION_KEYS = new Set(["loss_history"]);
 
 function question(
   key: string,
@@ -885,12 +892,23 @@ export function buildAcordQuestionsForTemplate(
   context: AcordFillContext
 ): QuotingQuestion[] {
   const definition = acordDefinitionForTemplate(template);
-  return definition.questions
-    .filter((spec) => !shouldSuppressAcordQuestion(template, spec, context))
-    .map((spec) => ({
+  return definition.questions.flatMap((spec) => {
+    const split = splitAcordTargetsForQuestion(spec, context);
+    const canTailor = canTailorAcordQuestion(spec, split);
+    const alwaysAsk = shouldAlwaysAskAcordQuestion(spec);
+    if (!alwaysAsk && canTailor && split.missingTargets.length === 0) return [];
+    const shouldNarrow =
+      !alwaysAsk &&
+      canTailor &&
+      split.knownTargets.length > 0 &&
+      split.missingTargets.length > 0;
+    return [
+      {
       id: questionId(template, spec),
       section: `${definition.title} - ACORD fields`,
-      label: `ACORD ${definition.formNumber}: ${spec.label}`,
+        label: `ACORD ${definition.formNumber}: ${
+          shouldNarrow ? missingTargetQuestionLabel(split.missingTargets) : spec.label
+        }`,
       kind: spec.kind,
       options: spec.options,
       required: spec.required,
@@ -899,8 +917,10 @@ export function buildAcordQuestionsForTemplate(
       sourceDocumentFileName: template.fileName,
       acordFormNumber: definition.formNumber,
       acordFieldKey: spec.key,
-      acordFieldLabels: spec.targetFields,
-    }));
+        acordFieldLabels: shouldNarrow ? split.missingTargets : spec.targetFields,
+      },
+    ];
+  });
 }
 
 export function buildAcordFilledFieldsForTemplate(
@@ -916,14 +936,37 @@ export function buildAcordFilledFieldsForTemplate(
   const missingFieldLabels: string[] = [];
 
   definition.questions.forEach((spec) => {
+    const split = splitAcordTargetsForQuestion(spec, context);
+    split.knownTargets.forEach(({ targetField, value }) => {
+      fields[targetField] = value;
+      mappings.push({
+        sourceLabel: `ACORD ${definition.formNumber}: ${targetField}`,
+        targetField,
+        value,
+        source: "system",
+      });
+    });
     const resolved = resolveAcordValue(template, spec, context);
     if (!resolved) {
-      if (spec.required) missingFieldLabels.push(`ACORD ${definition.formNumber}: ${spec.label}`);
+      if (spec.required && shouldCountAcordQuestionMissing(spec, split)) {
+        missingFieldLabels.push(`ACORD ${definition.formNumber}: ${missingTargetQuestionLabel(split.missingTargets)}`);
+      }
       return;
     }
-    const targetValues = targetFieldValuesForResolvedValue(spec, resolved.value, resolved.source);
+    const targetFields =
+      resolved.source === "questionnaire" && canTailorAcordQuestion(spec, split)
+        ? split.missingTargets
+        : spec.targetFields;
+    const targetValues = targetFieldValuesForResolvedValue(
+      spec,
+      resolved.value,
+      resolved.source,
+      targetFields
+    );
     if (targetValues.length === 0) {
-      if (spec.required) missingFieldLabels.push(`ACORD ${definition.formNumber}: ${spec.label}`);
+      if (spec.required && shouldCountAcordQuestionMissing(spec, split)) {
+        missingFieldLabels.push(`ACORD ${definition.formNumber}: ${missingTargetQuestionLabel(split.missingTargets)}`);
+      }
       return;
     }
     targetValues.forEach(({ targetField, value }) => {
@@ -951,27 +994,6 @@ export function countAcordAutoFilledFields(
 
 function questionId(template: AcordTemplateLike, spec: AcordQuestionSpec): string {
   return `acord-${template.templateId}-${fieldSlug(spec.key)}`;
-}
-
-function shouldSuppressAcordQuestion(
-  template: AcordTemplateLike,
-  spec: AcordQuestionSpec,
-  context: AcordFillContext
-): boolean {
-  void template;
-  void spec;
-  void context;
-  // Agents and clients must always be able to review and correct every
-  // ACORD-specific questionnaire item. Known data should prefill fields;
-  // it should never remove the question from the workflow.
-  return false;
-/*
-  const resolved = resolveAcordValue(template, spec, context);
-  if (!resolved) return false;
-  if (resolved.source === "questionnaire") return false;
-  if (targetFieldsCarrySameValue(spec.targetFields)) return true;
-  return compositeAcordQuestionComplete(spec, context);
-*/
 }
 
 function resolveAcordValue(
@@ -1056,9 +1078,12 @@ function targetFieldsForResolvedValue(spec: AcordQuestionSpec): string[] {
 function targetFieldValuesForResolvedValue(
   spec: AcordQuestionSpec,
   resolvedValue: string,
-  source: AcordValueSource
+  source: AcordValueSource,
+  targetFieldsOverride?: string[]
 ): { targetField: string; value: string }[] {
-  const sameValueTargets = targetFieldsForResolvedValue(spec);
+  const targetFields = targetFieldsOverride ?? spec.targetFields;
+  const scopedSpec = targetFields === spec.targetFields ? spec : { ...spec, targetFields };
+  const sameValueTargets = targetFieldsForResolvedValue(scopedSpec);
   if (sameValueTargets.length > 0) {
     const parsedByTarget = sameValueTargets
       .map((targetField) => ({
@@ -1075,7 +1100,7 @@ function targetFieldValuesForResolvedValue(
     return sameValueTargets.map((targetField) => ({ targetField, value: resolvedValue }));
   }
 
-  const mapped = spec.targetFields
+  const mapped = targetFields
     .map((targetField) => ({
       targetField,
       value: extractCompositeTargetValue(resolvedValue, targetField),
@@ -1088,26 +1113,82 @@ function targetFieldValuesForResolvedValue(
   // field, so it remains legible and reviewable without fabricating
   // separate component values.
   if (source === "questionnaire") {
-    const targetField = spec.targetFields.find((field) => targetFieldKind(field) !== "generic") ?? spec.targetFields[0];
+    const targetField = targetFields.find((field) => targetFieldKind(field) !== "generic") ?? targetFields[0];
     return targetField ? [{ targetField, value: resolvedValue }] : [];
   }
   return [];
 }
 
-function compositeAcordQuestionComplete(
+function splitAcordTargetsForQuestion(
   spec: AcordQuestionSpec,
   context: AcordFillContext
-): boolean {
-  const targetFields = spec.targetFields.filter((field) => targetFieldKind(field) !== "generic");
-  if (targetFields.length === 0) return false;
-  return targetFields.every((targetField) => !!knownValueForTargetField(spec, targetField, context));
+): AcordTargetSplit {
+  const nonGenericTargets = spec.targetFields.filter((field) => targetFieldKind(field) !== "generic");
+  const knownTargets: { targetField: string; value: string }[] = [];
+  const missingTargets: string[] = [];
+  nonGenericTargets.forEach((targetField) => {
+    const value = knownValueForTargetField(spec, targetField, context, { strictForSuppression: true });
+    if (value) {
+      knownTargets.push({ targetField, value });
+    } else {
+      missingTargets.push(targetField);
+    }
+  });
+  return { knownTargets, missingTargets, nonGenericTargets };
+}
+
+function canTailorAcordQuestion(spec: AcordQuestionSpec, split: AcordTargetSplit): boolean {
+  return !shouldAlwaysAskAcordQuestion(spec) && split.nonGenericTargets.length > 0;
+}
+
+function shouldAlwaysAskAcordQuestion(spec: AcordQuestionSpec): boolean {
+  return ALWAYS_ASK_ACORD_QUESTION_KEYS.has(spec.key);
+}
+
+function shouldCountAcordQuestionMissing(spec: AcordQuestionSpec, split: AcordTargetSplit): boolean {
+  if (shouldAlwaysAskAcordQuestion(spec)) return true;
+  if (split.nonGenericTargets.length === 0) return true;
+  return split.missingTargets.length > 0;
+}
+
+function missingTargetQuestionLabel(targetFields: string[]): string {
+  if (targetFields.length === 0) return "Remaining applicant details";
+  return humanJoin(targetFields);
+}
+
+function humanJoin(values: string[]): string {
+  const unique = Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+  if (unique.length <= 1) return unique[0] ?? "";
+  if (unique.length === 2) return `${unique[0]} and ${unique[1]}`;
+  return `${unique.slice(0, -1).join(", ")}, and ${unique[unique.length - 1]}`;
 }
 
 function knownValueForTargetField(
   spec: AcordQuestionSpec,
   targetField: string,
-  context: AcordFillContext
+  context: AcordFillContext,
+  options: { strictForSuppression?: boolean } = {}
 ): string | null {
+  if (options.strictForSuppression) {
+    const known = findStrictKnownValueForTarget(context.knownFields, spec, targetField);
+    if (known) return known;
+
+    const assetKnown = findStrictKnownValueForTarget(context.assetDetails, spec, targetField, "asset_detail", context);
+    if (assetKnown) return assetKnown;
+
+    const publicKnown = findStrictKnownValueForTarget(context.publicFields, spec, targetField, "public_record", context);
+    if (publicKnown) return publicKnown;
+
+    switch (targetFieldKind(targetField)) {
+      case "insured_name":
+        return realKnownValue(context.contactName);
+      case "agency_name":
+        return realKnownValue(context.agencyName);
+      default:
+        return null;
+    }
+  }
+
   const hints = targetSpecificHints(targetField);
   const known = findValueByHints(context.knownFields, [targetField]);
   if (known) return known;
@@ -1149,6 +1230,80 @@ function knownValueForTargetField(
   }
 }
 
+function findStrictKnownValueForTarget(
+  values: Record<string, unknown> | undefined,
+  spec: AcordQuestionSpec,
+  targetField: string,
+  evidenceSource?: "asset_detail" | "public_record",
+  context?: AcordFillContext
+): string | null {
+  if (!values) return null;
+  const entries = Object.entries(values)
+    .map(([key, value]) => ({ key, value: realKnownValue(value) }))
+    .filter((entry): entry is { key: string; value: string } => !!entry.value);
+  if (entries.length === 0) return null;
+  const target = normalize(targetField);
+  const targetKind = targetFieldKind(targetField);
+  const exact = entries.find((entry) => normalize(entry.key) === target);
+  if (exact && strictKnownEntryUsable(spec, targetField, exact, evidenceSource, context)) {
+    return exact.value;
+  }
+  if (targetKind === "generic") return null;
+  const kindMatch = entries.find((entry) => targetFieldKind(entry.key) === targetKind);
+  if (kindMatch && strictKnownEntryUsable(spec, targetField, kindMatch, evidenceSource, context)) {
+    return kindMatch.value;
+  }
+  return null;
+}
+
+function strictKnownEntryUsable(
+  spec: AcordQuestionSpec,
+  targetField: string,
+  entry: { key: string; value: string },
+  evidenceSource?: "asset_detail" | "public_record",
+  context?: AcordFillContext
+): boolean {
+  if (!sourceEntryCompatibleWithAcordQuestion(spec, entry.key, entry.value)) return false;
+  if (!valueCompatibleWithTargetField(entry.value, targetField)) return false;
+  if (!evidenceSource || !context) return true;
+  return evidenceAllowsAcordAutofill(context.publicFieldEvidence, entry.key, evidenceSource);
+}
+
+function realKnownValue(value: unknown): string | null {
+  const text = stringifyValue(value);
+  if (!text) return null;
+  if (/^commercial applicant$/i.test(text)) return null;
+  if (
+    /\b(unknown|not public|not publicly|not found|not listed|no public|n\/a|not available|unconfirmed|requires|needed|needs verification|verify)\b/i.test(
+      text
+    )
+  ) {
+    return null;
+  }
+  return text;
+}
+
+function valueCompatibleWithTargetField(value: string, targetField: string): boolean {
+  const kind = targetFieldKind(targetField);
+  if (kind === "insured_name" || kind === "agency_name") {
+    if (/@/.test(value)) return false;
+    if (looksLikeStreetAddress(value)) return false;
+  }
+  if (kind.includes("email") && !/@/.test(value)) return false;
+  if (kind.includes("phone") && !/[0-9]{7,}/.test(value.replace(/\D/g, ""))) return false;
+  if (kind.includes("address") && !looksLikeStreetAddress(value)) return false;
+  return true;
+}
+
+function looksLikeStreetAddress(value: string): boolean {
+  return (
+    /\d/.test(value) &&
+    /\b(st|street|rd|road|ave|avenue|dr|drive|ln|lane|blvd|boulevard|ct|court|cir|circle|way|pkwy|parkway|hwy|highway|pl|place|terrace|ter|trail|mi|fl|ga|sc|ny|ca|tx|il|oh|pa|zip)\b/i.test(
+      value
+    )
+  );
+}
+
 function targetSpecificHints(targetField: string): string[] {
   const kind = targetFieldKind(targetField);
   const base = [targetField];
@@ -1160,7 +1315,7 @@ function targetSpecificHints(targetField: string): string[] {
   if (kind === "agency_email" || kind === "insured_email") return [...base, "Email", "Primary email"];
   if (kind === "fein") return [...base, "FEIN", "EIN", "Federal EIN", "Tax ID"];
   if (kind === "entity_type") return [...base, "Entity type", "Business entity type"];
-  if (kind === "website") return [...base, "Website", "Business website"];
+  if (kind === "business_website") return [...base, "Website", "Business website"];
   if (kind === "years_in_business") return [...base, "Years in business", "Year established"];
   if (kind === "industry_code") return [...base, "Primary industry", "NAICS", "SIC"];
   if (kind === "operations") return [...base, "Business operations", "Description of operations", "Products / services"];
@@ -1219,7 +1374,11 @@ function targetFieldKind(label: string): string {
   if (normalized.includes("fax")) return normalized.includes("agency") || normalized.includes("producer") ? "agency_fax" : "insured_fax";
   if (normalized.includes("email")) return normalized.includes("agency") || normalized.includes("producer") ? "agency_email" : "insured_email";
   if (normalized.includes("phone")) return normalized.includes("agency") || normalized.includes("producer") ? "agency_phone" : "insured_phone";
-  if (normalized.includes("website")) return "website";
+  if (normalized.includes("website")) {
+    return normalized.includes("agency") || normalized.includes("producer")
+      ? "agency_website"
+      : "business_website";
+  }
   if (normalized.includes("address")) {
     if (normalized.includes("agency") || normalized.includes("producer")) return "agency_address";
     if (normalized.includes("property") || normalized.includes("risk") || normalized.includes("premises") || normalized.includes("location")) {

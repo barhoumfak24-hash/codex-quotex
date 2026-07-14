@@ -8,6 +8,7 @@ import { Card } from "@/components/ui/Card";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import {
   BILLING_STATUS_LABEL,
   billingCarrierUrl,
@@ -217,7 +218,7 @@ export function EmployeeBillingPage() {
                   <td className="px-4 py-5 align-middle">
                     <div className="font-mono text-sm font-semibold text-ink-900">{fmt.policyRef(row.policy)}</div>
                     <div className="truncate text-xs text-ink-500">
-                      {asset?.label ?? "Asset not recorded"} - {api.helpers.departmentLabel(row.policy)}
+                      {asset ? assetDisplayName(asset) : "Asset not recorded"} - {api.helpers.departmentLabel(row.policy)}
                     </div>
                     <div className="text-xs text-ink-500">
                       {row.policy.nextPaymentDueDate ? `Next due ${fmt.date(row.policy.nextPaymentDueDate)}` : "No due date"}
@@ -274,7 +275,7 @@ function policyBillingSearchParts(row: PolicyBillingRow): string[] {
     row.customer.email,
     row.customer.phone,
     row.carrier?.name,
-    asset?.label,
+    asset ? assetDisplayName(asset) : undefined,
     api.helpers.departmentLabel(row.policy),
     row.policy.policyNumber,
     row.policy.billingAccountNumber,

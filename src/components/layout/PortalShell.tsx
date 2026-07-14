@@ -1,9 +1,10 @@
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { ArrowLeft, LogOut } from "lucide-react";
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { Logo } from "./Logo";
 import { useAuth } from "@/lib/auth";
+import { db, subscribeToSyncStatus, type SyncStatus } from "@/lib/db";
 import { CountBadge } from "@/components/ui/CountBadge";
 import { ErrorBoundary } from "@/components/ui/ErrorBoundary";
 import { getAppSurface, toAppRoute, toSurfaceRoute } from "@/lib/appSurface";
@@ -89,6 +90,7 @@ export function PortalShell({
               </div>
             )}
           </div>
+          <SyncStatusBanner compact />
         </header>
 
         <main
@@ -215,7 +217,7 @@ export function PortalShell({
         >
         <div className={`${compactSidebar ? "employee-sidebar-logo px-5 py-4" : "px-5 py-5"} hairline`}>
           <div className="flex items-start justify-between gap-3">
-            <Logo subtitle={compactSidebar ? undefined : subtitle} stacked />
+            <Logo subtitle={compactSidebar ? undefined : subtitle} stacked interactive={false} />
           </div>
         </div>
         <nav
@@ -223,42 +225,49 @@ export function PortalShell({
           style={compactNavStyle}
           className={
             compactSidebar
-              ? "employee-sidebar-nav flex-1 space-y-0 overflow-hidden px-3 py-1.5"
+              ? "employee-sidebar-nav flex-1 space-y-0 overflow-y-auto px-3 py-1.5"
               : "dropdown-scroll-y flex-1 space-y-0.5 px-3 py-4"
           }
         >
-          {nav.map((item) => (
-            <NavLink
-                  key={item.to}
-                  to={surfaceRoute(item.to)}
-              end={item.end}
-              onClick={scrollToPageTop}
-              className={({ isActive }) =>
-                `flex items-center ${
+          {nav.map((item) => {
+            const target = surfaceRoute(item.to);
+            const isActive = item.end
+              ? location.pathname === target
+              : location.pathname === target || location.pathname.startsWith(`${target}/`);
+            return (
+              <button
+                key={item.to}
+                type="button"
+                onClick={() => {
+                  navigate(target);
+                  scrollToPageTop();
+                }}
+                aria-current={isActive ? "page" : undefined}
+                className={`flex w-full items-center text-left ${
                   compactSidebar
-                    ? "employee-sidebar-link min-h-[36px] gap-3 px-3 py-2 rounded-md text-sm leading-tight"
+                    ? "employee-sidebar-link gap-3 px-3 py-2 rounded-md text-sm leading-tight"
                     : "gap-3 px-3 py-2 rounded-md text-sm"
                 } font-medium ${
                   isActive
                     ? "bg-ink-900 text-white"
                     : "text-ink-700 hover:bg-ink-100"
-                }`
-              }
-            >
-              <span className="h-4 w-4 shrink-0">{item.icon}</span>
-              <span className="flex-1">{item.label}</span>
-              {item.badge && item.badge > 0 ? (
+                }`}
+              >
+                <span className="h-4 w-4 shrink-0">{item.icon}</span>
+                <span className="flex-1">{item.label}</span>
+                {item.badge && item.badge > 0 ? (
                 // Same alert system as AlertPin — solid #E63946,
-                <CountBadge
-                  value={item.badge}
-                  tone="alert"
-                  size="sm"
-                  title={`${item.badge} ${item.badge === 1 ? "alert" : "alerts"}`}
-                  className="ml-auto"
-                />
-              ) : null}
-            </NavLink>
-          ))}
+                  <CountBadge
+                    value={item.badge}
+                    tone="alert"
+                    size="sm"
+                    title={`${item.badge} ${item.badge === 1 ? "alert" : "alerts"}`}
+                    className="ml-auto"
+                  />
+                ) : null}
+              </button>
+            );
+          })}
         </nav>
         {showAccountFooter && (
           <div className="shrink-0 border-t border-ink-100 px-3 py-4">
@@ -303,6 +312,7 @@ export function PortalShell({
           )}
         </header>
         {topRight && <div className="px-6 py-3 bg-white border-b border-ink-100">{topRight}</div>}
+        <SyncStatusBanner />
         <main
           id="main-content"
           ref={mainRef}
@@ -318,6 +328,44 @@ export function PortalShell({
         </div>
       </div>
       </div>
+    </div>
+  );
+}
+
+function SyncStatusBanner({ compact = false }: { compact?: boolean }) {
+  const [status, setStatus] = useState<SyncStatus>(() => db.syncStatus());
+  const [retrying, setRetrying] = useState(false);
+
+  useEffect(() => subscribeToSyncStatus(setStatus), []);
+
+  const isRecovering = status.status === "error" && status.reason === "local_quota";
+  if (status.status !== "error" || isRecovering) return null;
+
+  return (
+    <div
+      className={`mt-2 flex items-center justify-between gap-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-900 ${
+        compact ? "text-[11px]" : ""
+      }`}
+      role="status"
+    >
+      <span className="min-w-0 truncate">
+        Changes are still syncing. You can keep working.
+      </span>
+      <button
+        type="button"
+        className="shrink-0 rounded border border-current/20 bg-white/60 px-2 py-1 text-[11px] font-bold"
+        disabled={retrying}
+        onClick={async () => {
+          setRetrying(true);
+          try {
+            await db.syncNow();
+          } finally {
+            setRetrying(false);
+          }
+        }}
+      >
+        {retrying ? "Retrying" : "Retry"}
+      </button>
     </div>
   );
 }

@@ -29,17 +29,26 @@ import { db } from "@/lib/db";
 import { fmt } from "@/lib/format";
 import { provisionAgencyForCompletedSale } from "@/lib/softwareSaleProvisioning";
 import {
+  createSoftwareSalePacketStripeCheckoutSession,
+  createSoftwareSaleStripeCheckoutSession,
+  getSoftwareSaleStripeCheckoutSession,
+} from "@/lib/stripeCheckout";
+import type { StripeCheckoutSessionSummary } from "@/lib/stripeCheckout";
+import {
   COMPANY_APP_MONTHLY_ADD_ON_USD,
   COMPANY_WEBSITE_AND_APP_BUNDLE_DISCOUNT_USD,
   COMPANY_WEBSITE_MONTHLY_ADD_ON_USD,
   SOFTWARE_SETUP_FEE_USD,
-  SOFTWARE_USER_MONTHLY_PRICE_USD,
+  SOFTWARE_PRODUCT_OPTIONS,
   WEBSITE_APP_ADD_ON_OPTIONS,
   normalizeSoftwareUserCount,
+  softwareProductSupportsWebsiteAppAddOns,
+  softwareSeatMonthlyPrice,
   softwareUserMonthlySubtotal,
   websiteAppAddOnMonthlyUsd,
 } from "@/lib/tiers";
 import type {
+  SoftwareProduct,
   SoftwareSale,
   SoftwareSaleSignedAgreement,
   SoftwareSaleWebsiteAppAddOn,
@@ -157,6 +166,7 @@ export type RemoteCheckoutPacket = {
   email: string;
   phone: string;
   website?: string;
+  product?: SoftwareProduct;
   tier?: SubscriptionTier;
   seats: number;
   estimatedMonthly: number;
@@ -361,49 +371,6 @@ const darkLabelClass = "mb-1 block text-xs font-medium uppercase tracking-wider 
 const darkSecondaryButtonClass =
   "btn border border-white/10 bg-white/[0.06] text-white hover:bg-white/[0.1]";
 
-function emptyPaymentForm() {
-  return {
-    cardName: "",
-    accountName: "",
-    cardNumber: "",
-    expiration: "",
-    cvc: "",
-    bankName: "",
-    routingNumber: "",
-    accountNumber: "",
-  };
-}
-
-type RemotePaymentMethodDraft = {
-  method: "card" | "bank";
-  cardName: string;
-  cardNumber: string;
-  expiration: string;
-  cvc: string;
-  accountName: string;
-  bankName: string;
-  routingNumber: string;
-  accountNumber: string;
-};
-
-function emptyRemotePaymentMethodDraft(entry?: RemoteCheckoutPaymentMethodEntry): RemotePaymentMethodDraft {
-  return {
-    method: entry?.method ?? "card",
-    cardName: entry?.method === "card" ? entry.accountName : "",
-    cardNumber: "",
-    expiration: "",
-    cvc: "",
-    accountName: entry?.method === "bank" ? entry.accountName : "",
-    bankName: "",
-    routingNumber: "",
-    accountNumber: "",
-  };
-}
-
-function paymentEntryLabel(entry: RemoteCheckoutPaymentMethodEntry) {
-  return `${entry.label} ending in ${entry.last4}`;
-}
-
 function signedAgreementsFromRemotePacket(packet: RemoteCheckoutPacket): SoftwareSaleSignedAgreement[] {
   return REQUIRED_CHECKOUT_FORMS.map((requiredForm) => {
     const signature = packet.signatures[requiredForm.id];
@@ -424,49 +391,28 @@ function signedAgreementsFromRemotePacket(packet: RemoteCheckoutPacket): Softwar
   });
 }
 
-function digitsOnly(value: string) {
-  return value.replace(/\D/g, "");
-}
-
 function billingTierForSeats(seats: number): SubscriptionTier {
   if (seats <= 10) return "minimum";
   if (seats <= 25) return "mid";
   return "ultra";
 }
 
-function websiteAppAddOnFromPacket(packet: RemoteCheckoutPacket): SoftwareSaleWebsiteAppAddOn {
-  const matched = (Object.keys(WEBSITE_APP_ADD_ON_OPTIONS) as SoftwareSaleWebsiteAppAddOn[]).find(
-    (key) => WEBSITE_APP_ADD_ON_OPTIONS[key].label === packet.addOnLabel
-  );
-  return matched ?? "none";
-}
-
-function saleInputFromRemotePacket(packet: RemoteCheckoutPacket) {
+function paidSoftwareSalePatchFromStripeSession(
+  session: StripeCheckoutSessionSummary,
+  paidAt = new Date().toISOString()
+): Partial<SoftwareSale> {
   return {
-    agencyName: packet.agencyName,
-    contactName: packet.contactName,
-    email: packet.email,
-    phone: packet.phone,
-    website: packet.website,
-    tier: packet.tier ?? billingTierForSeats(packet.seats),
-    seats: packet.seats,
-    estimatedMonthly: packet.estimatedMonthly,
-    setupFee: packet.setupFee ?? SOFTWARE_SETUP_FEE_USD,
-    websiteAppAddOn: packet.websiteAppAddOn ?? websiteAppAddOnFromPacket(packet),
-    websiteAppAddOnMonthly: packet.websiteAppAddOnMonthly ?? 0,
-    termMonths: packet.termMonths,
-    termDiscountPercent: packet.termDiscountPercent,
-    termDiscountMonthly: packet.termDiscountMonthly ?? 0,
-    monthlyBeforeTermDiscount: packet.monthlyBeforeTermDiscount ?? packet.estimatedMonthly,
-    standardEstimatedMonthly: packet.standardEstimatedMonthly ?? packet.estimatedMonthly,
-    customMonthlyPriceUsd: packet.customMonthlyPriceUsd,
-    customMonthlyPriceReason: packet.customMonthlyPriceReason,
-    source: packet.source ?? "master_portal",
-    paymentMode: packet.paymentMode ?? "manual_invoice",
-    notes: `Submitted from secure e-sign packet ${packet.id}.`,
-    signingPacketId: packet.id,
-    stripeCheckoutSessionId: packet.stripeCheckoutSessionId ?? `remote_packet_${packet.id}`,
-  } satisfies Omit<SoftwareSale, "id" | "createdAt" | "updatedAt" | "status">;
+    status: "paid",
+    paymentMode: "stripe_checkout",
+    stripeCheckoutSessionId: session.id,
+    stripeCustomerId: session.customerId,
+    stripeSubscriptionId: session.subscriptionId,
+    stripePaymentStatus: session.paymentStatus ?? "paid",
+    stripePaidAt: paidAt,
+    stripeSubscriptionTermStartedAt: session.subscriptionTermStartedAt,
+    stripeSubscriptionTermEndsAt: session.subscriptionTermEndsAt,
+    stripeSubscriptionCancelAt: session.subscriptionTermEndsAt,
+  };
 }
 
 async function finalizeSubmittedRemotePacket(packet: RemoteCheckoutPacket): Promise<{
@@ -478,15 +424,19 @@ async function finalizeSubmittedRemotePacket(packet: RemoteCheckoutPacket): Prom
   const signedAt = signedAtValues[signedAtValues.length - 1];
   const signedAgreementNames = signedAgreements.map((agreement) => agreement.title);
   const existingSale = packet.saleId ? api.softwareSales.get(packet.saleId) : undefined;
-  const sale =
-    existingSale ??
-    api.softwareSales.create({
-      ...saleInputFromRemotePacket(packet),
-      status: "paid",
-    });
+
+  if (!existingSale) {
+    await db.syncNow();
+    return {
+      packet,
+      status: "Signed documents submitted. Quotex will open Stripe Checkout to start the recurring subscription.",
+    };
+  }
+
   const saleWithSignatures =
-    api.softwareSales.update(sale.id, {
-      status: sale.status === "checkout_pending" ? "paid" : sale.status,
+    api.softwareSales.update(existingSale.id, {
+      status: "checkout_pending",
+      paymentMode: "stripe_checkout",
       signingPacketId: packet.id,
       signedAgreementNames,
       signedAgreements,
@@ -496,7 +446,7 @@ async function finalizeSubmittedRemotePacket(packet: RemoteCheckoutPacket): Prom
       signedPacketSubmittedAt: packet.submittedAt,
       signedPacketSubmittedByName: packet.submittedByName ?? signedAgreements[0]?.signedByName,
       signedPacketSubmittedByEmail: packet.submittedByEmail ?? signedAgreements[0]?.signedByEmail,
-    }) ?? sale;
+    }) ?? existingSale;
 
   let nextPacket: RemoteCheckoutPacket = {
     ...packet,
@@ -507,41 +457,115 @@ async function finalizeSubmittedRemotePacket(packet: RemoteCheckoutPacket): Prom
     invoiceEmailError: saleWithSignatures.invoiceEmailError,
   };
 
-  if (saleWithSignatures.invoiceEmailSentAt || saleWithSignatures.invoiceEmailStatus === "sent") {
-    const agency = provisionAgencyForCompletedSale(saleWithSignatures);
-    await db.syncNow();
-    return { packet: nextPacket, status: `Submitted. Agency provisioned: ${agency.name}.` };
-  }
-
-  const result = await sendSoftwareSaleInvoiceEmail(saleWithSignatures);
-  const updatedSale =
-    api.softwareSales.update(saleWithSignatures.id, {
-      status: result.ok && result.result?.status === "sent" ? "provisioning" : saleWithSignatures.status,
-      ...softwareSaleInvoicePatchFromResult(result),
-    }) ?? saleWithSignatures;
-
-  nextPacket = {
-    ...nextPacket,
-    invoiceEmailSentAt: updatedSale.invoiceEmailSentAt,
-    invoiceEmailStatus: updatedSale.invoiceEmailStatus,
-    invoiceEmailProvider: updatedSale.invoiceEmailProvider,
-    invoiceEmailError: updatedSale.invoiceEmailError,
+  await db.syncNow();
+  return {
+    packet: nextPacket,
+    status: "Signed documents submitted. Quotex will open Stripe Checkout to start the recurring subscription.",
   };
+}
 
-  if (result.ok && result.result?.status === "sent") {
-    const agency = provisionAgencyForCompletedSale(updatedSale);
-    await db.syncNow();
+async function finalizePaidRemotePacket(
+  packet: RemoteCheckoutPacket,
+  session: StripeCheckoutSessionSummary
+): Promise<{
+  packet: RemoteCheckoutPacket;
+  status: string;
+}> {
+  const signedAgreements = signedAgreementsFromRemotePacket(packet);
+  const signedAtValues = signedAgreements.map((agreement) => agreement.signedAt).sort();
+  const signedAt = signedAtValues[signedAtValues.length - 1];
+  const signedAgreementNames = signedAgreements.map((agreement) => agreement.title);
+  const resolvedSaleId = session.metadata?.saleId || session.clientReferenceId || packet.saleId || "";
+  const existingSale = resolvedSaleId ? api.softwareSales.get(resolvedSaleId) : undefined;
+
+  if (!existingSale) {
+    const submitted = await finalizeSubmittedRemotePacket(packet);
     return {
-      packet: nextPacket,
-      status: `Submitted. Invoice sent through ${result.result.provider}. Agency provisioned: ${agency.name}.`,
+      packet: submitted.packet,
+      status:
+        "Payment method was received and signed documents were submitted. Master billing needs the matching sale record to finish provisioning.",
     };
   }
+
+  let completedSale =
+    api.softwareSales.update(existingSale.id, {
+      ...paidSoftwareSalePatchFromStripeSession(session, existingSale.stripePaidAt ?? new Date().toISOString()),
+      signingPacketId: packet.id,
+      signedAgreementNames,
+      signedAgreements,
+      signedByName: signedAgreements[0]?.signedByName,
+      signedByEmail: signedAgreements[0]?.signedByEmail,
+      signedAt,
+      signedPacketSubmittedAt: packet.submittedAt,
+      signedPacketSubmittedByName: packet.submittedByName ?? signedAgreements[0]?.signedByName,
+      signedPacketSubmittedByEmail: packet.submittedByEmail ?? signedAgreements[0]?.signedByEmail,
+    }) ?? existingSale;
+
+  const invoiceAlreadySent = completedSale.invoiceEmailStatus === "sent" || !!completedSale.invoiceEmailSentAt;
+  if (!invoiceAlreadySent) {
+    const result = await sendSoftwareSaleInvoiceEmail(completedSale);
+    completedSale =
+      api.softwareSales.update(completedSale.id, {
+        status: result.ok && result.result?.status === "sent" ? "provisioning" : completedSale.status,
+        ...softwareSaleInvoicePatchFromResult(result),
+      }) ?? completedSale;
+  }
+
+  if (completedSale.invoiceEmailStatus === "sent" || completedSale.invoiceEmailSentAt) {
+    provisionAgencyForCompletedSale(completedSale);
+    completedSale = api.softwareSales.update(completedSale.id, { status: "closed" }) ?? completedSale;
+  }
+
+  const nextPacket: RemoteCheckoutPacket = {
+    ...packet,
+    saleId: completedSale.id,
+    stripeCheckoutSessionId: session.id,
+    invoiceEmailSentAt: completedSale.invoiceEmailSentAt,
+    invoiceEmailStatus: completedSale.invoiceEmailStatus,
+    invoiceEmailProvider: completedSale.invoiceEmailProvider,
+    invoiceEmailError: completedSale.invoiceEmailError,
+    updatedAt: new Date().toISOString(),
+  };
 
   await db.syncNow();
   return {
     packet: nextPacket,
-    status: result.result?.error ?? result.error ?? "Submitted. Invoice email could not be sent automatically.",
+    status:
+      completedSale.invoiceEmailStatus === "sent" || completedSale.invoiceEmailSentAt
+        ? "Payment method received. Signed documents submitted, invoice sent, and agency provisioned."
+        : "Payment method received. Signed documents submitted; invoice delivery needs attention in master billing.",
   };
+}
+
+function missingSignedRemoteCheckoutForms(packet: RemoteCheckoutPacket) {
+  return REQUIRED_CHECKOUT_FORMS.filter((requiredForm) => {
+    const signature = packet.signatures[requiredForm.id];
+    return !(
+      signature?.authorized === true &&
+      signature.signerName.trim().length > 0 &&
+      signature.signedAt
+    );
+  });
+}
+
+function firstRemoteCheckoutSignature(packet: RemoteCheckoutPacket) {
+  return REQUIRED_CHECKOUT_FORMS.map((requiredForm) => packet.signatures[requiredForm.id]).find(
+    (signature) => signature?.signedAt
+  );
+}
+
+function effectiveRemotePacketMonthly(packet: RemoteCheckoutPacket) {
+  if (Number.isFinite(packet.estimatedMonthly) && packet.estimatedMonthly > 0) return packet.estimatedMonthly;
+  if (Number.isFinite(packet.standardEstimatedMonthly) && (packet.standardEstimatedMonthly ?? 0) > 0) {
+    return packet.standardEstimatedMonthly ?? 0;
+  }
+  const seatMonthly = packet.seats * softwareSeatMonthlyPrice(packet.product ?? "full_platform");
+  const addOnMonthly = packet.websiteAppAddOnMonthly ?? websiteAppAddOnMonthlyUsd(packet.websiteAppAddOn ?? "none");
+  const monthlyBeforeDiscount =
+    packet.monthlyBeforeTermDiscount && packet.monthlyBeforeTermDiscount > 0
+      ? packet.monthlyBeforeTermDiscount
+      : seatMonthly + addOnMonthly;
+  return Math.max(0, monthlyBeforeDiscount - (packet.termDiscountMonthly ?? 0));
 }
 
 function addOnIcon(addOn: SoftwareSaleWebsiteAppAddOn) {
@@ -558,6 +582,7 @@ export function TransactionSitePage() {
     email: "",
     phone: "",
     website: "",
+    product: "full_platform" as SoftwareProduct,
     seats: "",
     websiteAppAddOn: "none" as SoftwareSaleWebsiteAppAddOn,
     notes: "",
@@ -565,12 +590,11 @@ export function TransactionSitePage() {
   const [submitted, setSubmitted] = useState<SoftwareSale | null>(null);
   const [invoiceDeliveryStatus, setInvoiceDeliveryStatus] = useState<string | null>(null);
   const [paymentFailureMessage, setPaymentFailureMessage] = useState<string | null>(null);
+  const [stripeStarting, setStripeStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hasCreatedPlan, setHasCreatedPlan] = useState(false);
   const [isPaymentStep, setIsPaymentStep] = useState(false);
   const [termMonths, setTermMonths] = useState<PlanTermMonths>(12);
-  const [paymentMethod, setPaymentMethod] = useState<"card" | "bank">("card");
-  const [paymentForm, setPaymentForm] = useState(() => emptyPaymentForm());
   const [checkoutSignatures, setCheckoutSignatures] = useState<Record<string, CheckoutSignatureState>>(
     () => emptyCheckoutSignatures()
   );
@@ -607,14 +631,17 @@ export function TransactionSitePage() {
   const seats = hasSelectedUsers ? normalizeSoftwareUserCount(parsedSeats) : 0;
   const billingTier = billingTierForSeats(seats);
   const setupFee = SOFTWARE_SETUP_FEE_USD;
-  const userSubtotal = hasSelectedUsers ? softwareUserMonthlySubtotal(seats) : 0;
-  const websiteAppAddOnMonthly = websiteAppAddOnMonthlyUsd(form.websiteAppAddOn);
+  const supportsWebsiteAppAddOns = softwareProductSupportsWebsiteAppAddOns(form.product);
+  const effectiveWebsiteAppAddOn = supportsWebsiteAppAddOns ? form.websiteAppAddOn : "none";
+  const productSeatPrice = softwareSeatMonthlyPrice(form.product);
+  const userSubtotal = hasSelectedUsers ? softwareUserMonthlySubtotal(seats, form.product) : 0;
+  const websiteAppAddOnMonthly = websiteAppAddOnMonthlyUsd(effectiveWebsiteAppAddOn);
   const websiteAppRetailMonthly =
-    form.websiteAppAddOn === "website_app"
+    effectiveWebsiteAppAddOn === "website_app"
       ? COMPANY_WEBSITE_MONTHLY_ADD_ON_USD + COMPANY_APP_MONTHLY_ADD_ON_USD
       : websiteAppAddOnMonthly;
   const bundleDiscount =
-    form.websiteAppAddOn === "website_app"
+    effectiveWebsiteAppAddOn === "website_app"
       ? COMPANY_WEBSITE_AND_APP_BUNDLE_DISCOUNT_USD
       : 0;
   const undiscountedMonthly = userSubtotal + websiteAppRetailMonthly;
@@ -641,13 +668,81 @@ export function TransactionSitePage() {
     };
   }, []);
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const sessionId = params.get("session_id");
+    const saleId = params.get("sale_id");
+    const stripeSuccess = params.get("stripe_success") === "1";
+    const stripeCancelled = params.get("stripe_cancelled") === "1";
+
+    if (stripeCancelled) {
+      setPaymentFailureMessage("Stripe Checkout was cancelled before payment completed.");
+      setIsPaymentStep(true);
+      window.history.replaceState({}, "", "/checkout");
+      return;
+    }
+
+    if (!stripeSuccess || !sessionId) return;
+    const completedSessionId = sessionId;
+
+    let cancelled = false;
+    async function recoverCompletedStripeCheckout() {
+      setPaymentFailureMessage(null);
+      setInvoiceDeliveryStatus("Confirming Stripe payment...");
+      try {
+        const checkout = await getSoftwareSaleStripeCheckoutSession(completedSessionId);
+        if (cancelled) return;
+        if (!checkout.ok || !checkout.session) {
+          setInvoiceDeliveryStatus(null);
+          setPaymentFailureMessage(checkout.message || checkout.error || "Stripe Checkout could not be verified.");
+          return;
+        }
+        const { session } = checkout;
+        if (session.paymentStatus !== "paid" && session.status !== "complete") {
+          setInvoiceDeliveryStatus(null);
+          setPaymentFailureMessage("Stripe Checkout has not reported a completed payment yet.");
+          return;
+        }
+
+        const resolvedSaleId = saleId || session.metadata?.saleId || session.clientReferenceId || "";
+        const existingSale = resolvedSaleId ? api.softwareSales.get(resolvedSaleId) : undefined;
+        if (!existingSale) {
+          setInvoiceDeliveryStatus(null);
+          setPaymentFailureMessage(
+            "Stripe confirmed payment, but the local checkout record was not found. Refresh from master billing to sync the paid sale."
+          );
+          return;
+        }
+
+        const paidSale =
+          api.softwareSales.update(existingSale.id, {
+            ...paidSoftwareSalePatchFromStripeSession(session),
+          }) ?? existingSale;
+        await finalizePaidSoftwareSale(paidSale);
+        window.history.replaceState({}, "", "/checkout");
+      } catch (err) {
+        if (cancelled) return;
+        setInvoiceDeliveryStatus(null);
+        setPaymentFailureMessage(err instanceof Error ? err.message : "Stripe Checkout could not be verified.");
+      }
+    }
+
+    void recoverCompletedStripeCheckout();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   function setField<K extends keyof typeof form>(key: K, value: (typeof form)[K]) {
     setHasCreatedPlan(false);
     setIsPaymentStep(false);
     setPaymentFailureMessage(null);
     setCheckoutSignatures(emptyCheckoutSignatures());
     setViewedCheckoutForms({});
-    setForm((prev) => ({ ...prev, [key]: value }));
+    setForm((prev) => ({
+      ...prev,
+      [key]: value,
+    }));
   }
 
   function selectTerm(months: PlanTermMonths) {
@@ -656,12 +751,6 @@ export function TransactionSitePage() {
     setCheckoutSignatures(emptyCheckoutSignatures());
     setViewedCheckoutForms({});
     setError(null);
-  }
-
-  function setPaymentField<K extends keyof typeof paymentForm>(key: K, value: (typeof paymentForm)[K]) {
-    setError(null);
-    setPaymentFailureMessage(null);
-    setPaymentForm((prev) => ({ ...prev, [key]: value }));
   }
 
   function setCheckoutSignatureField<K extends keyof CheckoutSignatureState>(
@@ -710,20 +799,6 @@ export function TransactionSitePage() {
       const nextForm = REQUIRED_CHECKOUT_FORMS.find((requiredForm) => !checkoutSignatures[requiredForm.id]?.signedAt);
       return `E-sign ${nextForm?.title ?? "each required checkout document"} before processing payment.`;
     }
-    const paymentName =
-      paymentMethod === "card" ? paymentForm.cardName.trim() : paymentForm.accountName.trim();
-    if (!paymentName) {
-      return paymentMethod === "card" ? "Add the name on card." : "Add the name on account.";
-    }
-    if (paymentMethod === "card") {
-      if (!paymentForm.cardNumber.trim()) return "Add the card number.";
-      if (!paymentForm.expiration.trim()) return "Add the card expiration.";
-      if (!paymentForm.cvc.trim()) return "Add the card security code.";
-      return null;
-    }
-    if (!paymentForm.bankName.trim()) return "Add the bank name.";
-    if (!paymentForm.routingNumber.trim()) return "Add the routing number.";
-    if (!paymentForm.accountNumber.trim()) return "Add the account number.";
     return null;
   }
 
@@ -732,7 +807,6 @@ export function TransactionSitePage() {
     if (validationError) return setError(validationError);
     if (!hasCreatedPlan) return setError("Create the plan before continuing to payment.");
     setError(null);
-    setPaymentForm(emptyPaymentForm());
     setCheckoutSignatures((prev) => {
       const next = { ...prev };
       REQUIRED_CHECKOUT_FORMS.forEach((requiredForm) => {
@@ -780,7 +854,29 @@ export function TransactionSitePage() {
     setError(null);
   }
 
-  function submitTransaction() {
+  async function finalizePaidSoftwareSale(sale: SoftwareSale) {
+    setSubmitted(sale);
+    setInvoiceDeliveryStatus("Sending invoice email...");
+    const result = await sendSoftwareSaleInvoiceEmail(sale);
+    const updatedSale = api.softwareSales.update(sale.id, {
+      status: result.ok && result.result?.status === "sent" ? "provisioning" : sale.status,
+      ...softwareSaleInvoicePatchFromResult(result),
+    });
+    const saleForProvisioning = updatedSale ?? sale;
+    setSubmitted(saleForProvisioning);
+    if (result.ok && result.result?.status === "sent") {
+      provisionAgencyForCompletedSale(saleForProvisioning);
+      const closedSale = api.softwareSales.update(saleForProvisioning.id, { status: "closed" }) ?? saleForProvisioning;
+      setSubmitted(closedSale);
+      await db.syncNow();
+      setInvoiceDeliveryStatus(`Invoice email sent through ${result.result.provider}.`);
+    } else {
+      await db.syncNow();
+      setInvoiceDeliveryStatus(result.result?.error ?? result.error ?? "Invoice email could not be sent.");
+    }
+  }
+
+  async function submitTransaction() {
     const validationError = getPlanValidationError();
     if (validationError) return setError(validationError);
     if (!hasCreatedPlan) return setError("Create the plan before continuing to payment.");
@@ -788,6 +884,7 @@ export function TransactionSitePage() {
     const paymentValidationError = getPaymentValidationError();
     if (paymentValidationError) return setError(paymentValidationError);
     setPaymentFailureMessage(null);
+    setStripeStarting(true);
     const signedAgreements: SoftwareSaleSignedAgreement[] = REQUIRED_CHECKOUT_FORMS.map((requiredForm) => ({
       id: requiredForm.id,
       title: requiredForm.title,
@@ -814,11 +911,12 @@ export function TransactionSitePage() {
         email: form.email.trim(),
         phone: form.phone.trim() || undefined,
         website: form.website.trim() || undefined,
+        product: form.product,
         tier: billingTier,
         seats,
         estimatedMonthly,
         setupFee,
-        websiteAppAddOn: form.websiteAppAddOn,
+        websiteAppAddOn: effectiveWebsiteAppAddOn,
         websiteAppAddOnMonthly,
         termMonths,
         termDiscountPercent: selectedTerm.discountPercent,
@@ -826,40 +924,44 @@ export function TransactionSitePage() {
         monthlyBeforeTermDiscount,
         source: "transaction_site",
         paymentMode: "stripe_checkout",
-        status: "paid",
+        status: "checkout_pending",
         notes: form.notes.trim() || undefined,
         signedAgreementNames: signedAgreements.map((agreement) => agreement.title),
         signedAgreements,
         signedByName: primarySignerName,
         signedByEmail: form.email.trim(),
         signedAt: finalSignedAt,
-        stripeCheckoutSessionId: `checkout_${Date.now()}`,
       });
     } catch {
       setSubmitted(null);
       setInvoiceDeliveryStatus(null);
       setPaymentFailureMessage("Payment failed. Try a different payment method.");
+      setStripeStarting(false);
       return;
     }
-    setSubmitted(sale);
-    setInvoiceDeliveryStatus("Sending invoice email...");
-    void sendSoftwareSaleInvoiceEmail(sale).then((result) => {
-      const updatedSale = api.softwareSales.update(sale.id, {
-        status: result.ok && result.result?.status === "sent" ? "provisioning" : sale.status,
-        ...softwareSaleInvoicePatchFromResult(result),
-      });
-      if (updatedSale) setSubmitted(updatedSale);
-      if (result.ok && result.result?.status === "sent") {
-        if (updatedSale) {
-          provisionAgencyForCompletedSale(updatedSale);
-          void db.syncNow();
-        }
-        setInvoiceDeliveryStatus(`Invoice email sent through ${result.result.provider}.`);
-      } else {
-        setInvoiceDeliveryStatus(result.result?.error ?? result.error ?? "Invoice email could not be sent.");
-      }
-    });
     setError(null);
+    await db.syncNow();
+
+    try {
+      const origin = window.location.origin;
+      const session = await createSoftwareSaleStripeCheckoutSession(sale, {
+        successUrl: `${origin}/checkout?stripe_success=1&session_id={CHECKOUT_SESSION_ID}&sale_id=${encodeURIComponent(
+          sale.id
+        )}`,
+        cancelUrl: `${origin}/checkout?stripe_cancelled=1&sale_id=${encodeURIComponent(sale.id)}`,
+      });
+      if (!session.ok || !session.url) {
+        setPaymentFailureMessage(session.message || session.error || "Stripe Checkout could not be started.");
+        setStripeStarting(false);
+        return;
+      }
+      api.softwareSales.update(sale.id, { stripeCheckoutSessionId: session.id });
+      await db.syncNow();
+      window.location.assign(session.url);
+    } catch (err) {
+      setPaymentFailureMessage(err instanceof Error ? err.message : "Stripe Checkout could not be started.");
+      setStripeStarting(false);
+    }
   }
 
   return (
@@ -943,6 +1045,13 @@ export function TransactionSitePage() {
                     <span className="font-medium">{submitted.seats}</span>
                   </div>
                   <div className="mt-2 flex justify-between gap-4">
+                    <span className="text-white/55">Product</span>
+                    <span className="font-medium text-right">
+                      {SOFTWARE_PRODUCT_OPTIONS[submitted.product ?? "full_platform"].label}
+                    </span>
+                  </div>
+                  {softwareProductSupportsWebsiteAppAddOns(submitted.product) && (
+                  <div className="mt-2 flex justify-between gap-4">
                     <span className="text-white/55">Website / Quotex app add-on</span>
                     <span className="font-medium text-right">
                       {WEBSITE_APP_ADD_ON_OPTIONS[submitted.websiteAppAddOn ?? "none"].label}
@@ -951,6 +1060,7 @@ export function TransactionSitePage() {
                         : ""}
                     </span>
                   </div>
+                  )}
                   <div className="mt-2 flex justify-between gap-4">
                     <span className="text-white/55">Agency code</span>
                     <span className="font-medium">{softwareSaleAgencyCode(submitted)}</span>
@@ -1003,8 +1113,6 @@ export function TransactionSitePage() {
                       setHasCreatedPlan(false);
                       setIsPaymentStep(false);
                       setTermMonths(12);
-                      setPaymentMethod("card");
-                      setPaymentForm(emptyPaymentForm());
                       setCheckoutSignatures(emptyCheckoutSignatures());
                       setViewedCheckoutForms({});
                       setViewingCheckoutFormId(null);
@@ -1014,6 +1122,7 @@ export function TransactionSitePage() {
                         email: "",
                         phone: "",
                         website: "",
+                        product: "full_platform",
                         seats: "",
                         websiteAppAddOn: "none",
                         notes: "",
@@ -1198,6 +1307,7 @@ export function TransactionSitePage() {
                 </div>
                   </section>
 
+                  {supportsWebsiteAppAddOns && (
                   <section className="mb-7 rounded-lg border border-white/10 bg-white/[0.04] p-4">
                 <div className="mb-4">
                   <div className="text-xs uppercase tracking-wider text-gold-300">Optional monthly add-ons</div>
@@ -1231,8 +1341,11 @@ export function TransactionSitePage() {
                             <div className="mt-1 text-xs leading-relaxed text-white/55">
                               {option.description}
                             </div>
+                            <div className="mt-3 text-lg font-semibold leading-tight text-gold-100">
+                              {option.monthlyPriceUsd > 0 ? `${fmt.money(option.monthlyPriceUsd)}/mo` : "No add-on charge"}
+                            </div>
                             {addOn === "website_app" && (
-                              <div className="mt-3 text-lg font-bold leading-tight text-emerald-200">
+                              <div className="mt-1 text-sm font-bold leading-tight text-emerald-200">
                                 Bundle saves you $1,000 per month
                               </div>
                             )}
@@ -1246,6 +1359,7 @@ export function TransactionSitePage() {
                   })}
                 </div>
                   </section>
+                  )}
                 </>
               )}
 
@@ -1275,22 +1389,35 @@ export function TransactionSitePage() {
                           <div>
                             <div className="font-semibold text-white">Staff users</div>
                             <div className="mt-0.5 text-xs text-white/45">
-                              {seats} x {fmt.money(SOFTWARE_USER_MONTHLY_PRICE_USD)}
+                              {seats} x {fmt.money(productSeatPrice)}
                             </div>
                           </div>
                           <div className="font-semibold">{fmt.money(userSubtotal)}/mo</div>
                         </div>
                         <div className="flex items-start justify-between gap-5">
                           <div>
+                            <div className="font-semibold text-white">Product</div>
+                            <div className="mt-0.5 text-xs text-white/45">
+                              {SOFTWARE_PRODUCT_OPTIONS[form.product].description}
+                            </div>
+                          </div>
+                          <div className="font-semibold text-right">
+                            {SOFTWARE_PRODUCT_OPTIONS[form.product].shortLabel}
+                          </div>
+                        </div>
+                        {supportsWebsiteAppAddOns && (
+                        <div className="flex items-start justify-between gap-5">
+                          <div>
                             <div className="font-semibold text-white">Website / Quotex app package</div>
                             <div className="mt-0.5 text-xs text-white/45">
-                              {WEBSITE_APP_ADD_ON_OPTIONS[form.websiteAppAddOn].label}
+                              {WEBSITE_APP_ADD_ON_OPTIONS[effectiveWebsiteAppAddOn].label}
                             </div>
                           </div>
                           <div className="font-semibold">
                             {websiteAppRetailMonthly > 0 ? `${fmt.money(websiteAppRetailMonthly)}/mo` : "None"}
                           </div>
                         </div>
+                        )}
                         {bundleDiscount > 0 && (
                           <div className="flex items-start justify-between gap-5">
                             <div>
@@ -1399,10 +1526,10 @@ export function TransactionSitePage() {
                     <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                       <div>
                         <div className="text-xs uppercase tracking-wider text-gold-300">Payment</div>
-                        <h2 className="mt-1 font-display text-2xl">Enter payment details.</h2>
+                        <h2 className="mt-1 font-display text-2xl">Secure Stripe Checkout.</h2>
                         <p className="mt-2 max-w-2xl text-sm leading-relaxed text-white/60">
-                          After payment clears, the system sends the formal invoice and encrypted
-                          agency code to {form.email.trim()}.
+                          After the required checkout documents are signed, payment opens in Stripe.
+                          Quotex does not collect or store card or bank numbers on this page.
                         </p>
                       </div>
                       <button
@@ -1509,141 +1636,23 @@ export function TransactionSitePage() {
                       </div>
                     </div>
 
-                    <div className="mb-5 grid gap-3 sm:grid-cols-2">
-                      <button
-                        type="button"
-                        className={`rounded-lg border px-4 py-3 text-left transition ${
-                          paymentMethod === "card"
-                            ? "border-gold-300 bg-gold-300/10 text-white"
-                            : "border-white/10 bg-white/[0.04] text-white hover:border-gold-300/60"
-                        }`}
-                        onClick={() => {
-                          setError(null);
-                          setPaymentMethod("card");
-                        }}
-                      >
-                        <div className="flex items-center gap-2 text-sm font-semibold">
-                          <CreditCard className="h-4 w-4 text-gold-300" />
-                          Card payment
+                    <div className="rounded-lg border border-emerald-300/25 bg-emerald-400/[0.08] p-4">
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div>
+                          <div className="flex items-center gap-2 text-sm font-semibold text-emerald-100">
+                            <LockKeyhole className="h-4 w-4 text-emerald-200" />
+                            Stripe will collect the payment method
+                          </div>
+                          <p className="mt-1 text-xs leading-relaxed text-white/55">
+                            The checkout session includes the selected plan total of {fmt.money(estimatedMonthly)}/mo.
+                            After Stripe confirms payment, the invoice and agency code are emailed to {form.email.trim()}.
+                          </p>
                         </div>
-                        <div className="mt-1 text-xs text-white/45">Use a business credit or debit card.</div>
-                      </button>
-                      <button
-                        type="button"
-                        className={`rounded-lg border px-4 py-3 text-left transition ${
-                          paymentMethod === "bank"
-                            ? "border-gold-300 bg-gold-300/10 text-white"
-                            : "border-white/10 bg-white/[0.04] text-white hover:border-gold-300/60"
-                        }`}
-                        onClick={() => {
-                          setError(null);
-                          setPaymentMethod("bank");
-                        }}
-                      >
-                        <div className="flex items-center gap-2 text-sm font-semibold">
-                          <ShieldCheck className="h-4 w-4 text-gold-300" />
-                          Bank / ACH
+                        <div className="rounded-full bg-white/[0.06] px-3 py-1 text-xs font-semibold text-white/65">
+                          Hosted checkout
                         </div>
-                        <div className="mt-1 text-xs text-white/45">Use a business checking account.</div>
-                      </button>
+                      </div>
                     </div>
-
-                    {paymentMethod === "card" ? (
-                      <div className="grid gap-4 md:grid-cols-2">
-                        <div>
-                          <label className={darkLabelClass} htmlFor="transaction-payment-name">Name on card</label>
-                          <input
-                            id="transaction-payment-name"
-                            className={darkInputClass}
-                            autoComplete="off"
-                            value={paymentForm.cardName}
-                            onChange={(e) => setPaymentField("cardName", e.target.value)}
-                          />
-                        </div>
-                        <div>
-                          <label className={darkLabelClass} htmlFor="transaction-card-number">Card number</label>
-                          <input
-                            id="transaction-card-number"
-                            className={darkInputClass}
-                            inputMode="numeric"
-                            autoComplete="off"
-                            placeholder="1234 1234 1234 1234"
-                            value={paymentForm.cardNumber}
-                            onChange={(e) => setPaymentField("cardNumber", e.target.value)}
-                          />
-                        </div>
-                        <div>
-                          <label className={darkLabelClass} htmlFor="transaction-card-expiration">Expiration</label>
-                          <input
-                            id="transaction-card-expiration"
-                            className={darkInputClass}
-                            autoComplete="off"
-                            placeholder="MM / YY"
-                            value={paymentForm.expiration}
-                            onChange={(e) => setPaymentField("expiration", e.target.value)}
-                          />
-                        </div>
-                        <div>
-                          <label className={darkLabelClass} htmlFor="transaction-card-cvc">Security code</label>
-                          <input
-                            id="transaction-card-cvc"
-                            className={darkInputClass}
-                            inputMode="numeric"
-                            autoComplete="off"
-                            placeholder="CVC"
-                            value={paymentForm.cvc}
-                            onChange={(e) => setPaymentField("cvc", e.target.value)}
-                          />
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="grid gap-4 md:grid-cols-2">
-                        <div>
-                          <label className={darkLabelClass} htmlFor="transaction-bank-name-on-account">
-                            Name on account
-                          </label>
-                          <input
-                            id="transaction-bank-name-on-account"
-                            className={darkInputClass}
-                            autoComplete="off"
-                            value={paymentForm.accountName}
-                            onChange={(e) => setPaymentField("accountName", e.target.value)}
-                          />
-                        </div>
-                        <div>
-                          <label className={darkLabelClass} htmlFor="transaction-bank-name">Bank name</label>
-                          <input
-                            id="transaction-bank-name"
-                            className={darkInputClass}
-                            autoComplete="off"
-                            value={paymentForm.bankName}
-                            onChange={(e) => setPaymentField("bankName", e.target.value)}
-                          />
-                        </div>
-                        <div>
-                          <label className={darkLabelClass} htmlFor="transaction-routing-number">Routing number</label>
-                          <input
-                            id="transaction-routing-number"
-                            className={darkInputClass}
-                            inputMode="numeric"
-                            autoComplete="off"
-                            value={paymentForm.routingNumber}
-                            onChange={(e) => setPaymentField("routingNumber", e.target.value)}
-                          />
-                        </div>
-                        <div>
-                          <label className={darkLabelClass} htmlFor="transaction-account-number">Account number</label>
-                          <input
-                            id="transaction-account-number"
-                            className={darkInputClass}
-                            inputMode="numeric"
-                            autoComplete="off"
-                            value={paymentForm.accountNumber}
-                            onChange={(e) => setPaymentField("accountNumber", e.target.value)}
-                          />
-                        </div>
-                      </div>
-                    )}
                   </section>
                 )}
 
@@ -1659,12 +1668,16 @@ export function TransactionSitePage() {
                   <button
                     type="button"
                     className={`btn-gold w-full justify-center py-3 text-base ${
-                      hasSignedCheckoutForms ? "" : "cursor-not-allowed opacity-45"
+                      hasSignedCheckoutForms && !stripeStarting ? "" : "cursor-not-allowed opacity-45"
                     }`}
-                    disabled={!hasSignedCheckoutForms}
+                    disabled={!hasSignedCheckoutForms || stripeStarting}
                     onClick={submitTransaction}
                   >
-                    {hasSignedCheckoutForms ? "Process payment" : "Sign all documents to process payment"}{" "}
+                    {stripeStarting
+                      ? "Opening secure checkout..."
+                      : hasSignedCheckoutForms
+                        ? "Continue to secure Stripe checkout"
+                        : "Sign all documents to continue"}{" "}
                     <ArrowRight className="h-5 w-5" />
                   </button>
                 ) : (
@@ -1875,10 +1888,8 @@ export function CheckoutRemoteSignPage() {
   const [activeFormId, setActiveFormId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [submittingPacket, setSubmittingPacket] = useState(false);
-  const [paymentDraft, setPaymentDraft] = useState<RemotePaymentMethodDraft>(() =>
-    emptyRemotePaymentMethodDraft(packet?.paymentMethodEntry)
-  );
-  const [paymentEntryStatus, setPaymentEntryStatus] = useState<string | null>(null);
+  const [paymentRedirecting, setPaymentRedirecting] = useState(false);
+  const [paymentStatusMessage, setPaymentStatusMessage] = useState<string | null>(null);
 
   useEffect(() => {
     const previousBackground = document.body.style.background;
@@ -1896,11 +1907,6 @@ export function CheckoutRemoteSignPage() {
   }, [packet]);
 
   useEffect(() => {
-    if (!packet?.paymentMethodEntry) return;
-    setPaymentDraft(emptyRemotePaymentMethodDraft(packet.paymentMethodEntry));
-  }, [packet?.id, packet?.paymentMethodEntry?.enteredAt]);
-
-  useEffect(() => {
     let active = true;
     void readSharedRemoteSigningPacket(packetId).then((sharedPacket) => {
       if (!active || !sharedPacket) return;
@@ -1910,6 +1916,94 @@ export function CheckoutRemoteSignPage() {
         return sharedPacket.updatedAt > current.updatedAt ? sharedPacket : current;
       });
     });
+    return () => {
+      active = false;
+    };
+  }, [packetId]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const sessionId = params.get("session_id")?.trim();
+    const stripeSuccess = params.get("stripe_success") === "1";
+    const stripeCancelled = params.get("stripe_cancelled") === "1";
+
+    if (!stripeSuccess && !stripeCancelled) return;
+
+    const cleanPath = `/checkout/sign/${encodeURIComponent(packetId)}`;
+    let active = true;
+    if (stripeCancelled) {
+      setPaymentRedirecting(false);
+      setPaymentStatusMessage(null);
+      setError("Stripe Checkout was cancelled before the payment method was saved.");
+      window.history.replaceState({}, "", cleanPath);
+      return () => {
+        active = false;
+      };
+    }
+
+    void (async () => {
+      setError(null);
+      setPaymentRedirecting(false);
+      setPaymentStatusMessage("Payment method received. Submitting signed documents to Quotex.");
+
+      try {
+        if (!sessionId) throw new Error("Stripe Checkout returned without a session id.");
+        const checkout = await getSoftwareSaleStripeCheckoutSession(sessionId);
+        const checkoutSession = checkout.session;
+        if (
+          !checkout.ok ||
+          !checkoutSession ||
+          (checkoutSession.status !== "complete" && checkoutSession.paymentStatus !== "paid")
+        ) {
+          throw new Error(checkout.message || checkout.error || "Stripe has not confirmed the payment method yet.");
+        }
+
+        const latestPacket =
+          (await readSharedRemoteSigningPacket(packetId)) ?? readRemoteSigningPacket(packetId);
+        if (!latestPacket) throw new Error("The signed packet could not be loaded for submission.");
+        const missingForms = missingSignedRemoteCheckoutForms(latestPacket);
+        if (missingForms.length > 0) {
+          throw new Error("All required documents must be signed before the payment method can submit them.");
+        }
+
+        const firstSignature = firstRemoteCheckoutSignature(latestPacket);
+        const submittedAt = latestPacket.submittedAt ?? new Date().toISOString();
+        const paidPacket: RemoteCheckoutPacket = {
+          ...latestPacket,
+          stripeCheckoutSessionId: sessionId,
+          submittedAt,
+          submittedByName: latestPacket.submittedByName ?? firstSignature?.signerName?.trim() ?? latestPacket.contactName,
+          submittedByEmail: latestPacket.submittedByEmail ?? latestPacket.email,
+          updatedAt: submittedAt,
+        };
+        writeRemoteSigningPacket(paidPacket);
+        const sharedPacket = await writeSharedRemoteSigningPacket(paidPacket);
+        const finalized = await finalizePaidRemotePacket(sharedPacket, checkoutSession);
+        const finalPacket: RemoteCheckoutPacket = {
+          ...finalized.packet,
+          stripeCheckoutSessionId: sessionId,
+          submittedAt: finalized.packet.submittedAt ?? submittedAt,
+          submittedByName: finalized.packet.submittedByName ?? paidPacket.submittedByName,
+          submittedByEmail: finalized.packet.submittedByEmail ?? paidPacket.submittedByEmail,
+          updatedAt: new Date().toISOString(),
+        };
+        writeRemoteSigningPacket(finalPacket);
+        const syncedFinalPacket = await writeSharedRemoteSigningPacket(finalPacket);
+        await db.syncNow();
+
+        if (!active) return;
+        setPacket(syncedFinalPacket);
+        setPaymentStatusMessage(finalized.status);
+      } catch (err) {
+        if (!active) return;
+        setPaymentStatusMessage(null);
+        setError(err instanceof Error ? err.message : "Payment was received, but the signed packet could not be submitted.");
+      } finally {
+        if (active) setPaymentRedirecting(false);
+        window.history.replaceState({}, "", cleanPath);
+      }
+    })();
+
     return () => {
       active = false;
     };
@@ -1936,71 +2030,17 @@ export function CheckoutRemoteSignPage() {
     });
   }
 
-  function setPaymentDraftField<K extends keyof RemotePaymentMethodDraft>(
-    key: K,
-    value: RemotePaymentMethodDraft[K]
-  ) {
-    setError(null);
-    setPaymentEntryStatus(null);
-    setPaymentDraft((prev) => ({ ...prev, [key]: value }));
-  }
-
-  function savePaymentMethodEntry() {
-    if (!packet) return;
-    const accountName =
-      paymentDraft.method === "card" ? paymentDraft.cardName.trim() : paymentDraft.accountName.trim();
-    if (!accountName) {
-      return setError(paymentDraft.method === "card" ? "Add the name on card." : "Add the name on account.");
-    }
-
-    const enteredAt = new Date().toISOString();
-    let entry: RemoteCheckoutPaymentMethodEntry;
-    if (paymentDraft.method === "card") {
-      const cardDigits = digitsOnly(paymentDraft.cardNumber);
-      if (cardDigits.length < 12) return setError("Add a valid card number.");
-      if (!paymentDraft.expiration.trim()) return setError("Add the card expiration.");
-      if (digitsOnly(paymentDraft.cvc).length < 3) return setError("Add the card security code.");
-      entry = {
-        method: "card",
-        accountName,
-        label: "Card",
-        last4: cardDigits.slice(-4),
-        enteredAt,
-      };
-    } else {
-      const routingDigits = digitsOnly(paymentDraft.routingNumber);
-      const accountDigits = digitsOnly(paymentDraft.accountNumber);
-      if (!paymentDraft.bankName.trim()) return setError("Add the bank name.");
-      if (routingDigits.length < 9) return setError("Add a valid routing number.");
-      if (accountDigits.length < 4) return setError("Add a valid account number.");
-      entry = {
-        method: "bank",
-        accountName,
-        label: paymentDraft.bankName.trim(),
-        last4: accountDigits.slice(-4),
-        enteredAt,
-      };
-    }
-
-    setPacket((prev) => {
-      if (!prev) return prev;
-      const next: RemoteCheckoutPacket = {
-        ...prev,
-        updatedAt: enteredAt,
-        paymentMethodEntry: entry,
-      };
-      writeRemoteSigningPacket(next);
-      void writeSharedRemoteSigningPacket(next).catch(() => undefined);
-      return next;
-    });
-    setPaymentEntryStatus(`${paymentEntryLabel(entry)} saved.`);
-  }
-
   function viewDocument(formId: string) {
     setActiveFormId(formId);
     updateSignature(formId, {
       viewedAt: packet?.signatures[formId]?.viewedAt ?? new Date().toISOString(),
     }, true);
+    window.setTimeout(() => {
+      document.getElementById(`remote-packet-form-${formId}`)?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    }, 50);
   }
 
   function signDocument(formId: string) {
@@ -2025,42 +2065,72 @@ export function CheckoutRemoteSignPage() {
     }, true);
   }
 
+  async function startRemoteStripeCheckout(sourcePacket: RemoteCheckoutPacket) {
+    if (paymentRedirecting) return;
+    const missingForms = missingSignedRemoteCheckoutForms(sourcePacket);
+    if (missingForms.length > 0) {
+      setError("Sign every required document before entering payment information.");
+      return;
+    }
+    setPaymentStatusMessage(null);
+    const saleId = sourcePacket.saleId?.trim() || "";
+    const sale = saleId ? api.softwareSales.get(saleId) : undefined;
+    setError(null);
+    setPaymentRedirecting(true);
+    try {
+      const origin = window.location.origin;
+      const session = await createSoftwareSalePacketStripeCheckoutSession({
+        saleId: saleId || undefined,
+        signingPacketId: sourcePacket.id,
+        successUrl: `${origin}/checkout/sign/${encodeURIComponent(
+          sourcePacket.id
+        )}?stripe_success=1&session_id={CHECKOUT_SESSION_ID}${saleId ? `&sale_id=${encodeURIComponent(saleId)}` : ""}`,
+        cancelUrl: `${origin}/checkout/sign/${encodeURIComponent(sourcePacket.id)}?stripe_cancelled=1`,
+      });
+      if (!session.ok || !session.url) {
+        setError(session.message || session.error || "Stripe Checkout could not be started.");
+        setPaymentRedirecting(false);
+        return;
+      }
+      if (sale) {
+        api.softwareSales.update(sale.id, {
+          stripeCheckoutSessionId: session.id,
+          stripePaymentStatus: "checkout_pending",
+        });
+      }
+      const packetWithSession: RemoteCheckoutPacket = {
+        ...sourcePacket,
+        stripeCheckoutSessionId: session.id,
+        updatedAt: new Date().toISOString(),
+      };
+      writeRemoteSigningPacket(packetWithSession);
+      await writeSharedRemoteSigningPacket(packetWithSession).catch(() => packetWithSession);
+      setPacket(packetWithSession);
+      await db.syncNow();
+      window.location.assign(session.url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Stripe Checkout could not be started.");
+      setPaymentRedirecting(false);
+    }
+  }
+
   async function submitSignedDocuments() {
     if (!packet) return;
-    if (submittingPacket || packet.submittedAt) return;
-    const missingForms = REQUIRED_CHECKOUT_FORMS.filter((requiredForm) => !packet.signatures[requiredForm.id]?.signedAt);
+    if (submittingPacket) return;
+    const missingForms = missingSignedRemoteCheckoutForms(packet);
     if (missingForms.length > 0) {
-      return setError("Sign every required document before submitting the packet.");
+      return setError("Sign every required document before entering payment information.");
     }
-    if (!packet.paymentMethodEntry) {
-      return setError("Enter and save the payment method before submitting the signed packet.");
-    }
-    const firstSignature = REQUIRED_CHECKOUT_FORMS.map((requiredForm) => packet.signatures[requiredForm.id]).find(
-      (signature) => signature?.signedAt
-    );
-    const submittedAt = new Date().toISOString();
-    const nextPacket: RemoteCheckoutPacket = {
-      ...packet,
-      updatedAt: submittedAt,
-      submittedAt,
-      submittedByName: firstSignature?.signerName?.trim() || packet.contactName,
-      submittedByEmail: packet.email,
-    };
+    const nextPacket: RemoteCheckoutPacket = { ...packet, updatedAt: new Date().toISOString() };
     setError(null);
     setSubmittingPacket(true);
     try {
       writeRemoteSigningPacket(nextPacket);
       const sharedPacket = await writeSharedRemoteSigningPacket(nextPacket);
-      const finalized = await finalizeSubmittedRemotePacket(sharedPacket);
-      writeRemoteSigningPacket(finalized.packet);
-      const syncedFinalPacket = await writeSharedRemoteSigningPacket(finalized.packet);
-      setPacket(syncedFinalPacket);
-      setPaymentEntryStatus(finalized.status);
-    } catch {
-      setError("The packet was submitted here, but live master portal sync did not confirm. Check your connection and press submit again.");
-      const retryPacket = { ...nextPacket, submittedAt: undefined, submittedByName: undefined, submittedByEmail: undefined };
-      writeRemoteSigningPacket(retryPacket);
-      setPacket(retryPacket);
+      setPacket(sharedPacket);
+      await startRemoteStripeCheckout(sharedPacket);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Payment entry could not be started. Check your connection and try again.");
     } finally {
       setSubmittingPacket(false);
     }
@@ -2073,7 +2143,7 @@ export function CheckoutRemoteSignPage() {
           <QuotexMark className="h-12 w-12 border border-white/15" letterClassName="text-[28px]" />
           <h1 className="mt-5 font-display text-3xl">Signing link unavailable</h1>
           <p className="mt-3 text-sm leading-relaxed text-white/60">
-            This e-sign packet could not be loaded. Ask the Quotex representative to resend the
+            This payment authorization packet could not be loaded. Ask the Quotex representative to resend the
             email or text link from the master plan builder.
           </p>
           <Link to="/checkout" className="btn-gold mt-5">
@@ -2087,7 +2157,8 @@ export function CheckoutRemoteSignPage() {
   const signedCount = REQUIRED_CHECKOUT_FORMS.filter((requiredForm) => packet.signatures[requiredForm.id]?.signedAt).length;
   const allSigned = signedCount === REQUIRED_CHECKOUT_FORMS.length;
   const submitted = !!packet.submittedAt;
-  const readyToSubmit = allSigned && !!packet.paymentMethodEntry && !submitted;
+  const paymentCompleted = !!packet.stripeCheckoutSessionId && submitted;
+  const readyForPayment = allSigned && !paymentCompleted;
 
   return (
     <div className="min-h-screen bg-[#080807] text-white">
@@ -2097,8 +2168,10 @@ export function CheckoutRemoteSignPage() {
             <div className="flex items-center gap-3">
               <QuotexMark className="h-12 w-12 border border-white/15" letterClassName="text-[28px]" />
               <div>
-                <div className="text-xs uppercase tracking-[0.18em] text-gold-300">Secure e-sign packet</div>
-                <h1 className="mt-1 font-display text-3xl">Review and sign.</h1>
+                <div className="text-xs uppercase tracking-[0.18em] text-gold-300">
+                  Secure payment authorization
+                </div>
+                <h1 className="mt-1 font-display text-3xl">Review, authorize, and submit.</h1>
               </div>
             </div>
             <div
@@ -2107,6 +2180,17 @@ export function CheckoutRemoteSignPage() {
               }`}
             >
               {signedCount}/{REQUIRED_CHECKOUT_FORMS.length} signed
+            </div>
+          </div>
+
+          <div className="sticky top-0 z-10 -mx-5 mt-5 border-y border-white/10 bg-[#11100c]/95 px-5 py-3 backdrop-blur sm:-mx-7 sm:px-7">
+            <div className="grid gap-2 text-xs sm:grid-cols-2">
+              <div className={`rounded-full px-3 py-2 font-semibold ${allSigned ? "bg-emerald-400/10 text-emerald-200" : "bg-white/[0.06] text-white/60"}`}>
+                {signedCount}/{REQUIRED_CHECKOUT_FORMS.length} authorizations signed
+              </div>
+              <div className={`rounded-full px-3 py-2 font-semibold ${submitted ? "bg-emerald-400/10 text-emerald-200" : "bg-white/[0.06] text-white/60"}`}>
+                Packet {submitted ? "submitted" : "not submitted"}
+              </div>
             </div>
           </div>
 
@@ -2122,7 +2206,7 @@ export function CheckoutRemoteSignPage() {
             </div>
             <div className="rounded-md border border-white/10 bg-white/[0.04] p-3">
               <div className="text-xs uppercase tracking-wider text-white/40">Monthly plan</div>
-              <div className="mt-1 font-semibold">{fmt.money(packet.estimatedMonthly)}/mo</div>
+              <div className="mt-1 font-semibold">{fmt.money(effectiveRemotePacketMonthly(packet))}/mo</div>
             </div>
             <div className="rounded-md border border-white/10 bg-white/[0.04] p-3">
               <div className="text-xs uppercase tracking-wider text-white/40">Term</div>
@@ -2135,11 +2219,12 @@ export function CheckoutRemoteSignPage() {
 
           {submitted ? (
             <div className="mt-5 rounded-lg border border-emerald-300/20 bg-emerald-400/10 p-4 text-sm text-emerald-100">
-              Forms and payment authorization submitted. The master portal will show this packet as complete.
+              {paymentStatusMessage ??
+                "Signed documents submitted. Continue to secure Stripe Checkout to enter the recurring payment method."}
             </div>
           ) : allSigned ? (
             <div className="mt-5 rounded-lg border border-gold-300/25 bg-gold-300/10 p-4 text-sm text-gold-50">
-              All documents are signed. Submit the signed packet at the bottom of this page to finish.
+              All authorization documents are signed. Submit the packet to enter the secure payment method in Stripe Checkout.
             </div>
           ) : null}
 
@@ -2160,7 +2245,8 @@ export function CheckoutRemoteSignPage() {
               return (
                 <section
                   key={requiredForm.id}
-                  className="overflow-hidden rounded-lg border border-white/10 bg-black/15"
+                  id={`remote-packet-form-${requiredForm.id}`}
+                  className="scroll-mt-20 overflow-hidden rounded-lg border border-white/10 bg-black/15"
                 >
                   <div className="flex flex-col gap-3 p-4 sm:flex-row sm:items-start sm:justify-between">
                     <div className="min-w-0">
@@ -2284,191 +2370,36 @@ export function CheckoutRemoteSignPage() {
             })}
           </div>
 
-          <section id="payment-method" className="mt-6 rounded-xl border border-white/10 bg-black/20 p-4">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div>
-                <div className="text-xs font-semibold uppercase tracking-[0.16em] text-gold-300">
-                  Payment method entry
-                </div>
-                <h2 className="mt-1 text-lg font-semibold text-white">Secure recurring payment method.</h2>
-                <p className="mt-1 text-xs leading-relaxed text-white/55">
-                  Enter the method that should be used for the signed monthly plan. Only the method type,
-                  account name, and last four are saved with this packet.
-                </p>
-              </div>
-              {packet.paymentMethodEntry && (
-                <span className="w-fit rounded-full bg-emerald-400/10 px-3 py-1 text-xs font-semibold text-emerald-200">
-                  {paymentEntryLabel(packet.paymentMethodEntry)}
-                </span>
-              )}
-            </div>
-
-            <div className="mt-4 grid gap-2 sm:grid-cols-2">
-              <button
-                type="button"
-                className={`rounded-lg border px-4 py-3 text-left text-sm font-semibold transition ${
-                  paymentDraft.method === "card"
-                    ? "border-gold-300 bg-gold-300/10 text-gold-50"
-                    : "border-white/10 bg-white/[0.04] text-white/65 hover:bg-white/[0.08]"
-                }`}
-                onClick={() => setPaymentDraftField("method", "card")}
-              >
-                Card payment
-              </button>
-              <button
-                type="button"
-                className={`rounded-lg border px-4 py-3 text-left text-sm font-semibold transition ${
-                  paymentDraft.method === "bank"
-                    ? "border-gold-300 bg-gold-300/10 text-gold-50"
-                    : "border-white/10 bg-white/[0.04] text-white/65 hover:bg-white/[0.08]"
-                }`}
-                onClick={() => setPaymentDraftField("method", "bank")}
-              >
-                Bank account
-              </button>
-            </div>
-
-            {paymentDraft.method === "card" ? (
-              <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                <div>
-                  <label className={darkLabelClass} htmlFor="remote-payment-card-name">
-                    Name on card
-                  </label>
-                  <input
-                    id="remote-payment-card-name"
-                    className={darkInputClass}
-                    value={paymentDraft.cardName}
-                    onChange={(event) => setPaymentDraftField("cardName", event.target.value)}
-                  />
-                </div>
-                <div>
-                  <label className={darkLabelClass} htmlFor="remote-payment-card-number">
-                    Card number
-                  </label>
-                  <input
-                    id="remote-payment-card-number"
-                    className={darkInputClass}
-                    inputMode="numeric"
-                    autoComplete="cc-number"
-                    value={paymentDraft.cardNumber}
-                    onChange={(event) => setPaymentDraftField("cardNumber", event.target.value)}
-                  />
-                </div>
-                <div>
-                  <label className={darkLabelClass} htmlFor="remote-payment-card-expiration">
-                    Expiration
-                  </label>
-                  <input
-                    id="remote-payment-card-expiration"
-                    className={darkInputClass}
-                    autoComplete="cc-exp"
-                    value={paymentDraft.expiration}
-                    onChange={(event) => setPaymentDraftField("expiration", event.target.value)}
-                  />
-                </div>
-                <div>
-                  <label className={darkLabelClass} htmlFor="remote-payment-card-cvc">
-                    CVC
-                  </label>
-                  <input
-                    id="remote-payment-card-cvc"
-                    className={darkInputClass}
-                    inputMode="numeric"
-                    autoComplete="cc-csc"
-                    value={paymentDraft.cvc}
-                    onChange={(event) => setPaymentDraftField("cvc", event.target.value)}
-                  />
-                </div>
-              </div>
-            ) : (
-              <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                <div>
-                  <label className={darkLabelClass} htmlFor="remote-payment-account-name">
-                    Name on account
-                  </label>
-                  <input
-                    id="remote-payment-account-name"
-                    className={darkInputClass}
-                    value={paymentDraft.accountName}
-                    onChange={(event) => setPaymentDraftField("accountName", event.target.value)}
-                  />
-                </div>
-                <div>
-                  <label className={darkLabelClass} htmlFor="remote-payment-bank-name">
-                    Bank name
-                  </label>
-                  <input
-                    id="remote-payment-bank-name"
-                    className={darkInputClass}
-                    value={paymentDraft.bankName}
-                    onChange={(event) => setPaymentDraftField("bankName", event.target.value)}
-                  />
-                </div>
-                <div>
-                  <label className={darkLabelClass} htmlFor="remote-payment-routing-number">
-                    Routing number
-                  </label>
-                  <input
-                    id="remote-payment-routing-number"
-                    className={darkInputClass}
-                    inputMode="numeric"
-                    value={paymentDraft.routingNumber}
-                    onChange={(event) => setPaymentDraftField("routingNumber", event.target.value)}
-                  />
-                </div>
-                <div>
-                  <label className={darkLabelClass} htmlFor="remote-payment-account-number">
-                    Account number
-                  </label>
-                  <input
-                    id="remote-payment-account-number"
-                    className={darkInputClass}
-                    inputMode="numeric"
-                    value={paymentDraft.accountNumber}
-                    onChange={(event) => setPaymentDraftField("accountNumber", event.target.value)}
-                  />
-                </div>
-              </div>
-            )}
-
-            <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="text-xs text-white/45">
-                Full card or bank numbers are used only for entry and are not displayed after saving.
-              </div>
-              <button type="button" className="btn-gold justify-center" onClick={savePaymentMethodEntry}>
-                <CreditCard className="h-4 w-4" />
-                Save payment method
-              </button>
-            </div>
-            {paymentEntryStatus && (
-              <div className="mt-3 rounded-md border border-emerald-300/20 bg-emerald-400/10 px-3 py-2 text-xs text-emerald-100">
-                {paymentEntryStatus}
-              </div>
-            )}
-          </section>
-
           <div className="mt-6 rounded-xl border border-white/10 bg-black/20 p-4">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <div className="text-sm font-semibold text-white">Submit forms/payment</div>
+                <div className="text-sm font-semibold text-white">
+                  {paymentCompleted ? "Payment method received" : "Enter payment method"}
+                </div>
                 <p className="mt-1 text-xs leading-relaxed text-white/55">
-                  {submitted
-                    ? `Completed ${new Date(packet.submittedAt!).toLocaleString()}.`
+                  {paymentCompleted
+                    ? "Payment details were received and the signed documents were submitted to Quotex."
                     : allSigned
-                      ? packet.paymentMethodEntry
-                        ? "Send the completed packet and payment authorization back to Quotex."
-                        : "Save the payment method entry before submitting the packet."
+                      ? "Stripe Checkout securely collects the payment method. Signed documents submit automatically after payment is confirmed."
                       : "Sign every document above before submitting the packet."}
                 </p>
               </div>
               <button
                 type="button"
-                className={`btn-gold justify-center ${readyToSubmit ? "" : "cursor-not-allowed opacity-55"}`}
-                disabled={!readyToSubmit || submittingPacket}
+                className={`btn-gold justify-center ${
+                  readyForPayment ? "" : "cursor-not-allowed opacity-55"
+                }`}
+                disabled={!readyForPayment || submittingPacket || paymentRedirecting}
                 onClick={submitSignedDocuments}
               >
                 <CheckCircle2 className="h-4 w-4" />
-                {submittingPacket ? "Submitting..." : submitted ? "Submitted" : "Submit forms/payment"}
+                {submittingPacket || paymentRedirecting
+                  ? paymentRedirecting
+                    ? "Opening checkout..."
+                    : "Preparing..."
+                  : paymentCompleted
+                    ? "Submitted"
+                    : "Enter payment method"}
               </button>
             </div>
           </div>

@@ -226,11 +226,10 @@ export function AddressAutocomplete({
     const handle = window.setTimeout(async () => {
       lastQueryRef.current = q;
       try {
-        let effectiveLocationBias = locationBias;
+        const effectiveLocationBias = locationBias;
         if (!effectiveLocationBias && !locationPromptedRef.current && mode === "address") {
           locationPromptedRef.current = true;
-          effectiveLocationBias = await ensureLocationBias({ forcePrompt: true });
-          if (requestSeqRef.current !== requestSeq || lastQueryRef.current !== q) return;
+          void ensureLocationBias({ forcePrompt: true });
         }
         const out = await searchAddresses(q, mode, controller.signal, googleSessionToken.current, {
           allowMockFallback,
@@ -264,6 +263,12 @@ export function AddressAutocomplete({
       controller.abort();
     };
   }, [value, mode, minQueryLength, allowMockFallback, locationBias]);
+
+  function warmLocationBias() {
+    if (mode !== "address" || locationBias || locationPromptedRef.current) return;
+    locationPromptedRef.current = true;
+    void ensureLocationBias({ forcePrompt: true });
+  }
 
   // Close on outside click.
   useEffect(() => {
@@ -405,6 +410,7 @@ export function AddressAutocomplete({
             onChange(nextValue);
           }}
           onFocus={() => {
+            warmLocationBias();
             if (predictions.length > 0) setOpen(true);
           }}
           onKeyDown={handleKey}

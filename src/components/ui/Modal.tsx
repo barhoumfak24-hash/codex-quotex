@@ -82,6 +82,11 @@ export function Modal({
   const titleId = useId();
   const panelRef = useRef<HTMLDivElement | null>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   useEffect(() => {
     if (!open) return;
@@ -90,7 +95,7 @@ export function Modal({
     const focusTimer = window.setTimeout(() => focusModalPanel(panelRef.current), 0);
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (e.key === "Tab" && panelRef.current) {
@@ -116,7 +121,7 @@ export function Modal({
         previouslyFocusedRef.current.focus();
       }
     };
-  }, [open, onClose]);
+  }, [open]);
 
   useEffect(() => {
     if (!open || !isAppSurface) {

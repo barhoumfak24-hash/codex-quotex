@@ -42,6 +42,7 @@ export function AgencyWebsiteApp() {
       <Route path="/quote/start" element={<QuoteStartGate />} />
       <Route path="/marketing/contact" element={<MarketingSmartContactPage />} />
       <Route path="/app" element={<Navigate to="/login" replace />} />
+      <Route path="/customer/questionnaire/:sessionId" element={<ClientQuestionnairePage />} />
 
       <Route
         element={
@@ -59,7 +60,6 @@ export function AgencyWebsiteApp() {
         <Route path="/customer/claims" element={<CustomerClaimsPage />} />
         <Route path="/customer/settings" element={<CustomerSettingsPage />} />
         <Route path="/customer/quote/new" element={<QuoteFlowPage />} />
-        <Route path="/customer/questionnaire/:sessionId" element={<ClientQuestionnairePage />} />
       </Route>
 
       <Route path="/software" element={<Navigate to="/404" replace />} />

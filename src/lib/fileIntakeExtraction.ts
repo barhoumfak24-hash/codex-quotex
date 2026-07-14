@@ -1,4 +1,4 @@
-const MAX_TEXT_CHARS = 24_000;
+const MAX_TEXT_CHARS = 70_000;
 const MAX_DATA_URL_BYTES = 8_000_000;
 
 export interface AiFileExtractionPayload {
@@ -30,16 +30,19 @@ function isVisionReadable(file: File): boolean {
   return file.type.startsWith("image/") || isPdf(file);
 }
 
-function compactText(value: string): string {
-  return value
+function compactText(value: string): { text: string; truncated: boolean } {
+  const compacted = value
     .replace(/\r/g, "\n")
     .replace(/[ \t]+/g, " ")
     .replace(/\n{3,}/g, "\n\n")
-    .trim()
-    .slice(0, MAX_TEXT_CHARS);
+    .trim();
+  return {
+    text: compacted.slice(0, MAX_TEXT_CHARS),
+    truncated: compacted.length > MAX_TEXT_CHARS,
+  };
 }
 
-function printableTextFromBinary(buffer: ArrayBuffer): string {
+function printableTextFromBinary(buffer: ArrayBuffer): { text: string; truncated: boolean } {
   const bytes = new Uint8Array(buffer);
   let out = "";
   let run = "";
@@ -57,7 +60,7 @@ function printableTextFromBinary(buffer: ArrayBuffer): string {
   return compactText(out);
 }
 
-function literalPdfText(buffer: ArrayBuffer): string {
+function literalPdfText(buffer: ArrayBuffer): { text: string; truncated: boolean } {
   const raw = new TextDecoder("latin1").decode(buffer);
   const chunks: string[] = [];
   const literalPattern = /\((?:\\.|[^\\)]){2,}\)/g;
@@ -71,7 +74,8 @@ function literalPdfText(buffer: ArrayBuffer): string {
     if (/[A-Za-z]{2,}/.test(value)) chunks.push(value);
     if (chunks.join("\n").length > MAX_TEXT_CHARS) break;
   }
-  return compactText(chunks.join("\n") || printableTextFromBinary(buffer));
+  if (chunks.length > 0) return compactText(chunks.join("\n"));
+  return printableTextFromBinary(buffer);
 }
 
 function readAsDataUrl(file: File): Promise<string> {
@@ -86,17 +90,25 @@ function readAsDataUrl(file: File): Promise<string> {
 export async function readAiFileForExtraction(file: File): Promise<AiFileExtractionPayload> {
   const sources: string[] = [];
   let text = "";
+  let truncated = false;
 
   if (isTextLike(file)) {
-    text = compactText(await file.text());
+    const result = compactText(await file.text());
+    text = result.text;
+    truncated = result.truncated;
     if (text) sources.push("Readable file text");
   } else if (isPdf(file)) {
-    text = literalPdfText(await file.arrayBuffer());
+    const result = literalPdfText(await file.arrayBuffer());
+    text = result.text;
+    truncated = result.truncated;
     if (text) sources.push("PDF embedded text scan");
   } else if (isOfficeLike(file)) {
-    text = printableTextFromBinary(await file.arrayBuffer());
+    const result = printableTextFromBinary(await file.arrayBuffer());
+    text = result.text;
+    truncated = result.truncated;
     if (text) sources.push("Document binary text scan");
   }
+  if (truncated) sources.push("Long document text was clipped to the safe AI request limit");
 
   let dataUrl: string | undefined;
   if (isVisionReadable(file)) {

@@ -1,5 +1,6 @@
 import type {
   Agency,
+  SoftwareProduct,
   SoftwarePlanTermMonths,
   SoftwareSaleWebsiteAppAddOn,
   SubscriptionTier,
@@ -20,6 +21,26 @@ export const COMPANY_WEBSITE_AND_APP_MONTHLY_ADD_ON_USD =
   COMPANY_WEBSITE_AND_APP_BUNDLE_DISCOUNT_USD;
 export const SOFTWARE_USER_BLOCK_DISCOUNT_SIZE = 10;
 export const SOFTWARE_USER_BLOCK_MONTHLY_DISCOUNT_USD = 0;
+
+export const SOFTWARE_PRODUCT_OPTIONS: Record<
+  SoftwareProduct,
+  {
+    label: string;
+    shortLabel: string;
+    description: string;
+    userMonthlyPriceUsd: number;
+    supportsWebsiteAppAddOns: boolean;
+  }
+> = {
+  full_platform: {
+    label: "Full Quotex software",
+    shortLabel: "Full software",
+    description:
+      "Complete agency operating system with clients, policies, messages, documents, carrier workflows, and AI quoting.",
+    userMonthlyPriceUsd: SOFTWARE_USER_MONTHLY_PRICE_USD,
+    supportsWebsiteAppAddOns: true,
+  },
+};
 
 export const SOFTWARE_PLAN_TERM_OPTIONS: Array<{
   months: SoftwarePlanTermMonths;
@@ -134,6 +155,18 @@ export function websiteAppAddOnMonthlyUsd(addOn?: SoftwareSaleWebsiteAppAddOn): 
   return WEBSITE_APP_ADD_ON_OPTIONS[addOn ?? "none"].monthlyPriceUsd;
 }
 
+export function normalizeSoftwareProduct(_product?: SoftwareProduct | string | null): SoftwareProduct {
+  return "full_platform";
+}
+
+export function softwareProductSupportsWebsiteAppAddOns(product?: SoftwareProduct | string | null): boolean {
+  return SOFTWARE_PRODUCT_OPTIONS[normalizeSoftwareProduct(product)].supportsWebsiteAppAddOns;
+}
+
+export function softwareSeatMonthlyPrice(product?: SoftwareProduct | string | null): number {
+  return SOFTWARE_PRODUCT_OPTIONS[normalizeSoftwareProduct(product)].userMonthlyPriceUsd;
+}
+
 export function websiteAppAddOnRetailMonthlyUsd(addOn?: SoftwareSaleWebsiteAppAddOn): number {
   return addOn === "website_app"
     ? COMPANY_WEBSITE_MONTHLY_ADD_ON_USD + COMPANY_APP_MONTHLY_ADD_ON_USD
@@ -169,8 +202,11 @@ export function softwareUserDiscountBlocks(seats: number): number {
   return 0;
 }
 
-export function softwareUserMonthlySubtotal(seats: number): number {
-  return normalizeSoftwareUserCount(seats) * SOFTWARE_USER_MONTHLY_PRICE_USD;
+export function softwareUserMonthlySubtotal(
+  seats: number,
+  product?: SoftwareProduct | string | null
+): number {
+  return normalizeSoftwareUserCount(seats) * softwareSeatMonthlyPrice(product);
 }
 
 export function softwareUserMonthlyDiscount(seats: number): number {
@@ -195,9 +231,10 @@ export function softwareUserMonthlyTotal(seats: number): number {
 export function softwareSaleMonthlyTotalForSeats(
   seats: number,
   addOn?: SoftwareSaleWebsiteAppAddOn,
-  termMonths?: SoftwarePlanTermMonths | number
+  termMonths?: SoftwarePlanTermMonths | number,
+  product?: SoftwareProduct | string | null
 ): number {
-  const beforeTermDiscount = softwarePlanMonthlyBeforeTermDiscount(seats, addOn);
+  const beforeTermDiscount = softwarePlanMonthlyBeforeTermDiscount(seats, addOn, product);
   return Math.max(
     0,
     beforeTermDiscount - softwarePlanTermDiscountMonthlyUsd(beforeTermDiscount, termMonths)
@@ -217,9 +254,14 @@ export function includedUserSlotsForTier(tier: SubscriptionTier): number {
 
 export function softwarePlanMonthlyBeforeTermDiscount(
   seats: number,
-  addOn?: SoftwareSaleWebsiteAppAddOn
+  addOn?: SoftwareSaleWebsiteAppAddOn,
+  product?: SoftwareProduct | string | null
 ): number {
-  return softwareUserMonthlySubtotal(seats) + websiteAppAddOnMonthlyUsd(addOn);
+  const normalizedProduct = normalizeSoftwareProduct(product);
+  const normalizedAddOn = softwareProductSupportsWebsiteAppAddOns(normalizedProduct)
+    ? addOn
+    : "none";
+  return softwareUserMonthlySubtotal(seats, normalizedProduct) + websiteAppAddOnMonthlyUsd(normalizedAddOn);
 }
 
 export function softwarePlanTermDiscountMonthlyUsd(
@@ -273,12 +315,14 @@ export function agencyAiMessageAddOnMonthlyUsd(
 
 export function standardAgencyMonthlyPriceUsd(
   agency: Pick<Agency, "tier" | "allowedUsers"> &
-    Partial<Pick<Agency, "websiteAppAddOn" | "softwarePlanTermMonths">>
+    Partial<Pick<Agency, "softwareProduct" | "websiteAppAddOn" | "softwarePlanTermMonths">>
 ): number {
+  const product = normalizeSoftwareProduct(agency.softwareProduct);
   return softwareSaleMonthlyTotalForSeats(
     Math.max(1, Math.ceil(agency.allowedUsers || TIER_LIMITS[agency.tier].allowedUsers)),
-    agency.websiteAppAddOn,
-    agency.softwarePlanTermMonths
+    softwareProductSupportsWebsiteAppAddOns(product) ? agency.websiteAppAddOn : "none",
+    agency.softwarePlanTermMonths,
+    product
   );
 }
 
@@ -289,6 +333,7 @@ export function agencyMonthlyPriceUsd(
         Agency,
         | "allowedCarriers"
         | "allowedAiMessagesPerMonth"
+        | "softwareProduct"
         | "websiteAppAddOn"
         | "softwarePlanTermMonths"
         | "monthlyPriceOverrideUsd"

@@ -16,6 +16,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   vi.unstubAllEnvs();
 });
 
@@ -47,6 +48,57 @@ describe("communications delivery routes", () => {
     expect(response.status).toBe(502);
     expect(body.ok).toBe(false);
     expect(body.result?.provider).toBe("unconfigured");
+  });
+
+  it("sends each payment authorization resend as a fresh email conversation", async () => {
+    vi.stubEnv("EMAIL_PROVIDER", "sendgrid");
+    vi.stubEnv("SENDGRID_API_KEY", "SG.test-key");
+    vi.stubEnv("EMAIL_FROM", "Quotex Insurance <contact@quotexinsurance.com>");
+    const realFetch = globalThis.fetch.bind(globalThis);
+    const sendGridRequests: Array<Record<string, unknown>> = [];
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url === "https://api.sendgrid.com/v3/mail/send") {
+        sendGridRequests.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+        return new Response(null, {
+          status: 202,
+          headers: { "x-message-id": `sg-${sendGridRequests.length}` },
+        });
+      }
+      return realFetch(input, init);
+    });
+    const token = issueSessionJwt({
+      userId: "master_user",
+      role: "master_admin",
+      tenantId: null,
+    });
+
+    const firstResponse = await postToCommunications({
+      path: "/software-sale/signing-email",
+      token,
+      payload: validSigningPayload(),
+    });
+    const secondResponse = await postToCommunications({
+      path: "/software-sale/signing-email",
+      token,
+      payload: validSigningPayload(),
+    });
+
+    expect(firstResponse.status).toBe(200);
+    expect(secondResponse.status).toBe(200);
+    expect(sendGridRequests).toHaveLength(2);
+    const firstSubject = sendGridRequests[0]?.subject;
+    const secondSubject = sendGridRequests[1]?.subject;
+    expect(firstSubject).toEqual(expect.stringMatching(/^Quotex payment authorization QTX-PAY-/));
+    expect(secondSubject).toEqual(expect.stringMatching(/^Quotex payment authorization QTX-PAY-/));
+    expect(secondSubject).not.toBe(firstSubject);
+    const firstHeaders = sendGridRequests[0]?.personalizations?.[0]?.headers ?? {};
+    const secondHeaders = sendGridRequests[1]?.personalizations?.[0]?.headers ?? {};
+    expect(firstHeaders["X-Quotex-Message-Type"]).toBe("payment-authorization");
+    expect(secondHeaders["X-Quotex-Message-Type"]).toBe("payment-authorization");
+    expect(secondHeaders["X-Quotex-Email-Reference"]).not.toBe(firstHeaders["X-Quotex-Email-Reference"]);
+    expect(firstHeaders["In-Reply-To"]).toBeUndefined();
+    expect(firstHeaders.References).toBeUndefined();
   });
 });
 

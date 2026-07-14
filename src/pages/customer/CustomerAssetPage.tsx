@@ -9,6 +9,7 @@ import { PolicyStatusBadge } from "@/components/ui/StatusBadge";
 import { Timeline } from "@/components/ui/Timeline";
 import { PolicyEditWizard } from "@/components/policies/PolicyEditWizard";
 import { api } from "@/lib/api";
+import { assetDisplayName, assetDisplaySubtitleLabel, formatAssetDetailValue } from "@/lib/assetDisplay";
 import { toSurfaceRoute } from "@/lib/appSurface";
 import { fmt } from "@/lib/format";
 import { useCustomer } from "@/lib/useCustomer";
@@ -47,9 +48,9 @@ export function CustomerAssetPage() {
         Back
       </Button>
       <div>
-        <h1 className="font-display text-3xl">{asset.label}</h1>
+        <h1 className="font-display text-3xl">{assetDisplayName(asset)}</h1>
         <p className="text-ink-500 text-sm mt-1">
-          {api.helpers.assetTypeLabel(asset.type)} · {fmt.money(asset.estimatedValue)}
+          {assetDisplaySubtitleLabel(asset.type)} · {fmt.money(asset.estimatedValue)}
         </p>
       </div>
 
@@ -82,7 +83,7 @@ export function CustomerAssetPage() {
                     {shouldMap ? (
                       <MapLink address={v} className="max-w-full justify-end text-right" />
                     ) : (
-                      <span className="block truncate">{String(v)}</span>
+                      <span className="block truncate">{formatAssetDetailValue(k, v)}</span>
                     )}
                   </dd>
                 </div>

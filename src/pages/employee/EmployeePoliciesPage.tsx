@@ -9,6 +9,7 @@ import { EmployeeBackButton } from "@/components/layout/EmployeeBackButton";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import { matchesAiCustomFilter } from "@/lib/aiCustomFilters";
 import { fmt } from "@/lib/format";
 import type { PolicyStatus } from "@/types";
@@ -103,7 +104,7 @@ export function EmployeePoliciesPage() {
       const haystack = [
         customer?.name,
         customer?.email,
-        asset?.label,
+        asset ? assetDisplayName(asset) : undefined,
         carrier?.name,
         p.policyNumber,
         fmt.policyRef(p),
@@ -125,7 +126,7 @@ export function EmployeePoliciesPage() {
         text: [
           customer?.name,
           customer?.email,
-          asset?.label,
+          asset ? assetDisplayName(asset) : undefined,
           asset?.type,
           asset ? api.helpers.assetTypeLabel(asset.type) : undefined,
           carrier?.name,
@@ -248,7 +249,7 @@ export function EmployeePoliciesPage() {
                   </td>
                   <td className="px-4 py-5 align-middle">
                     <div className="font-mono text-sm font-semibold text-ink-900">{fmt.policyRef(p)}</div>
-                    <div className="line-clamp-2">{asset?.label ?? "—"}</div>
+                    <div className="line-clamp-2">{asset ? assetDisplayName(asset) : "—"}</div>
                     <div className="text-[11px] text-ink-400">{api.helpers.departmentLabel(p)}</div>
                   </td>
                   <td className="px-4 py-5 align-middle">

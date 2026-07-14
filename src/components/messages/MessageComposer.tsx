@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Loader2, Mail, Paperclip, Plus, Reply, Send, Sparkles, Wand2, X } from "lucide-react";
 import { aiEmailSubject, aiEnhanceMessage } from "@/lib/ai";
+import { plainTextToEmailHtml } from "@/lib/emailHtml";
 import { fileToCommunicationAttachment, formatAttachmentSize } from "@/lib/messageAttachments";
 import type { CommunicationAttachment } from "@/types";
 
@@ -22,14 +23,23 @@ export interface ReplyTarget {
   subject: string; // already normalized to "Re: …"
   replyToId: string;
   toSummary: string; // short label e.g. the original subject
+  externalThreadId?: string;
+  replyToMessageIdHeader?: string;
+  references?: string[];
 }
 
 export interface ComposedMessage {
   channel: "email";
   body: string;
+  bodyHtml?: string;
   subject?: string;
   threadId?: string;
   replyToId?: string;
+  cc?: string[];
+  bcc?: string[];
+  externalThreadId?: string;
+  replyToMessageIdHeader?: string;
+  references?: string[];
   attachments?: CommunicationAttachment[];
 }
 
@@ -52,6 +62,8 @@ export function MessageComposer({
 }) {
   const [body, setBody] = useState("");
   const [subject, setSubject] = useState("");
+  const [cc, setCc] = useState("");
+  const [bcc, setBcc] = useState("");
   const [attachments, setAttachments] = useState<CommunicationAttachment[]>([]);
   const [attaching, setAttaching] = useState(false);
   const [suggesting, setSuggesting] = useState(false);
@@ -101,26 +113,37 @@ export function MessageComposer({
 
   function handleSend() {
     if (!body.trim() && attachments.length === 0) return;
+    const cleanBody = body.trim() || "Please see attached.";
+    const bodyHtml = plainTextToEmailHtml(cleanBody);
     if (replyTarget) {
       onSend({
         channel: "email",
-        body: body.trim() || "Please see attached.",
+        body: cleanBody,
+        bodyHtml,
         subject: replyTarget.subject,
         threadId: replyTarget.threadId,
         replyToId: replyTarget.replyToId,
+        externalThreadId: replyTarget.externalThreadId,
+        replyToMessageIdHeader: replyTarget.replyToMessageIdHeader,
+        references: replyTarget.references,
         attachments,
       });
     } else {
       onSend({
         channel: "email",
-        body: body.trim() || "Please see attached.",
+        body: cleanBody,
+        bodyHtml,
         subject: subject.trim() || (attachments.length > 0 ? "Files from your agent" : "A message from your agent"),
         threadId: newThreadId(),
+        cc: parseEmailList(cc),
+        bcc: parseEmailList(bcc),
         attachments,
       });
     }
     setBody("");
     setSubject("");
+    setCc("");
+    setBcc("");
     setAttachments([]);
   }
 
@@ -175,31 +198,51 @@ export function MessageComposer({
       {/* Subject — only for a new email chat. Replies reuse the thread
           subject. */}
       {!replying && (
-        <div className="flex flex-wrap items-end gap-2">
-          <div className="min-w-[160px] flex-1">
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="min-w-[160px] flex-1">
+              <input
+                className="input text-sm"
+                placeholder="Subject"
+                value={subject}
+                spellCheck={true}
+                lang="en-US"
+                onChange={(e) => setSubject(e.target.value)}
+              />
+            </div>
+            <button
+              type="button"
+              className="btn-outline text-[11px] !px-2.5 !py-2 shrink-0"
+              onClick={suggestSubject}
+              disabled={suggesting || !body.trim()}
+              title="AI reads the message body and suggests a subject"
+            >
+              {suggesting ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="h-3.5 w-3.5 text-gold-600" />
+              )}
+              AI subject
+            </button>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
             <input
-              className="input text-sm"
-              placeholder="Subject"
-              value={subject}
-              spellCheck={true}
-              lang="en-US"
-              onChange={(e) => setSubject(e.target.value)}
+              className="input text-xs"
+              placeholder="Cc"
+              value={cc}
+              spellCheck={false}
+              autoCapitalize="none"
+              onChange={(e) => setCc(e.target.value)}
+            />
+            <input
+              className="input text-xs"
+              placeholder="Bcc"
+              value={bcc}
+              spellCheck={false}
+              autoCapitalize="none"
+              onChange={(e) => setBcc(e.target.value)}
             />
           </div>
-          <button
-            type="button"
-            className="btn-outline text-[11px] !px-2.5 !py-2 shrink-0"
-            onClick={suggestSubject}
-            disabled={suggesting || !body.trim()}
-            title="AI reads the message body and suggests a subject"
-          >
-            {suggesting ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <Sparkles className="h-3.5 w-3.5 text-gold-600" />
-            )}
-            AI subject
-          </button>
         </div>
       )}
 
@@ -287,4 +330,13 @@ export function MessageComposer({
       </div>
     </div>
   );
+}
+
+function parseEmailList(value: string): string[] | undefined {
+  const emails = value
+    .split(/[,\s;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(item));
+  return emails.length > 0 ? emails : undefined;
 }

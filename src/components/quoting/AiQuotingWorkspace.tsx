@@ -1045,28 +1045,12 @@ function CommercialAcordTemplatePicker({
                   </div>
                 )}
               </div>
-              {previewTemplate.templateFieldLayout?.length ? (
-                <DocumentTemplateFieldOverlay
-                  layout={previewTemplate.templateFieldLayout}
-                  fields={{}}
-                  fileUrl={previewUrl ?? undefined}
-                  sourceFileName={previewTemplate.fileName}
-                  title="Selected ACORD form"
-                  renderPdfBackground={false}
+              {previewUrl ? (
+                <iframe
+                  title={`Selected ACORD ${previewTemplate.fileName}`}
+                  src={embeddedAcordViewerUrl(previewUrl)}
+                  className="mt-3 h-[520px] w-full rounded border border-ink-200 bg-white"
                 />
-              ) : previewUrl ? (
-                <div className="mt-3 rounded-md border border-dashed border-ink-200 bg-white px-3 py-6 text-center text-xs text-ink-500">
-                  This ACORD file is attached, but the embedded browser preview could not be prepared.
-                  <a
-                    className="ml-1 font-semibold text-blue-700 underline"
-                    href={previewUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Open the ACORD PDF
-                  </a>
-                  .
-                </div>
               ) : (
                 <div className="mt-3 rounded-md border border-dashed border-ink-200 bg-white px-3 py-6 text-center text-xs text-ink-500">
                   This selected template does not have a bundled PDF URL.
@@ -4530,39 +4514,12 @@ function CommercialAcordSummary({
                 viewerUrl={embeddedAcordViewerUrl}
                 highlightFieldLabels={highlightedFieldLabels}
               />
-            ) : previewUrl && highlightedFieldLabels.length > 0 && sourcePreviewDocument?.templateFieldLayout?.length ? (
-              <DocumentTemplateFieldOverlay
-                layout={sourcePreviewDocument.templateFieldLayout}
-                fields={{}}
-                fileUrl={previewUrl}
-                sourceFileName={previewTemplate.fileName}
-                title="Required missing ACORD fields"
-                renderPdfBackground={false}
-                highlightLabels={highlightedFieldLabels}
-                showOnlyHighlighted
-              />
-            ) : previewUrl && sourcePreviewDocument?.templateFieldLayout?.length ? (
-              <DocumentTemplateFieldOverlay
-                layout={sourcePreviewDocument.templateFieldLayout}
-                fields={{}}
-                fileUrl={previewUrl}
-                sourceFileName={previewTemplate.fileName}
-                title="Selected ACORD form"
-                renderPdfBackground={false}
-              />
             ) : previewUrl ? (
-              <div className="rounded-md border border-dashed border-ink-200 bg-white px-3 py-6 text-center text-xs text-ink-500">
-                This ACORD file is attached, but the embedded browser preview could not be prepared.
-                <a
-                  href={previewUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="ml-1 font-semibold text-gold-900 underline"
-                >
-                  Open the ACORD PDF
-                </a>
-                .
-              </div>
+              <iframe
+                title={`Selected ACORD ${previewTemplate.fileName}`}
+                src={embeddedAcordViewerUrl(previewUrl)}
+                className="h-[520px] w-full rounded border border-ink-200 bg-white"
+              />
             ) : (
               <div className="rounded-md border border-dashed border-ink-200 bg-white px-3 py-6 text-center text-xs text-ink-500">
                 The completed ACORD preview is not available yet.

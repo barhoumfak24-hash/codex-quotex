@@ -12,6 +12,9 @@ const projectRef = envValue("SUPABASE_PROJECT_REF");
 const accessToken = envValue("SUPABASE_ACCESS_TOKEN");
 const cronSecret = envValue("CRON_SECRET");
 const storageBuckets = splitList(envValue("BACKUP_STORAGE_BUCKETS", envValue("SUPABASE_STORAGE_DOCUMENT_BUCKET")));
+const backupOutputEncrypted = envValue("BACKUP_OUTPUT_ENCRYPTED") === "true";
+const backupOffsiteTarget = envValue("BACKUP_OFFSITE_TARGET");
+const restoreDrillAt = envValue("DR_LAST_RESTORE_DRILL_AT");
 
 if (isMissingOrPlaceholder(directUrl) && isMissingOrPlaceholder(databaseUrl)) {
   issues.push("Set DIRECT_URL or DATABASE_URL for database backups. DIRECT_URL is preferred for pg_dump.");
@@ -49,18 +52,34 @@ if (isMissingOrPlaceholder(cronSecret)) {
   warnings.push("Set CRON_SECRET so Vercel Cron can call the disaster-recovery monitor securely.");
 }
 
-if (envValue("BACKUP_ALLOW_UNENCRYPTED") !== "true") {
-  warnings.push("Backups must be written to encrypted disk or encrypted offsite storage. Set BACKUP_ALLOW_UNENCRYPTED=true only for local dry runs.");
+if (envValue("BACKUP_ALLOW_UNENCRYPTED") === "true") {
+  warnings.push("BACKUP_ALLOW_UNENCRYPTED=true is for local dry runs only. Production backups must use encrypted disk or encrypted offsite storage.");
+} else if (!backupOutputEncrypted && isMissingOrPlaceholder(backupOffsiteTarget)) {
+  warnings.push("Mark BACKUP_OUTPUT_ENCRYPTED=true or set BACKUP_OFFSITE_TARGET after confirming backups land on encrypted/offsite storage.");
 }
 
 warnings.push("Enable a paid Supabase Point-in-Time Recovery tier once the recovery window is explicitly chosen.");
-warnings.push("Run a restore drill before importing real agency data. Backups are not proven until restore is tested.");
+if (!restoreDrillAt) {
+  warnings.push("Run `pnpm run dr:state-drill` and set DR_LAST_RESTORE_DRILL_AT before importing real agency data.");
+} else {
+  const parsed = Date.parse(restoreDrillAt);
+  if (Number.isNaN(parsed)) {
+    warnings.push("DR_LAST_RESTORE_DRILL_AT must be an ISO timestamp.");
+  } else {
+    const maxDays = Number.parseInt(envValue("DR_RESTORE_DRILL_MAX_DAYS", "90"), 10) || 90;
+    const ageDays = Math.floor((Date.now() - parsed) / (24 * 60 * 60 * 1000));
+    if (ageDays > maxDays) {
+      warnings.push(`DR_LAST_RESTORE_DRILL_AT is ${ageDays} days old. Run another restore drill within ${maxDays} days.`);
+    }
+  }
+}
 
 console.log("QuoteX backup configuration check");
 console.log("----------------------------------");
 console.log(`Loaded env files: ${loaded.length ? loaded.join(", ") : "none"}`);
 console.log(`Database backup URL: ${directUrl ? "DIRECT_URL" : databaseUrl ? "DATABASE_URL" : "missing"}`);
 console.log(`Storage buckets: ${storageBuckets.length ? storageBuckets.join(", ") : "missing"}`);
+console.log(`Last restore drill: ${restoreDrillAt || "missing"}`);
 console.log("");
 
 if (warnings.length) {

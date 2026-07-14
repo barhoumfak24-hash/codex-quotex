@@ -30,7 +30,10 @@ describe("documents.listTemplates + applyTemplate", () => {
     const acord25 = templates.find((template) => template.documentName?.startsWith("ACORD 25"));
     const acord125 = templates.find((template) => template.documentName?.startsWith("ACORD 125"));
 
-    expect(acordTemplates).toHaveLength(41);
+    expect(acordTemplates).toHaveLength(44);
+    expect(fileNames).toContain("ACORD-130-Scenario-1-Documents.pdf");
+    expect(fileNames).toContain("ACORD-130-Scenario-2-Documents.pdf");
+    expect(fileNames).toContain("ACORD-130-Scenario-3-Documents.pdf");
     expect(fileNames).toContain("ACORD-810-Fillable.pdf");
     expect(fileNames).toContain("ACORD-Untitled-document-11.pdf");
     expect(fileNames).not.toContain("ACORD-81.pdf");
@@ -42,6 +45,37 @@ describe("documents.listTemplates + applyTemplate", () => {
     expect(acord25?.downloadUrl).toBe("/acord/ACORD-025-Certificate-of-Liability.pdf");
     expect(acord25?.templateFields?.["Bundled PDF"]).toContain("Yes");
     expect(acord25?.templateFields?.["Source file"]).toBe("acord-coi-form.pdf");
+  });
+
+  it("backfills bundled ACORD templates for a newly-created agency", async () => {
+    const { api } = await import("../api");
+    const seedAgency = api.agencies.list()[0];
+    const {
+      id: _id,
+      createdAt: _createdAt,
+      active: _active,
+      agencyCode: _agencyCode,
+      agencyCodeEncrypted: _agencyCodeEncrypted,
+      agencyCodePreview: _agencyCodePreview,
+      ...agencyInput
+    } = seedAgency;
+    const agency = api.agencies.create({
+      ...agencyInput,
+      name: "New ACORD Agency",
+      contactEmail: "acord-new@example.com",
+      websiteSlug: "new-acord-agency",
+      active: true,
+    });
+    const acordTemplates = api.documents
+      .listTemplates(agency.id)
+      .filter((template) => /acord/i.test(`${template.fileName} ${template.documentName ?? ""}`));
+
+    expect(acordTemplates).toHaveLength(44);
+    expect(acordTemplates.every((template) => template.tenantId === agency.id)).toBe(true);
+    expect(acordTemplates.map((template) => template.fileName)).toContain("ACORD-125.pdf");
+    expect(acordTemplates.map((template) => template.fileName)).toContain(
+      "ACORD-130-Scenario-1-Documents.pdf"
+    );
   });
 
   it("listTemplates returns only reusable agency-library docs", async () => {

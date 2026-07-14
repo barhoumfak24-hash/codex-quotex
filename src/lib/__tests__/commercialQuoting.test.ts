@@ -13,10 +13,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 beforeEach(async () => {
   if (typeof window !== "undefined" && window.localStorage) window.localStorage.clear();
   const { db } = await import("../db");
+  const { resetAiResourceGovernor } = await import("../aiResourceGovernor");
+  resetAiResourceGovernor();
   db.reset();
 });
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   if (typeof window !== "undefined" && window.localStorage) window.localStorage.clear();
 });
 
@@ -114,7 +118,7 @@ describe("commercial quoting session", () => {
     expect(new Set(questions.map((q) => q.section))).toEqual(new Set(["Base business intake"]));
   });
 
-  it("prefills commercial questionnaire answers from verified AI/public data while keeping them editable", async () => {
+  it("removes verified AI-seeded base questions while preserving their values", async () => {
     const { api } = await import("../api");
     const { db } = await import("../db");
     const agency = api.agencies.list()[0];
@@ -165,13 +169,17 @@ describe("commercial quoting session", () => {
       /operating states/i.test(question.label)
     );
 
-    expect(legalName).toBeTruthy();
-    expect(operatingStates).toBeTruthy();
-    expect(prepared.questionnaireResponses?.[legalName!.id]).toBe("Coastal Logistics LLC");
-    expect(prepared.questionnaireResponses?.[operatingStates!.id]).toBe("FL, GA");
-    expect(prepared.questionnaireResponseMeta?.[legalName!.id]?.updatedByRole).toBe("ai");
-    expect(prepared.missingFields).not.toContain(legalName!.label);
-    expect(prepared.missingFields).not.toContain(operatingStates!.label);
+    expect(legalName).toBeUndefined();
+    expect(operatingStates).toBeUndefined();
+    expect(prepared.questionnaireResponses?.["base-legal-business-name-as-registered"]).toBe(
+      "Coastal Logistics LLC"
+    );
+    expect(prepared.questionnaireResponses?.["base-operating-states"]).toBe("FL, GA");
+    expect(
+      prepared.questionnaireResponseMeta?.["base-legal-business-name-as-registered"]?.updatedByRole
+    ).toBe("ai");
+    expect(prepared.missingFields).not.toContain("Legal business name (as registered)");
+    expect(prepared.missingFields).not.toContain("Operating states");
   });
 
   it("prefills source-backed web answers for review without writing them into ACORD until confirmed", async () => {
@@ -206,6 +214,7 @@ describe("commercial quoting session", () => {
           fieldKey: "Business operations summary (2-3 sentences)",
           sourceKind: "public_web",
           sourceLabel: "Company website",
+          sourceUrl: "https://example.com/company",
           confidence: 0.72,
           verified: false,
           allowDocumentAutofill: false,
@@ -268,6 +277,7 @@ describe("commercial quoting session", () => {
       fieldKey,
       sourceKind,
       sourceLabel: sourceKind === "public_geocoder" ? "Verified public geocoder" : "OpenAI web research",
+      sourceUrl: sourceKind === "public_web" ? "https://example.com/research" : undefined,
       confidence: sourceKind === "public_geocoder" ? 0.91 : 0.76,
       verified: sourceKind === "public_geocoder",
       allowDocumentAutofill: false,
@@ -300,6 +310,7 @@ describe("commercial quoting session", () => {
             value: "Real estate investment and property management / NAICS 531390",
             sourceLabel: "OpenAI web research",
             sourceKind: "public_web",
+            sourceUrl: "https://example.com/research",
             confidence: 0.76,
             verified: false,
             rationale: "Public business profile.",
@@ -310,6 +321,7 @@ describe("commercial quoting session", () => {
             value: "Private property management and coastal portfolio administration.",
             sourceLabel: "OpenAI web research",
             sourceKind: "public_web",
+            sourceUrl: "https://example.com/research",
             confidence: 0.76,
             verified: false,
             rationale: "Public business profile.",
@@ -320,6 +332,7 @@ describe("commercial quoting session", () => {
             value: "Coastal Logistics LLC",
             sourceLabel: "OpenAI web research",
             sourceKind: "public_web",
+            sourceUrl: "https://example.com/research",
             confidence: 0.76,
             verified: false,
             rationale: "Deliberate mismatch that must not fill the property question.",
@@ -609,22 +622,16 @@ describe("commercial quoting session", () => {
     ).toBe(true);
     const prepared = api.quoting.prepareCommercialQuestionnaire(session.id)!;
     const questions = prepared.questionnaireQuestions ?? [];
-    expect(
-      questions.some(
-        (question) =>
-          question.sourceDocumentId === acord36!.id &&
-          /policy number|effective date|expiration date/i.test(question.label)
-      )
-    ).toBe(true);
-    expect(
-      questions.some(
-        (question) =>
-          question.sourceDocumentId === acord125!.id &&
-          /legal business name, entity type, FEIN, website, and years in business/i.test(
-            question.label
-          )
-      )
-    ).toBe(true);
+    const narrowedIdentityQuestion = questions.find(
+      (question) =>
+        question.sourceDocumentId === acord125!.id &&
+        question.acordFieldKey === "business_identity"
+    );
+    expect(narrowedIdentityQuestion).toBeTruthy();
+    expect(narrowedIdentityQuestion?.label).toMatch(/FEIN/i);
+    expect(narrowedIdentityQuestion?.label).not.toMatch(/legal business name/i);
+    expect(narrowedIdentityQuestion?.acordFieldLabels).not.toContain("Legal business name");
+    expect(narrowedIdentityQuestion?.acordFieldLabels).not.toContain("Business legal name");
 
     const completedDocuments = api.documents
       .listByTenant(agency.id)
@@ -704,7 +711,7 @@ describe("commercial quoting session", () => {
       .listTemplates(agency.id)
       .filter((d) => /acord/i.test(`${d.fileName} ${d.documentName ?? ""}`));
 
-    expect(templates.length).toBe(41);
+    expect(templates.length).toBe(44);
     templates.forEach((template) => {
       const questions = buildAcordQuestionsForTemplate(
         {
@@ -720,6 +727,133 @@ describe("commercial quoting session", () => {
       expect(questions.every((question) => (question.acordFieldLabels ?? []).length > 0)).toBe(true);
       expect(questions.some((question) => !/remaining applicant details/i.test(question.label))).toBe(true);
     });
+  });
+
+  it("narrows ACORD 125 identity questions to only missing targets with stable ids", async () => {
+    const { buildAcordQuestionsForTemplate } = await import("../acordQuestionnaires");
+    const template = {
+      templateId: "template-acord-125",
+      fileName: "ACORD-125.pdf",
+      documentName: "ACORD 125 - Commercial Insurance Application",
+    };
+    const blankIdentity = buildAcordQuestionsForTemplate(template, {
+      publicFields: {},
+      assetDetails: {},
+    }).find((question) => question.acordFieldKey === "business_identity");
+
+    const tailoredIdentity = buildAcordQuestionsForTemplate(template, {
+      publicFields: {},
+      assetDetails: {},
+      knownFields: {
+        "Legal business name": "Coastal Logistics LLC",
+        "Business legal name": "Coastal Logistics LLC",
+        "Entity type": "LLC",
+        Website: "https://coastallogistics.example",
+        "Years in business": "12",
+      },
+    }).find((question) => question.acordFieldKey === "business_identity");
+
+    expect(blankIdentity).toBeTruthy();
+    expect(tailoredIdentity).toBeTruthy();
+    expect(tailoredIdentity?.id).toBe(blankIdentity?.id);
+    expect(tailoredIdentity?.label).toBe("ACORD 125: FEIN");
+    expect(tailoredIdentity?.acordFieldLabels).toEqual(["FEIN"]);
+  });
+
+  it("does not let a narrowed ACORD 125 FEIN answer overwrite known legal names", async () => {
+    const { buildAcordFilledFieldsForTemplate } = await import("../acordQuestionnaires");
+    const template = {
+      templateId: "template-acord-125",
+      fileName: "ACORD-125.pdf",
+      documentName: "ACORD 125 - Commercial Insurance Application",
+    };
+    const result = buildAcordFilledFieldsForTemplate(template, {
+      publicFields: {},
+      assetDetails: {},
+      knownFields: {
+        "Legal business name": "Coastal Logistics LLC",
+        "Business legal name": "Coastal Logistics LLC",
+        "Entity type": "LLC",
+        Website: "https://coastallogistics.example",
+        "Years in business": "12",
+      },
+      responses: {
+        "acord-template-acord-125-business-identity": "12-3456789",
+      },
+    });
+
+    expect(result.fields["Legal business name"]).toBe("Coastal Logistics LLC");
+    expect(result.fields["Business legal name"]).toBe("Coastal Logistics LLC");
+    expect(result.fields.FEIN).toBe("12-3456789");
+    expect(result.fields["Entity type"]).toBe("LLC");
+    expect(result.fields.Website).toBe("https://coastallogistics.example");
+  });
+
+  it("keeps attestation and unsafely inferred ACORD questions visible", async () => {
+    const { buildAcordQuestionsForTemplate } = await import("../acordQuestionnaires");
+    const template = {
+      templateId: "template-acord-125",
+      fileName: "ACORD-125.pdf",
+      documentName: "ACORD 125 - Commercial Insurance Application",
+    };
+
+    const withKnownLosses = buildAcordQuestionsForTemplate(template, {
+      publicFields: {},
+      assetDetails: {},
+      knownFields: {
+        "Loss history": "No claims reported",
+        "Claims history": "No claims reported",
+        "Prior losses": "No claims reported",
+      },
+    });
+    expect(withKnownLosses.some((question) => question.acordFieldKey === "loss_history")).toBe(true);
+
+    const withEstimateOnly = buildAcordQuestionsForTemplate(
+      {
+        templateId: "template-acord-611",
+        fileName: "ACORD-611.pdf",
+        documentName: "ACORD 611 - Supplemental ACORD Form",
+      },
+      {
+      publicFields: {},
+      assetDetails: {},
+      estimatedValue: 1_000_000,
+      }
+    );
+    expect(withEstimateOnly.some((question) => question.acordFieldKey === "coverage_limits")).toBe(true);
+
+    const withPlaceholderName = buildAcordQuestionsForTemplate(template, {
+      publicFields: {},
+      assetDetails: {},
+      contactName: "Commercial applicant",
+    });
+    expect(
+      withPlaceholderName.some((question) => question.acordFieldKey === "insured_name_address")
+    ).toBe(true);
+  });
+
+  it("does not use agency website to suppress insured website targets", async () => {
+    const { buildAcordQuestionsForTemplate } = await import("../acordQuestionnaires");
+    const template = {
+      templateId: "template-acord-125",
+      fileName: "ACORD-125.pdf",
+      documentName: "ACORD 125 - Commercial Insurance Application",
+    };
+
+    const identity = buildAcordQuestionsForTemplate(template, {
+      publicFields: {},
+      assetDetails: {},
+      knownFields: {
+        "Legal business name": "Coastal Logistics LLC",
+        "Business legal name": "Coastal Logistics LLC",
+        "Entity type": "LLC",
+        "Years in business": "12",
+        "Agency website": "https://agency.example",
+      },
+    }).find((question) => question.acordFieldKey === "business_identity");
+
+    expect(identity).toBeTruthy();
+    expect(identity?.acordFieldLabels).toEqual(["FEIN", "Website"]);
   });
 
   it("startSession honors the agent-selected line of business", async () => {
@@ -917,7 +1051,11 @@ describe("commercial quoting session", () => {
     ).toBe(true);
     expect(
       submitted?.commercialCarrierSubmissions?.every(
-        (row) => row.status === "accepted" && row.responseAt
+        (row) =>
+          row.status === "awaiting_response" &&
+          !row.responseAt &&
+          !!row.submissionId &&
+          (row.applicationThreadIds?.length ?? 0) > 0
       )
     ).toBe(true);
     const applicationMessageIds = (submitted?.commercialCarrierSubmissions ?? []).flatMap(
@@ -1009,9 +1147,112 @@ describe("commercial quoting session", () => {
     expect(applicationSummaryEvent?.communicationId).toBeTruthy();
     expect(applicationMessageIds).toContain(applicationSummaryEvent?.communicationId);
     expect(applicationSummaryEvent?.documentId).toBeTruthy();
-    expect(submitted?.quotes.map((quote) => quote.carrierId).sort()).toEqual(
-      [...selectedCarrierIds].sort()
-    );
+    expect(submitted?.quotes).toHaveLength(0);
+  });
+
+  it("links an inbound quote reply to the exact carrier submission and captures the stated premium", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const customer = api.customers.list(agency.id)[0];
+    const session = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: agent.id,
+      assetType: "other",
+      contactName: "Coastal Logistics LLC",
+      estimatedValue: 2_500_000,
+      lineOfBusiness: "commercial",
+    });
+    const selectedCarrierId = api.quoting
+      .recommendCommercialCarriers(session.id, commercialAnswers)
+      .find((row) => row.underwriterContacts.some((contact) => !!contact.email))!.carrierId;
+    const submitted = api.quoting.submitQuestionnaireResponses(
+      session.id,
+      commercialAnswers,
+      { id: agent.id, name: agent.name, role: "agent" },
+      {
+        selectedCommercialCarrierIds: [selectedCarrierId],
+        commercialCarrierEmailDrafts: api.quoting.previewCommercialCarrierEmails(
+          session.id,
+          commercialAnswers,
+          "application",
+          [selectedCarrierId]
+        ),
+      }
+    )!;
+    const submission = submitted.commercialCarrierSubmissions![0];
+    expect(submission.status).toBe("awaiting_response");
+    api.communications.create({
+      tenantId: agency.id,
+      carrierContactId: submission.underwriterContactIds![0],
+      channel: "email",
+      direction: "inbound",
+      threadId: submission.applicationThreadIds![0],
+      carrierSubmissionId: submission.submissionId,
+      subject: "Re: Commercial application package",
+      body: "We can quote this BOP. Annual premium is $18,450 subject to final underwriting and signed carrier forms.",
+      createdById: "carrier",
+    });
+
+    const read = api.quoting.readCommercialCarrierResponses(session.id)!;
+    const parsed = read.commercialCarrierSubmissions![0];
+    expect(parsed.status).toBe("accepted");
+    expect(parsed.finalPremium).toBe(18450);
+    expect(parsed.quote?.outcome).toBe("quoted");
+    expect(parsed.replyCommunicationIds).toHaveLength(1);
+    expect(read.quotes[0]?.premium).toBe(18450);
+  });
+
+  it("routes ambiguous inbound carrier replies to agent review instead of guessing", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const customer = api.customers.list(agency.id)[0];
+    const session = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: agent.id,
+      assetType: "other",
+      contactName: "Coastal Logistics LLC",
+      estimatedValue: 2_500_000,
+      lineOfBusiness: "commercial",
+    });
+    const selectedCarrierId = api.quoting
+      .recommendCommercialCarriers(session.id, commercialAnswers)
+      .find((row) => row.underwriterContacts.some((contact) => !!contact.email))!.carrierId;
+    const submitted = api.quoting.submitQuestionnaireResponses(
+      session.id,
+      commercialAnswers,
+      { id: agent.id, name: agent.name, role: "agent" },
+      {
+        selectedCommercialCarrierIds: [selectedCarrierId],
+        commercialCarrierEmailDrafts: api.quoting.previewCommercialCarrierEmails(
+          session.id,
+          commercialAnswers,
+          "application",
+          [selectedCarrierId]
+        ),
+      }
+    )!;
+    const submission = submitted.commercialCarrierSubmissions![0];
+    api.communications.create({
+      tenantId: agency.id,
+      carrierContactId: submission.underwriterContactIds![0],
+      channel: "email",
+      direction: "inbound",
+      threadId: submission.applicationThreadIds![0],
+      carrierSubmissionId: submission.submissionId,
+      subject: "Re: Commercial application package",
+      body: "Thanks, I will take a look and circle back.",
+      createdById: "carrier",
+    });
+
+    const read = api.quoting.readCommercialCarrierResponses(session.id)!;
+    const parsed = read.commercialCarrierSubmissions![0];
+    expect(parsed.status).toBe("agent_review");
+    expect(parsed.agentReviewReason).toMatch(/did not clearly state/i);
+    expect(read.quotes).toHaveLength(0);
   });
 
   it("sends supplemental packages only to carriers that requested missing information", async () => {
@@ -1055,14 +1296,38 @@ describe("commercial quoting session", () => {
         commercialCarrierEmailDrafts: applicationDrafts,
       }
     );
+    const firstSubmission = submitted?.commercialCarrierSubmissions?.[0];
+    api.communications.create({
+      tenantId: agency.id,
+      carrierContactId: firstSubmission?.underwriterContactIds?.[0],
+      channel: "email",
+      direction: "inbound",
+      threadId: firstSubmission?.applicationThreadIds?.[0],
+      carrierSubmissionId: firstSubmission?.submissionId,
+      subject: "Supplemental required",
+      body: "Please complete the attached supplemental before we can proceed.",
+      attachments: [
+        {
+          id: "att-supplemental",
+          fileName: "Carrier-Supplemental.pdf",
+          fileType: "application/pdf",
+        },
+      ],
+      createdById: "carrier",
+    });
+    const withCarrierReply = api.quoting.readCommercialCarrierResponses(session.id);
     const supplementalCarrierIds = new Set(
-      (submitted?.commercialCarrierSubmissions ?? [])
-        .filter((submission) => submission.status === "needs_client_info")
+      (withCarrierReply?.commercialCarrierSubmissions ?? [])
+        .filter(
+          (submission) =>
+            submission.status === "needs_client_info" ||
+            submission.status === "needs_supplemental"
+        )
         .map((submission) => submission.carrierId)
     );
     expect(supplementalCarrierIds.size).toBeGreaterThan(0);
 
-    const secondRound = (submitted?.questionnaireQuestions ?? []).filter(
+    const secondRound = (withCarrierReply?.questionnaireQuestions ?? []).filter(
       (question) => question.round === "second_round"
     );
     const secondRoundAnswers = Object.fromEntries(
@@ -1120,7 +1385,7 @@ describe("commercial quoting session", () => {
     ).toBe(true);
   });
 
-  it("submitQuestionnaireResponses shows accepted rankings during second-round supplementals", async () => {
+  it("does not show accepted rankings until a real carrier quote reply arrives", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
@@ -1134,67 +1399,36 @@ describe("commercial quoting session", () => {
       estimatedValue: 1_500_000,
     });
     api.quoting.sendPortalLink(session.id, "https://example/link");
-    const tasksBefore = api.tasks.listByTenant(agency.id).length;
     const submitted = api.quoting.submitQuestionnaireResponses(session.id, {
       "base-legal-business-name-as-registered": "Acme Logistics LLC",
       "base-federal-ein": "12-3456789",
     });
-    expect(submitted?.status).toBe("awaiting_reply");
+    expect(submitted?.status).toBe("quoting");
     expect(submitted?.commercialApplicationSentAt).toBeTruthy();
-    expect(submitted?.commercialSecondRoundSentAt).toBeTruthy();
+    expect(submitted?.commercialSecondRoundSentAt).toBeFalsy();
     expect(submitted?.questionnaireResponses?.["base-federal-ein"]).toBe("12-3456789");
-    expect(api.tasks.listByTenant(agency.id).length).toBeGreaterThan(tasksBefore);
-    const supplementalTask = api.tasks
-      .listByTenant(agency.id)
-      .find((task) => task.activityKey === `quote-session:${session.id}:supplemental_pending`);
-    expect(supplementalTask?.assignedToId).toBe(agent.id);
-    expect(supplementalTask?.status).toBe("open");
-    expect(submitted?.quotes.length).toBeGreaterThan(0);
-    const initiallyAcceptedIds = new Set(
-      (submitted?.commercialCarrierSubmissions ?? [])
-        .filter((s) => s.status === "accepted" || s.status === "supplemental_sent")
-        .map((s) => s.carrierId)
-    );
-    const initiallyWaitingIds = new Set(
-      (submitted?.commercialCarrierSubmissions ?? [])
-        .filter((s) => s.status === "needs_client_info")
-        .map((s) => s.carrierId)
-    );
-    expect(initiallyAcceptedIds.size).toBeGreaterThan(0);
-    expect(initiallyWaitingIds.size).toBeGreaterThan(0);
-    expect(submitted?.quotes.every((q) => initiallyAcceptedIds.has(q.carrierId))).toBe(true);
-    expect(submitted?.quotes.some((q) => initiallyWaitingIds.has(q.carrierId))).toBe(false);
-
-    const secondRound = (submitted?.questionnaireQuestions ?? []).filter(
-      (q) => q.round === "second_round"
-    );
-    expect(secondRound.length).toBeGreaterThan(0);
-    const secondRoundAnswers = Object.fromEntries(
-      secondRound.map((q) => [q.id, "Confirmed supplemental answer"])
-    );
-    const final = api.quoting.submitQuestionnaireResponses(session.id, secondRoundAnswers);
-    expect(final?.status).toBe("complete");
-    expect(final?.replyReceivedAt).toBeTruthy();
-    expect(final?.commercialSupplementalsCompletedAt).toBeTruthy();
-    expect(final?.quotes.length).toBeGreaterThan(0);
-    const acceptedIds = new Set(
-      (final?.commercialCarrierSubmissions ?? [])
-        .filter((s) => s.status === "accepted" || s.status === "supplemental_sent")
-        .map((s) => s.carrierId)
-    );
-    expect(final?.quotes.every((q) => acceptedIds.has(q.carrierId))).toBe(true);
-    expect(acceptedIds.size).toBeGreaterThanOrEqual(initiallyAcceptedIds.size);
-    const tasksAfter = api.tasks.listByTenant(agency.id);
-    const resolvedSupplemental = tasksAfter.find(
-      (task) => task.activityKey === `quote-session:${session.id}:supplemental_pending`
-    );
-    expect(resolvedSupplemental?.status).toBe("resolved");
-    expect(resolvedSupplemental?.completedAt).toBeTruthy();
+    expect(submitted?.quotes).toHaveLength(0);
     expect(
-      tasksAfter.some(
-        (task) => task.activityKey === `quote-session:${session.id}:quote_ready` && task.status !== "resolved"
+      (submitted?.commercialCarrierSubmissions ?? []).every(
+        (submission) => submission.status === "awaiting_response"
       )
-    ).toBe(false);
+    ).toBe(true);
+
+    const firstSubmission = submitted?.commercialCarrierSubmissions?.[0]!;
+    api.communications.create({
+      tenantId: agency.id,
+      carrierContactId: firstSubmission.underwriterContactIds?.[0],
+      channel: "email",
+      direction: "inbound",
+      threadId: firstSubmission.applicationThreadIds?.[0],
+      carrierSubmissionId: firstSubmission.submissionId,
+      subject: "Quote indication",
+      body: "We can quote the account. Annual premium is $12,750 subject to underwriting.",
+      createdById: "carrier",
+    });
+    const final = api.quoting.readCommercialCarrierResponses(session.id);
+    expect(final?.status).toBe("complete");
+    expect(final?.quotes[0]?.premium).toBe(12750);
     const readyNotification = api.aiNotifications
       .listUnacked(agency.id)
       .find(
@@ -1205,7 +1439,7 @@ describe("commercial quoting session", () => {
     expect(api.aiNotifications.acknowledge(readyNotification!.id, agent.id)).toBeNull();
   });
 
-  it("does not create a new supplemental round when an incomplete supplemental is sent anyway", async () => {
+  it("does not create a supplemental round before a real carrier supplemental request", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
@@ -1227,8 +1461,8 @@ describe("commercial quoting session", () => {
     const originalSecondRound = (submitted?.questionnaireQuestions ?? []).filter(
       (question) => question.round === "second_round"
     );
-    expect(submitted?.status).toBe("awaiting_reply");
-    expect(originalSecondRound.length).toBeGreaterThan(0);
+    expect(submitted?.status).toBe("quoting");
+    expect(originalSecondRound).toHaveLength(0);
 
     const final = api.quoting.submitQuestionnaireResponses(
       session.id,
@@ -1239,15 +1473,15 @@ describe("commercial quoting session", () => {
       (question) => question.round === "second_round"
     );
 
-    expect(final?.status).toBe("complete");
+    expect(final?.status).toBe("quoting");
     expect(final?.commercialSupplementalsCompletedAt).toBeTruthy();
-    expect(finalSecondRound).toHaveLength(originalSecondRound.length);
+    expect(finalSecondRound).toHaveLength(0);
     expect(
       (final?.commercialCarrierSubmissions ?? []).some(
         (submission) => submission.status === "needs_client_info"
       )
     ).toBe(false);
-    expect(final?.quotes.length).toBeGreaterThan(0);
+    expect(final?.quotes).toHaveLength(0);
   });
 
   it("prefills commercial profile business name and contact details without using numeric placeholders", async () => {
@@ -1285,21 +1519,33 @@ describe("commercial quoting session", () => {
       question.id === "contact_information" || /primary contact.*phone.*email/i.test(question.label)
     );
     const acordBusinessIdentity = prepared.questionnaireQuestions?.find((question) =>
-      /ACORD 125: Legal business name, entity type/i.test(question.label)
+      question.acordFieldKey === "business_identity"
     );
 
-    expect(legalName).toBeTruthy();
-    expect(contactInfo).toBeTruthy();
+    expect(legalName).toBeUndefined();
+    expect(contactInfo).toBeUndefined();
     expect(acordBusinessIdentity).toBeTruthy();
-    expect(prepared.questionnaireResponses?.[legalName!.id]).toBe("Coastal Logistics LLC");
-    expect(prepared.questionnaireResponses?.[legalName!.id]).not.toBe("2345");
-    expect(prepared.questionnaireResponses?.[acordBusinessIdentity!.id]).toContain(
-      "Legal business name: Coastal Logistics LLC"
+    expect(acordBusinessIdentity?.label).not.toMatch(/legal business name/i);
+    expect(acordBusinessIdentity?.acordFieldLabels).not.toContain("Legal business name");
+    expect(acordBusinessIdentity?.acordFieldLabels).not.toContain("Business legal name");
+    expect(prepared.questionnaireResponses?.["base-legal-business-name-as-registered"]).toBe(
+      "Coastal Logistics LLC"
     );
-    expect(prepared.questionnaireResponses?.[contactInfo!.id]).toContain("Alexandra Whitford");
-    expect(prepared.questionnaireResponses?.[contactInfo!.id]).toContain("517-294-2671");
-    expect(prepared.questionnaireResponses?.[contactInfo!.id]).toContain(
+    expect(
+      Object.values(prepared.questionnaireResponses ?? {}).some((value) => value.includes("2345"))
+    ).toBe(false);
+    const completedDoc = api.documents
+      .listByTenant(agency.id)
+      .find(
+        (document) =>
+          document.quoteRequestId === session.id &&
+          document.type === "completed_acord_application"
+      );
+    expect(completedDoc?.templateFields?.["Business legal name"]).toBe("Coastal Logistics LLC");
+    expect(completedDoc?.templateFields?.["Legal business name"]).toBe("Coastal Logistics LLC");
+    expect(completedDoc?.templateFields?.["Applicant email"]).toBe(
       "alexandra@coastallogistics.example"
     );
+    expect(completedDoc?.templateFields?.["Applicant phone"]).toBe("517-294-2671");
   });
 });

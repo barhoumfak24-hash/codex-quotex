@@ -39,6 +39,7 @@ import { prospectsRoutes } from "./routes/prospects.js";
 import { quotesRoutes } from "./routes/quotes.js";
 import { renewalsRoutes } from "./routes/renewals.js";
 import { signingPacketsRoutes } from "./routes/signingPackets.js";
+import { stateBlobRoutes } from "./routes/stateBlobs.js";
 import { stateRoutes } from "./routes/state.js";
 import { statusRoutes } from "./routes/status.js";
 import { stripeRoutes } from "./routes/stripe.js";
@@ -46,7 +47,8 @@ import { systemRoutes } from "./routes/system.js";
 import { tenantsRoutes } from "./routes/tenants.js";
 import { websiteRoutes } from "./routes/website.js";
 import { runDisasterRecoveryCheck } from "./services/disasterRecovery.js";
-import { databaseHealth } from "./services/prisma.js";
+import { pollDueMailboxConnections } from "./services/mailboxSync.js";
+import { databaseHealth, prisma } from "./services/prisma.js";
 
 type RawBodyRequest = {
   rawBody?: Buffer;
@@ -81,6 +83,17 @@ app.use(
   })
 );
 app.use(
+  "/api/state-blobs",
+  publicWorkflowLimiter,
+  express.json({
+    limit: "20mb",
+    verify(req, _res, buffer) {
+      (req as RawBodyRequest).rawBody = Buffer.from(buffer);
+    },
+  }),
+  stateBlobRoutes
+);
+app.use(
   express.json({
     limit: "2mb",
     verify(req, _res, buffer) {
@@ -107,6 +120,48 @@ app.get("/health/database", async (req, res) => {
   }
 });
 
+app.get("/health/master-auth", diagnosticsLimiter, async (req, res) => {
+  if (!canReadDiagnostics(req)) return res.status(404).json({ error: "not_found" });
+  try {
+    const masters = await prisma.user.findMany({
+      where: { role: "master_admin" },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        status: true,
+        passwordHash: true,
+        lastLoginAt: true,
+        createdAt: true,
+        updatedAt: true,
+      },
+      orderBy: { createdAt: "asc" },
+    });
+    res.json({
+      ok: true,
+      checkedAt: new Date().toISOString(),
+      masterCount: masters.length,
+      activeMasterCount: masters.filter((user) => user.status === "active").length,
+      masters: masters.map((user) => ({
+        id: user.id,
+        email: maskEmail(user.email),
+        name: user.name,
+        status: user.status,
+        hasPasswordHash: Boolean(user.passwordHash),
+        lastLoginAt: user.lastLoginAt?.toISOString() ?? null,
+        createdAt: user.createdAt.toISOString(),
+        updatedAt: user.updatedAt.toISOString(),
+      })),
+    });
+  } catch {
+    res.status(503).json({
+      ok: false,
+      error: "master_auth_diagnostic_failed",
+      checkedAt: new Date().toISOString(),
+    });
+  }
+});
+
 app.get("/cron/disaster-recovery", diagnosticsLimiter, async (req, res, next) => {
   try {
     if (!canRunCron(req)) return res.status(401).json({ error: "unauthorized" });
@@ -117,8 +172,45 @@ app.get("/cron/disaster-recovery", diagnosticsLimiter, async (req, res, next) =>
   }
 });
 
+app.get("/cron/mailbox-sync", diagnosticsLimiter, async (req, res, next) => {
+  try {
+    if (!canRunCron(req)) return res.status(401).json({ error: "unauthorized" });
+    const report = await pollDueMailboxConnections({ maxConnections: 25, maxResults: 25 });
+    res.status(report.failed > 0 && report.checked === report.failed ? 503 : 200).json({
+      ok: report.failed === 0,
+      source: "vercel-cron",
+      checkedAt: new Date().toISOString(),
+      ...report,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/mailboxes/poll", diagnosticsLimiter, async (req, res, next) => {
+  try {
+    if (!canRunCron(req)) return res.status(401).json({ error: "unauthorized" });
+    const report = await pollDueMailboxConnections({ maxConnections: 25, maxResults: 25 });
+    res.status(report.failed > 0 && report.checked === report.failed ? 503 : 200).json({
+      ok: report.failed === 0,
+      source: "vercel-cron",
+      checkedAt: new Date().toISOString(),
+      ...report,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.use("/api", apiLimiter);
-app.use("/api/auth", authLimiter, authRoutes);
+app.use(
+  "/api/auth",
+  (req, res, next) => {
+    if (req.method === "GET" && req.path === "/session") return next();
+    return authLimiter(req, res, next);
+  },
+  authRoutes
+);
 app.use("/api/communications", publicWorkflowLimiter, communicationsRoutes);
 app.use("/api/signing-packets", publicWorkflowLimiter, signingPacketsRoutes);
 app.use("/api/state", publicWorkflowLimiter, stateRoutes);
@@ -176,4 +268,11 @@ function constantTimeEquals(received: string, expected: string): boolean {
   const expectedBuffer = Buffer.from(expected);
   if (receivedBuffer.length !== expectedBuffer.length) return false;
   return timingSafeEqual(receivedBuffer, expectedBuffer);
+}
+
+function maskEmail(email: string): string {
+  const [name, domain] = email.split("@");
+  if (!name || !domain) return "(invalid email)";
+  const visiblePrefix = name.slice(0, Math.min(2, name.length));
+  return `${visiblePrefix}${"*".repeat(Math.max(3, name.length - visiblePrefix.length))}@${domain}`;
 }

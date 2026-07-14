@@ -2,6 +2,7 @@ import { Router } from "express";
 import type { NextFunction, Request, Response } from "express";
 import { assertBodyTenantMatchesAuth } from "../middleware/auth.js";
 import {
+  aiAnalyzePropertyImagery,
   aiCarrierMatch,
   aiDraftCampaign,
   aiDraftPamphlet,
@@ -13,12 +14,15 @@ import {
   aiMarketingMessage,
   aiMarketingCreative,
   aiMapAcordFields,
+  aiMapUniversalDocumentFields,
   aiPortalAssistant,
+  aiParseCarrierReply,
   aiSortIntent,
   aiParseCarrierAppetite,
   aiParseIntake,
   aiPremiumEstimate,
 } from "../services/ai/index.js";
+import { publicAiAgentManifest } from "../services/ai/agents.js";
 import { generateOpenAiImage } from "../services/ai/provider.js";
 
 // ALL AI is server-side. No model key ever crosses to the browser.
@@ -41,6 +45,10 @@ aiRoutes.use(rejectOversizedAiInput);
 aiRoutes.use((req, res, next) => {
   if (!assertBodyTenantMatchesAuth(req, res)) return;
   next();
+});
+
+aiRoutes.get("/agents", (_req, res) => {
+  res.json({ agents: publicAiAgentManifest() });
 });
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -169,8 +177,9 @@ aiRoutes.post("/enhance-message", async (req, res) => {
       contactName: typeof contactName === "string" ? contactName : undefined,
     });
     res.json(out);
-  } catch {
-    res.status(500).json({ error: "ai_failed" });
+  } catch (error) {
+    const message = error instanceof Error ? error.message.slice(0, 300) : "AI mapping failed.";
+    res.status(500).json({ error: "ai_failed", message });
   }
 });
 
@@ -210,10 +219,30 @@ aiRoutes.post("/extract-policy", async (req, res) => {
 
 aiRoutes.post("/enrich-asset", async (req, res) => {
   try {
-    const { assetType, seed } = req.body ?? {};
+    const { assetType, seed, targetQuestions } = req.body ?? {};
     if (typeof assetType !== "string") return badRequest(res, "assetType is required");
     if (!isRecord(seed)) return badRequest(res, "seed must be an object");
-    const out = await aiEnrichAsset({ assetType, seed });
+    const out = await aiEnrichAsset({ assetType, seed, targetQuestions });
+    res.json(out);
+  } catch {
+    res.status(500).json({ error: "ai_failed" });
+  }
+});
+
+aiRoutes.post("/property-imagery", async (req, res) => {
+  try {
+    const { address, lat, lon, displayName, provider } = req.body ?? {};
+    if (typeof address !== "string" || address.trim().length === 0) return badRequest(res, "address is required");
+    const nLat = Number(lat);
+    const nLon = Number(lon);
+    if (!Number.isFinite(nLat) || !Number.isFinite(nLon)) return badRequest(res, "lat and lon are required");
+    const out = await aiAnalyzePropertyImagery({
+      address,
+      lat: nLat,
+      lon: nLon,
+      displayName: typeof displayName === "string" ? displayName : undefined,
+      provider: provider === "census" ? "census" : "google",
+    });
     res.json(out);
   } catch {
     res.status(500).json({ error: "ai_failed" });
@@ -237,6 +266,92 @@ aiRoutes.post("/parse-carrier-appetite", async (req, res) => {
   }
 });
 
+aiRoutes.post("/parse-carrier-reply", async (req, res) => {
+  try {
+    const { submission, email } = req.body ?? {};
+    if (!isRecord(email)) return badRequest(res, "email must be an object");
+    const cleanEmail = {
+      subject: typeof email.subject === "string" ? email.subject : undefined,
+      text: typeof email.text === "string" ? email.text : undefined,
+      html: typeof email.html === "string" ? email.html : undefined,
+      attachments: Array.isArray(email.attachments)
+        ? email.attachments.filter(isRecord).map((attachment) => ({
+            id: typeof attachment.id === "string" ? attachment.id : undefined,
+            fileName: typeof attachment.fileName === "string" ? attachment.fileName : undefined,
+            fileType: typeof attachment.fileType === "string" ? attachment.fileType : undefined,
+            description: typeof attachment.description === "string" ? attachment.description : undefined,
+          }))
+        : undefined,
+    };
+    const out = await aiParseCarrierReply({
+      submission: isRecord(submission) ? submission : undefined,
+      email: cleanEmail,
+    });
+    res.json(out);
+  } catch (error) {
+    const message = error instanceof Error ? error.message.slice(0, 300) : "Carrier reply parsing failed.";
+    res.status(500).json({ error: "ai_failed", message });
+  }
+});
+
+aiRoutes.post("/document-map", async (req, res) => {
+  try {
+    const { document, fields, dossier, attachments } = req.body ?? {};
+    if (!Array.isArray(fields)) return badRequest(res, "fields must be an array");
+    if (!isRecord(dossier)) return badRequest(res, "dossier must be an object");
+    const cleanFields = fields
+      .filter(isRecord)
+      .map((field) => ({
+        id: typeof field.id === "string" ? field.id : undefined,
+        label: typeof field.label === "string" ? field.label : "",
+        acordFieldKey: typeof field.acordFieldKey === "string" ? field.acordFieldKey : undefined,
+        acordFieldLabels: Array.isArray(field.acordFieldLabels)
+          ? field.acordFieldLabels.filter((label): label is string => typeof label === "string")
+          : undefined,
+        required: field.required === true,
+        kind: typeof field.kind === "string" ? field.kind : typeof field.type === "string" ? field.type : undefined,
+        page: typeof field.page === "number" ? field.page : undefined,
+        rect: isRecord(field.rect)
+          ? {
+              x: Number(field.rect.x) || 0,
+              y: Number(field.rect.y) || 0,
+              width: Number(field.rect.width) || 0,
+              height: Number(field.rect.height) || 0,
+            }
+          : undefined,
+      }))
+      .filter((field) => field.label.trim().length > 0);
+    if (cleanFields.length === 0) return badRequest(res, "at least one field label is required");
+    const cleanAttachments = Array.isArray(attachments)
+      ? attachments
+          .filter(isRecord)
+          .map((attachment) => ({
+            fileName: typeof attachment.fileName === "string" ? attachment.fileName : undefined,
+            mimeType: typeof attachment.mimeType === "string" ? attachment.mimeType : undefined,
+            dataUrl: typeof attachment.dataUrl === "string" ? attachment.dataUrl : "",
+          }))
+          .filter((attachment) => attachment.dataUrl)
+      : undefined;
+    const out = await aiMapUniversalDocumentFields({
+      document: isRecord(document)
+        ? {
+            fileName: typeof document.fileName === "string" ? document.fileName : undefined,
+            fileType: typeof document.fileType === "string" ? document.fileType : undefined,
+            documentName: typeof document.documentName === "string" ? document.documentName : undefined,
+            kind: typeof document.kind === "string" ? document.kind : undefined,
+          }
+        : undefined,
+      fields: cleanFields,
+      dossier,
+      attachments: cleanAttachments,
+    });
+    res.json(out);
+  } catch (error) {
+    const message = error instanceof Error ? error.message.slice(0, 300) : "AI document mapping failed.";
+    res.status(500).json({ error: "ai_failed", message });
+  }
+});
+
 aiRoutes.post("/acord-map", async (req, res) => {
   try {
     const { template, fields, dossier, intent } = req.body ?? {};
@@ -247,6 +362,10 @@ aiRoutes.post("/acord-map", async (req, res) => {
       .map((field) => ({
         id: typeof field.id === "string" ? field.id : undefined,
         label: typeof field.label === "string" ? field.label : "",
+        acordFieldKey: typeof field.acordFieldKey === "string" ? field.acordFieldKey : undefined,
+        acordFieldLabels: Array.isArray(field.acordFieldLabels)
+          ? field.acordFieldLabels.filter((label): label is string => typeof label === "string")
+          : undefined,
         required: field.required === true,
         kind: typeof field.kind === "string" ? field.kind : undefined,
         page: typeof field.page === "number" ? field.page : undefined,
@@ -267,8 +386,9 @@ aiRoutes.post("/acord-map", async (req, res) => {
       intent: intent === "questionnaire_prefill" ? "questionnaire_prefill" : "document_autofill",
     });
     res.json(out);
-  } catch {
-    res.status(500).json({ error: "ai_failed" });
+  } catch (error) {
+    const message = error instanceof Error ? error.message.slice(0, 300) : "AI mapping failed.";
+    res.status(500).json({ error: "ai_failed", message });
   }
 });
 
@@ -364,7 +484,7 @@ aiRoutes.get("/pamphlet-image", async (req, res) => {
     const landscape = Number(req.query.width) > Number(req.query.height);
     const image = await generateOpenAiImage({
       prompt,
-      size: landscape ? "1536x1024" : "1024x1536",
+      size: landscape ? "1792x1024" : "1024x1792",
     });
     if (!image) {
       res.status(503).json({ error: "image_provider_unconfigured" });

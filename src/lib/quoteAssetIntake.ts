@@ -30,6 +30,33 @@ const HOME_FIELDS: QuoteAssetDetailField[] = [
     publicHints: ["address", "risk address"],
   },
   {
+    key: "occupancy",
+    label: "Occupancy",
+    inputType: "select",
+    required: true,
+    options: ["Primary", "Secondary / seasonal", "Tenant occupied", "Vacant", "Condo", "Dwelling fire"],
+    publicHints: ["occupancy"],
+    questionHints: ["occupancy"],
+  },
+  {
+    key: "ownershipAndLien",
+    label: "Ownership and lien details",
+    inputType: "textarea",
+    questionHints: ["ownership", "lien", "mortgagee", "loan"],
+  },
+  {
+    key: "countyTownship",
+    label: "County and township / municipality",
+    inputType: "text",
+    publicHints: ["county", "township", "municipality"],
+  },
+  {
+    key: "priorOrMailingAddress",
+    label: "Prior or mailing address in the last 3 years",
+    inputType: "address",
+    questionHints: ["prior address", "mailing address"],
+  },
+  {
     key: "yearBuilt",
     label: "Year built",
     inputType: "number",
@@ -43,11 +70,46 @@ const HOME_FIELDS: QuoteAssetDetailField[] = [
     publicHints: ["square footage", "sq ft"],
   },
   {
+    key: "unitsWallHeight",
+    label: "Number of units and wall height",
+    inputType: "textarea",
+    publicHints: ["units", "wall height"],
+    questionHints: ["number of units", "wall height"],
+  },
+  {
+    key: "homeStyle",
+    label: "Home style",
+    inputType: "select",
+    options: ["1 story", "1.5 story", "1.75 story", "2 story", "Split-level", "Condo", "Apartment", "Manufactured home", "Other"],
+    publicHints: ["style", "stories"],
+  },
+  {
+    key: "foundationDetails",
+    label: "Foundation details",
+    inputType: "textarea",
+    publicHints: ["foundation", "basement"],
+    questionHints: ["foundation", "basement", "crawl space"],
+  },
+  {
     key: "constructionType",
     label: "Construction type",
     inputType: "select",
     options: ["Frame", "Masonry", "Stucco over masonry", "ICF concrete", "Other / unknown"],
     publicHints: ["construction"],
+  },
+  {
+    key: "frameAndExterior",
+    label: "Frame and exterior materials",
+    inputType: "textarea",
+    publicHints: ["frame", "exterior", "siding", "brick", "stone", "stucco"],
+    questionHints: ["frame", "exterior"],
+  },
+  {
+    key: "roofShapePitch",
+    label: "Roof shape and pitch",
+    inputType: "textarea",
+    publicHints: ["roof shape", "roof pitch", "gable", "hip", "flat"],
+    questionHints: ["roof shape", "roof pitch"],
   },
   {
     key: "roofMaterial",
@@ -65,11 +127,83 @@ const HOME_FIELDS: QuoteAssetDetailField[] = [
     questionHints: ["roof age", "partial replacements"],
   },
   {
+    key: "skylights",
+    label: "Skylights",
+    inputType: "textarea",
+    publicHints: ["skylight"],
+    questionHints: ["skylight"],
+  },
+  {
+    key: "attachedStructures",
+    label: "Attached structures",
+    inputType: "textarea",
+    publicHints: ["porch", "deck", "attached garage", "carport", "balcony"],
+    questionHints: ["attached structures", "porch", "deck", "garage"],
+  },
+  {
+    key: "detachedStructuresAndRecreation",
+    label: "Detached structures and recreational features",
+    inputType: "textarea",
+    publicHints: ["detached garage", "shed", "pool", "gazebo"],
+    questionHints: ["pool", "hot tub", "trampoline", "shed", "detached garage"],
+  },
+  {
+    key: "interiorFinishes",
+    label: "Interior walls, ceilings, and floors",
+    inputType: "textarea",
+    questionHints: ["interior", "walls", "ceilings", "floors"],
+  },
+  {
+    key: "kitchenBathQuality",
+    label: "Kitchen and bathroom quality",
+    inputType: "textarea",
+    questionHints: ["kitchen", "bath"],
+  },
+  {
+    key: "interiorFeatures",
+    label: "Interior features",
+    inputType: "textarea",
+    questionHints: ["wet bar", "fireplace", "wood stove", "spiral staircase", "attic", "central vacuum"],
+  },
+  {
+    key: "heatingCoolingSystems",
+    label: "Heating and cooling systems",
+    inputType: "textarea",
+    publicHints: ["heating", "cooling", "central air", "hvac"],
+    questionHints: ["heating", "cooling", "central AC"],
+  },
+  {
+    key: "electricalAndSafetySystems",
+    label: "Electrical and safety systems",
+    inputType: "textarea",
+    publicHints: ["electrical", "alarm", "sprinkler"],
+    questionHints: ["electrical", "alarm", "sprinkler", "surveillance"],
+  },
+  {
+    key: "homeUpdates",
+    label: "Updates and remodels",
+    inputType: "textarea",
+    publicHints: ["updates", "renovation", "remodel"],
+    questionHints: ["roof receipt", "heating", "plumbing", "electrical", "addition", "remodel"],
+  },
+  {
     key: "distanceToCoast",
     label: "Distance to coast",
     inputType: "text",
     placeholder: "e.g., 0.8 miles",
     publicHints: ["distance to coast"],
+  },
+  {
+    key: "lotSize",
+    label: "Lot size",
+    inputType: "text",
+    publicHints: ["lot size", "acreage", "acres"],
+  },
+  {
+    key: "floodZone",
+    label: "Flood zone",
+    inputType: "text",
+    publicHints: ["flood zone"],
   },
   {
     key: "windMitigation",
@@ -84,6 +218,30 @@ const HOME_FIELDS: QuoteAssetDetailField[] = [
     inputType: "textarea",
     placeholder: "Carrier, cause, paid amount, and date for any losses",
     questionHints: ["losses", "loss history", "carrier, paid amount"],
+  },
+  {
+    key: "animalsAndLiabilityExposures",
+    label: "Animals, business, rental, and liability exposures",
+    inputType: "textarea",
+    questionHints: ["dogs", "bite", "daycare", "business", "rental", "vacant land", "pond", "recreational vehicles"],
+  },
+  {
+    key: "scheduledProperty",
+    label: "Scheduled property",
+    inputType: "textarea",
+    questionHints: ["jewelry", "watches", "guns", "furs", "art", "collections", "safe", "vault"],
+  },
+  {
+    key: "requestedHomeEndorsements",
+    label: "Requested endorsements and special coverages",
+    inputType: "textarea",
+    questionHints: ["water backup", "personal injury", "ordinance", "loss assessment", "service line", "equipment breakdown", "id theft"],
+  },
+  {
+    key: "homeDiscountsAndProtection",
+    label: "Discounts and protection details",
+    inputType: "textarea",
+    questionHints: ["full pay", "escrow", "non-smoker", "generator", "protective", "hydrant", "fire station", "multi-policy"],
   },
 ];
 
@@ -100,6 +258,19 @@ const VEHICLE_FIELDS: QuoteAssetDetailField[] = [
   { key: "make", label: "Make", inputType: "text", required: true, publicHints: ["year / make / model", "make"] },
   { key: "model", label: "Model", inputType: "text", required: true, publicHints: ["year / make / model", "model"] },
   {
+    key: "statedValue",
+    label: "Stated value",
+    inputType: "currency",
+    publicHints: ["stated value", "market value", "msrp"],
+    questionHints: ["stated value"],
+  },
+  {
+    key: "purchaseAndOwnership",
+    label: "Purchase date, new/used, own/lien/lease, and name on title",
+    inputType: "textarea",
+    questionHints: ["purchase date", "new", "used", "own", "lien", "lease", "title"],
+  },
+  {
     key: "garagingAddress",
     label: "Garaging address",
     inputType: "address",
@@ -108,10 +279,22 @@ const VEHICLE_FIELDS: QuoteAssetDetailField[] = [
     placeholder: "Where the vehicle is normally kept",
   },
   {
+    key: "lienholderOrLessor",
+    label: "Lienholder or lessor name and address",
+    inputType: "textarea",
+    questionHints: ["lienholder", "lessor", "lease", "holder"],
+  },
+  {
     key: "annualMileage",
     label: "Annual mileage",
     inputType: "number",
     questionHints: ["annual mileage"],
+  },
+  {
+    key: "commuteAndAnnualMileage",
+    label: "Distance one way, days per week, and annual mileage",
+    inputType: "textarea",
+    questionHints: ["distance one way", "days per week", "annual mileage"],
   },
   {
     key: "primaryUse",
@@ -121,11 +304,90 @@ const VEHICLE_FIELDS: QuoteAssetDetailField[] = [
     questionHints: ["primary use", "pleasure", "commute", "business"],
   },
   {
+    key: "businessDeliveryRideshareUse",
+    label: "Business, delivery, rideshare, advertising, or wrapped vehicle use",
+    inputType: "textarea",
+    questionHints: ["business", "delivery", "uber", "lyft", "advertising", "wrap"],
+  },
+  {
+    key: "principalOperator",
+    label: "Principal operator",
+    inputType: "text",
+    questionHints: ["principal operator"],
+  },
+  {
+    key: "vehicleSafetyAndDamage",
+    label: "Safety features and existing damage",
+    inputType: "textarea",
+    publicHints: ["safety features", "blind spot", "automatic braking", "telematics"],
+    questionHints: ["blind spot", "auto brake", "onstar", "damage"],
+  },
+  {
+    key: "customEquipmentOrModifications",
+    label: "Customized equipment or modifications",
+    inputType: "textarea",
+    questionHints: ["custom", "lift", "cap", "tires", "snow plow", "modifications"],
+  },
+  {
+    key: "coverageLimits",
+    label: "Requested liability, property damage, and UM/UIM limits",
+    inputType: "textarea",
+    questionHints: ["split limits", "csl", "property damage", "um", "uim"],
+  },
+  {
+    key: "physicalDamageDeductibles",
+    label: "Comprehensive and collision coverage / deductibles",
+    inputType: "textarea",
+    questionHints: ["comprehensive", "collision", "deductible", "glass"],
+  },
+  {
+    key: "roadsideRentalGap",
+    label: "Roadside, rental, glass, gap, and travel coverage",
+    inputType: "textarea",
+    questionHints: ["roadside", "rental", "glass", "gap", "travel"],
+  },
+  {
     key: "drivers",
     label: "Drivers",
     inputType: "textarea",
     placeholder: "Names, DOBs, license numbers, and years insured",
     questionHints: ["all drivers", "drivers"],
+  },
+  {
+    key: "driverIncidents",
+    label: "Tickets, accidents, PIP, deer, glass, or other claims",
+    inputType: "textarea",
+    questionHints: ["tickets", "accidents", "pip", "deer", "glass", "claims"],
+  },
+  {
+    key: "driverEducationStudent",
+    label: "Driver education and student details",
+    inputType: "textarea",
+    questionHints: ["education", "student", "gpa", "student distance"],
+  },
+  {
+    key: "priorAutoCarrier",
+    label: "Prior carrier, policy number, expiration date, term, and loss-free years",
+    inputType: "textarea",
+    questionHints: ["prior carrier", "policy number", "expiration", "loss-free"],
+  },
+  {
+    key: "autoDiscountsAndPayment",
+    label: "Discounts, groups, payment plan, health insurance, and deductible choices",
+    inputType: "textarea",
+    questionHints: ["discount", "group", "payment", "health insurance", "deductible"],
+  },
+  {
+    key: "ratingResidence",
+    label: "Residence/rating details",
+    inputType: "textarea",
+    questionHints: ["own", "rent", "house", "apartment", "condo", "manufactured home"],
+  },
+  {
+    key: "motorcycleOrSpecialVehicleDetails",
+    label: "Motorcycle or special vehicle details",
+    inputType: "textarea",
+    questionHints: ["motorcycle", "cycle", "helmet", "custom value", "medical benefits"],
   },
 ];
 
@@ -323,19 +585,60 @@ export const QUOTE_ASSET_DETAIL_FIELDS: Record<AssetType, QuoteAssetDetailField[
 const QUOTE_ASSET_DETAIL_KEY_ALIASES: Partial<Record<AssetType, Record<string, string[]>>> = {
   coastal_home: {
     riskAddress: ["propertyAddress", "address", "locationAddress", "premisesAddress", "primaryResidenceAddress"],
+    ownershipAndLien: ["ownershipLien", "mortgageeInfo", "mortgagee", "lienholder", "loanDetails"],
+    countyTownship: ["county", "township", "municipality"],
+    priorOrMailingAddress: ["priorAddress", "mailingAddress", "previousAddress"],
     yearBuilt: ["builtYear", "constructionYear", "year_built"],
     squareFeet: ["squareFootage", "sqft", "sqFt", "livingArea", "livingAreaSqFt"],
+    unitsWallHeight: ["units", "numberOfUnits", "wallHeight"],
+    homeStyle: ["style", "homeStyleType", "stories", "story"],
+    foundationDetails: ["foundation", "basement", "crawlSpace"],
     constructionType: ["construction", "constructionClass", "wallConstruction"],
+    frameAndExterior: ["frameExterior", "exterior", "siding", "exteriorMaterials"],
+    roofShapePitch: ["roofShape", "roofPitch", "roofStyle"],
     roofMaterial: ["roof", "roofCovering", "roofType"],
+    skylights: ["skylight"],
+    attachedStructures: ["porchesDecksGarages", "porches", "decks", "attachedGarage", "carport"],
+    detachedStructuresAndRecreation: ["detachedStructures", "poolTrampoline", "pool", "shed", "detachedGarage"],
+    interiorFinishes: ["interior", "wallsCeilingsFloors"],
+    kitchenBathQuality: ["kitchenBath", "bathrooms", "kitchenQuality", "bathQuality"],
+    interiorFeatures: ["fireplaces", "woodStove", "wetBar", "centralVacuum"],
+    heatingCoolingSystems: ["heatingCooling", "hvac", "heat", "centralAir", "ac"],
+    electricalAndSafetySystems: ["electricalSafety", "electrical", "alarmSystems", "protectiveDevices"],
+    homeUpdates: ["updates", "renovations", "remodels"],
     distanceToCoast: ["coastDistance", "distanceFromCoast", "distanceToWater"],
+    lotSize: ["acreage", "acres", "lotSqFt"],
+    floodZone: ["femaFloodZone"],
     windMitigation: ["windMitigationDetails", "windCert", "windCertificate"],
     lossHistory: ["losses", "claims", "claimsHistory"],
+    animalsAndLiabilityExposures: ["animals", "dogs", "liabilityExposures", "businessRentalExposure"],
+    scheduledProperty: ["specialProperty", "valuableArticles", "jewelry", "collections"],
+    requestedHomeEndorsements: ["endorsements", "specialCoverages", "requestedCoverages"],
+    homeDiscountsAndProtection: ["discounts", "protectiveCredits", "protectionDetails"],
   },
   luxury_vehicle: {
     vin: ["VIN", "vehicleVin"],
-    garagingAddress: ["address", "riskAddress", "propertyAddress", "garageAddress"],
+    statedValue: ["vehicleStatedValue", "marketValue", "msrp", "basePrice"],
+    purchaseAndOwnership: ["purchaseDate", "ownershipStatus", "titleOwner", "ownedLeasedLien"],
+    garagingAddress: ["garageAddress", "garagingAddressIfDifferent", "vehicleGaragingAddress", "vehicleLocation", "storageAddress"],
+    lienholderOrLessor: ["lienholder", "lessor", "lossPayee", "holderAddress"],
     annualMileage: ["mileage", "estimatedAnnualMileage"],
+    commuteAndAnnualMileage: ["commuteDetails", "distanceOneWay", "daysPerWeek"],
     primaryUse: ["use", "usage"],
+    businessDeliveryRideshareUse: ["businessUse", "rideshareUse", "deliveryUse", "uberLyftUse", "advertisingWrap"],
+    principalOperator: ["principalDriver", "operator"],
+    vehicleSafetyAndDamage: ["safetyFeaturesDamage", "safetyFeatures", "existingDamage", "telematics"],
+    customEquipmentOrModifications: ["modifications", "customEquipment", "customizedEquipment"],
+    coverageLimits: ["autoCoverageLimits", "liabilityLimits", "umLimits", "uimLimits"],
+    physicalDamageDeductibles: ["deductibles", "compCollision", "comprehensiveCollision"],
+    roadsideRentalGap: ["roadsideRentalGlassGap", "roadside", "rental", "gap"],
+    drivers: ["allDrivers", "driverSchedule", "driverOneDetails", "driverTwoDetails"],
+    driverIncidents: ["ticketsAccidentsClaims", "incidents", "violations", "claims"],
+    driverEducationStudent: ["educationStudent", "studentDetails"],
+    priorAutoCarrier: ["priorCarrier", "priorAuto", "lossFreeYears"],
+    autoDiscountsAndPayment: ["discountsAndPayment", "autoDiscounts", "paymentPlan"],
+    ratingResidence: ["residenceRating", "homeRating", "ownRent"],
+    motorcycleOrSpecialVehicleDetails: ["motorcycleDetails", "specialVehicleDetails"],
   },
   yacht: {
     hin: ["HIN", "hullId", "hullIdentificationNumber"],
@@ -405,14 +708,15 @@ export function primaryQuoteAssetAddress(
   details: Record<string, unknown> | undefined
 ): string | undefined {
   const cleaned = cleanQuoteAssetDetails(assetType, details);
-  const keys = [
-    "riskAddress",
-    "garagingAddress",
-    "marinaAddress",
-    "primaryResidenceAddress",
-    "primaryAddress",
-    "location",
-  ];
+  const keysByAssetType: Partial<Record<AssetType, string[]>> = {
+    coastal_home: ["riskAddress"],
+    luxury_vehicle: ["garagingAddress"],
+    yacht: ["marinaAddress"],
+    umbrella_liability: ["primaryResidenceAddress"],
+    full_portfolio: ["primaryAddress"],
+    other: ["location"],
+  };
+  const keys = keysByAssetType[assetType] ?? [];
   return keys.map((key) => cleaned[key]).find(Boolean);
 }
 
@@ -425,8 +729,14 @@ export function quoteAssetPublicFieldValue(
   const cleaned = cleanQuoteAssetDetails(assetType, details);
   const label = publicLabel.toLowerCase();
 
+  if (assetType === "luxury_vehicle" && (label.includes("vin-decoded") || label.includes("trim"))) {
+    return undefined;
+  }
   if (assetType === "luxury_vehicle" && label.includes("year / make / model")) {
     return compactJoin([cleaned.year, cleaned.make, cleaned.model], " ");
+  }
+  if (assetType === "luxury_vehicle" && (label.includes("garaging") || label.includes("address"))) {
+    return cleaned.garagingAddress;
   }
   if (assetType === "yacht" && label.includes("year built")) return cleaned.year;
   if (assetType === "yacht" && label.includes("hull length")) return cleaned.length ? `${cleaned.length} ft` : undefined;

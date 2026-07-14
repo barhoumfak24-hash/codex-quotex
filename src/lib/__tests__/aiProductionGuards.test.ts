@@ -31,10 +31,40 @@ const evidence: PublicDataEvidenceMap = {
     fieldKey: "website",
     sourceKind: "public_web",
     sourceLabel: "Business website",
+    sourceUrl: "https://example.com/business",
     confidence: 0.72,
     verified: false,
     allowDocumentAutofill: false,
     collectedAt: "2026-06-22T12:00:00.000Z",
+  },
+  "Pool": {
+    fieldKey: "detachedStructuresAndRecreation",
+    sourceKind: "imagery_vision",
+    sourceLabel: "Google aerial imagery",
+    sourceUrl: "https://maps.googleapis.com/maps/api/staticmap?key=redacted",
+    confidence: 0.88,
+    verified: false,
+    allowDocumentAutofill: false,
+    collectedAt: "2026-06-22T12:00:00.000Z",
+  },
+  "Low confidence estimate": {
+    fieldKey: "lowEstimate",
+    sourceKind: "model_estimate",
+    sourceLabel: "AI estimate",
+    confidence: 0.35,
+    verified: false,
+    allowDocumentAutofill: false,
+    collectedAt: "2026-06-22T12:00:00.000Z",
+  },
+  "OpenAI uncited review answer": {
+    fieldKey: "yearBuilt",
+    sourceKind: "web_search",
+    sourceLabel: "OpenAI public data sweep - county assessor",
+    confidence: 0.78,
+    verified: false,
+    allowDocumentAutofill: false,
+    collectedAt: "2026-06-22T12:00:00.000Z",
+    notes: "Review-only questionnaire prefill from OpenAI web search.",
   },
 };
 
@@ -45,12 +75,21 @@ describe("aiProductionGuards", () => {
     expect(aiEvidenceAllowsDocumentAutofill(findAiPublicEvidence(evidence, "roof year"))).toBe(false);
   });
 
-  it("allows source-backed web facts to prefill questionnaires without allowing document autofill", () => {
+  it("allows cited review facts to prefill questionnaires and rejects uncited OpenAI web answers", () => {
     const webEvidence = findAiPublicEvidence(evidence, "website");
+    const imageryEvidence = findAiPublicEvidence(evidence, "pool");
     const estimateEvidence = findAiPublicEvidence(evidence, "roof year");
+    const weakEstimateEvidence = findAiPublicEvidence(evidence, "low confidence estimate");
+    const uncitedOpenAiEvidence = findAiPublicEvidence(evidence, "OpenAI uncited review answer");
     expect(aiEvidenceAllowsQuestionnairePrefill(webEvidence)).toBe(true);
     expect(aiEvidenceAllowsDocumentAutofill(webEvidence)).toBe(false);
+    expect(aiEvidenceAllowsQuestionnairePrefill(imageryEvidence)).toBe(true);
+    expect(aiEvidenceAllowsDocumentAutofill(imageryEvidence)).toBe(false);
+    expect(aiEvidenceAllowsQuestionnairePrefill(uncitedOpenAiEvidence)).toBe(false);
+    expect(aiEvidenceAllowsDocumentAutofill(uncitedOpenAiEvidence)).toBe(false);
     expect(aiEvidenceAllowsQuestionnairePrefill(estimateEvidence)).toBe(false);
+    expect(aiEvidenceAllowsDocumentAutofill(estimateEvidence)).toBe(false);
+    expect(aiEvidenceAllowsQuestionnairePrefill(weakEstimateEvidence)).toBe(false);
   });
 
   it("blocks unapproved outbound AI marketing sends", () => {

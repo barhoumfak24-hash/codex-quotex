@@ -32,14 +32,14 @@ import type {
   QuotingQuestion,
   TaskTopic,
 } from "@/types";
-import { postServerAi } from "@/lib/aiGateway";
+import { browserAiFallbacksAllowed, postServerAi } from "@/lib/aiGateway";
+import { carrierPortalRunnerStatus } from "./carrierPortalPlaybooks";
 import {
   quoteAssetPublicFieldValue,
   quoteAssetQuestionAnswered,
   summarizeQuoteAssetDetails,
 } from "@/lib/quoteAssetIntake";
 import {
-  decodeVinViaNhtsa,
   normalizeVin,
   vinValidationIssue,
 } from "@/lib/assetLabels";
@@ -87,6 +87,18 @@ function isAssetType(value: unknown): value is AssetType {
     value === "other"
   );
 }
+
+export type AiEnrichmentTargetQuestion = {
+  id?: string;
+  key?: string;
+  label?: string;
+  inputType?: string;
+  kind?: string;
+  options?: string[];
+  required?: boolean;
+  acordFieldKey?: string;
+  acordFieldLabels?: string[];
+};
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value)
@@ -1167,13 +1179,8 @@ export async function aiEnhanceMessage(input: {
 // Real backend wiring:
 //   POST /api/ai/enrich-asset { assetType, seed } → AiAssetEnrichment
 //
-// The real implementation calls a model with a tool-use loop that hits
-// county property records, FEMA flood maps, NHC wind data, NHTSA VIN
-// decoder, USCG/Coast Guard vessel docs, and similar public sources.
-//
-// Demo behavior: deterministic-feeling values seeded by a hash of the
-// seed input — same address always returns the same values, so the
-// experience reads as a real lookup rather than dice rolls.
+// Public-data enrichment must be source-backed. The browser fallback is
+// intentionally conservative and never manufactures property facts.
 // =====================================================================
 
 function hashSeed(input: string): number {
@@ -1260,16 +1267,20 @@ function publicFieldEvidence(
     verified: boolean;
     allowDocumentAutofill: boolean;
     notes?: string;
+    sourceUrl?: string;
+    observedDate?: string;
   }
 ): PublicDataFieldEvidence {
   return {
     fieldKey,
     sourceKind,
     sourceLabel,
+    sourceUrl: options.sourceUrl,
     confidence: Math.max(0, Math.min(1, options.confidence)),
     verified: options.verified,
     allowDocumentAutofill: options.allowDocumentAutofill,
     collectedAt: new Date().toISOString(),
+    observedDate: options.observedDate,
     notes: options.notes,
   };
 }
@@ -1284,9 +1295,22 @@ function markEvidence(
     verified: boolean;
     allowDocumentAutofill: boolean;
     notes?: string;
+    sourceUrl?: string;
+    observedDate?: string;
   }
 ): void {
   evidence[fieldKey] = publicFieldEvidence(fieldKey, sourceKind, sourceLabel, options);
+}
+
+function enrichedPublicFieldLooksUnavailable(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) return true;
+  if (/^(unknown|n\/a|none|not found|not public|not publicly|not available|requires)\b/.test(normalized)) {
+    return true;
+  }
+  return /\b(not found|not public|not publicly|no public|not available|unable to confirm|unable to determine|requires applicant|requires client|requires insured|applicant attestation|clue|loss runs?|verify with applicant)\b/.test(
+    normalized
+  );
 }
 
 function publicFieldIsDocumentReady(
@@ -1598,7 +1622,19 @@ async function enrichCoastalHome(seed: Record<string, unknown>): Promise<AiAsset
       fields: {},
       sources: ["Geocoder (no match)"],
       confidence: 0,
-      unavailableFields: [],
+      unavailableFields: [
+        "address",
+        "floodZone",
+        "yearBuilt",
+        "squareFootage",
+        "constructionType",
+        "roofMaterial",
+        "roofAge",
+        "lotSize",
+        "distanceToCoast",
+        "estimatedValue",
+        "windMitigation",
+      ],
       notes:
         "We couldn't resolve that exact address against any of our geocoders, so the public-records lookup didn't run. Double-check the spelling (street type, ZIP) or fill the fields in by hand — your agent can verify everything during the carrier review.",
     };
@@ -1613,13 +1649,21 @@ async function enrichCoastalHome(seed: Record<string, unknown>): Promise<AiAsset
   // ATTOM / RentCast server-side in production. Until that's plumbed
   // in we want the form to actually auto-fill so the agent / customer
   // doesn't see an empty result and assume the feature is broken.
-  const synth = synthesizeCoastalHomeFields(geo);
-
-  const fields: Record<string, unknown> = { ...synth.fields };
+  const fields: Record<string, unknown> = { address: geo.displayName };
   const evidence: PublicDataEvidenceMap = {};
   const sources: string[] = ["Geocoder (address resolution)"];
   // Truly unavailable from any public source — homeowner-submitted only.
-  const unavailable: string[] = ["windMitigation"];
+  const unavailable = new Set<string>([
+    "yearBuilt",
+    "squareFootage",
+    "constructionType",
+    "roofMaterial",
+    "roofAge",
+    "lotSize",
+    "distanceToCoast",
+    "estimatedValue",
+    "windMitigation",
+  ]);
   const addressEvidence = geocoderEvidenceSource(geo);
 
   markEvidence(evidence, "address", addressEvidence.sourceKind, addressEvidence.sourceLabel, {
@@ -1627,17 +1671,6 @@ async function enrichCoastalHome(seed: Record<string, unknown>): Promise<AiAsset
     verified: addressEvidence.verified,
     allowDocumentAutofill: addressEvidence.verified,
     notes: "Normalized address returned by the geocoding provider.",
-  });
-
-  Object.keys(synth.fields).forEach((fieldKey) => {
-    if (fieldKey === "address") return;
-    markEvidence(evidence, fieldKey, "model_estimate", "AI property estimator", {
-      confidence: 0.48,
-      verified: false,
-      allowDocumentAutofill: false,
-      notes:
-        "Used only for preliminary quote ranking until a property-record provider or the client verifies it.",
-    });
   });
 
   if (flood) {
@@ -1650,54 +1683,17 @@ async function enrichCoastalHome(seed: Record<string, unknown>): Promise<AiAsset
       notes: flood.subtype ? `Zone subtype: ${flood.subtype}` : undefined,
     });
   } else {
-    unavailable.unshift("floodZone");
+    unavailable.add("floodZone");
   }
-  sources.push(...synth.sources);
 
   return {
     fields,
     evidence,
     sources,
-    confidence: flood ? 0.78 : 0.55,
-    unavailableFields: unavailable,
+    confidence: flood ? 0.78 : 0.62,
+    unavailableFields: Array.from(unavailable),
     notes:
-      "Flood zone confirmed from FEMA NFHL. Year built, square footage, construction type, roof material, distance to coast, and lot size are AI estimates anchored on the resolved address — production wires to CoreLogic / Estated / ATTOM / RentCast for verified property records. Wind mitigation is homeowner-submitted (FL OIR-B1-1802) and always requires the original inspection report.",
-  };
-}
-
-// Deterministic property-detail synthesizer. Takes a geocoded
-// address (lat/lon/displayName) and returns plausible defaults for
-// every field the coastal-home intake form asks for. Anchored on a
-// hash of the resolved address so re-running on the same address
-// returns identical numbers — the agent can rely on what they saw
-// in the demo.
-function synthesizeCoastalHomeFields(geo: GeocodeResult): {
-  fields: Record<string, unknown>;
-  sources: string[];
-} {
-  const rng = rngFromSeed(geo.displayName);
-  // Resolved address components live inside the formatted string
-  // for most geocoders ("100 Main St, Anytown, FL 33401, USA"). We
-  // also expose the cleaned single-line address as `address` so the
-  // form snaps to the normalized version.
-  const fields: Record<string, unknown> = {
-    address: geo.displayName,
-    yearBuilt: 1985 + Math.floor(rng() * 38),
-    squareFootage: 2400 + Math.floor(rng() * 4600),
-    constructionType: ["Concrete block", "Frame", "ICF", "Steel frame"][
-      Math.floor(rng() * 4)
-    ],
-    roofMaterial: ["Architectural shingle", "Tile", "Metal", "Slate"][
-      Math.floor(rng() * 4)
-    ],
-    roofAge: 1 + Math.floor(rng() * 18),
-    lotSize: Math.round((0.18 + rng() * 1.8) * 100) / 100,
-    distanceToCoast: Math.round((0.2 + rng() * 8) * 10) / 10,
-    estimatedValue: 350_000 + Math.floor(rng() * 4_650_000),
-  };
-  return {
-    fields,
-    sources: ["AI property estimator"],
+      "Address and flood-zone data are source-backed when available. Property characteristics that require assessor or commercial-provider data stay blank until a verified source or client answer is available.",
   };
 }
 
@@ -1707,6 +1703,122 @@ function synthesizeCoastalHomeFields(geo: GeocodeResult): {
 // the federal database. Market value still requires a paid provider
 // (Manheim, KBB, NADA, J.D. Power) — that's marked unavailable.
 // ---------------------------------------------------------------------
+
+interface NhtsaVinValues {
+  [key: string]: string | null | undefined;
+}
+interface NhtsaValuesResponse {
+  Results?: NhtsaVinValues[];
+}
+
+function cleanNhtsaValue(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.replace(/\s+/g, " ").trim();
+  return text ? text : undefined;
+}
+
+function joinNhtsaValues(values: Array<unknown>, separator = " / "): string | undefined {
+  const parts = values.map(cleanNhtsaValue).filter((value): value is string => !!value);
+  return parts.length > 0 ? parts.join(separator) : undefined;
+}
+
+function comparableNhtsaText(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function appendDistinctNhtsaValue(parts: string[], value: string | undefined): void {
+  if (!value) return;
+  const comparable = comparableNhtsaText(value);
+  if (!comparable) return;
+  const alreadyCovered = parts.some((part) => {
+    const existing = comparableNhtsaText(part);
+    return existing.includes(comparable) || comparable.includes(existing);
+  });
+  if (!alreadyCovered) parts.push(value);
+}
+
+function nhtsaDisplayModel(model: string | undefined, series: string | undefined, trim: string | undefined): string | undefined {
+  const parts: string[] = [];
+  appendDistinctNhtsaValue(parts, model);
+  appendDistinctNhtsaValue(parts, series);
+  appendDistinctNhtsaValue(parts, trim);
+  return parts.length > 0 ? parts.join(" ") : undefined;
+}
+
+function nhtsaDecodeIsClean(errorCode?: string, errorText?: string): boolean {
+  const code = cleanNhtsaValue(errorCode);
+  if (!code) return /vin decoded clean/i.test(errorText ?? "");
+  const codes = code.split(/[,\s]+/).filter(Boolean);
+  return codes.length > 0 && codes.every((item) => item === "0");
+}
+
+function vehicleEngineDescription(row: NhtsaVinValues): string | undefined {
+  const liters = cleanNhtsaValue(row.DisplacementL);
+  const cylinders = cleanNhtsaValue(row.EngineCylinders);
+  const horsepower = cleanNhtsaValue(row.EngineHP);
+  const fuel = cleanNhtsaValue(row.FuelTypePrimary);
+  return joinNhtsaValues(
+    [
+      liters ? `${liters}L` : undefined,
+      cylinders ? `${cylinders} cylinder` : undefined,
+      horsepower ? `${horsepower} hp` : undefined,
+      fuel,
+    ],
+    " "
+  );
+}
+
+async function decodeVinViaNhtsaDetailed(vin: string): Promise<{
+  year?: number;
+  make?: string;
+  model?: string;
+  bodyClass?: string;
+  trim?: string;
+  series?: string;
+  vehicleType?: string;
+  doors?: string;
+  driveType?: string;
+  fuelType?: string;
+  engineDescription?: string;
+  basePrice?: string;
+  curbWeightLb?: string;
+  errorCode?: string;
+  errorText?: string;
+} | null> {
+  if (!vin) return null;
+  const url = `https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValuesExtended/${encodeURIComponent(vin)}?format=json`;
+  try {
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = (await res.json()) as NhtsaValuesResponse;
+    const row = data.Results?.[0];
+    if (!row) return null;
+    const get = (key: string): string | undefined => cleanNhtsaValue(row[key]);
+    const yearStr = get("ModelYear");
+    const year = yearStr ? Number(yearStr) : undefined;
+    const trim = joinNhtsaValues([row.Trim, row.Trim2]);
+    const series = joinNhtsaValues([row.Series, row.Series2]);
+    return {
+      year: Number.isFinite(year) ? year : undefined,
+      make: get("Make"),
+      model: nhtsaDisplayModel(get("Model"), series, trim),
+      bodyClass: get("BodyClass"),
+      trim,
+      series,
+      vehicleType: get("VehicleType"),
+      doors: get("Doors"),
+      driveType: get("DriveType"),
+      fuelType: get("FuelTypePrimary"),
+      engineDescription: vehicleEngineDescription(row),
+      basePrice: get("BasePrice"),
+      curbWeightLb: get("CurbWeightLB"),
+      errorCode: get("ErrorCode"),
+      errorText: get("ErrorText"),
+    };
+  } catch {
+    return null;
+  }
+}
 
 async function enrichLuxuryVehicle(seed: Record<string, unknown>): Promise<AiAssetEnrichment> {
   const vin = normalizeVin(seed.vin);
@@ -1721,7 +1833,7 @@ async function enrichLuxuryVehicle(seed: Record<string, unknown>): Promise<AiAss
     };
   }
 
-  const decoded = await decodeVinViaNhtsa(vin);
+  const decoded = await decodeVinViaNhtsaDetailed(vin);
   if (!decoded) {
     return {
       fields: {},
@@ -1734,31 +1846,60 @@ async function enrichLuxuryVehicle(seed: Record<string, unknown>): Promise<AiAss
   }
 
   const errorCode = decoded.errorCode ?? "";
-  // NHTSA's errorCode "0" means a clean decode. Anything else means
-  // some VIN positions failed validation; the values may still be
-  // partially populated.
-  const clean = errorCode === "0" || errorCode === "";
+  // NHTSA's error code "0" means a clean decode. Anything else can
+  // still include partial year/make/model values, but those are not
+  // safe to use because the VIN itself failed validation.
+  const clean = nhtsaDecodeIsClean(errorCode, decoded.errorText);
+  if (!clean) {
+    return {
+      fields: {},
+      sources: ["NHTSA VIN decoder (vpic.nhtsa.dot.gov)"],
+      confidence: 0,
+      unavailableFields: [
+        "year",
+        "make",
+        "model",
+        "bodyClass",
+        "trim",
+        "series",
+        "curbWeightLb",
+        "basePrice",
+        "estimatedValue",
+      ],
+      notes: `NHTSA could not validate this VIN${
+        decoded.errorText ? `: ${decoded.errorText}` : errorCode ? ` (error code ${errorCode})` : ""
+      }. Re-enter the VIN before using decoded vehicle details.`,
+    };
+  }
 
   const fields: Record<string, unknown> = {};
   if (decoded.year) fields.year = decoded.year;
   if (decoded.make) fields.make = decoded.make;
   if (decoded.model) fields.model = decoded.model;
+  if (decoded.bodyClass) fields.bodyClass = decoded.bodyClass;
+  if (decoded.trim) fields.trim = decoded.trim;
+  if (decoded.series) fields.series = decoded.series;
+  if (decoded.vehicleType) fields.vehicleType = decoded.vehicleType;
+  if (decoded.doors) fields.doors = decoded.doors;
+  if (decoded.driveType) fields.driveType = decoded.driveType;
+  if (decoded.fuelType) fields.fuelType = decoded.fuelType;
+  if (decoded.engineDescription) fields.engineDescription = decoded.engineDescription;
+  if (decoded.basePrice) fields.basePrice = decoded.basePrice;
+  if (decoded.curbWeightLb) fields.curbWeightLb = decoded.curbWeightLb;
   const evidence: PublicDataEvidenceMap = {};
   Object.keys(fields).forEach((fieldKey) => {
     markEvidence(evidence, fieldKey, "government_api", "NHTSA VIN decoder (vpic.nhtsa.dot.gov)", {
-      confidence: clean ? 0.95 : 0.6,
-      verified: clean,
-      allowDocumentAutofill: clean,
-      notes: clean
-        ? `Decoded from VIN ${vin}.`
-        : `Partial NHTSA decode; error code ${errorCode || "unknown"}.`,
+      confidence: 0.95,
+      verified: true,
+      allowDocumentAutofill: true,
+      notes: `Decoded from VIN ${vin}.`,
     });
   });
   markEvidence(evidence, "vin", "client_intake", "Client-entered VIN", {
     confidence: 0.9,
-    verified: clean,
-    allowDocumentAutofill: clean,
-    notes: clean ? "VIN accepted by NHTSA decoder." : "VIN should be reviewed before binding.",
+    verified: true,
+    allowDocumentAutofill: true,
+    notes: "VIN accepted by NHTSA decoder.",
   });
 
   const unavailable: string[] = [];
@@ -1768,16 +1909,19 @@ async function enrichLuxuryVehicle(seed: Record<string, unknown>): Promise<AiAss
   if (!decoded.year) unavailable.push("year");
   if (!decoded.make) unavailable.push("make");
   if (!decoded.model) unavailable.push("model");
+  if (!decoded.bodyClass) unavailable.push("bodyClass");
+  if (!decoded.trim && !decoded.series) unavailable.push("trim");
+  if (!decoded.curbWeightLb) unavailable.push("curbWeightLb");
+  if (!decoded.basePrice) unavailable.push("basePrice");
 
   return {
     fields,
     evidence,
     sources: ["NHTSA VIN decoder (vpic.nhtsa.dot.gov)"],
-    confidence: clean ? 0.95 : 0.6,
+    confidence: 0.95,
     unavailableFields: unavailable,
-    notes: clean
-      ? "VIN decoded via NHTSA's federal database. Market value requires a paid valuation provider (Manheim / KBB / NADA / J.D. Power) wired through the production backend."
-      : `NHTSA returned partial results (error code ${errorCode}). Confirm the VIN and any missing fields with your agent.`,
+    notes:
+      "VIN decoded via NHTSA's federal database. Market value requires a paid valuation provider (Manheim / KBB / NADA / J.D. Power) wired through the production backend.",
   };
 }
 
@@ -1826,17 +1970,41 @@ async function enrichJewelry(_seed: Record<string, unknown>): Promise<AiAssetEnr
 
 export async function aiEnrichAsset(
   assetType: AssetType,
-  seed: Record<string, unknown>
+  seed: Record<string, unknown>,
+  targetQuestions: AiEnrichmentTargetQuestion[] = []
 ): Promise<AiAssetEnrichment> {
   // Public-record lookups and model calls run server-side so provider
-  // credentials never cross into the browser. If the API is unavailable,
-  // the deterministic local fallbacks keep the demo usable.
-  const server = await postServerAi<AiAssetEnrichment>(
-    "/ai/enrich-asset",
-    { assetType, seed },
-    { timeoutMs: 25_000 }
-  );
-  if (server) return server;
+  // credentials never cross into the browser.
+  let server: unknown = null;
+  try {
+    server = await postServerAi<unknown>(
+      "/ai/enrich-asset",
+      { assetType, seed, targetQuestions },
+      { timeoutMs: 240_000 }
+    );
+  } catch {
+    return {
+      fields: {},
+      sources: [],
+      confidence: 0,
+      unavailableFields: Object.keys(seed).filter(Boolean),
+      notes:
+        "Server-side public-record enrichment is unavailable. Quotex did not run browser-side lookup fallbacks.",
+    };
+  }
+  if (server) {
+    if (isAiAssetEnrichmentResponse(server)) return server;
+    if (!browserEnrichmentFallbackAllowed()) {
+      return {
+        fields: {},
+        sources: [],
+        confidence: 0,
+        unavailableFields: Object.keys(seed).filter(Boolean),
+        notes:
+          "Server-side public-record enrichment returned an invalid response shape. Quotex did not apply any AI-filled values.",
+      };
+    }
+  }
   if (!browserEnrichmentFallbackAllowed()) {
     return {
       fields: {},
@@ -1896,6 +2064,19 @@ function fetchIsMockedForAi(): boolean {
   }
 }
 
+function isAiAssetEnrichmentResponse(value: unknown): value is AiAssetEnrichment {
+  if (!isRecord(value)) return false;
+  return (
+    isRecord(value.fields) &&
+    Array.isArray(value.sources) &&
+    typeof value.confidence === "number" &&
+    (value.evidence === undefined || isRecord(value.evidence)) &&
+    (value.unavailableFields === undefined ||
+      (Array.isArray(value.unavailableFields) && value.unavailableFields.every((item) => typeof item === "string"))) &&
+    (value.notes === undefined || typeof value.notes === "string")
+  );
+}
+
 // Which asset types support AI enrichment, and what seed fields the
 // customer must enter before we can run a lookup. The DetailsForm shows
 // the AI-fill button as soon as `requires` are filled.
@@ -1943,6 +2124,68 @@ function contactExtractionText(input: { fileName: string; text?: string }): stri
     .replace(/[ \t]+/g, " ")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+function normalizeContactEvidenceText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9@.+-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+type AiContactFieldEvidence = NonNullable<AiExtractedContact["fieldEvidence"]>[string];
+
+function evidenceSnippetForContactValue(text: string, value: unknown): string {
+  const raw = String(value ?? "").trim();
+  if (!raw) return "";
+  const normalized = normalizeContactEvidenceText(raw);
+  const lines = text
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const exact = lines.find((line) => normalizeContactEvidenceText(line).includes(normalized));
+  if (exact) return exact.slice(0, 220);
+  return raw.slice(0, 220);
+}
+
+function localContactEvidence(
+  fieldKey: string,
+  value: unknown,
+  text: string,
+  confidence = 0.86
+): AiContactFieldEvidence | undefined {
+  const stringValue =
+    typeof value === "number" && Number.isFinite(value)
+      ? String(value)
+      : typeof value === "string"
+        ? value.trim()
+        : "";
+  if (!stringValue) return undefined;
+  const evidence = evidenceSnippetForContactValue(text, stringValue);
+  const verified =
+    evidence.length > 0 &&
+    (normalizeContactEvidenceText(text).includes(normalizeContactEvidenceText(evidence)) ||
+      normalizeContactEvidenceText(text).includes(normalizeContactEvidenceText(stringValue)));
+  return {
+    fieldKey,
+    value: stringValue,
+    sourceKind: "local_pattern",
+    evidence,
+    confidence,
+    verified,
+  };
+}
+
+function localContactEvidenceMap(
+  entries: Array<ReturnType<typeof localContactEvidence>>
+): AiExtractedContact["fieldEvidence"] | undefined {
+  const map = Object.fromEntries(
+    entries
+      .filter((entry): entry is NonNullable<typeof entry> => Boolean(entry && entry.verified))
+      .map((entry) => [entry.fieldKey, entry])
+  );
+  return Object.keys(map).length > 0 ? map : undefined;
 }
 
 function labeledContactValue(text: string, labels: string[]): string {
@@ -2154,6 +2397,17 @@ export async function aiExtractContactFromFile(input: {
       (businessName ? "commercial" : assetType ? "personal" : undefined);
     const estimatedValue = extractBestContactValue(scannedText);
     const notes = extractContactNotes(scannedText, assetType);
+    const fieldEvidence = localContactEvidenceMap([
+      localContactEvidence("lineOfBusiness", lineOfBusiness, scannedText, 0.78),
+      localContactEvidence("businessName", businessName, scannedText, 0.9),
+      localContactEvidence("name", name, scannedText, 0.9),
+      localContactEvidence("email", email, scannedText, 0.96),
+      localContactEvidence("phone", phone, scannedText, 0.92),
+      localContactEvidence("address", address, scannedText, 0.9),
+      localContactEvidence("assetType", assetType, scannedText, 0.76),
+      localContactEvidence("estimatedValue", estimatedValue, scannedText, 0.86),
+      localContactEvidence("notes", notes, scannedText, 0.72),
+    ]);
     const filledCount = [
       lineOfBusiness,
       businessName,
@@ -2186,6 +2440,12 @@ export async function aiExtractContactFromFile(input: {
           "Full document text scan",
           ...(input.dataUrl ? ["Vision attachment available for server AI"] : []),
         ],
+        fieldEvidence,
+        outcome: "needs_confirm",
+        requiredFieldsPresent: Boolean(fieldEvidence?.name && fieldEvidence?.email),
+        autoCreateEligible: false,
+        peopleDetected: 1,
+        extractionWarnings: [],
       };
     }
   }
@@ -2200,6 +2460,11 @@ export async function aiExtractContactFromFile(input: {
       input.dataUrl ? "Vision attachment available for server AI" : "No readable text found",
       "No fabricated filename data",
     ],
+    outcome: input.dataUrl ? "needs_confirm" : "no_client_found",
+    requiredFieldsPresent: false,
+    autoCreateEligible: false,
+    peopleDetected: 0,
+    extractionWarnings: input.dataUrl ? ["No verified fields were extracted from the upload."] : ["No readable text found."],
   };
 
   // Nationwide-flavored fake address — small inline pool so the
@@ -2523,6 +2788,228 @@ export async function aiParseCarrierAppetite(input: {
   };
 }
 
+export type AiCarrierReplyOutcome =
+  | "accepted"
+  | "quoted"
+  | "declined"
+  | "pending"
+  | "more_info_required";
+
+export interface AiParsedCarrierReply {
+  outcome: AiCarrierReplyOutcome;
+  confidence: number;
+  policyType?: string;
+  coverages: {
+    label: string;
+    limit?: string;
+    premium?: string;
+    deductible?: string;
+    terms?: string;
+    sourceText?: string;
+  }[];
+  limits: string[];
+  premiums: string[];
+  deductibles: string[];
+  terms: string[];
+  carrierNotes: string[];
+  conditions: string[];
+  nextSteps: string[];
+  requestedItems: string[];
+  supplementalAttachmentNames: string[];
+  declineReason?: string;
+  evidenceSnippets: string[];
+  requiresAgentReview: boolean;
+  agentReviewReason?: string;
+}
+
+function carrierReplySentences(text: string): string[] {
+  return text
+    .replace(/\s+/g, " ")
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean)
+    .slice(0, 18);
+}
+
+function extractCurrencyStrings(text: string): string[] {
+  return Array.from(
+    new Set(text.match(/\$\s?\d[\d,]*(?:\.\d{2})?(?:\s?(?:annual|annually|year|yr|premium))?/gi) ?? [])
+  ).slice(0, 8);
+}
+
+function fallbackParseCarrierReply(input: {
+  email: {
+    subject?: string;
+    text?: string;
+    html?: string;
+    attachments?: { fileName?: string; fileType?: string }[];
+  };
+}): AiParsedCarrierReply {
+  const text = [input.email.subject ?? "", input.email.text ?? "", input.email.html ?? ""]
+    .join("\n")
+    .replace(/<[^>]+>/g, " ");
+  const lower = text.toLowerCase();
+  const sentences = carrierReplySentences(text);
+  const evidence = (patterns: RegExp[]) =>
+    sentences.filter((sentence) => patterns.some((pattern) => pattern.test(sentence))).slice(0, 6);
+  const supplementalAttachments = (input.email.attachments ?? [])
+    .filter(
+      (attachment) =>
+        /\.pdf$/i.test(attachment.fileName ?? "") ||
+        /pdf/i.test(attachment.fileType ?? "") ||
+        /supplement/i.test(attachment.fileName ?? "")
+    )
+    .map((attachment) => attachment.fileName ?? "Supplemental attachment")
+    .filter(Boolean);
+  const premiums = extractCurrencyStrings(text);
+  const declineEvidence = evidence([
+    /\bdeclin(?:e|ed|ing)\b/i,
+    /\bno appetite\b/i,
+    /\bunable to quote\b/i,
+    /\bcannot quote\b/i,
+    /\bnot able to offer\b/i,
+  ]);
+  const moreInfoEvidence = evidence([
+    /\bsupplemental\b/i,
+    /\bmore information\b/i,
+    /\badditional information\b/i,
+    /\bneed(?:ed|s)?\b/i,
+    /\brequir(?:e|ed|es)\b/i,
+  ]);
+  const quoteEvidence = evidence([
+    /\bquote\b/i,
+    /\bpremium\b/i,
+    /\bindication\b/i,
+    /\bproposal\b/i,
+    /\bbind(?:able|ing)?\b/i,
+  ]);
+  const requestedItems = moreInfoEvidence
+    .map((line) => line.replace(/^(please|we|carrier|underwriter)\s+/i, "").trim())
+    .filter((line) => line.length > 8)
+    .slice(0, 8);
+
+  if (declineEvidence.length > 0) {
+    return {
+      outcome: "declined",
+      confidence: 0.84,
+      coverages: [],
+      limits: [],
+      premiums: [],
+      deductibles: [],
+      terms: [],
+      carrierNotes: [],
+      conditions: [],
+      nextSteps: [],
+      requestedItems: [],
+      supplementalAttachmentNames: [],
+      declineReason: declineEvidence[0],
+      evidenceSnippets: declineEvidence,
+      requiresAgentReview: false,
+    };
+  }
+
+  if (supplementalAttachments.length > 0 || requestedItems.length > 0) {
+    return {
+      outcome: "more_info_required",
+      confidence: supplementalAttachments.length > 0 ? 0.82 : 0.74,
+      coverages: [],
+      limits: [],
+      premiums,
+      deductibles: [],
+      terms: [],
+      carrierNotes: quoteEvidence,
+      conditions: [],
+      nextSteps: [],
+      requestedItems: requestedItems.length ? requestedItems : ["Carrier requested supplemental information."],
+      supplementalAttachmentNames: supplementalAttachments,
+      evidenceSnippets: [...moreInfoEvidence, ...quoteEvidence].slice(0, 8),
+      requiresAgentReview: false,
+    };
+  }
+
+  if (premiums.length > 0 && quoteEvidence.length > 0) {
+    return {
+      outcome: "quoted",
+      confidence: 0.8,
+      coverages: [],
+      limits: Array.from(new Set(text.match(/\$?\d[\d,]*(?:,\d{3})*(?:\s?(?:limit|coverage))/gi) ?? [])).slice(0, 8),
+      premiums,
+      deductibles: Array.from(new Set(text.match(/\$?\d[\d,]*(?:,\d{3})*(?:\s?(?:deductible|ded))/gi) ?? [])).slice(0, 8),
+      terms: [],
+      carrierNotes: quoteEvidence,
+      conditions: [],
+      nextSteps: evidence([/\bnext step\b/i, /\bsubject to\b/i, /\bunderwriting\b/i]),
+      requestedItems: [],
+      supplementalAttachmentNames: [],
+      evidenceSnippets: quoteEvidence,
+      requiresAgentReview: false,
+    };
+  }
+
+  const anyCarrierSignal =
+    /\b(application|underwriting|quote|carrier|policy|premium|supplemental|decline)\b/.test(lower);
+  return {
+    outcome: "pending",
+    confidence: anyCarrierSignal ? 0.48 : 0.28,
+    coverages: [],
+    limits: [],
+    premiums,
+    deductibles: [],
+    terms: [],
+    carrierNotes: anyCarrierSignal ? sentences.slice(0, 4) : [],
+    conditions: [],
+    nextSteps: [],
+    requestedItems: [],
+    supplementalAttachmentNames: supplementalAttachments,
+    evidenceSnippets: sentences.slice(0, 4),
+    requiresAgentReview: true,
+    agentReviewReason: "Carrier reply did not clearly state quote, decline, or supplemental outcome.",
+  };
+}
+
+export async function aiParseCarrierReply(input: {
+  submission?: Record<string, unknown>;
+  email: {
+    subject?: string;
+    text?: string;
+    html?: string;
+    attachments?: { id?: string; fileName?: string; fileType?: string; description?: string }[];
+  };
+}): Promise<AiParsedCarrierReply> {
+  const server = await postServerAi<AiParsedCarrierReply>(
+    "/ai/parse-carrier-reply",
+    {
+      submission: input.submission,
+      email: input.email,
+    },
+    { timeoutMs: 60_000 }
+  );
+  if (
+    server &&
+    typeof server.outcome === "string" &&
+    typeof server.confidence === "number" &&
+    Array.isArray(server.evidenceSnippets)
+  ) {
+    return {
+      ...server,
+      coverages: Array.isArray(server.coverages) ? server.coverages : [],
+      limits: Array.isArray(server.limits) ? server.limits : [],
+      premiums: Array.isArray(server.premiums) ? server.premiums : [],
+      deductibles: Array.isArray(server.deductibles) ? server.deductibles : [],
+      terms: Array.isArray(server.terms) ? server.terms : [],
+      carrierNotes: Array.isArray(server.carrierNotes) ? server.carrierNotes : [],
+      conditions: Array.isArray(server.conditions) ? server.conditions : [],
+      nextSteps: Array.isArray(server.nextSteps) ? server.nextSteps : [],
+      requestedItems: Array.isArray(server.requestedItems) ? server.requestedItems : [],
+      supplementalAttachmentNames: Array.isArray(server.supplementalAttachmentNames)
+        ? server.supplementalAttachmentNames
+        : [],
+      requiresAgentReview: server.requiresAgentReview === true || server.confidence < 0.72,
+    };
+  }
+  return fallbackParseCarrierReply(input);
+}
+
 // =====================================================================
 // AI quoting workspace helpers. Powers the new quoting card that
 // replaced "Quote data" on the prospect detail page.
@@ -2546,10 +3033,23 @@ const PUBLIC_FIELDS_BY_ASSET: Partial<Record<AssetType, string[]>> = {
   coastal_home: [
     "Year built",
     "Square footage",
+    "County, township, or municipality",
+    "Home style",
+    "Foundation details",
     "Construction type",
-    "Roof material",
+    "Frame and exterior materials",
+    "Roof shape, pitch, material, and skylights",
+    "Roof age",
+    "Attached structures",
+    "Detached structures and recreational features",
+    "Heating and cooling systems",
+    "Electrical and safety systems",
+    "Updates and remodels",
     "Distance to coast",
     "Lot size",
+    "Flood zone",
+    "Occupancy",
+    "Estimated exposure value",
     "Owner of record",
   ],
   luxury_vehicle: [
@@ -2557,6 +3057,8 @@ const PUBLIC_FIELDS_BY_ASSET: Partial<Record<AssetType, string[]>> = {
     "VIN-decoded trim",
     "Curb weight",
     "MSRP at sale",
+    "Safety features",
+    "Stated value",
     "Garaging address",
   ],
   yacht: [
@@ -2582,20 +3084,33 @@ const PUBLIC_FIELDS_BY_ASSET: Partial<Record<AssetType, string[]>> = {
 // look-up. Drives the questionnaire draft.
 const QUESTIONNAIRE_BY_ASSET: Partial<Record<AssetType, string[]>> = {
   coastal_home: [
-    "Current wind-mitigation certificate (year + uplift class)",
-    "Updated roof age + any partial replacements",
-    "Burglar / fire alarm specs (central station? smoke?)",
-    "Pool / trampoline / other attractive nuisance",
-    "Short-term-rental usage in the last 12 months",
-    "Any losses in the last 5 years (carrier, paid amount, cause)",
+    "Ownership and lien details",
+    "Prior or mailing address in the last 3 years",
+    "Number of units and wall height",
+    "Interior walls, ceilings, and floors",
+    "Kitchen and bathroom quality",
+    "Interior features",
+    "Animals, business, rental, and liability exposures",
+    "Jewelry, watches, guns, furs, art, collections, medical equipment, vault or safe",
+    "Prior carrier, coverage, policy number, expiration date, deductible, and losses",
+    "Requested endorsements and special coverages",
+    "Discounts and protection details",
   ],
   luxury_vehicle: [
-    "Annual mileage estimate",
-    "Primary use (pleasure / commute / business)",
-    "All drivers (name, DOB, license #, years insured)",
-    "Garaging: locked garage / driveway / street",
-    "Modifications, performance upgrades, tracking device",
-    "Loss history in last 5 years",
+    "Purchase date, new/used, own/lien/lease, and name on title",
+    "Lienholder or lessor name and address",
+    "Business, delivery, rideshare, advertising, or wrapped vehicle use",
+    "Distance one way, days per week, and annual mileage",
+    "Principal operator",
+    "Customized equipment or modifications",
+    "Requested liability, property damage, and UM/UIM limits",
+    "Comprehensive and collision coverage / deductibles",
+    "Roadside, rental, glass, gap, and travel coverage",
+    "All drivers and household members",
+    "Tickets, accidents, PIP, deer, glass, or other claims",
+    "Prior carrier, policy number, expiration date, term, and loss-free years",
+    "Discounts, groups, payment plan, health insurance, and deductible choices",
+    "Motorcycle or special vehicle details, if applicable",
   ],
   yacht: [
     "Cruising area (e.g. Atlantic coast, Caribbean, Great Lakes)",
@@ -2629,6 +3144,8 @@ export interface AiQuotingPrep {
 export interface AiAcordFieldDescriptor {
   id?: string;
   label: string;
+  acordFieldKey?: string;
+  acordFieldLabels?: string[];
   required?: boolean;
   kind?: string;
   page?: number;
@@ -2639,6 +3156,7 @@ export interface AiAcordFieldMapping {
   targetField: string;
   value: string;
   sourceLabel: string;
+  sourceUrl?: string;
   sourceKind: PublicDataFieldSourceKind;
   confidence: number;
   verified: boolean;
@@ -2653,6 +3171,8 @@ export interface AiAcordMappingResult {
   webSources: { title: string; url: string; field: string }[];
   summary: string;
   confidence: number;
+  providerError?: string;
+  providerErrorCode?: string;
 }
 
 const ACORD_AI_DOCUMENT_SOURCE_KINDS = new Set<PublicDataFieldSourceKind>([
@@ -2660,10 +3180,12 @@ const ACORD_AI_DOCUMENT_SOURCE_KINDS = new Set<PublicDataFieldSourceKind>([
   "client_intake",
   "validated_address",
   "public_geocoder",
+  "web_search",
   "public_web",
   "government_api",
   "commercial_provider",
   "carrier_api",
+  "model_estimate",
 ]);
 
 type AiAcordMappingIntent = "document_autofill" | "questionnaire_prefill";
@@ -2672,6 +3194,15 @@ function asAcordAiSourceKind(value: unknown): PublicDataFieldSourceKind {
   return ACORD_AI_DOCUMENT_SOURCE_KINDS.has(value as PublicDataFieldSourceKind)
     ? (value as PublicDataFieldSourceKind)
     : "unknown";
+}
+
+function acordAiSourceRequiresCitation(sourceKind: PublicDataFieldSourceKind): boolean {
+  return (
+    sourceKind === "web_search" ||
+    sourceKind === "public_web" ||
+    sourceKind === "government_api" ||
+    sourceKind === "commercial_provider"
+  );
 }
 
 function acordAiLabelLooksAddress(label: string): boolean {
@@ -2686,12 +3217,41 @@ function acordAiValueLooksAddress(value: string): boolean {
   );
 }
 
-function acordAiFieldValueLooksCompatible(label: string, value: string): boolean {
+function acordAiValueLooksUnavailable(value: string): boolean {
+  return /\b(unknown|not public|not publicly|not found|not listed|not noted|no public|n\/a|not available|unconfirmed|requires|needed|needs verification|verify|applicant|attestation|clue|loss runs?)\b/i.test(
+    value
+  );
+}
+
+function acordAiValueContainsNumber(value: string): boolean {
+  return /\d/.test(value.trim());
+}
+
+function acordAiFieldValueLooksCompatible(
+  label: string,
+  value: string,
+  options: { questionnairePrefill?: boolean } = {}
+): boolean {
   const normalized = label.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const unavailableNote = options.questionnairePrefill && acordAiValueLooksUnavailable(value);
   if (acordAiLabelLooksAddress(label)) return acordAiValueLooksAddress(value);
   if (/\b(email)\b/.test(normalized)) return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
   if (/\b(phone|telephone)\b/.test(normalized)) return value.replace(/\D/g, "").length >= 7;
   if (/\b(fein|ein|tax id)\b/.test(normalized)) return value.replace(/\D/g, "").length >= 9;
+  if (/\b(year built|roof year|model year|year started)\b/.test(normalized)) {
+    const year = Number(value.trim());
+    return (Number.isInteger(year) && year >= 1800 && year <= new Date().getFullYear() + 2) || !!unavailableNote;
+  }
+  if (/\byears in business\b/.test(normalized)) return /^\d{1,3}$/.test(value.trim()) || !!unavailableNote;
+  if (/\b(square footage|living area|building area|lot size|number of stories|stories|bedrooms|bathrooms|roof age)\b/.test(normalized)) {
+    return /^\$?\s*\d[\d,]*(?:\.\d+)?$/.test(value.trim()) || (options.questionnairePrefill && acordAiValueContainsNumber(value)) || !!unavailableNote;
+  }
+  if (/\b(occupancy|occupied|use)\b/.test(normalized)) {
+    return /\b(primary|secondary|seasonal|vacation|rental|tenant|owner|occupied|vacant)\b/i.test(value) || !!unavailableNote;
+  }
+  if (/\b(construction type|construction|roof material|roof type|flood zone|protection class)\b/.test(normalized)) {
+    return !acordAiValueLooksAddress(value) && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) && value.trim().length <= (options.questionnairePrefill ? 220 : 80);
+  }
   if (/\b(name|insured|applicant|business)\b/.test(normalized) && acordAiValueLooksAddress(value)) {
     return false;
   }
@@ -2714,7 +3274,7 @@ function safeQuestionnaireAiPrefillLabel(label: string): boolean {
   if (/\b(loss|claim|incident|conviction|violation|mvr|bankruptcy|cancel|nonrenew|audit|payroll|revenue|sales|fein|tax id|ssn)\b/.test(normalized)) {
     return false;
   }
-  return /\b(legal business name|business name|named insured|name of insured|applicant name|dba|doing business as|mailing address|property address|risk address|location address|premises address|city|state|zip|postal|phone|email|website|business description|operations|entity type|year started|years in business|naics|sic)\b/.test(normalized);
+  return /\b(legal business name|business name|named insured|name of insured|applicant name|dba|doing business as|mailing address|property address|risk address|location address|premises address|city|state|zip|postal|phone|email|website|business description|operations|entity type|year started|years in business|naics|sic|owner of record|occupancy|year built|square footage|living area|construction type|roof material|roof year|roof age|lot size|distance to coast|distance from coast|coast distance|flood zone|protection class|number of stories|stories|bedrooms|bathrooms|vin|vehicle identification|year make model|make|model|model year|body class|hull|vessel|yacht|marina|mooring|appraised value|estimated value|exposure value|storage location)\b/.test(normalized);
 }
 
 function parseAcordAiMappings(
@@ -2732,27 +3292,36 @@ function parseAcordAiMappings(
     const value = normalizeLookupText(item.value);
     const confidence = clamp(Number(item.confidence ?? 0), 0, 1);
     const verified = item.verified === true;
-    if (!targetField || !value || unsafeAcordAiFieldLabel(targetField)) return;
-    if (!acordAiFieldValueLooksCompatible(targetField, value)) return;
+    const unavailableNote = acordAiValueLooksUnavailable(value);
+    if (!targetField || !value) return;
+    if (unavailableNote) return;
+    if (unsafeAcordAiFieldLabel(targetField)) return;
+    if (!acordAiFieldValueLooksCompatible(targetField, value, { questionnairePrefill: intent === "questionnaire_prefill" })) return;
     const sourceKind = asAcordAiSourceKind(item.sourceKind);
+    const sourceUrl = normalizeLookupText(item.sourceUrl);
+    if (sourceKind === "model_estimate" || sourceKind === "unknown") return;
+    if (acordAiSourceRequiresCitation(sourceKind) && !sourceUrl) return;
     const documentReady =
       verified &&
       confidence >= 0.84 &&
-      sourceKind !== "model_estimate" &&
-      sourceKind !== "unknown" &&
       sourceKind !== "public_web";
     const questionnaireReady =
       intent === "questionnaire_prefill" &&
-      confidence >= 0.6 &&
-      sourceKind !== "model_estimate" &&
-      sourceKind !== "unknown" &&
-      (verified || sourceKind === "public_web" || sourceKind === "public_geocoder") &&
-      safeQuestionnaireAiPrefillLabel(targetField);
+      safeQuestionnaireAiPrefillLabel(targetField) &&
+      confidence >= 0.55 &&
+      (verified ||
+        sourceKind === "public_web" ||
+        sourceKind === "web_search" ||
+        sourceKind === "public_geocoder" ||
+        sourceKind === "commercial_provider" ||
+        sourceKind === "government_api" ||
+        sourceKind === "client_intake");
     if (!documentReady && !questionnaireReady) return;
     const sourceLabel = normalizeLookupText(item.sourceLabel) || "Verified Quotex AI mapping";
     const targetId = normalizeLookupText(item.targetId);
     const mapping: AiAcordFieldMapping = {
       ...(targetId ? { targetId } : {}),
+      ...(sourceUrl ? { sourceUrl } : {}),
       targetField,
       value,
       sourceLabel,
@@ -2766,12 +3335,29 @@ function parseAcordAiMappings(
       confidence,
       verified,
       allowDocumentAutofill: documentReady,
+      sourceUrl,
       notes:
-        mapping.rationale ||
+        [mapping.rationale, sourceUrl ? `Source URL: ${sourceUrl}` : ""]
+          .filter(Boolean)
+          .join(" ") ||
         (documentReady
           ? "Mapped by server-side ACORD AI with source-backed verification."
           : "Mapped as editable questionnaire prefill from source-backed AI research."),
     });
+    if (intent === "questionnaire_prefill" && targetId) {
+      fields[targetId] = value;
+      markEvidence(publicFieldEvidence, targetId, sourceKind, sourceLabel, {
+        confidence,
+        verified,
+        allowDocumentAutofill: false,
+        sourceUrl,
+        notes:
+          [mapping.rationale, sourceUrl ? `Source URL: ${sourceUrl}` : ""]
+            .filter(Boolean)
+            .join(" ") ||
+          "Mapped as editable questionnaire prefill from source-backed AI research.",
+      });
+    }
     mappings.push(mapping);
   });
   const missingFields = Array.isArray(record.missingFields)
@@ -2799,6 +3385,8 @@ function parseAcordAiMappings(
       normalizeLookupText(record.summary) ||
       `Mapped ${mappings.length} verified ACORD field${mappings.length === 1 ? "" : "s"}.`,
     confidence: clamp(Number(record.confidence ?? (mappings.length ? 0.84 : 0)), 0, 1),
+    providerError: normalizeLookupText(record.providerError),
+    providerErrorCode: normalizeLookupText(record.providerErrorCode),
   };
 }
 
@@ -2818,8 +3406,24 @@ export async function aiMapAcordFields(input: {
       dossier: input.dossier,
       intent: input.intent,
     },
-    { timeoutMs: 60_000 }
+    { timeoutMs: 240_000, requireServer: true }
   );
+  if (!server) {
+    return {
+      fields: {},
+      publicFieldEvidence: {},
+      mappings: [],
+      missingFields: input.fields.map((field) => field.label).filter(Boolean),
+      webSources: [],
+      summary:
+        input.intent === "questionnaire_prefill"
+          ? "OpenAI-backed questionnaire mapping route was unavailable; no editable questionnaire answers were changed."
+          : "OpenAI-backed ACORD mapping route was unavailable; no document fields were changed.",
+      confidence: 0,
+      providerError: "Server AI route was unavailable.",
+      providerErrorCode: "server_ai_unavailable",
+    };
+  }
   return parseAcordAiMappings(server, input.intent);
 }
 
@@ -2844,12 +3448,22 @@ export async function aiPreparePublicFields(input: {
       verified: boolean;
       allowDocumentAutofill: boolean;
       notes?: string;
+      sourceUrl?: string;
+      observedDate?: string;
     }
   ) => {
     const text = normalizeLookupText(value);
     if (!text) return;
+    if (enrichedPublicFieldLooksUnavailable(text)) return;
     const existingEvidence = publicFieldEvidence[label];
-    if (publicFields[label] && existingEvidence?.sourceKind !== "model_estimate") return;
+    const governmentVerifiedUpgrade =
+      sourceKind === "government_api" &&
+      options.verified &&
+      existingEvidence &&
+      ["agent_seed", "client_intake", "model_estimate", "unknown"].includes(existingEvidence.sourceKind);
+    if (publicFields[label] && existingEvidence?.sourceKind !== "model_estimate" && !governmentVerifiedUpgrade) {
+      return;
+    }
     publicFields[label] = text;
     markEvidence(publicFieldEvidence, label, sourceKind, sourceLabel, options);
   };
@@ -2878,9 +3492,13 @@ export async function aiPreparePublicFields(input: {
     });
   }
 
-  const enrichmentSeed = publicLookupSeedForQuotePrep(input.assetType, input.address, input.assetDetails);
+  const enrichmentSeed = publicLookupSeedForQuotePrep(input.assetType, input.address, input.assetDetails, labels);
   if (Object.keys(enrichmentSeed).length > 0) {
-    const enrichment = await aiEnrichAsset(input.assetType, enrichmentSeed);
+    const enrichment = await aiEnrichAsset(
+      input.assetType,
+      enrichmentSeed,
+      labels.map((label) => ({ label, required: true }))
+    );
     applyEnrichmentToQuotePrep(input.assetType, labels, enrichment, setPublicField);
   }
 
@@ -2915,25 +3533,27 @@ export async function aiPreparePublicFields(input: {
 function publicLookupSeedForQuotePrep(
   assetType: AssetType,
   address: string | undefined,
-  assetDetails: Record<string, string> | undefined
+  assetDetails: Record<string, string> | undefined,
+  targetLabels: string[] = []
 ): Record<string, unknown> {
   const details = assetDetails ?? {};
+  const targets = targetLabels.length > 0 ? { questionnaireFields: targetLabels, publicFieldLabels: targetLabels } : {};
   if (assetType === "coastal_home") {
     const riskAddress =
       details.riskAddress ??
       details.propertyAddress ??
       details.address ??
       address;
-    return riskAddress ? { address: riskAddress } : {};
+    return riskAddress ? { address: riskAddress, ...targets } : {};
   }
   if (assetType === "luxury_vehicle") {
-    return details.vin ? { vin: details.vin } : {};
+    return details.vin ? { vin: details.vin, ...targets } : {};
   }
   if (assetType === "yacht") {
     const make = details.make ?? details.builder;
     const model = details.model;
     const year = details.year;
-    return make || model || year ? { make, model, year } : {};
+    return make || model || year ? { make, model, year, ...targets } : {};
   }
   return {};
 }
@@ -2952,6 +3572,8 @@ function applyEnrichmentToQuotePrep(
       verified: boolean;
       allowDocumentAutofill: boolean;
       notes?: string;
+      sourceUrl?: string;
+      observedDate?: string;
     }
   ) => void
 ): void {
@@ -2971,6 +3593,8 @@ function applyEnrichmentToQuotePrep(
       verified: ev.verified,
       allowDocumentAutofill: ev.allowDocumentAutofill,
       notes: ev.notes,
+      sourceUrl: ev.sourceUrl,
+      observedDate: ev.observedDate,
     });
   };
 
@@ -2979,9 +3603,25 @@ function applyEnrichmentToQuotePrep(
       if (/year built/i.test(label)) setFromKey(label, "yearBuilt");
       else if (/square footage|sq ft/i.test(label)) setFromKey(label, "squareFootage");
       else if (/construction/i.test(label)) setFromKey(label, "constructionType");
+      else if (/home style|style|stories/i.test(label)) setFromKey(label, "homeStyle");
+      else if (/foundation/i.test(label)) setFromKey(label, "foundationDetails");
+      else if (/frame|exterior/i.test(label)) setFromKey(label, "frameAndExterior");
+      else if (/roof shape|roof pitch|skylight/i.test(label)) setFromKey(label, "roofShapePitchMaterial");
       else if (/roof material/i.test(label)) setFromKey(label, "roofMaterial");
+      else if (/roof age|roof year/i.test(label)) setFromKey(label, fields.roofAge ? "roofAge" : "roofYear");
+      else if (/attached structure|porch|deck|balcony|carport/i.test(label)) setFromKey(label, "attachedStructures");
+      else if (/detached structure|recreational|pool|hot tub|trampoline/i.test(label)) setFromKey(label, "detachedStructuresAndRecreation");
+      else if (/heating|cooling|hvac/i.test(label)) setFromKey(label, "heatingCoolingSystems");
+      else if (/electrical|safety|alarm|sprinkler|surveillance/i.test(label)) setFromKey(label, "electricalAndSafetySystems");
+      else if (/updates|remodel/i.test(label)) setFromKey(label, "homeUpdates");
+      else if (/animals|liability exposure|business|rental/i.test(label)) setFromKey(label, "animalsAndLiabilityExposures");
+      else if (/county|township|municipality/i.test(label)) setFromKey(label, "countyTownship");
+      else if (/ownership|lien/i.test(label)) setFromKey(label, "ownershipAndLien");
       else if (/distance to coast/i.test(label)) setFromKey(label, "distanceToCoast");
       else if (/lot size/i.test(label)) setFromKey(label, "lotSize");
+      else if (/flood zone/i.test(label)) setFromKey(label, "floodZone");
+      else if (/occupancy/i.test(label)) setFromKey(label, "occupancy");
+      else if (/estimated exposure value|estimated value|exposure value/i.test(label)) setFromKey(label, "estimatedValue");
     }
     if (assetType === "luxury_vehicle" && /year \/ make \/ model/i.test(label)) {
       const value = [fields.year, fields.make, fields.model].filter(Boolean).join(" ");
@@ -2993,6 +3633,24 @@ function applyEnrichmentToQuotePrep(
         allowDocumentAutofill: parts.every((part) => part.allowDocumentAutofill),
         notes: "Derived from NHTSA year, make, and model fields.",
       });
+    }
+    if (assetType === "luxury_vehicle" && /vin-decoded trim|trim/i.test(label)) {
+      const value = [fields.trim, fields.series].filter(Boolean).join(" / ");
+      if (!value) return;
+      const trimEvidence = fields.trim ? useEvidence("trim") : useEvidence("series");
+      setPublicField(label, value, trimEvidence.sourceKind, trimEvidence.sourceLabel, {
+        confidence: trimEvidence.confidence,
+        verified: trimEvidence.verified,
+        allowDocumentAutofill: trimEvidence.allowDocumentAutofill,
+        notes: trimEvidence.notes,
+      });
+    }
+    if (assetType === "luxury_vehicle" && /curb weight/i.test(label)) {
+      const value = fields.curbWeightLb ? `${fields.curbWeightLb} lb` : undefined;
+      setFromKey(label, "curbWeightLb", value);
+    }
+    if (assetType === "luxury_vehicle" && /msrp|base price/i.test(label)) {
+      setFromKey(label, "basePrice");
     }
   });
 }
@@ -3130,9 +3788,9 @@ export function aiGenerateCommercialQuestionnaire(input: {
 }): QuotingQuestion[] {
   const out: QuotingQuestion[] = [];
 
-  // Base intake stays visible even when AI/public data already has a
-  // value. Agents and clients can review or correct the AI-filled answer
-  // before it is used downstream.
+  // Base intake is generated broadly here. The commercial quote-flow
+  // preparation step removes trusted AI-seeded answers, while keeping
+  // claims-history visible for client attestation.
   const base: { label: string; kind: QuotingQuestion["kind"]; options?: string[]; required?: boolean }[] = [
     { label: "Legal business name (as registered)", kind: "text", required: true },
     { label: "Federal EIN", kind: "text", required: true },
@@ -3305,6 +3963,13 @@ export function aiRankCarrierQuotes(input: {
         fitParts.push("pricing tendency outside target");
       }
     }
+    const runnerStatus = carrierPortalRunnerStatus(c);
+    if (runnerStatus.canAttempt) {
+      fitParts.push("portal playbook ready");
+    } else if (c.portalPlaybook) {
+      fitParts.push(runnerStatus.label.toLowerCase());
+    }
+
     // Base premium scales with estimatedValue + asset-type factor +
     // carrier's pricing tendency. Heuristic, not predictive.
     const baseRate =
@@ -3330,7 +3995,9 @@ export function aiRankCarrierQuotes(input: {
     const apiStatus: "connected" | "simulated" | "no_api" =
       c.quotingApi?.status === "connected"
         ? "connected"
-        : c.quotingApi?.status === "configured"
+        : c.quotingApi?.status === "configured" ||
+          c.quotingAutomation?.status === "configured" ||
+          runnerStatus.canAttempt
         ? "simulated"
         : "no_api";
     return {

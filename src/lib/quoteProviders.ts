@@ -1,5 +1,6 @@
 import { aiRankCarrierQuotes } from "./ai";
 import { runCarrierPortalRunner } from "./carrierPortalRunner";
+import { carrierPortalRunnerStatus } from "./carrierPortalPlaybooks";
 import type {
   AssetType,
   Carrier,
@@ -105,6 +106,10 @@ export function getCarrierQuoteProviderReadiness(
     carrier.agentPortalUrl?.trim();
   const configuredStatus = carrier.quotingAutomation?.status ?? "not_configured";
   const automationStatus = carrier.quotingAutomation?.status ?? "configured";
+  const runnerStatus = carrierPortalRunnerStatus(carrier);
+  const runnerAllowed =
+    runnerStatus.canAttempt ||
+    (automationStatus === "connected" && carrier.portalPlaybook?.status !== "unsupported");
   const hasHttpsEndpoint = false;
   const hasPortalUrl = !!portalUrl && /^https:\/\//i.test(portalUrl);
   const blockingReasons: string[] = [];
@@ -115,6 +120,7 @@ export function getCarrierQuoteProviderReadiness(
     const browserSessionReference = readClientEnv("VITE_QUOTEX_CARRIER_BROWSER_SESSION_REFERENCE");
     if (!portalUrl) blockingReasons.push("missing carrier portal URL");
     if (portalUrl && !hasPortalUrl) blockingReasons.push("carrier portal URL must be HTTPS");
+    if (!runnerAllowed) blockingReasons.push(runnerStatus.detail);
     if (!automationBridge) {
       blockingReasons.push("server-side carrier automation worker is not configured");
     }
@@ -131,6 +137,7 @@ export function getCarrierQuoteProviderReadiness(
   const liveReady =
     provider === "carrier_portal_automation" &&
     automationStatus === "connected" &&
+    runnerAllowed &&
     hasPortalUrl &&
     blockingReasons.length === 0;
   const quoteApiStatus: CarrierQuote["apiStatus"] = liveReady
@@ -277,6 +284,16 @@ export function runCarrierQuoteProvider(input: CarrierQuoteProviderRunInput): Ca
       ? runnerTrace?.jobId ?? `RPA-${carrier.id.slice(-5).toUpperCase()}-${stableHash(request.requestId) % 10000}`
       : undefined;
   const messages = providerMessages(readiness, request);
+  const runnerStatus = carrierPortalRunnerStatus(carrier);
+  if (carrier.portalPlaybook) {
+    messages.push(
+      `Runner readiness: ${runnerStatus.label} - ${runnerStatus.detail}`,
+      carrier.portalPlaybook.quotes.length
+        ? `Quote playbook: ${carrier.portalPlaybook.quotes.slice(0, 3).join(" -> ")}`
+        : "Quote playbook: manual carrier workflow only.",
+      `Stop immediately if: ${carrier.portalPlaybook.stopConditions.slice(0, 3).join(" | ")}`
+    );
+  }
   if (runnerTrace) {
     messages.push(
       `Runner status: ${runnerTrace.status.replace(/_/g, " ")} (${

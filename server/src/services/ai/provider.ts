@@ -25,6 +25,7 @@ export type CompleteArgs = {
   reasoningEffort?: "none" | "low" | "medium" | "high" | "xhigh";
   quality?: "fast" | "standard" | "advanced" | "maximum";
   maxOutputTokens?: number;
+  timeoutMs?: number;
   tools?: Array<Record<string, unknown>>;
   toolChoice?: "auto" | "required" | Record<string, unknown>;
 };
@@ -42,13 +43,8 @@ class AiProviderHttpError extends Error {
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
-const stubProvider: AiProvider = {
-  async completeJson<T = unknown>(): Promise<T> {
-    return {} as T;
-  },
-};
-
-function configuredTimeoutMs(): number {
+function configuredTimeoutMs(overrideMs?: number): number {
+  if (Number.isFinite(overrideMs) && Number(overrideMs) >= 1_000) return Number(overrideMs);
   const n = Number(process.env.AI_REQUEST_TIMEOUT_MS);
   return Number.isFinite(n) && n >= 1_000 ? n : DEFAULT_TIMEOUT_MS;
 }
@@ -76,12 +72,15 @@ async function sleep(ms: number): Promise<void> {
 async function fetchJsonWithRetry(
   url: string,
   init: RequestInit,
-  attempts = 3
+  attempts = 3,
+  timeoutMs?: number
 ): Promise<unknown> {
   let lastError: unknown;
-  for (let attempt = 0; attempt < attempts; attempt++) {
+  const timeoutForAttempt = configuredTimeoutMs(timeoutMs);
+  const maxAttempts = timeoutForAttempt >= 90_000 ? 1 : attempts;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), configuredTimeoutMs());
+    const timer = setTimeout(() => controller.abort(), timeoutForAttempt);
     try {
       const res = await fetch(url, { ...init, signal: controller.signal });
       const text = await res.text();
@@ -96,7 +95,7 @@ async function fetchJsonWithRetry(
       lastError = err;
       const status = err instanceof AiProviderHttpError ? err.status : 0;
       const shouldRetry =
-        attempt < attempts - 1 &&
+        attempt < maxAttempts - 1 &&
         (status === 0 || isRetryableStatus(status));
       if (!shouldRetry) break;
       await sleep(retryDelay(attempt));
@@ -168,6 +167,14 @@ function qualityReasoningEffort(
     default:
       return "medium";
   }
+}
+
+function openAiReasoningEffort(
+  model: string,
+  effort: NonNullable<CompleteArgs["reasoningEffort"]>
+): Exclude<NonNullable<CompleteArgs["reasoningEffort"]>, "none" | "xhigh"> | undefined {
+  if (!model.startsWith("gpt-5") || effort === "none") return undefined;
+  return effort === "xhigh" ? "high" : effort;
 }
 
 function candidateModels(args: CompleteArgs): string[] {
@@ -242,7 +249,8 @@ async function repairJsonWithOpenAi<T>(
         store: false,
       }),
     },
-    1
+    1,
+    args.timeoutMs
   );
   const fixed = extractOpenAiText(data);
   if (!fixed) throw new Error("OpenAI JSON repair did not include output text");
@@ -251,7 +259,11 @@ async function repairJsonWithOpenAi<T>(
 
 async function openaiProvider(): Promise<AiProvider> {
   const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return stubProvider;
+  if (!apiKey?.trim()) {
+    throw new Error(
+      "OPENAI_API_KEY is required for Quotex AI. Configure it as a server-side environment variable."
+    );
+  }
   const url = process.env.OPENAI_RESPONSES_URL ?? "https://api.openai.com/v1/responses";
   return {
     async completeJson<T = unknown>(args: CompleteArgs): Promise<T> {
@@ -267,28 +279,35 @@ async function openaiProvider(): Promise<AiProvider> {
       let lastError: unknown;
       for (const model of candidateModels(args)) {
         try {
-          const data = await fetchJsonWithRetry(url, {
-            method: "POST",
-            headers: {
-              "content-type": "application/json",
-              authorization: `Bearer ${apiKey}`,
+          const reasoningEffort = openAiReasoningEffort(
+            model,
+            qualityReasoningEffort(args.quality, args.reasoningEffort, route.reasoningEffort)
+          );
+          const data = await fetchJsonWithRetry(
+            url,
+            {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                authorization: `Bearer ${apiKey}`,
+              },
+              body: JSON.stringify({
+                model,
+                input: [
+                  { role: "system", content: args.system },
+                  { role: "user", content: openAiUserContent(args) },
+                ],
+                text: { format },
+                ...(reasoningEffort ? { reasoning: { effort: reasoningEffort } } : {}),
+                ...(args.tools && args.tools.length > 0 ? { tools: args.tools } : {}),
+                ...(args.toolChoice ? { tool_choice: args.toolChoice } : {}),
+                max_output_tokens: args.maxOutputTokens ?? 1_200,
+                store: false,
+              }),
             },
-            body: JSON.stringify({
-              model,
-              input: [
-                { role: "system", content: args.system },
-                { role: "user", content: openAiUserContent(args) },
-              ],
-              text: { format },
-              ...(model.startsWith("gpt-5")
-                ? { reasoning: { effort: qualityReasoningEffort(args.quality, args.reasoningEffort, route.reasoningEffort) } }
-                : {}),
-              ...(args.tools && args.tools.length > 0 ? { tools: args.tools } : {}),
-              ...(args.toolChoice ? { tool_choice: args.toolChoice } : {}),
-              max_output_tokens: args.maxOutputTokens ?? 1_200,
-              store: false,
-            }),
-          });
+            3,
+            args.timeoutMs
+          );
           const text = extractOpenAiText(data);
           if (!text) throw new Error("OpenAI response did not include output text");
           try {
@@ -307,29 +326,16 @@ async function openaiProvider(): Promise<AiProvider> {
   };
 }
 
-async function anthropicProvider(): Promise<AiProvider> {
-  // Placeholder until @anthropic-ai/sdk or REST support is added.
-  // Keep returning the validated fallback path instead of pretending
-  // an unconfigured provider is live.
-  return stubProvider;
-}
-
-async function geminiProvider(): Promise<AiProvider> {
-  // Placeholder until @google/generative-ai or REST support is added.
-  return stubProvider;
-}
-
 let cachedKey = "";
 let cached: AiProvider | null = null;
-function configuredProvider(): "openai" | "anthropic" | "gemini" | "stub" {
+function configuredProvider(): "openai" {
   const explicit = process.env.AI_PROVIDER?.trim().toLowerCase();
-  if (explicit === "openai" || explicit === "anthropic" || explicit === "gemini" || explicit === "stub") {
-    return explicit;
+  if (explicit && explicit !== "openai") {
+    throw new Error(
+      `Unsupported AI_PROVIDER=${explicit}. Quotex AI is OpenAI-only; set AI_PROVIDER=openai.`
+    );
   }
-  if (process.env.OPENAI_API_KEY?.trim()) return "openai";
-  if (process.env.ANTHROPIC_API_KEY?.trim()) return "anthropic";
-  if (process.env.GEMINI_API_KEY?.trim()) return "gemini";
-  return "stub";
+  return "openai";
 }
 
 async function pick(): Promise<AiProvider> {
@@ -337,10 +343,7 @@ async function pick(): Promise<AiProvider> {
   const key = `${p}:${process.env.OPENAI_MODEL ?? ""}:${process.env.OPENAI_REASONING_EFFORT ?? ""}`;
   if (cached && cachedKey === key) return cached;
   cachedKey = key;
-  if (p === "openai") cached = await openaiProvider();
-  else if (p === "anthropic") cached = await anthropicProvider();
-  else if (p === "gemini") cached = await geminiProvider();
-  else cached = stubProvider;
+  cached = await openaiProvider();
   return cached;
 }
 
@@ -356,7 +359,7 @@ export const provider: AiProvider = {
 
 export async function generateOpenAiImage(input: {
   prompt: string;
-  size?: "1024x1024" | "1024x1536" | "1536x1024";
+  size?: "1024x1024" | "1024x1792" | "1792x1024";
 }): Promise<{ mimeType: string; bytes: Buffer } | null> {
   return runServerAiJob(
     {
@@ -369,6 +372,7 @@ export async function generateOpenAiImage(input: {
     async () => {
       const apiKey = process.env.OPENAI_API_KEY;
       if (!apiKey) return null;
+      const model = getOpenAiImageModel();
       const data = await fetchJsonWithRetry(
         process.env.OPENAI_IMAGES_URL ?? "https://api.openai.com/v1/images/generations",
         {
@@ -378,9 +382,9 @@ export async function generateOpenAiImage(input: {
             authorization: `Bearer ${apiKey}`,
           },
           body: JSON.stringify({
-            model: getOpenAiImageModel(),
+            model,
             prompt: input.prompt.slice(0, 4_000),
-            size: input.size ?? "1024x1536",
+            size: imageSizeForModel(model, input.size),
             n: 1,
           }),
         },
@@ -395,7 +399,24 @@ export async function generateOpenAiImage(input: {
       if (typeof row.b64_json === "string") {
         return { mimeType: "image/png", bytes: Buffer.from(row.b64_json, "base64") };
       }
+      if (typeof row.url === "string" && /^https:\/\//i.test(row.url)) {
+        const imageResponse = await fetch(row.url);
+        if (!imageResponse.ok) return null;
+        const arrayBuffer = await imageResponse.arrayBuffer();
+        return {
+          mimeType: imageResponse.headers.get("content-type") ?? "image/png",
+          bytes: Buffer.from(arrayBuffer),
+        };
+      }
       return null;
     }
   );
+}
+
+function imageSizeForModel(
+  model: string,
+  requested?: "1024x1024" | "1024x1792" | "1792x1024"
+): "1024x1024" | "1024x1792" | "1792x1024" {
+  if (model.toLowerCase().startsWith("dall-e-3")) return requested ?? "1024x1792";
+  return "1024x1024";
 }

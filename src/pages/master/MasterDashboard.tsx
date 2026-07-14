@@ -1,11 +1,11 @@
 import { Link, useNavigate } from "react-router-dom";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { BadgeDollarSign, Building2, ShieldCheck, Sparkles, Users, Wallet } from "lucide-react";
 import { Card, CardHeader, EmptyState, StatCard } from "@/components/ui/Card";
 import { Modal } from "@/components/ui/Modal";
 import { api } from "@/lib/api";
-import { isLivePlatformAgency } from "@/lib/demoData";
 import { fmt } from "@/lib/format";
+import { listReconciledLivePlatformAgencies, reconcilePaidSoftwareSalesToAgencies } from "@/lib/softwareSaleProvisioning";
 import { agencyMonthlyPriceUsd, softwareSaleMonthlyTotalForSeats } from "@/lib/tiers";
 
 type Drilldown = "clients" | "policies" | null;
@@ -19,23 +19,33 @@ type AgencyRow = {
 
 export function MasterDashboard() {
   const navigate = useNavigate();
+  const [, setRev] = useState(0);
   const [drilldown, setDrilldown] = useState<Drilldown>(null);
-  const agencies = api.agencies.list().filter(isLivePlatformAgency);
+
+  useEffect(() => {
+    if (reconcilePaidSoftwareSalesToAgencies().length > 0) setRev((r) => r + 1);
+  }, []);
+
+  const agencies = listReconciledLivePlatformAgencies();
+  const activeAgencies = agencies.filter((agency) => agency.active);
   const carriers = api.carriers.list();
   const softwareSales = api.softwareSales.list();
   const openSoftwareSales = softwareSales.filter((sale) => sale.status !== "closed");
   const pipelineMrr = openSoftwareSales.reduce(
-    (sum, sale) => sum + (sale.estimatedMonthly || softwareSaleMonthlyTotalForSeats(sale.seats, sale.websiteAppAddOn)),
+    (sum, sale) =>
+      sum +
+      (sale.estimatedMonthly ||
+        softwareSaleMonthlyTotalForSeats(sale.seats, sale.websiteAppAddOn, sale.termMonths, sale.product)),
     0
   );
-  const agencyRows: AgencyRow[] = agencies.map((agency) => {
+  const agencyRows: AgencyRow[] = activeAgencies.map((agency) => {
     const customers = api.customers.list(agency.id);
     const policies = api.policies.listByTenant(agency.id);
     const deposits = api.deposits
       .listByTenant(agency.id)
       .filter((d) => d.status === "paid")
       .reduce((sum, d) => sum + d.amount, 0);
-    const monthlyRevenue = agency.active ? agencyMonthlyPriceUsd(agency) : 0;
+    const monthlyRevenue = agencyMonthlyPriceUsd(agency);
     return { agency, customers, policies, deposits, monthlyRevenue };
   });
 
@@ -55,7 +65,7 @@ export function MasterDashboard() {
       <div className="grid sm:grid-cols-2 lg:grid-cols-6 gap-4">
         <StatCard
           label="Agencies"
-          value={agencies.filter((agency) => agency.active).length}
+          value={activeAgencies.length}
           hint={`${agencies.length} total`}
           icon={<Building2 className="h-5 w-5" />}
           onClick={() => navigate("/master/agencies")}

@@ -69,7 +69,7 @@ describe("customers.assignAgents — multi-agent client routing", () => {
     expect(assignees.has(agentB.id)).toBe(true);
   });
 
-  it("both co-assigned agents see the client via listVisible / canSee", async () => {
+  it("co-assigned agents see ownership and other agency staff can still open the directory profile", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     const [agentA, agentB, third] = api.users
@@ -94,7 +94,7 @@ describe("customers.assignAgents — multi-agent client routing", () => {
     expect(api.customers.canSee(refreshed, { id: agentA.id, role: "agent" })).toBe(true);
     expect(api.customers.canSee(refreshed, { id: agentB.id, role: "agent" })).toBe(true);
     if (third) {
-      expect(api.customers.canSee(refreshed, { id: third.id, role: "agent" })).toBe(false);
+      expect(api.customers.canSee(refreshed, { id: third.id, role: "agent" })).toBe(true);
     }
     expect(
       api.customers

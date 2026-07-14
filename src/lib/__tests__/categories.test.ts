@@ -34,6 +34,16 @@ describe("api.categories — per-tenant link/unlink", () => {
     expect(categories.filter((c) => c.lineOfBusiness === "commercial").length).toBeGreaterThanOrEqual(100);
   });
 
+  it("exposes every master category and agency link with a stable unique key", async () => {
+    const { api } = await import("../api");
+    const categories = api.categories.list();
+    const categoryIds = categories.map((category) => category.id);
+    const linkKeys = api.categories.links().map((link) => `${link.tenantId}:${link.categoryId}`);
+
+    expect(new Set(categoryIds).size).toBe(categoryIds.length);
+    expect(new Set(linkKeys).size).toBe(linkKeys.length);
+  });
+
   it("seed links both demo agencies to every category", async () => {
     const { api } = await import("../api");
     const categoryCount = api.categories.list().length;
@@ -87,6 +97,9 @@ describe("api.categories — per-tenant link/unlink", () => {
 describe("category schema questions — seed sanity", () => {
   it("every seeded category is explicitly personal or commercial", async () => {
     const { SEED_CATEGORIES } = await import("../seed");
+    const categoryIds = SEED_CATEGORIES.map((category) => category.id);
+
+    expect(new Set(categoryIds).size).toBe(categoryIds.length);
     for (const cat of SEED_CATEGORIES) {
       expect(["personal", "commercial"]).toContain(cat.lineOfBusiness);
     }

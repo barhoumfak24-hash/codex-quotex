@@ -30,3 +30,4 @@ work
 backups
 tmp-*
 *.wav
+graphify-out/

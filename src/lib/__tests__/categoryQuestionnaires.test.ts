@@ -7,7 +7,7 @@ beforeEach(async () => {
 });
 
 describe("category questionnaire templates", () => {
-  it("keeps the primary home intake to homeowner-known essentials", async () => {
+  it("builds the primary home intake from the home quote sheet", async () => {
     const { api } = await import("../api");
     const { categoryQuestionnaire } = await import("../categoryQuestionnaires");
 
@@ -17,21 +17,46 @@ describe("category questionnaire templates", () => {
 
     expect(keys).toContain("propertyAddress");
     expect(keys).toContain("occupancy");
+    expect(keys).toContain("yearBuilt");
+    expect(keys).toContain("squareFootageAndUnits");
+    expect(keys).toContain("foundationDetails");
+    expect(keys).toContain("roofShapePitchMaterial");
+    expect(keys).toContain("heatingCoolingSystems");
+    expect(keys).toContain("electricalAndSafetySystems");
+    expect(keys).toContain("priorCarrierAndLosses");
+    expect(keys).toContain("requestedHomeEndorsements");
+    expect(keys).toContain("homeDiscountsAndProtection");
     expect(keys).toContain("currentCoverage");
     expect(keys).toContain("targetEffectiveDate");
-    expect(keys).not.toContain("priorLosses");
-    expect(keys).not.toContain("nonPublicPropertyNotes");
-    expect(keys).not.toContain("estimatedValue");
-    expect(keys).not.toContain("yearBuilt");
-    expect(keys).not.toContain("squareFootage");
-    expect(keys).not.toContain("constructionType");
-    expect(keys).not.toContain("roofAge");
-    expect(keys).not.toContain("roofMaterial");
-    expect(keys).not.toContain("floodZone");
-    expect(keys).not.toContain("notes");
+    expect(questions.length).toBeGreaterThanOrEqual(24);
   });
 
-  it("generates a public-data-oriented questionnaire for every active category", async () => {
+  it("builds the standard auto intake from the auto quote sheet", async () => {
+    const { api } = await import("../api");
+    const { categoryQuestionnaire } = await import("../categoryQuestionnaires");
+
+    const category = api.categories.get("cat_standard_auto")!;
+    const questions = categoryQuestionnaire(category);
+    const keys = questions.map((question) => question.key);
+
+    expect(keys).toContain("vin");
+    expect(keys).toContain("yearMakeModel");
+    expect(keys).toContain("purchaseAndOwnership");
+    expect(keys).toContain("garagingAddressIfDifferent");
+    expect(keys).toContain("primaryUse");
+    expect(keys).toContain("coverageLimits");
+    expect(keys).toContain("physicalDamageDeductibles");
+    expect(keys).toContain("driverOneDetails");
+    expect(keys).toContain("additionalDriversAndHousehold");
+    expect(keys).toContain("ticketsAccidentsClaims");
+    expect(keys).toContain("priorAutoCarrier");
+    expect(keys).toContain("autoDiscountsAndPayment");
+    expect(keys).toContain("currentCoverage");
+    expect(keys).toContain("targetEffectiveDate");
+    expect(questions.length).toBeGreaterThanOrEqual(22);
+  });
+
+  it("generates a bounded questionnaire for every active category", async () => {
     const { api } = await import("../api");
     const {
       categoryQuestionnaire,
@@ -40,46 +65,21 @@ describe("category questionnaire templates", () => {
 
     const categories = api.categories.listActive();
     expect(categories.length).toBeGreaterThan(100);
-    const disallowedPublicDataKeys = new Set([
-      "estimatedValue",
-      "yearBuilt",
-      "squareFootage",
-      "constructionType",
-      "roofAge",
-      "roofMaterial",
-      "floodZone",
-      "distanceToWater",
-      "year",
-      "make",
-      "model",
-      "length",
-      "dba",
-      "fein",
-      "riskAddress",
-      "entityType",
-      "yearsInBusiness",
-      "employeeCount",
-      "notes",
-      "priorLosses",
-      "nonPublicPropertyNotes",
-      "nonPublicRiskNotes",
-      "operationsNotObvious",
-      "locationsNotInSearch",
-      "protectionNotes",
-      "professionalServicesNotObvious",
-      "scheduleAndValues",
-      "acreageOrAnimalNotes",
-    ]);
 
     categories.forEach((category) => {
       const questions = categoryQuestionnaire(category);
+      const maxQuestions =
+        category.lineOfBusiness === "commercial"
+          ? 9
+          : category.assetType === "coastal_home"
+          ? 30
+          : category.assetType === "luxury_vehicle"
+          ? 28
+          : 8;
       expect(questions.length).toBeGreaterThanOrEqual(3);
-      expect(questions.length).toBeLessThanOrEqual(category.lineOfBusiness === "commercial" ? 9 : 8);
+      expect(questions.length).toBeLessThanOrEqual(maxQuestions);
       expect(categoryQuestionPublicDataScore(category)).toBeGreaterThanOrEqual(70);
       expect(new Set(questions.map((question) => question.key)).size).toBe(questions.length);
-      questions.forEach((question) => {
-        expect(disallowedPublicDataKeys.has(question.key)).toBe(false);
-      });
     });
   });
 

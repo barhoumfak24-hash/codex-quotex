@@ -11,6 +11,7 @@ import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
 import { formatAssetValue } from "@/lib/assetLabels";
+import { formatAssetDetailValue } from "@/lib/assetDisplay";
 import { fmt } from "@/lib/format";
 
 // =====================================================================
@@ -151,7 +152,7 @@ export function EmployeeAssetPage() {
                       {shouldMap ? (
                         <MapLink address={v} className="max-w-full justify-end text-right" />
                       ) : (
-                        <span className="block truncate">{String(v)}</span>
+                        <span className="block truncate">{formatAssetDetailValue(k, v)}</span>
                       )}
                     </dd>
                   </div>

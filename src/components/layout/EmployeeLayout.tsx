@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { useLocation } from "react-router-dom";
 import {
   Archive,
   BarChart3,
@@ -230,6 +231,7 @@ function localDateKey(iso: string): string {
 export function EmployeeLayout() {
   const { agency } = useTenant();
   const { user } = useAuth();
+  const location = useLocation();
   // Tick this whenever ANY db mutation happens so the sidebar
   // badges recompute in lockstep. Without this the layout only
   // re-renders on route changes, leaving stale counts behind after

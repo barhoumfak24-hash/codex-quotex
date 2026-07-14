@@ -1,6 +1,6 @@
 import { Suspense, lazy, useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
-import { QuotexMark } from "./components/layout/Logo";
+import { QuotexMark, QuotexWordmark } from "./components/layout/Logo";
 import { ErrorBoundary } from "./components/ui/ErrorBoundary";
 import { useExternalLinkTargets } from "./lib/externalLinks";
 import type { AppSurface } from "./lib/appSurface";
@@ -48,8 +48,8 @@ function LoadingBrand({ showRefresh = false }: { showRefresh?: boolean }) {
     >
       <div className="flex flex-col items-center gap-5">
         <div className="flex items-center gap-3">
-          <QuotexMark className="h-12 w-12 shadow-soft" letterClassName="text-[30px]" />
-          <div className="font-display text-3xl leading-none text-ink-950">Quotex</div>
+          <QuotexMark size="xl" className="shadow-soft" />
+          <QuotexWordmark className="text-3xl text-ink-950" />
         </div>
         {showRefresh && (
           <button type="button" className="btn-outline" onClick={reloadPage}>

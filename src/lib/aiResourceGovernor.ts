@@ -8,6 +8,8 @@ export type AiResourceFeature =
   | "contact_extraction"
   | "policy_extraction"
   | "asset_enrichment"
+  | "property_imagery"
+  | "document_mapping"
   | "acord_mapping"
   | "carrier_appetite_parse"
   | "campaign_draft"
@@ -111,6 +113,8 @@ const FEATURE_POLICIES: Partial<Record<AiResourceFeature, Partial<AiResourcePoli
   contact_extraction: { cacheTtlMs: 15 * 60_000, estimatedUnitCost: 5 },
   policy_extraction: { cacheTtlMs: 15 * 60_000, estimatedUnitCost: 5 },
   asset_enrichment: { cacheTtlMs: 30 * 60_000, estimatedUnitCost: 4 },
+  property_imagery: { cacheTtlMs: 24 * 60 * 60_000, estimatedUnitCost: 10, maxPerMinute: 10 },
+  document_mapping: { cacheTtlMs: 0, estimatedUnitCost: 10, maxPerMinute: 15 },
   acord_mapping: { cacheTtlMs: 0, estimatedUnitCost: 8, maxPerMinute: 20 },
   carrier_appetite_parse: { cacheTtlMs: 30 * 60_000, estimatedUnitCost: 5 },
   campaign_draft: { cacheTtlMs: 5 * 60_000, estimatedUnitCost: 2 },
@@ -149,6 +153,10 @@ export function aiFeatureForPath(path: string): AiResourceFeature {
       return "policy_extraction";
     case "ai/enrich-asset":
       return "asset_enrichment";
+    case "ai/property-imagery":
+      return "property_imagery";
+    case "ai/document-map":
+      return "document_mapping";
     case "ai/acord-map":
       return "acord_mapping";
     case "ai/parse-carrier-appetite":

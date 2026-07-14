@@ -1,20 +1,15 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { LockKeyhole, ShieldCheck, UserPlus } from "lucide-react";
 import { AuthShell } from "./AuthShell";
-import { useAuth } from "@/lib/auth";
-import { api } from "@/lib/api";
+import { authFailureMessage, useAuth } from "@/lib/auth";
 
 type Mode = "sign-in" | "create";
 
 export function MasterLoginPage() {
   const { createMasterAccount, signInMaster } = useAuth();
   const nav = useNavigate();
-  const masterExists = useMemo(
-    () => api.users.masterAccountExists(),
-    []
-  );
-  const [mode, setMode] = useState<Mode>(() => (masterExists ? "sign-in" : "create"));
+  const [mode, setMode] = useState<Mode>("sign-in");
   const [signInEmail, setSignInEmail] = useState("");
   const [signInPassword, setSignInPassword] = useState("");
   const [createName, setCreateName] = useState("");
@@ -22,39 +17,46 @@ export function MasterLoginPage() {
   const [createPassword, setCreatePassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [message, setMessage] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
-  function submitSignIn(event: React.FormEvent) {
+  async function submitSignIn(event: React.FormEvent) {
     event.preventDefault();
     setMessage(null);
-    const master = signInMaster(signInEmail, signInPassword);
-    if (!master) {
-      setMessage("Master access was not approved for those credentials.");
-      return;
+    setSubmitting(true);
+    try {
+      const result = await signInMaster(signInEmail, signInPassword);
+      if (!result.ok) {
+        setMessage(authFailureMessage(result.reason, "master"));
+        return;
+      }
+      nav("/master");
+    } finally {
+      setSubmitting(false);
     }
-    nav("/master");
   }
 
-  function submitCreate(event: React.FormEvent) {
+  async function submitCreate(event: React.FormEvent) {
     event.preventDefault();
     setMessage(null);
-    if (masterExists) {
-      setMessage("The master portal already has its one allowed account.");
-      return;
-    }
     if (createPassword !== confirmPassword) {
       setMessage("The confirmation password does not match.");
       return;
     }
-    const result = createMasterAccount({
-      name: createName,
-      email: createEmail,
-      password: createPassword,
-    });
-    if (!result.ok) {
-      setMessage(createErrorLabel(result.reason));
-      return;
+    setSubmitting(true);
+    try {
+      const result = await createMasterAccount({
+        name: createName,
+        email: createEmail,
+        password: createPassword,
+      });
+      if (!result.ok) {
+        setMessage(createErrorLabel(result.reason));
+        return;
+      }
+      nav("/master");
+    } finally {
+      setSubmitting(false);
     }
-    nav("/master");
   }
 
   return (
@@ -110,24 +112,19 @@ export function MasterLoginPage() {
               required
             />
           </div>
-          <button className="btn-primary w-full" type="submit">
-            Enter master portal
+          <button className="btn-primary w-full" type="submit" disabled={submitting}>
+            {submitting ? "Checking access..." : "Enter master portal"}
           </button>
         </form>
       ) : (
         <form onSubmit={submitCreate} className="space-y-3">
-          {masterExists && (
-            <div className="rounded-md border border-gold-200 bg-gold-50 px-3 py-2 text-xs text-gold-800">
-              The master account is already provisioned. Create account is locked to keep the master portal limited to one user.
-            </div>
-          )}
           <div>
             <label className="label">Full name</label>
             <input
               className="input"
               value={createName}
               onChange={(event) => setCreateName(event.target.value)}
-              disabled={masterExists}
+              disabled={submitting}
               required
             />
           </div>
@@ -138,7 +135,7 @@ export function MasterLoginPage() {
               type="email"
               value={createEmail}
               onChange={(event) => setCreateEmail(event.target.value)}
-              disabled={masterExists}
+              disabled={submitting}
               required
             />
           </div>
@@ -149,7 +146,7 @@ export function MasterLoginPage() {
               type="password"
               value={createPassword}
               onChange={(event) => setCreatePassword(event.target.value)}
-              disabled={masterExists}
+              disabled={submitting}
               minLength={12}
               required
             />
@@ -161,14 +158,14 @@ export function MasterLoginPage() {
               type="password"
               value={confirmPassword}
               onChange={(event) => setConfirmPassword(event.target.value)}
-              disabled={masterExists}
+              disabled={submitting}
               minLength={12}
               required
             />
           </div>
-          <button className="btn-primary w-full" type="submit" disabled={masterExists}>
+          <button className="btn-primary w-full" type="submit" disabled={submitting}>
             <ShieldCheck className="h-4 w-4" />
-            Create master account
+            {submitting ? "Creating..." : "Create master account"}
           </button>
         </form>
       )}
@@ -185,9 +182,10 @@ export function MasterLoginPage() {
   );
 }
 
-function createErrorLabel(reason: "exists" | "invalid_email" | "weak_password" | "missing_name") {
+function createErrorLabel(reason: "exists" | "invalid_email" | "weak_password" | "missing_name" | "server_unavailable") {
   if (reason === "exists") return "The master portal already has its one allowed account.";
   if (reason === "invalid_email") return "Enter a valid founder email.";
   if (reason === "weak_password") return "Use a passphrase with at least 12 characters.";
+  if (reason === "server_unavailable") return "The server auth system is unavailable. Try again in a moment.";
   return "Enter the founder's full name.";
 }

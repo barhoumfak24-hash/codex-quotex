@@ -10,6 +10,7 @@ import {
   looksLikeVin,
   normalizeVin,
 } from "@/lib/assetLabels";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import type { AssetType, Policy, PolicyStatus, RenewalStatus } from "@/types";
@@ -456,7 +457,7 @@ export function AddPolicyModal({
               </option>
               {assets.map((a) => (
                 <option key={a.id} value={a.id}>
-                  {a.label}
+                  {assetDisplayName(a)}
                 </option>
               ))}
               {selectedCustomerId && <option value={NEW_ASSET}>+ Add a new asset…</option>}

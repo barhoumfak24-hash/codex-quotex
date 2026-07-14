@@ -94,7 +94,7 @@ describe("server environment validation", () => {
     );
   });
 
-  it("rejects production stub AI unless explicitly allowed", () => {
+  it("rejects unsupported production AI providers", () => {
     stubGoodProductionEnv();
     vi.stubEnv("AI_PROVIDER", "stub");
 
@@ -102,7 +102,7 @@ describe("server environment validation", () => {
 
     expect(result.ok).toBe(false);
     expect(result.errors).toContain(
-      "A real AI provider key is required in production unless ALLOW_AI_STUB_IN_PRODUCTION=true."
+      "AI_PROVIDER=stub is not supported. Quotex AI is OpenAI-only; set AI_PROVIDER=openai."
     );
   });
 

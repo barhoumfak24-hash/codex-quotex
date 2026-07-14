@@ -24,6 +24,7 @@ import { Modal } from "@/components/ui/Modal";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import { matchesAiCustomFilter } from "@/lib/aiCustomFilters";
 import {
   BILLING_STATUS_LABEL,
@@ -755,7 +756,7 @@ export function EmployeeAccountingPage() {
                     {fmt.policyRef(row.policy)}
                   </div>
                   <div className="truncate text-xs text-ink-500">
-                    {row.asset?.label ?? "Asset not recorded"} - {api.helpers.departmentLabel(row.policy)}
+                    {row.asset ? assetDisplayName(row.asset) : "Asset not recorded"} - {api.helpers.departmentLabel(row.policy)}
                   </div>
                 </td>
                 <td className="px-4 py-5 align-middle">
@@ -1594,7 +1595,7 @@ function accountingSearchParts(row: AccountingRow): string[] {
     row.customer.phone,
     fmt.policyRef(row.policy),
     row.policy.policyNumber,
-    row.asset?.label,
+    row.asset ? assetDisplayName(row.asset) : undefined,
     row.carrier?.name,
     billingMethodLabel(row.policy.billingMethod),
     billingFrequencyLabel(row.policy),

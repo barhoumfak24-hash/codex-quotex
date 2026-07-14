@@ -26,7 +26,9 @@ import { useTenant } from "@/lib/tenant";
 import { useAuth } from "@/lib/auth";
 import { useIntegrationNotice } from "@/lib/integrationNotice";
 import { api } from "@/lib/api";
-import { aiExtractPolicyFromFile } from "@/lib/ai";
+import { aiEnrichAsset, aiExtractPolicyFromFile } from "@/lib/ai";
+import { assetDisplayName, assetDisplaySubtitleLabel, buildAssetLabelFromDetails } from "@/lib/assetDisplay";
+import { categoryQuestionnaire } from "@/lib/categoryQuestionnaires";
 import { isRoutingManagerRole } from "@/lib/roles";
 import { buildDocumentTemplateFields, documentTypeLabelForTemplate } from "@/lib/documentTemplateFields";
 import { fmt } from "@/lib/format";
@@ -36,6 +38,7 @@ import { downloadContactDossier } from "@/lib/contactDossier";
 import { requestManagerStepUp, verifyManagerStepUp } from "@/lib/managerStepUp";
 import { isContactProfileActivity } from "@/lib/taskFilters";
 import { scrollAnchorIntoView } from "@/lib/scrollAnchors";
+import { summarizeQuotingWorkflow } from "@/lib/quotingWorkflows";
 import {
   buildLossRunEmailBody,
   buildLossRunReport,
@@ -43,12 +46,28 @@ import {
   lossRunAttachment,
   lossRunSubject,
 } from "@/lib/lossRuns";
-import type { Asset, Document, MarketingCampaign, MarketingMessage, NoteAttachment, Policy, PolicyParty, TemplateFieldMap } from "@/types";
+import { normalizeVinFieldValue, uppercaseVinInput } from "@/lib/vinInput";
+import type { AddressParts } from "@/lib/addressSearch";
+import type { AiAssetEnrichment, Asset, AssetType, CategoryQuestion, Document, InsuranceCategory, MarketingCampaign, MarketingMessage, NoteAttachment, Policy, PolicyParty, TemplateFieldMap } from "@/types";
 
 type RenewalAiField = "policyId" | "renewalDate";
 type ClaimStatus = "opened" | "in_review" | "closed";
 type ClaimAiField = "policyId" | "status" | "externalClaimNumber" | "carrierClaimsUrl";
 type LossHistoryAiField = "policyId" | "status" | "externalClaimNumber" | "openedAt" | "lossDescription";
+type AssetCategoryOption = Pick<
+  InsuranceCategory,
+  "id" | "label" | "description" | "lineOfBusiness" | "assetType"
+>;
+
+const FALLBACK_ASSET_CATEGORY_OPTIONS: AssetCategoryOption[] = [
+  { id: "profile_fallback_coastal_home", label: "Coastal home", lineOfBusiness: "personal", assetType: "coastal_home" },
+  { id: "profile_fallback_luxury_vehicle", label: "Luxury vehicle", lineOfBusiness: "personal", assetType: "luxury_vehicle" },
+  { id: "profile_fallback_yacht", label: "Yacht", lineOfBusiness: "personal", assetType: "yacht" },
+  { id: "profile_fallback_jewelry", label: "Jewelry", lineOfBusiness: "personal", assetType: "jewelry" },
+  { id: "profile_fallback_umbrella", label: "Umbrella liability", lineOfBusiness: "personal", assetType: "umbrella_liability" },
+  { id: "profile_fallback_portfolio", label: "Full portfolio", lineOfBusiness: "personal", assetType: "full_portfolio" },
+  { id: "profile_fallback_other", label: "Other", lineOfBusiness: "commercial", assetType: "other" },
+];
 
 function uniqueStaffIds(ids: Array<string | undefined>): string[] {
   return Array.from(new Set(ids.filter((id): id is string => !!id)));
@@ -65,6 +84,241 @@ function yesNo(value: boolean): string {
 
 function joinedValue(values: string[]): string {
   return values.length > 0 ? values.join(", ") : "-";
+}
+
+function cleanCategoryQuestionAnswers(
+  questions: CategoryQuestion[],
+  answers: Record<string, string>
+): Record<string, string> {
+  const allowedKeys = new Set(questions.map((question) => question.key));
+  return Object.fromEntries(
+    Object.entries(answers).filter(
+      ([key, value]) => allowedKeys.has(key) && value.trim().length > 0
+    )
+  );
+}
+
+type AssetLookupKind = "address" | "vin" | "assetId";
+
+function compactLookupKey(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function nonEmptyText(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  return String(value).replace(/\s+/g, " ").trim();
+}
+
+function enrichmentValueLooksUsable(value: unknown): boolean {
+  const text = nonEmptyText(value);
+  if (!text) return false;
+  return !/\b(not found|not public|not available|unavailable|unknown|verify|requires applicant|requires client)\b/i.test(text);
+}
+
+function profileAssetLookupConfig(category?: Pick<InsuranceCategory, "assetType" | "label">): {
+  kind: AssetLookupKind;
+  label: string;
+  placeholder: string;
+} {
+  switch (category?.assetType) {
+    case "coastal_home":
+      return {
+        kind: "address",
+        label: "Property address",
+        placeholder: "Start typing property address...",
+      };
+    case "luxury_vehicle":
+      return {
+        kind: "vin",
+        label: "VIN",
+        placeholder: "17-character VIN",
+      };
+    case "yacht":
+      return {
+        kind: "assetId",
+        label: "Hull ID, vessel name, or registration",
+        placeholder: "Enter HIN, vessel name, or registration",
+      };
+    case "jewelry":
+      return {
+        kind: "assetId",
+        label: "Appraisal ID or item description",
+        placeholder: "Enter appraisal ID, serial number, or item description",
+      };
+    default:
+      return {
+        kind: "assetId",
+        label: "Asset ID or lookup detail",
+        placeholder: `Enter ${category?.label ?? "asset"} address, ID, or description`,
+      };
+  }
+}
+
+function profileAssetLookupReady(kind: AssetLookupKind, value: string): boolean {
+  const text = value.trim();
+  if (!text) return false;
+  if (kind === "vin") return text.replace(/[^A-Za-z0-9]/g, "").length >= 17;
+  if (kind === "address") return text.length >= 6;
+  return text.length >= 3;
+}
+
+function profileAssetLookupSeed(
+  category: Pick<InsuranceCategory, "assetType">,
+  lookupValue: string,
+  parts: AddressParts | null,
+  answers: Record<string, string>
+): Record<string, unknown> {
+  const seed: Record<string, unknown> = {};
+  const text = lookupValue.trim();
+  if (category.assetType === "coastal_home") {
+    seed.address = text;
+    if (parts) {
+      seed.addressParts = parts;
+      seed.streetAddress = parts.street;
+      seed.unit = parts.apt || undefined;
+      seed.city = parts.city;
+      seed.state = parts.state;
+      seed.zip = parts.zip;
+    }
+  } else if (category.assetType === "luxury_vehicle") {
+    seed.vin = uppercaseVinInput(text).replace(/[^A-Z0-9]/g, "");
+  } else if (category.assetType === "yacht") {
+    seed.hin = text;
+    seed.description = text;
+  } else {
+    seed.identifier = text;
+    seed.description = text;
+  }
+  for (const [key, value] of Object.entries(answers)) {
+    if (String(value).trim()) seed[key] = value;
+  }
+  return seed;
+}
+
+function profileAssetPrimaryQuestionKeys(
+  assetType: AssetType,
+  kind: AssetLookupKind
+): Set<string> {
+  if (kind === "address") {
+    return new Set([
+      "address",
+      "propertyAddress",
+      "riskAddress",
+      "primaryResidenceAddress",
+      "garagingAddress",
+      "garagingAddressIfDifferent",
+      "location",
+      "mooringLocation",
+      "marinaAddress",
+      "storageLocationIfDifferent",
+    ]);
+  }
+  if (kind === "vin") return new Set(["vin"]);
+  if (assetType === "yacht") return new Set(["hin", "vesselName"]);
+  return new Set(["identifier", "publicSearchKey", "riskDescription", "description", "itemDescription"]);
+}
+
+function valueForProfileAssetQuestion(
+  question: CategoryQuestion,
+  assetType: AssetType,
+  enrichment: AiAssetEnrichment
+): string {
+  const fields = enrichment.fields ?? {};
+  const compactQuestionKey = compactLookupKey(question.key);
+  const compactQuestionLabel = compactLookupKey(question.label);
+
+  const directEntry = Object.entries(fields).find(([key]) => compactLookupKey(key) === compactQuestionKey);
+  if (directEntry && enrichmentValueLooksUsable(directEntry[1])) return nonEmptyText(directEntry[1]);
+
+  const labelEntry = Object.entries(fields).find(([key]) => compactLookupKey(key) === compactQuestionLabel);
+  if (labelEntry && enrichmentValueLooksUsable(labelEntry[1])) return nonEmptyText(labelEntry[1]);
+
+  const field = (key: string) => {
+    const value = fields[key];
+    return enrichmentValueLooksUsable(value) ? nonEmptyText(value) : "";
+  };
+  const join = (keys: string[]) =>
+    keys
+      .map(field)
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+
+  if (assetType === "luxury_vehicle") {
+    if (question.key === "yearMakeModel" || /year.*make.*model/i.test(question.label)) {
+      return join(["year", "make", "model", "trim", "series"]);
+    }
+    if (/vin[- ]?decoded trim|trim/i.test(question.label)) return join(["trim", "series"]);
+    if (/vehicle safety|safety feature/i.test(question.label)) return join(["bodyClass", "vehicleType", "doors", "driveType", "fuelType"]);
+    if (/year/i.test(question.label)) return field("year");
+    if (/make/i.test(question.label)) return field("make");
+    if (/model/i.test(question.label)) return field("model");
+  }
+
+  if (assetType === "coastal_home") {
+    if (/property address|risk address|primary residence address|location/i.test(question.label)) {
+      return field("address") || field("formattedAddress");
+    }
+    if (/year built/i.test(question.label)) return field("yearBuilt");
+    if (/square footage|sq ft|living area|building area/i.test(question.label)) {
+      return field("squareFootage") || field("squareFeet") || field("livingArea") || field("buildingArea");
+    }
+    if (/construction/i.test(question.label)) return field("constructionType");
+    if (/home style|stories|story/i.test(question.label)) return field("homeStyle") || field("stories");
+    if (/foundation/i.test(question.label)) return field("foundationDetails") || field("foundation");
+    if (/frame|exterior|siding/i.test(question.label)) {
+      return field("frameAndExterior") || join(["constructionType", "exterior", "siding"]);
+    }
+    if (/roof shape|roof pitch|roof material|skylight|roof/i.test(question.label)) {
+      return field("roofShapePitchMaterial") || join(["roofMaterial", "roofShape", "roofPitch", "roofAge", "roofYear"]);
+    }
+    if (/county|township|municipality/i.test(question.label)) return field("countyTownship") || field("county");
+    if (/lot size|acre/i.test(question.label)) return field("lotSize");
+    if (/flood zone/i.test(question.label)) return field("floodZone");
+    if (/distance to coast/i.test(question.label)) return field("distanceToCoast");
+    if (/occupancy/i.test(question.label)) return field("occupancy");
+    if (/estimated value|exposure value/i.test(question.label)) return field("estimatedValue");
+  }
+
+  return "";
+}
+
+function normalizeOptionAnswer(question: CategoryQuestion, value: string): string {
+  if ((question.inputType !== "select" && question.inputType !== "boolean") || !value) return value;
+  const options = question.inputType === "boolean" ? ["Yes", "No", "Unsure"] : question.options ?? [];
+  const compactValue = compactLookupKey(value);
+  const exact = options.find((option) => compactLookupKey(option) === compactValue);
+  if (exact) return exact;
+  const partial = options.find((option) => {
+    const compactOption = compactLookupKey(option);
+    return compactOption.includes(compactValue) || compactValue.includes(compactOption);
+  });
+  return partial ?? "";
+}
+
+function mergeProfileAssetEnrichment(input: {
+  questions: CategoryQuestion[];
+  current: Record<string, string>;
+  lookupValue: string;
+  lookupKind: AssetLookupKind;
+  assetType: AssetType;
+  enrichment: AiAssetEnrichment;
+}): { answers: Record<string, string>; appliedCount: number } {
+  const primaryKeys = profileAssetPrimaryQuestionKeys(input.assetType, input.lookupKind);
+  const next = { ...input.current };
+  let appliedCount = 0;
+  for (const question of input.questions) {
+    let value = primaryKeys.has(question.key) ? input.lookupValue.trim() : "";
+    if (!value) value = valueForProfileAssetQuestion(question, input.assetType, input.enrichment);
+    if (!value) continue;
+    value = normalizeOptionAnswer(question, normalizeVinFieldValue(question, value));
+    if (!value) continue;
+    const current = next[question.key]?.trim();
+    if (current && !primaryKeys.has(question.key)) continue;
+    if (current !== value) appliedCount += 1;
+    next[question.key] = value;
+  }
+  return { answers: next, appliedCount };
 }
 
 export function ClientDetailPage() {
@@ -161,6 +415,16 @@ export function ClientDetailPage() {
   const [claimCheckBusy, setClaimCheckBusy] = useState(false);
   const [claimCheckNotice, setClaimCheckNotice] = useState<string | null>(null);
   const [createActivityOpen, setCreateActivityOpen] = useState(false);
+  const [addAssetOpen, setAddAssetOpen] = useState(false);
+  const [addAssetCategoryId, setAddAssetCategoryId] = useState("");
+  const [addAssetEstimatedValue, setAddAssetEstimatedValue] = useState("");
+  const [addAssetDetails, setAddAssetDetails] = useState<Record<string, string>>({});
+  const [addAssetLookupValue, setAddAssetLookupValue] = useState("");
+  const [addAssetSelectedAddressParts, setAddAssetSelectedAddressParts] = useState<AddressParts | null>(null);
+  const [addAssetLookupBusy, setAddAssetLookupBusy] = useState(false);
+  const [addAssetLookupNotice, setAddAssetLookupNotice] = useState("");
+  const addAssetLookupRequestRef = useRef(0);
+  const addAssetLookupLastRunRef = useRef("");
   const [previewTemplateOpen, setPreviewTemplateOpen] = useState(false);
   const [documentsUploaderOpen, setDocumentsUploaderOpen] = useState(false);
   const [fullProfileOpen, setFullProfileOpen] = useState(false);
@@ -245,6 +509,156 @@ export function ClientDetailPage() {
     );
   }
   const assets = api.assets.listByCustomer(customer.id);
+  const assetCategoryOptionsRaw = api.categories.listActiveForTenant(agency.id);
+  const assetCategoryOptions: AssetCategoryOption[] =
+    assetCategoryOptionsRaw.length > 0 ? assetCategoryOptionsRaw : FALLBACK_ASSET_CATEGORY_OPTIONS;
+  const selectedAddAssetCategory =
+    assetCategoryOptions.find((option) => option.id === addAssetCategoryId) ?? assetCategoryOptions[0];
+  const addAssetQuestions = selectedAddAssetCategory
+    ? categoryQuestionnaire(selectedAddAssetCategory)
+    : [];
+  const addAssetLookupConfig = profileAssetLookupConfig(selectedAddAssetCategory);
+  function openAddAssetModal() {
+    const defaultCategory = assetCategoryOptions[0];
+    setAddAssetCategoryId(defaultCategory?.id ?? "");
+    setAddAssetEstimatedValue("");
+    setAddAssetDetails({});
+    setAddAssetLookupValue("");
+    setAddAssetSelectedAddressParts(null);
+    setAddAssetLookupNotice("");
+    addAssetLookupLastRunRef.current = "";
+    setAddAssetOpen(true);
+  }
+  function closeAddAssetModal() {
+    setAddAssetOpen(false);
+    setAddAssetEstimatedValue("");
+    setAddAssetDetails({});
+    setAddAssetLookupValue("");
+    setAddAssetSelectedAddressParts(null);
+    setAddAssetLookupNotice("");
+    addAssetLookupLastRunRef.current = "";
+  }
+  async function runAddAssetLookup(
+    lookupValue = addAssetLookupValue,
+    parts = addAssetSelectedAddressParts
+  ): Promise<Record<string, string> | null> {
+    if (!selectedAddAssetCategory) return null;
+    const normalizedLookup =
+      addAssetLookupConfig.kind === "vin"
+        ? uppercaseVinInput(lookupValue).replace(/[^A-Z0-9]/g, "")
+        : lookupValue.trim();
+    if (!profileAssetLookupReady(addAssetLookupConfig.kind, normalizedLookup)) return null;
+    const runKey = `${selectedAddAssetCategory.id}:${normalizedLookup}`;
+    if (addAssetLookupLastRunRef.current === runKey) return addAssetDetails;
+
+    const requestId = addAssetLookupRequestRef.current + 1;
+    addAssetLookupRequestRef.current = requestId;
+    setAddAssetLookupBusy(true);
+    setAddAssetLookupNotice("");
+    try {
+      const seed = profileAssetLookupSeed(
+        selectedAddAssetCategory,
+        normalizedLookup,
+        parts,
+        addAssetDetails
+      );
+      const enrichment = await aiEnrichAsset(
+        selectedAddAssetCategory.assetType,
+        seed,
+        addAssetQuestions
+      );
+      if (addAssetLookupRequestRef.current !== requestId) return null;
+      const merged = mergeProfileAssetEnrichment({
+        questions: addAssetQuestions,
+        current: addAssetDetails,
+        lookupValue: normalizedLookup,
+        lookupKind: addAssetLookupConfig.kind,
+        assetType: selectedAddAssetCategory.assetType,
+        enrichment,
+      });
+      setAddAssetDetails(merged.answers);
+      addAssetLookupLastRunRef.current = runKey;
+      setAddAssetLookupNotice(
+        merged.appliedCount > 0
+          ? `AI lookup filled ${merged.appliedCount} field${merged.appliedCount === 1 ? "" : "s"}.`
+          : "AI lookup kept the primary lookup detail ready for the asset record."
+      );
+      return merged.answers;
+    } catch {
+      if (addAssetLookupRequestRef.current === requestId) {
+        setAddAssetLookupNotice("AI lookup could not complete. The asset can still be saved from the lookup detail.");
+      }
+      return null;
+    } finally {
+      if (addAssetLookupRequestRef.current === requestId) setAddAssetLookupBusy(false);
+    }
+  }
+
+  function handleAddAssetLookupValueChange(value: string) {
+    const next =
+      addAssetLookupConfig.kind === "vin"
+        ? uppercaseVinInput(value).replace(/[^A-Z0-9]/g, "")
+        : value;
+    setAddAssetLookupValue(next);
+    if (addAssetLookupConfig.kind !== "address") setAddAssetSelectedAddressParts(null);
+    setAddAssetLookupNotice("");
+    if (
+      addAssetLookupConfig.kind === "vin" &&
+      profileAssetLookupReady("vin", next) &&
+      addAssetLookupLastRunRef.current !== `${selectedAddAssetCategory?.id ?? ""}:${next}`
+    ) {
+      void runAddAssetLookup(next, null);
+    }
+  }
+
+  async function createProfileAsset() {
+    if (!selectedAddAssetCategory) return;
+    let answersForSave = addAssetDetails;
+    if (profileAssetLookupReady(addAssetLookupConfig.kind, addAssetLookupValue)) {
+      answersForSave = (await runAddAssetLookup()) ?? answersForSave;
+    }
+    const parsedEstimatedValue = Number(addAssetEstimatedValue);
+    const estimatedValue =
+      Number.isFinite(parsedEstimatedValue) && parsedEstimatedValue > 0
+        ? parsedEstimatedValue
+        : 0;
+    const details = cleanCategoryQuestionAnswers(addAssetQuestions, answersForSave);
+    const normalizedLookup =
+      addAssetLookupConfig.kind === "vin"
+        ? uppercaseVinInput(addAssetLookupValue).replace(/[^A-Z0-9]/g, "")
+        : addAssetLookupValue.trim();
+    if (normalizedLookup) {
+      if (addAssetLookupConfig.kind === "address") {
+        details.propertyAddress ||= normalizedLookup;
+        details.address ||= normalizedLookup;
+      } else if (addAssetLookupConfig.kind === "vin") {
+        details.vin ||= normalizedLookup;
+      } else if (selectedAddAssetCategory.assetType === "yacht") {
+        details.hin ||= normalizedLookup;
+        details.vesselName ||= normalizedLookup;
+      } else {
+        details.identifier ||= normalizedLookup;
+        details.assetName ||= normalizedLookup;
+      }
+    }
+    const label = buildAssetLabelFromDetails({
+      type: selectedAddAssetCategory.assetType,
+      details,
+      categoryLabel: selectedAddAssetCategory.label,
+      fallbackLabel: `New ${selectedAddAssetCategory.label}`,
+    });
+    api.assets.create({
+      tenantId: activeAgency.id,
+      customerId: activeCustomer.id,
+      type: selectedAddAssetCategory.assetType,
+      label,
+      estimatedValue,
+      details,
+      status: "pending",
+    });
+    closeAddAssetModal();
+    refresh();
+  }
   const policies = api.policies.listByCustomer(customer.id);
   const activePolicies = policies.filter((p) => p.status !== "closed");
   const previousPolicies = policies
@@ -946,7 +1360,15 @@ export function ClientDetailPage() {
         )}
 
         <Card>
-          <CardHeader title="Assets" />
+          <CardHeader
+            title="Assets"
+            action={
+              <button type="button" className="btn-primary text-xs" onClick={openAddAssetModal}>
+                <Plus className="h-3.5 w-3.5" />
+                Add asset
+              </button>
+            }
+          />
           {assets.length === 0 ? (
             <div className="text-sm text-ink-400">No assets.</div>
           ) : (
@@ -1081,7 +1503,7 @@ export function ClientDetailPage() {
                         {fmt.policyRef(p)}
                       </div>
                       <div className="mt-0.5 truncate text-xs text-ink-500">
-                        {carrier?.name ?? "Carrier"} - {asset?.label ?? "Assets listed on policy"} - {api.helpers.departmentLabel(p)}
+                        {carrier?.name ?? "Carrier"} - {asset ? assetDisplayName(asset) : "Assets listed on policy"} - {api.helpers.departmentLabel(p)}
                       </div>
                     </div>
                     <div className="flex shrink-0 items-center justify-end gap-2">
@@ -1102,6 +1524,8 @@ export function ClientDetailPage() {
 
         <ContactActivitiesCard
           title="Open activities and quote flows"
+          tenantId={agency.id}
+          customerId={customer.id}
           openActivities={openActivities}
           resolvedActivities={resolvedActivities}
           emptyHint="No open activities for this client right now."
@@ -1186,7 +1610,7 @@ export function ClientDetailPage() {
                         {c.externalClaimNumber ? `Claim #${c.externalClaimNumber}` : fmt.policyRef(policy)}
                       </div>
                       <div className="mt-0.5 truncate text-xs text-ink-500">
-                        {carrier?.name ?? "Carrier"} - {policy ? fmt.policyRef(policy) : "Policy pending"} - {asset?.label ?? "Asset not recorded"}
+                        {carrier?.name ?? "Carrier"} - {policy ? fmt.policyRef(policy) : "Policy pending"} - {asset ? assetDisplayName(asset) : "Asset not recorded"}
                         {c.closedAt ? ` - closed ${fmt.relative(c.closedAt)}` : ""}
                       </div>
                     </div>
@@ -1304,6 +1728,139 @@ export function ClientDetailPage() {
       )}
 
       <Modal
+        open={addAssetOpen}
+        onClose={closeAddAssetModal}
+        title="Add asset"
+        size="lg"
+      >
+        <div className="space-y-4">
+          <div>
+            <label className="label">Category</label>
+            <select
+              className="input"
+              value={selectedAddAssetCategory?.id ?? ""}
+              onChange={(event) => {
+                setAddAssetCategoryId(event.target.value);
+                setAddAssetDetails({});
+                setAddAssetLookupValue("");
+                setAddAssetSelectedAddressParts(null);
+                setAddAssetLookupNotice("");
+                addAssetLookupLastRunRef.current = "";
+              }}
+            >
+              {assetCategoryOptions.map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.label} - {option.lineOfBusiness === "commercial" ? "Commercial" : "Personal"}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {selectedAddAssetCategory && (
+            <div className="rounded-md border border-gold-200 bg-gold-50/40 p-3">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <div>
+                  <label className="label">{addAssetLookupConfig.label}</label>
+                  <p className="text-xs text-ink-500">
+                    Enter the primary lookup detail and Quotex will run the same AI sweep used in the quote flow.
+                  </p>
+                </div>
+                {addAssetLookupBusy && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    Looking up
+                  </span>
+                )}
+              </div>
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <div className="min-w-0 flex-1">
+                  {addAssetLookupConfig.kind === "address" ? (
+                    <AddressAutocomplete
+                      value={addAssetLookupValue}
+                      onChange={handleAddAssetLookupValueChange}
+                      onSelect={(description) => {
+                        setAddAssetLookupValue(description);
+                        void runAddAssetLookup(description, addAssetSelectedAddressParts);
+                      }}
+                      onSelectParts={(parts) => {
+                        setAddAssetSelectedAddressParts(parts);
+                      }}
+                      placeholder={addAssetLookupConfig.placeholder}
+                      allowMockFallback={false}
+                    />
+                  ) : (
+                    <input
+                      className="input"
+                      value={addAssetLookupValue}
+                      onChange={(event) => handleAddAssetLookupValueChange(event.target.value)}
+                      onBlur={() => {
+                        void runAddAssetLookup();
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void runAddAssetLookup();
+                        }
+                      }}
+                      placeholder={addAssetLookupConfig.placeholder}
+                      autoCapitalize={addAssetLookupConfig.kind === "vin" ? "characters" : undefined}
+                      spellCheck={addAssetLookupConfig.kind === "vin" ? false : undefined}
+                    />
+                  )}
+                </div>
+                <button
+                  type="button"
+                  className="btn-outline justify-center text-sm"
+                  onClick={() => {
+                    void runAddAssetLookup();
+                  }}
+                  disabled={
+                    addAssetLookupBusy ||
+                    !profileAssetLookupReady(addAssetLookupConfig.kind, addAssetLookupValue)
+                  }
+                >
+                  {addAssetLookupBusy ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Sparkles className="h-4 w-4" />
+                  )}
+                  Run lookup
+                </button>
+              </div>
+              {addAssetLookupNotice && (
+                <div className="mt-2 rounded-md border border-ink-100 bg-white px-3 py-2 text-xs text-ink-600">
+                  {addAssetLookupNotice}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2 border-t border-ink-100 pt-4">
+            <button type="button" className="btn-outline" onClick={closeAddAssetModal}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={createProfileAsset}
+              disabled={
+                !selectedAddAssetCategory ||
+                addAssetLookupBusy ||
+                !profileAssetLookupReady(addAssetLookupConfig.kind, addAssetLookupValue)
+              }
+            >
+              {addAssetLookupBusy ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Plus className="h-4 w-4" />
+              )}
+              Add asset
+            </button>
+          </div>
+        </div>
+      </Modal>
+
+      <Modal
         open={fullProfileOpen}
         onClose={() => setFullProfileOpen(false)}
         title="Full client profile"
@@ -1365,7 +1922,7 @@ export function ClientDetailPage() {
                       <div className="min-w-0">
                         <div className="font-semibold text-ink-900">{fmt.policyRef(policy)}</div>
                         <div className="text-ink-500">
-                          {carrier?.name ?? "Carrier pending"} - {asset?.label ?? "No asset linked"}
+                          {carrier?.name ?? "Carrier pending"} - {asset ? assetDisplayName(asset) : "No asset linked"}
                         </div>
                       </div>
                       <div className="text-ink-500 sm:text-right">{fmt.titleCase(policy.status)}</div>
@@ -1671,7 +2228,7 @@ function AddRenewalModal({
     api.status.create({
       tenantId,
       source: "agent",
-      message: `Renewal added: ${selectedAsset?.label ?? fmt.policyRef(selectedPolicy)} renews ${fmt.date(iso)}.`,
+      message: `Renewal added: ${selectedAsset ? assetDisplayName(selectedAsset) : fmt.policyRef(selectedPolicy)} renews ${fmt.date(iso)}.`,
       visibility: "internal",
       customerId: selectedPolicy.customerId,
       policyId: selectedPolicy.id,
@@ -1719,7 +2276,7 @@ function AddRenewalModal({
               const asset = assets.find((a) => a.id === p.assetId);
               return (
                 <option key={p.id} value={p.id}>
-                  {asset?.label ?? fmt.policyRef(p)} · {fmt.policyRef(p)}
+                  {asset ? assetDisplayName(asset) : fmt.policyRef(p)} · {fmt.policyRef(p)}
                 </option>
               );
             })}
@@ -1739,7 +2296,7 @@ function AddRenewalModal({
         {selectedPolicy && (
           <div className="rounded-md border border-ink-100 bg-ink-50/60 p-3 text-xs text-ink-600">
             <CalendarClock className="mr-1 inline h-3.5 w-3.5 text-gold-600" />
-            This updates {selectedAsset?.label ?? "the policy"} to show the new renewal date on policy detail pages.
+            This updates {selectedAsset ? assetDisplayName(selectedAsset) : "the policy"} to show the new renewal date on policy detail pages.
           </div>
         )}
         <div className="flex justify-end gap-2 pt-2 border-t border-ink-100">
@@ -1791,7 +2348,7 @@ function PreviousPoliciesModal({
                     {fmt.policyRef(policy)}
                   </div>
                   <div className="mt-1 truncate text-xs text-ink-500">
-                    {carrier?.name ?? "Carrier"} - {asset?.label ?? "Assets listed on policy"} -{" "}
+                    {carrier?.name ?? "Carrier"} - {asset ? assetDisplayName(asset) : "Assets listed on policy"} -{" "}
                     {api.helpers.departmentLabel(policy)}
                   </div>
                   <div className="mt-1 text-xs text-ink-400">
@@ -2230,7 +2787,7 @@ function PreviousLossRunsModal({
                     const asset = assets.find((row) => row.id === policy.assetId);
                     return (
                       <option key={policy.id} value={policy.id}>
-                        {fmt.policyRef(policy)} - {asset?.label ?? "Asset"} - {carrier?.name ?? "Carrier"}
+                        {fmt.policyRef(policy)} - {asset ? assetDisplayName(asset) : "Asset"} - {carrier?.name ?? "Carrier"}
                       </option>
                     );
                   })}
@@ -2294,7 +2851,7 @@ function PreviousLossRunsModal({
               <div className="rounded-md border border-ink-100 bg-white/70 p-3 text-xs text-ink-600">
                 <LifeBuoy className="mr-1 inline h-3.5 w-3.5 text-gold-600" />
                 {selectedLossPolicy
-                  ? `${selectedLossCarrier?.name ?? "Carrier"} - ${selectedLossAsset?.label ?? fmt.policyRef(selectedLossPolicy)}`
+                  ? `${selectedLossCarrier?.name ?? "Carrier"} - ${selectedLossAsset ? assetDisplayName(selectedLossAsset) : fmt.policyRef(selectedLossPolicy)}`
                   : "Pick a policy to attach this historical loss."}
               </div>
               <div className="md:col-span-2">
@@ -2665,7 +3222,7 @@ function AddClaimModal({
     api.status.create({
       tenantId,
       source: "agent",
-      message: `Claim added for ${selectedAsset?.label ?? fmt.policyRef(selectedPolicy)} with ${selectedCarrier?.name ?? "the carrier"}${
+      message: `Claim added for ${selectedAsset ? assetDisplayName(selectedAsset) : fmt.policyRef(selectedPolicy)} with ${selectedCarrier?.name ?? "the carrier"}${
         externalClaimNumber.trim() ? ` (claim #${externalClaimNumber.trim()})` : ""
       }.`,
       visibility: "customer_visible",
@@ -2717,7 +3274,7 @@ function AddClaimModal({
               const carrier = api.carriers.get(p.carrierId);
               return (
                 <option key={p.id} value={p.id}>
-                  {asset?.label ?? fmt.policyRef(p)} · {carrier?.name ?? "Carrier"} · {fmt.policyRef(p)}
+                  {asset ? assetDisplayName(asset) : fmt.policyRef(p)} · {carrier?.name ?? "Carrier"} · {fmt.policyRef(p)}
                 </option>
               );
             })}
@@ -2764,7 +3321,7 @@ function AddClaimModal({
         {selectedPolicy && (
           <div className="rounded-md border border-ink-100 bg-ink-50/60 p-3 text-xs text-ink-600">
             <LifeBuoy className="mr-1 inline h-3.5 w-3.5 text-gold-600" />
-            {selectedCarrier?.name ?? "Carrier"} claim for {selectedAsset?.label ?? "this policy"}.
+            {selectedCarrier?.name ?? "Carrier"} claim for {selectedAsset ? assetDisplayName(selectedAsset) : "this policy"}.
           </div>
         )}
         <div className="flex justify-end gap-2 pt-2 border-t border-ink-100">
@@ -3565,6 +4122,54 @@ function ActivityRow({
   );
 }
 
+function QuoteFlowActivityRow({
+  session,
+}: {
+  session: ReturnType<typeof api.quoting.listByTenant>[number];
+}) {
+  const navigate = useNavigate();
+  const summary = summarizeQuotingWorkflow(session);
+  const asset = session.assetId ? api.assets.get(session.assetId) : undefined;
+  const lineLabel = session.lineOfBusiness === "commercial" ? "Commercial" : "Personal";
+  const contactHref = session.customerId
+    ? `/employee/clients/${session.customerId}?quoteWorkspace=expanded`
+    : session.prospectId
+    ? `/employee/prospects/${session.prospectId}?quoteWorkspace=expanded`
+    : "/employee/tasks";
+
+  return (
+    <li className="py-2.5 flex items-start justify-between gap-2">
+      <div className="min-w-0 flex items-start gap-2">
+        <Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-gold-700" />
+        <div className="min-w-0">
+          <div className="truncate text-sm font-semibold text-ink-900">
+            {lineLabel} quote flow
+          </div>
+          <div className="mt-1 flex flex-wrap items-center gap-1.5">
+            <Badge tone={summary.tone}>{summary.stage}</Badge>
+            <Badge tone={session.lineOfBusiness === "commercial" ? "gold" : "info"}>
+              {lineLabel}
+            </Badge>
+            <span className="text-[11px] text-ink-400">
+              {fmt.relative(session.updatedAt)} ago
+            </span>
+          </div>
+          <div className="mt-1 truncate text-xs text-ink-500">
+            {asset ? assetDisplayName(asset) : api.helpers.assetTypeLabel(session.assetType)} - {summary.detail}
+          </div>
+        </div>
+      </div>
+      <button
+        type="button"
+        className="btn-outline text-[11px] !px-2.5 !py-1 whitespace-nowrap shrink-0"
+        onClick={() => navigate(contactHref)}
+      >
+        View
+      </button>
+    </li>
+  );
+}
+
 // Activities tied to a single contact (client or prospect). Shows the
 // open queue at the top, a collapsible history of resolved/past
 // activities below it, and a "+ New activity" button pinned at the
@@ -3572,6 +4177,9 @@ function ActivityRow({
 // grid width so it has room for the history feed.
 export function ContactActivitiesCard({
   title,
+  tenantId,
+  customerId,
+  prospectId,
   openActivities,
   resolvedActivities = [],
   emptyHint,
@@ -3579,6 +4187,9 @@ export function ContactActivitiesCard({
   className,
 }: {
   title: string;
+  tenantId?: string;
+  customerId?: string;
+  prospectId?: string;
   openActivities: import("@/types").Task[];
   resolvedActivities?: import("@/types").Task[];
   emptyHint: string;
@@ -3587,7 +4198,20 @@ export function ContactActivitiesCard({
   // so the card's bottom lines up with neighbouring cards).
   className?: string;
 }) {
-  const hasOpen = openActivities.length > 0;
+  const quoteFlows = tenantId
+    ? api.quoting
+        .listByTenant(tenantId)
+        .filter((session) =>
+          customerId
+            ? session.customerId === customerId
+            : prospectId
+            ? session.prospectId === prospectId
+            : false
+        )
+        .filter((session) => !summarizeQuotingWorkflow(session).isClosed)
+    : [];
+  const openCount = openActivities.length + quoteFlows.length;
+  const hasOpen = openCount > 0;
   const hasResolved = resolvedActivities.length > 0;
   // Collapsed by default — the open queue is what matters day to day;
   // history expands on demand.
@@ -3599,7 +4223,7 @@ export function ContactActivitiesCard({
       }`}
     >
       <CardHeader
-        title={hasOpen ? `${title} · ${openActivities.length}` : title}
+        title={hasOpen ? `${title} · ${openCount}` : title}
         subtitle="Open and resolved activity for this record."
       />
       {!hasOpen ? (
@@ -3608,6 +4232,9 @@ export function ContactActivitiesCard({
         <ul className="divide-y divide-indigo-100 -mt-1">
           {openActivities.map((t) => (
             <ActivityRow key={t.id} task={t} />
+          ))}
+          {quoteFlows.map((session) => (
+            <QuoteFlowActivityRow key={session.id} session={session} />
           ))}
         </ul>
       )}
@@ -4232,7 +4859,7 @@ function FilledTemplatePreviewModal({
                   <tbody>
                     {assets.map((a) => (
                       <tr key={a.id} className="border-b border-ink-50">
-                        <td className="py-1.5 pr-3">{a.label}</td>
+                        <td className="py-1.5 pr-3">{assetDisplayName(a)}</td>
                         <td className="py-1.5 pr-3">{api.helpers.assetTypeLabel(a.type)}</td>
                         <td className="py-1.5">
                           {a.estimatedValue ? fmt.money(a.estimatedValue) : "—"}
@@ -4357,7 +4984,7 @@ function UploadPickerModal({
       customerName: customer?.name,
       customerEmail: customer?.email,
       customerPhone: customer?.phone,
-      assetLabel: asset?.label,
+      assetLabel: asset ? assetDisplayName(asset) : undefined,
       assetValue: asset?.estimatedValue ? fmt.money(asset.estimatedValue) : undefined,
       policyNumber: policy?.policyNumber,
       carrierName: carrier?.name,
@@ -4628,7 +5255,7 @@ function AiFillSection({
       customerName: customer?.name,
       customerEmail: customer?.email,
       customerPhone: customer?.phone,
-      assetLabel: asset?.label,
+      assetLabel: asset ? assetDisplayName(asset) : undefined,
       assetValue: asset?.estimatedValue ? fmt.money(asset.estimatedValue) : undefined,
       policyNumber: policy?.policyNumber,
       carrierName: carrier?.name,
@@ -4872,7 +5499,7 @@ function CollapsibleDocumentList({
     groups.set(policy.id, {
       key: policy.id,
       title: fmt.policyRef(policy),
-      subtitle: `${carrier?.name ?? "Carrier pending"}${asset ? ` - ${asset.label}` : ""}`,
+      subtitle: `${carrier?.name ?? "Carrier pending"}${asset ? ` - ${assetDisplayName(asset)}` : ""}`,
       sortLabel: policy.policyNumber ?? policy.id,
       docs: [],
     });
@@ -4892,7 +5519,7 @@ function CollapsibleDocumentList({
         key,
         title: policy ? fmt.policyRef(policy) : "Client-level documents",
         subtitle: policy
-          ? `${carrier?.name ?? "Carrier pending"}${asset ? ` - ${asset.label}` : ""}`
+          ? `${carrier?.name ?? "Carrier pending"}${asset ? ` - ${assetDisplayName(asset)}` : ""}`
           : "Documents not attached to a specific policy.",
         sortLabel: policy?.policyNumber ?? policy?.id ?? "zz-client",
         docs: [],

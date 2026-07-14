@@ -6,6 +6,8 @@ const serverSrc = path.dirname(fileURLToPath(import.meta.url));
 const serverRoot = path.resolve(serverSrc, "..");
 const repoRoot = path.resolve(serverRoot, "..");
 const envFileKeys = new Set<string>();
+const loadProductionEnvFile =
+  process.env.NODE_ENV === "production" || process.env.QTX_LOAD_VERCEL_PRODUCTION_ENV === "true";
 
 function unquote(value: string): string {
   const trimmed = value.trim();
@@ -34,8 +36,10 @@ function loadEnvFile(filePath: string) {
 }
 
 for (const filePath of [
+  ...(loadProductionEnvFile ? [path.join(repoRoot, ".env.vercel.production.local")] : []),
   path.join(repoRoot, ".env"),
   path.join(repoRoot, ".env.local"),
+  ...(loadProductionEnvFile ? [path.join(serverRoot, ".env.vercel.production.local")] : []),
   path.join(serverRoot, ".env"),
   path.join(serverRoot, ".env.local"),
 ]) {
@@ -96,6 +100,7 @@ export function validateServerEnv(): EnvValidationResult {
   }
 
   validateAiProvider(errors, warnings, production);
+  validateBase44(errors, warnings);
   validateAddressProvider(errors, warnings, production);
   validateCarrierWorker(errors);
   validateManagerStepUp(errors, production);
@@ -144,34 +149,32 @@ function warnIfMissing(name: string, warnings: string[], message: string) {
 
 function validateAiProvider(errors: string[], warnings: string[], production: boolean) {
   const provider = configuredAiProvider();
-  if (production && provider === "stub" && process.env.ALLOW_AI_STUB_IN_PRODUCTION !== "true") {
-    errors.push(
-      "A real AI provider key is required in production unless ALLOW_AI_STUB_IN_PRODUCTION=true."
-    );
+  if (provider !== "openai") {
+    const message = `AI_PROVIDER=${provider} is not supported. Quotex AI is OpenAI-only; set AI_PROVIDER=openai.`;
+    if (production) errors.push(message);
+    else warnings.push(message);
     return;
   }
-  const providerKey: Record<string, string> = {
-    openai: "OPENAI_API_KEY",
-    anthropic: "ANTHROPIC_API_KEY",
-    gemini: "GEMINI_API_KEY",
-  };
-  const requiredKey = providerKey[provider];
-  if (!requiredKey) return;
-  if (process.env[requiredKey]?.trim()) return;
-  const message = `${requiredKey} is required when AI_PROVIDER=${provider}.`;
+  if (process.env.OPENAI_API_KEY?.trim()) return;
+  const message = "OPENAI_API_KEY is required for Quotex AI.";
   if (production) errors.push(message);
-  else warnings.push(`${message} AI routes will use deterministic fallback behavior.`);
+  else warnings.push(`${message} AI routes will fail closed until a server-side key is configured.`);
 }
 
-function configuredAiProvider(): "openai" | "anthropic" | "gemini" | "stub" {
+function configuredAiProvider(): string {
   const explicit = process.env.AI_PROVIDER?.trim().toLowerCase();
-  if (explicit === "openai" || explicit === "anthropic" || explicit === "gemini" || explicit === "stub") {
-    return explicit;
+  return explicit || "openai";
+}
+
+function validateBase44(errors: string[], warnings: string[]) {
+  const key = process.env.BASE44_API_KEY?.trim() ?? "";
+  const baseUrl = process.env.BASE44_AGENT_BASE_URL?.trim() ?? "";
+  const mode = process.env.BASE44_PUBLIC_SWEEP_MODE?.trim().toLowerCase();
+  const hasAny = Boolean(key || baseUrl || mode);
+  if (!hasAny) {
+    return;
   }
-  if (process.env.OPENAI_API_KEY?.trim()) return "openai";
-  if (process.env.ANTHROPIC_API_KEY?.trim()) return "anthropic";
-  if (process.env.GEMINI_API_KEY?.trim()) return "gemini";
-  return "stub";
+  warnings.push("Base44 AI configuration is ignored. Quotex AI is OpenAI-only.");
 }
 
 function validateCarrierWorker(errors: string[]) {
@@ -375,6 +378,7 @@ function validateNoPublicSecrets(errors: string[]) {
     "VITE_OPENAI_API_KEY",
     "VITE_ANTHROPIC_API_KEY",
     "VITE_GEMINI_API_KEY",
+    "VITE_BASE44_API_KEY",
     "VITE_SUPABASE_SERVICE_ROLE_KEY",
     "VITE_STRIPE_SECRET_KEY",
     "VITE_SENDGRID_API_KEY",

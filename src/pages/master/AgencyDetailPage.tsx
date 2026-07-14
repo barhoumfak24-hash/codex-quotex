@@ -1,5 +1,5 @@
 import { useNavigate, useParams } from "react-router-dom";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   ArrowLeft,
   Building2,
@@ -17,6 +17,7 @@ import { Card, CardHeader, EmptyState, StatCard } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { api } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import {
   addMonthsToDateInput,
   agencyPlanRenewalIso,
@@ -81,6 +82,7 @@ function billingTierForUserSlots(slots: number): SubscriptionTier {
 }
 
 export function AgencyDetailPage() {
+  const { user } = useAuth();
   const { agencyId } = useParams();
   const nav = useNavigate();
   const [, setRev] = useState(0);
@@ -99,9 +101,14 @@ export function AgencyDetailPage() {
   const [priceOverrideValue, setPriceOverrideValue] = useState("");
   const [priceOverrideReason, setPriceOverrideReason] = useState("");
   const [priceOverrideError, setPriceOverrideError] = useState("");
+  const [carrierLinkOverrides, setCarrierLinkOverrides] = useState<Record<string, boolean>>({});
+  useEffect(() => {
+    setCarrierLinkOverrides({});
+  }, [agencyId]);
   if (!agencyId) return null;
   const agency = api.agencies.get(agencyId);
   if (!agency) return <EmptyState title="Agency not found" />;
+  const agencyIdLocked = agency.id;
   const users = api.users
     .list(agency.id)
     .filter((u) => u.role === "agent" || u.role === "manager");
@@ -109,6 +116,8 @@ export function AgencyDetailPage() {
   const carriers = api.carriers.list();
   const links = api.carriers.links().filter((l) => l.tenantId === agency.id && l.active);
   const linkedIds = new Set(links.map((l) => l.carrierId));
+  const isCarrierLinked = (carrierId: string) => carrierLinkOverrides[carrierId] ?? linkedIds.has(carrierId);
+  const linkedCarrierCount = carriers.filter((carrier) => isCarrierLinked(carrier.id)).length;
   // Categories: same link/unlink pattern as carriers. Tenants with
   // no link rows fall back to all active categories at runtime;
   // here on the admin page we render the entire master library so
@@ -162,6 +171,31 @@ export function AgencyDetailPage() {
   const openSlots = Math.max(0, agency.allowedUsers - users.length);
   const agencyCode = api.agencies.revealCodeForMaster(agency.id) ?? "";
   const refresh = () => setRev((r) => r + 1);
+
+  function toggleCarrierLink(carrierId: string, currentlyLinked: boolean) {
+    const nextLinked = !currentlyLinked;
+    setCarrierLinkOverrides((current) => ({ ...current, [carrierId]: nextLinked }));
+    if (currentlyLinked) {
+      api.carriers.unlinkFromAgency(carrierId, agencyIdLocked);
+    } else {
+      api.carriers.linkToAgency(carrierId, agencyIdLocked);
+    }
+    refresh();
+  }
+
+  function linkAllCarriers() {
+    setCarrierLinkOverrides(Object.fromEntries(carriers.map((carrier) => [carrier.id, true])));
+    carriers.forEach((carrier) => {
+      if (!isCarrierLinked(carrier.id)) api.carriers.linkToAgency(carrier.id, agencyIdLocked);
+    });
+    refresh();
+  }
+
+  function unlinkAllCarriers() {
+    setCarrierLinkOverrides(Object.fromEntries(carriers.map((carrier) => [carrier.id, false])));
+    carriers.forEach((carrier) => api.carriers.unlinkFromAgency(carrier.id, agencyIdLocked));
+    refresh();
+  }
 
   function addSlots() {
     const safeCount = Math.max(1, Math.min(100, Math.floor(slotCount) || 1));
@@ -307,13 +341,13 @@ export function AgencyDetailPage() {
           <p className="text-ink-500 text-sm mt-1">{agency.contactEmail} · {agency.serviceAreas.join(", ")}</p>
         </div>
         <div className="flex items-center gap-2">
-          <Badge tone={agency.active ? "success" : "neutral"}>{agency.active ? "Active" : "Inactive"}</Badge>
+          <Badge tone={agency.active ? "success" : "neutral"}>{agency.active ? "Active" : "Deactivated"}</Badge>
           {agency.active ? (
-            <button className="btn-outline text-xs" onClick={() => { api.agencies.deactivate(agency.id); refresh(); }}>
+            <button className="btn-outline text-xs" onClick={() => { api.agencies.deactivate(agency.id, { actorId: user?.id }); refresh(); }}>
               Deactivate
             </button>
           ) : (
-            <button className="btn-outline text-xs" onClick={() => { api.agencies.update(agency.id, { active: true }); refresh(); }}>
+            <button className="btn-outline text-xs" onClick={() => { api.agencies.reactivate(agency.id); refresh(); }}>
               Reactivate
             </button>
           )}
@@ -683,23 +717,36 @@ export function AgencyDetailPage() {
         </Card>
 
         <Card className="lg:col-span-2">
-          <CardHeader title="Carrier library" subtitle="Assign which carriers this agency can offer." />
+          <CardHeader
+            title="Carrier library"
+            subtitle="Assign which carriers this agency can offer."
+            action={<Badge tone={linkedCarrierCount > 0 ? "success" : "neutral"}>{linkedCarrierCount} linked</Badge>}
+          />
+          <div className="mb-3 flex items-center justify-end gap-2 text-xs">
+            <button type="button" className="btn-ghost" onClick={linkAllCarriers}>
+              Link all
+            </button>
+            <button type="button" className="btn-ghost text-rose-600" onClick={unlinkAllCarriers}>
+              Unlink all
+            </button>
+          </div>
           <ul className="grid sm:grid-cols-2 gap-2">
             {carriers.map((c) => {
-              const linked = linkedIds.has(c.id);
+              const linked = isCarrierLinked(c.id);
               return (
                 <li key={c.id} className="flex items-center justify-between gap-2 border border-ink-100 rounded-md p-3">
                   <div>
-                    <div className="text-sm font-medium">{c.name}</div>
+                    <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                      {c.name}
+                      {linked && <Badge tone="success">Linked</Badge>}
+                    </div>
                     <div className="text-[11px] text-ink-500">{c.preferredAssetTypes.length} appetites</div>
                   </div>
                   <button
+                    type="button"
                     className={linked ? "btn-ghost text-xs text-rose-600" : "btn-outline text-xs"}
-                    onClick={() => {
-                      if (linked) api.carriers.unlinkFromAgency(c.id, agency.id);
-                      else api.carriers.linkToAgency(c.id, agency.id);
-                      refresh();
-                    }}
+                    aria-pressed={linked}
+                    onClick={() => toggleCarrierLink(c.id, linked)}
                   >
                     {linked ? "Unlink" : "Link"}
                   </button>
@@ -716,6 +763,7 @@ export function AgencyDetailPage() {
           />
           <div className="mb-3 flex items-center justify-end gap-2 text-xs">
             <button
+              type="button"
               className="btn-ghost"
               onClick={() => {
                 categories.forEach((c) => {
@@ -727,6 +775,7 @@ export function AgencyDetailPage() {
               Link all
             </button>
             <button
+              type="button"
               className="btn-ghost text-rose-600"
               onClick={() => {
                 categories.forEach((c) => api.categories.unlinkFromAgency(c.id, agency.id));
@@ -770,6 +819,7 @@ export function AgencyDetailPage() {
                           </div>
                         </div>
                         <button
+                          type="button"
                           className={linked ? "btn-ghost text-xs text-rose-600" : "btn-outline text-xs"}
                           onClick={() => {
                             if (linked) api.categories.unlinkFromAgency(c.id, agency.id);

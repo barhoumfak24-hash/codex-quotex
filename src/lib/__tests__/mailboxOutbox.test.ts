@@ -66,7 +66,9 @@ describe("mailbox outbox", () => {
     const sent = api.mailboxOutbox.markSent(job!.id, {
       externalMessageId: "gmail-message-1",
       externalThreadId: "gmail-thread-1",
-      externalUrl: "https://mail.google.com/mail/u/0/#inbox/gmail-thread-1",
+      externalUrl: "https://mail.google.com/mail/u/?authuser=advisor%40gmail.com#search/rfc822msgid:gmail-message-1%40example.test",
+      rfc822MessageId: "<gmail-message-1@example.test>",
+      messageIdHeader: "<gmail-message-1@example.test>",
     });
 
     expect(sent?.status).toBe("sent");
@@ -78,7 +80,9 @@ describe("mailbox outbox", () => {
     expect(updatedMessage?.deliveryStatus).toBe("sent");
     expect(updatedMessage?.externalMessageId).toBe("gmail-message-1");
     expect(updatedMessage?.externalThreadId).toBe("gmail-thread-1");
-    expect(updatedMessage?.externalUrl).toContain("mail.google.com");
+    expect(updatedMessage?.externalUrl).toContain("rfc822msgid:gmail-message-1%40example.test");
+    expect(updatedMessage?.rfc822MessageId).toBe("<gmail-message-1@example.test>");
+    expect(updatedMessage?.messageIdHeader).toBe("<gmail-message-1@example.test>");
   });
 
   it("mirrors provider email once and classifies inbound delivery status", async () => {
@@ -93,11 +97,18 @@ describe("mailbox outbox", () => {
       to: [user.businessEmail ?? user.email],
       subject: "Question about my policy",
       body: "Can you check my deductible?",
+      bodyHtml: "<table><tr><td><strong>Can you check my deductible?</strong></td></tr></table>",
+      messageIdHeader: "<provider-inbound-1@example.test>",
+      rfc822MessageId: "<provider-inbound-1@example.test>",
+      references: ["<root@example.test>"],
       sentAt: "2026-06-20T14:30:00.000Z",
     });
 
     expect(mirrored?.deliveryStatus).toBe("received");
     expect(mirrored?.customerId).toBe(customer.id);
+    expect(mirrored?.bodyHtml).toContain("<table>");
+    expect(mirrored?.messageIdHeader).toBe("<provider-inbound-1@example.test>");
+    expect(mirrored?.rfc822MessageId).toBe("<provider-inbound-1@example.test>");
 
     const duplicate = api.mailbox.mirrorExternalEmail({
       tenantId: agency.id,
@@ -108,6 +119,7 @@ describe("mailbox outbox", () => {
       to: [user.businessEmail ?? user.email],
       subject: "Question about my policy",
       body: "Updated provider body",
+      bodyHtml: "<p>Updated provider body</p>",
     });
 
     expect(duplicate?.id).toBe(mirrored?.id);
@@ -116,6 +128,43 @@ describe("mailbox outbox", () => {
       .filter((row) => row.externalMessageId === "provider-inbound-1");
     expect(mirroredRows).toHaveLength(1);
     expect(mirroredRows[0].body).toBe("Updated provider body");
+    expect(mirroredRows[0].bodyHtml).toBe("<p>Updated provider body</p>");
     expect(api.mailboxOutbox.listByTenant(agency.id)).toHaveLength(0);
+  });
+
+  it("threads synced replies by Message-ID references when provider thread ids differ", async () => {
+    const { api, agency, customer, user } = await mailboxFixture();
+    const original = api.mailbox.mirrorExternalEmail({
+      tenantId: agency.id,
+      mailboxUserId: user.id,
+      externalMessageId: "provider-thread-root",
+      externalThreadId: "provider-thread-a",
+      from: customer.email,
+      to: [user.businessEmail ?? user.email],
+      subject: "Renewal packet",
+      body: "Can you send the renewal packet?",
+      messageIdHeader: "<renewal-root@example.test>",
+    });
+
+    const reply = api.mailbox.mirrorExternalEmail({
+      tenantId: agency.id,
+      mailboxUserId: user.id,
+      externalMessageId: "provider-thread-reply",
+      externalThreadId: "provider-thread-b",
+      from: user.businessEmail ?? user.email,
+      to: [customer.email],
+      subject: "Re: Renewal packet",
+      body: "Yes, sending it now.",
+      bodyHtml: "<p>Yes, sending it now.</p>",
+      messageIdHeader: "<renewal-reply@example.test>",
+      inReplyToHeader: "<renewal-root@example.test>",
+      references: ["<renewal-root@example.test>"],
+      direction: "outbound",
+    });
+
+    expect(original?.threadId).toBeTruthy();
+    expect(reply?.threadId).toBe(original?.threadId);
+    expect(reply?.deliveryStatus).toBe("synced");
+    expect(reply?.bodyHtml).toBe("<p>Yes, sending it now.</p>");
   });
 });

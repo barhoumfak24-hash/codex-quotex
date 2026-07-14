@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Activity,
   Building2,
@@ -13,8 +13,9 @@ import { MasterBackButton } from "@/components/layout/MasterBackButton";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardHeader, EmptyState, StatCard } from "@/components/ui/Card";
 import { api } from "@/lib/api";
-import { isLivePlatformAgency, isPresentationDemoAgencyId } from "@/lib/demoData";
+import { isPresentationDemoAgencyId } from "@/lib/demoData";
 import { fmt } from "@/lib/format";
+import { listReconciledLivePlatformAgencies, reconcilePaidSoftwareSalesToAgencies } from "@/lib/softwareSaleProvisioning";
 import type { MasterAgencyActivity, MasterAgencyActivityKind } from "@/types";
 
 type ActivityFilter = "all" | MasterAgencyActivityKind;
@@ -85,15 +86,16 @@ function matchesSearch(activity: MasterAgencyActivity, query: string): boolean {
 }
 
 export function MasterActivitiesPage() {
+  const [, setRev] = useState(0);
   const [search, setSearch] = useState("");
   const [agencyId, setAgencyId] = useState("all");
   const [action, setAction] = useState<ActivityFilter>("all");
 
-  const agencies = api
-    .agencies
-    .list()
-    .filter(isLivePlatformAgency)
-    .sort((a, b) => a.name.localeCompare(b.name));
+  useEffect(() => {
+    if (reconcilePaidSoftwareSalesToAgencies().length > 0) setRev((r) => r + 1);
+  }, []);
+
+  const agencies = listReconciledLivePlatformAgencies().sort((a, b) => a.name.localeCompare(b.name));
   const activities = api
     .masterAgencyActivities
     .list()

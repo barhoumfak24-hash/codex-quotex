@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { db } from "../db";
 
 // =====================================================================
 // Email threading + AI subject generation. Replies inherit a thread
@@ -7,9 +8,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 // subject helper turns a draft body into a concise subject line.
 // =====================================================================
 
-beforeEach(async () => {
+beforeEach(() => {
   if (typeof window !== "undefined" && window.localStorage) window.localStorage.clear();
-  const { db } = await import("../db");
   db.reset();
 });
 afterEach(() => {
@@ -76,6 +76,13 @@ describe("communications threading", () => {
     expect(row.mailboxAccount).toBe("advisor@gmail.com");
     expect(row.mailboxProvider).toBe("gmail");
     expect(row.mailboxConnectionId).toBe(`mailbox_staff_${manager.id}`);
+    expect(api.mailboxes.staff(manager.id)?.lastSendAt).toBeFalsy();
+
+    api.mailboxOutbox.markSent(row.outboxJobId!, {
+      externalMessageId: "gmail-confirmed-send",
+      externalThreadId: "gmail-thread",
+    });
+
     expect(api.mailboxes.staff(manager.id)?.lastSendAt).toBeTruthy();
   });
 
@@ -94,6 +101,7 @@ describe("communications threading", () => {
       mailboxUserId: manager.id,
       externalMessageId: "gmail_msg_in_1",
       externalThreadId: "gmail_thread_1",
+      externalUrl: "https://mail.google.com/mail/u/0/#inbox/gmail_msg_in_1",
       from: customer.email,
       to: ["advisor@gmail.com"],
       subject: "Question about renewal",
@@ -119,10 +127,47 @@ describe("communications threading", () => {
     expect(sent?.mailboxConnectionId).toBe(`mailbox_staff_${manager.id}`);
     expect(api.mailboxes.staff(manager.id)?.lastSyncAt).toBeTruthy();
     expect(sent?.body).toBe("Yes, it renews next month.");
+    const inboundRemark = api.status
+      .listFor({ customerId: customer.id })
+      .find((event) => event.communicationId === inbound?.id);
+    expect(inboundRemark?.message).toBe("Email received: Question about renewal.");
+    expect(inboundRemark?.source).toBe("customer");
+    expect(inboundRemark?.createdAt).toBe("2026-05-31T12:00:00.000Z");
     const mirrored = api.communications
       .listByCustomer(customer.id)
       .filter((c) => c.externalThreadId === "gmail_thread_1");
     expect(mirrored).toHaveLength(2);
+  });
+
+  it("mirrors provider messages from unknown external contacts instead of dropping them", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    api.users.update(manager.id, {
+      businessEmail: "advisor@gmail.com",
+      mailProvider: "gmail",
+    });
+
+    const inbound = api.mailbox.mirrorExternalEmail({
+      tenantId: agency.id,
+      mailboxUserId: manager.id,
+      externalMessageId: "gmail_unknown_contact_1",
+      externalThreadId: "gmail_unknown_thread_1",
+      from: "Taylor Contact <taylor.contact@example.com>",
+      to: ["advisor@gmail.com"],
+      subject: "Question before I become a client",
+      body: "Can you help me quote a coastal property?",
+      sentAt: "2026-05-31T13:00:00.000Z",
+    });
+
+    expect(inbound).toBeTruthy();
+    expect(inbound?.direction).toBe("inbound");
+    expect(inbound?.customerId).toBeUndefined();
+    expect(inbound?.prospectId).toBeUndefined();
+    expect(inbound?.carrierContactId).toBeUndefined();
+    expect(inbound?.externalRecipientEmail).toBe("taylor.contact@example.com");
+    expect(inbound?.externalRecipientName).toBe("Taylor Contact");
+    expect(inbound?.mailboxOrigin).toBe("provider_sync");
   });
 
   it("keeps company marketing on the agency mailbox instead of a staff mailbox", async () => {
@@ -188,6 +233,20 @@ describe("mail provider deep links", () => {
     expect(url).toContain("mail.google.com");
     expect(decodeURIComponent(url)).toContain("client@example.com");
     expect(decodeURIComponent(url)).toContain("Question about renewal");
+  });
+
+  it("builds exact Gmail links from RFC822 Message-ID when available", async () => {
+    const { mailboxThreadUrl } = await import("../mailProvider");
+    const url = mailboxThreadUrl({
+      mailbox: "advisor@gmail.com",
+      provider: "gmail",
+      contactEmail: "client@example.com",
+      subject: "Question about renewal",
+      rfc822MessageId: "<abc+123/client@example.test>",
+    });
+    expect(url).toBe(
+      "https://mail.google.com/mail/u/?authuser=advisor%40gmail.com#search/rfc822msgid:abc%2B123%2Fclient%40example.test"
+    );
   });
 });
 

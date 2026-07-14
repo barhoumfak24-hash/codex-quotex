@@ -1,4 +1,4 @@
-import { WEBSITE_APP_ADD_ON_OPTIONS } from "@/lib/tiers";
+import { SOFTWARE_PRODUCT_OPTIONS, WEBSITE_APP_ADD_ON_OPTIONS, normalizeSoftwareProduct } from "@/lib/tiers";
 import { apiBaseUrl } from "@/lib/apiBase";
 import { revealProtectedAgencyCode } from "@/lib/credentials";
 import { provisionAgencyForCompletedSale } from "@/lib/softwareSaleProvisioning";
@@ -62,6 +62,7 @@ export async function sendSoftwareSaleInvoiceEmail(sale: SoftwareSale): Promise<
     phone: sale.phone,
     website: sale.website,
     agencyCode: softwareSaleAgencyCode(sale),
+    productLabel: SOFTWARE_PRODUCT_OPTIONS[normalizeSoftwareProduct(sale.product)].label,
     seats: sale.seats,
     estimatedMonthly: sale.estimatedMonthly,
     setupFee: sale.setupFee,

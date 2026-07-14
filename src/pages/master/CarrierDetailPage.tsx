@@ -97,7 +97,7 @@ export function CarrierDetailPage() {
       <Card>
         <CardHeader
           title="AI carrier portal runner"
-          subtitle="Store the approved carrier portal entry points. Production runs this from the secure backend worker with encrypted credentials, MFA handling, and audit logs."
+          subtitle="Store the approved carrier portal entry points. Production runs this from the secure backend worker against the agent's existing signed-in browser session with MFA prompts and audit logs."
         />
         <form
           className="grid sm:grid-cols-2 gap-3"
@@ -107,7 +107,6 @@ export function CarrierDetailPage() {
             const agentPortalUrl = String(data.get("automationAgentUrl") ?? "").trim();
             const customerPortalUrl = String(data.get("automationCustomerUrl") ?? "").trim();
             const provider = String(data.get("automationProvider") ?? "").trim();
-            const credentialReference = String(data.get("automationCredential") ?? "").trim();
             const mfaMode = String(data.get("automationMfa") ?? "staff_prompt") as NonNullable<
               Carrier["quotingAutomation"]
             >["mfaMode"];
@@ -117,7 +116,6 @@ export function CarrierDetailPage() {
                 provider: provider || undefined,
                 agentPortalUrl: agentPortalUrl || undefined,
                 customerPortalUrl: customerPortalUrl || undefined,
-                credentialReference: credentialReference || undefined,
                 mfaMode,
                 notes: notes || undefined,
                 status: agentPortalUrl || customerPortalUrl ? "configured" : "not_configured",
@@ -166,18 +164,6 @@ export function CarrierDetailPage() {
             />
           </div>
           <div>
-            <label className="label">Credential reference</label>
-            <input
-              name="automationCredential"
-              className="input"
-              defaultValue={carrier.quotingAutomation?.credentialReference ?? ""}
-              placeholder="vault://agency/carrier/rater"
-            />
-            <p className="text-[11px] text-ink-400 mt-1">
-              Store only the vault key or secret reference here, never a raw password.
-            </p>
-          </div>
-          <div>
             <label className="label">MFA mode</label>
             <select
               name="automationMfa"
@@ -200,9 +186,9 @@ export function CarrierDetailPage() {
             />
           </div>
           <div className="sm:col-span-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-950">
-            This is not stealth scraping. Use only carrier-approved automation, authorized
-            agency credentials, and a server-side worker that records every submission,
-            screenshot, MFA prompt, and carrier response.
+            This is not stealth scraping. Use only carrier-approved automation, an already
+            signed-in agency browser session, and a server-side worker that records every
+            submission, screenshot, MFA prompt, and carrier response.
           </div>
           <div className="sm:col-span-2">
             <button type="submit" className="btn-primary">

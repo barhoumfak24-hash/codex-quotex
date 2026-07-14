@@ -3,6 +3,7 @@ import { Briefcase, Gem, Home, Sailboat, ShieldCheck, Umbrella } from "lucide-re
 import { Card, CardHeader, EmptyState } from "@/components/ui/Card";
 import { PolicyStatusBadge } from "@/components/ui/StatusBadge";
 import { api } from "@/lib/api";
+import { assetDisplayName, assetDisplaySubtitleLabel } from "@/lib/assetDisplay";
 import { fmt } from "@/lib/format";
 import { useCustomer } from "@/lib/useCustomer";
 import type { AssetType } from "@/types";
@@ -64,10 +65,10 @@ export function CustomerAssetsPage() {
                       </span>
                       <div className="min-w-0">
                         <div className="truncate text-sm font-semibold text-ink-900">
-                          {a.label}
+                          {assetDisplayName(a)}
                         </div>
                         <div className="mt-0.5 truncate text-xs text-ink-500">
-                          {api.helpers.assetTypeLabel(a.type)} ·{" "}
+                          {assetDisplaySubtitleLabel(a.type)} ·{" "}
                           {fmt.money(a.estimatedValue)}
                         </div>
                       </div>

@@ -817,7 +817,7 @@ describe("askPortalAssistantSmart", () => {
     expect(a.related).toContain("How do I mark an activity resolved?");
   });
 
-  it("falls back to the grounded local answer when the model fails", async () => {
+  it("reports temporary AI unavailability when the model fails", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
@@ -825,9 +825,19 @@ describe("askPortalAssistantSmart", () => {
       })
     );
 
-    const local = askPortalAssistant("what is the activity center?", "agent");
     const smart = await askPortalAssistantSmart("what is the activity center?", "agent");
-    expect(smart).toEqual(local);
+    expect(smart.topicId).toBe("ai-unavailable");
+    expect(smart.text).toContain("temporarily unavailable");
+  });
+
+  it("does not silently use local synthesis when production AI is unavailable", async () => {
+    vi.stubEnv("PROD", true);
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("offline", { status: 503 })));
+
+    const smart = await askPortalAssistantSmart("what is the activity center?", "agent");
+
+    expect(smart.topicId).toBe("ai-unavailable");
+    expect(smart.text).toContain("temporarily unavailable");
   });
 
   it("combines closely related local topics for workflow-style prompts", () => {

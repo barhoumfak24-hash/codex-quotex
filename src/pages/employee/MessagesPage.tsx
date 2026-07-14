@@ -18,6 +18,7 @@ import {
   Pin,
   Plus,
   Reply,
+  RefreshCw,
   Search,
   Send,
   Trash2,
@@ -51,7 +52,12 @@ import {
   mailProviderShortLabel,
 } from "@/lib/mailProvider";
 import { fileToCommunicationAttachment, formatAttachmentSize } from "@/lib/messageAttachments";
-import { sendCommunicationThroughLiveMailbox } from "@/lib/liveMailbox";
+import {
+  getLiveMailboxSyncStatus,
+  sendCommunicationThroughLiveMailbox,
+  syncCommunicationsFromLiveMailbox,
+} from "@/lib/liveMailbox";
+import { listMailboxConnections } from "@/lib/mailboxOAuth";
 import type {
   Communication,
   CommunicationAttachment,
@@ -210,6 +216,10 @@ export function MessagesPage() {
   // Unified "New send" modal - start a fresh conversation in whichever
   // card the button was clicked (clients/prospects/holders, internal, carriers).
   const [newSend, setNewSend] = useState<null | "contact" | "internal" | "carrier">(null);
+  const [refreshingMessages, setRefreshingMessages] = useState(false);
+  const [serverMailbox, setServerMailbox] = useState<ConnectedMailbox | null>(null);
+  const [serverMailboxError, setServerMailboxError] = useState<string | null>(null);
+  const [mailboxSyncStatus, setMailboxSyncStatus] = useState<string | null>(null);
   // Count of inbound messages the AI triaged into activities or notices this
   // visit - drives the "AI triaged your inbox" banner.
   const [aiTriaged, setAiTriaged] = useState(0);
@@ -230,6 +240,48 @@ export function MessagesPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agency?.id, user?.id]);
 
+  useEffect(() => {
+    let cancelled = false;
+    if (!agency || !user) {
+      setServerMailbox(null);
+      setServerMailboxError(null);
+      return;
+    }
+    void listMailboxConnections({ user, tenantId: agency.id, mineOnly: true }).then((result) => {
+      if (cancelled) return;
+      if (!result.ok) {
+        setServerMailbox(null);
+        setServerMailboxError(result.message ?? "Mailbox connection status could not be loaded.");
+        return;
+      }
+      const connection = result.connections.find((row) => row.userId === user.id) ?? result.connections[0];
+      const nextMailbox = connection
+        ? {
+            address: connection.address,
+            provider: connection.provider,
+            providerName: mailProviderShortLabel(connection.provider),
+            connectionId: connection.id,
+            status: connection.status,
+            authMode: connection.authMode,
+          }
+        : null;
+      setServerMailbox(
+        nextMailbox
+      );
+      setServerMailboxError(null);
+      if (nextMailbox?.status === "connected") {
+        void getLiveMailboxSyncStatus({ tenantId: agency.id, user, limit: 1 }).then((statusResult) => {
+          if (cancelled || !statusResult.ok || statusResult.status.length === 0) return;
+          const latest = statusResult.status[0];
+          setMailboxSyncStatus(`Last mailbox receive check: ${latest.action.replace(/^mailbox\./, "").replace(/\./g, " ")}.`);
+        });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [agency?.id, user?.id]);
+
   if (!agency || !user) return null;
 
   // ----- Client / prospect side -----
@@ -248,6 +300,8 @@ export function MessagesPage() {
   // mixing inbound communications + outbound marketing messages.
   const contactThreads: ContactThread[] = useMemo(() => {
     const map = new Map<string, ContactThread>();
+    const customerById = new Map(customers.map((customer) => [customer.id, customer]));
+    const prospectById = new Map(prospects.map((prospect) => [prospect.id, prospect]));
     function upsert(
       key: string,
       base: Pick<ContactThread, "kind" | "id" | "name" | "email" | "phone">,
@@ -268,6 +322,39 @@ export function MessagesPage() {
         }
         if (msg.isUnreadInbound) existing.hasUnreadInbound = true;
       }
+    }
+    function knownContactBase(c: Communication):
+      | { key: string; base: Pick<ContactThread, "kind" | "id" | "name" | "email" | "phone"> }
+      | null {
+      if (c.customerId) {
+        const customer = customerById.get(c.customerId);
+        if (!customer || customer.archived) return null;
+        return {
+          key: `client:${customer.id}`,
+          base: {
+            kind: "client",
+            id: customer.id,
+            name: customer.name,
+            email: customer.email,
+            phone: customer.phone,
+          },
+        };
+      }
+      if (c.prospectId) {
+        const prospect = prospectById.get(c.prospectId);
+        if (!prospect || prospect.archived) return null;
+        return {
+          key: `prospect:${prospect.id}`,
+          base: {
+            kind: "prospect",
+            id: prospect.id,
+            name: prospect.name,
+            email: prospect.email,
+            phone: prospect.phone,
+          },
+        };
+      }
+      return null;
     }
     customers
       .filter((c) => !c.archived)
@@ -302,14 +389,9 @@ export function MessagesPage() {
     emailComms
       .filter((c) => !c.customerId || visibleCustomerIds.has(c.customerId))
       .forEach((c) => {
-        const key = c.customerId
-          ? `client:${c.customerId}`
-          : c.prospectId
-          ? `prospect:${c.prospectId}`
-          : null;
-        if (!key || !map.has(key)) return;
-        const base = map.get(key)!;
-        upsert(key, base, {
+        const contact = knownContactBase(c);
+        if (!contact) return;
+        upsert(contact.key, map.get(contact.key) ?? contact.base, {
           body: c.body,
           at: c.createdAt,
           isUnreadInbound: c.direction === "inbound" && !c.resolvedAt,
@@ -318,13 +400,28 @@ export function MessagesPage() {
     emailOutbound
       .filter((m) => !m.customerId || visibleCustomerIds.has(m.customerId))
       .forEach((m) => {
-        const key = m.customerId
-          ? `client:${m.customerId}`
-          : m.prospectId
-          ? `prospect:${m.prospectId}`
+        const customer = m.customerId ? customerById.get(m.customerId) : undefined;
+        const prospect = m.prospectId ? prospectById.get(m.prospectId) : undefined;
+        const key = customer ? `client:${customer.id}` : prospect ? `prospect:${prospect.id}` : null;
+        const base = customer
+          ? {
+              kind: "client" as const,
+              id: customer.id,
+              name: customer.name,
+              email: customer.email,
+              phone: customer.phone,
+            }
+          : prospect
+          ? {
+              kind: "prospect" as const,
+              id: prospect.id,
+              name: prospect.name,
+              email: prospect.email,
+              phone: prospect.phone,
+            }
           : null;
-        if (!key || !map.has(key)) return;
-        upsert(key, map.get(key)!, {
+        if (!key || !base) return;
+        upsert(key, map.get(key) ?? base, {
           body: m.content,
           at: m.sentAt ?? m.createdAt,
         });
@@ -456,16 +553,16 @@ export function MessagesPage() {
     ? internalThreads.find((t) => t.id === activeInternalId) ?? null
     : null;
   const staffMailbox = api.mailboxes.staff(user.id);
-  const connectedMailbox = staffMailbox?.address ?? user.businessEmail ?? user.email;
-  const connectedProvider = staffMailbox?.provider ?? user.mailProvider ?? inferMailProvider(connectedMailbox);
+  const connectedMailbox = serverMailbox?.address ?? staffMailbox?.address ?? user.businessEmail ?? user.email;
+  const connectedProvider = serverMailbox?.provider ?? staffMailbox?.provider ?? user.mailProvider ?? inferMailProvider(connectedMailbox);
   const connectedProviderName = mailProviderShortLabel(connectedProvider);
   const mailbox: ConnectedMailbox = {
     address: connectedMailbox,
     provider: connectedProvider,
     providerName: connectedProviderName,
-    connectionId: staffMailbox?.id,
-    status: staffMailbox?.status,
-    authMode: staffMailbox?.authMode,
+    connectionId: serverMailbox?.connectionId ?? staffMailbox?.id,
+    status: serverMailbox?.status ?? staffMailbox?.status,
+    authMode: serverMailbox?.authMode ?? staffMailbox?.authMode,
   };
 
   // Auto-mark internal thread read on focus.
@@ -488,6 +585,47 @@ export function MessagesPage() {
     setSearchParams(next, { replace: true });
   }
 
+  async function refreshMessages(options: { silent?: boolean } = {}) {
+    if (!agency || !user) return;
+    if (!options.silent) setRefreshingMessages(true);
+    try {
+      const sync = await syncCommunicationsFromLiveMailbox({
+        tenantId: agency.id,
+        user,
+        connectionId: mailbox.connectionId,
+        maxResults: 25,
+      });
+      if (!sync.ok && mailbox.status === "connected" && !options.silent) alert(sync.message);
+      if (sync.ok) {
+        const imported = sync.serverImported ?? sync.imported;
+        const updated = sync.serverUpdated ?? 0;
+        const failed = sync.serverFailed ?? 0;
+        setMailboxSyncStatus(
+          failed > 0
+            ? `Mailbox checked. ${imported} new, ${updated} updated, ${failed} failed.`
+            : `Mailbox checked. ${imported} new, ${updated} updated.`
+        );
+      } else if (!options.silent) {
+        setMailboxSyncStatus(`Mailbox receive check failed: ${sync.message}`);
+      }
+      const created = api.communications.sweepInboundForActivities(agency.id, user.id);
+      if (created.length > 0) setAiTriaged((current) => current + created.length);
+      setRev((r) => r + 1);
+    } finally {
+      if (!options.silent) window.setTimeout(() => setRefreshingMessages(false), 250);
+    }
+  }
+
+  useEffect(() => {
+    if (!agency || !user || mailbox.status !== "connected") return;
+    const interval = window.setInterval(() => {
+      void refreshMessages({ silent: true });
+    }, 60_000);
+    return () => window.clearInterval(interval);
+    // Polling is intentionally keyed to the connected mailbox identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agency?.id, user?.id, mailbox.connectionId, mailbox.status]);
+
   return (
     <div className="space-y-4">
       <EmployeeBackButton />
@@ -495,17 +633,39 @@ export function MessagesPage() {
         <div>
           <h1 className="font-display text-3xl">Messages</h1>
           <p className="text-ink-500 text-sm mt-1">
-            Email-only inbox {staffMailbox?.status === "connected" ? "connected" : "prepared"} for{" "}
+            Email-only inbox {mailbox.status === "connected" ? "connected" : "prepared"} for{" "}
             {mailbox.providerName} through {mailbox.address}. Client, prospect, holder, and carrier
             email threads stay mirrored here.
           </p>
         </div>
+        <button
+          type="button"
+          className="btn-outline text-sm"
+          onClick={() => void refreshMessages()}
+          disabled={refreshingMessages}
+          title="Refresh message threads and re-check inbound messages"
+        >
+          <RefreshCw className={`h-4 w-4 ${refreshingMessages ? "animate-spin" : ""}`} />
+          Refresh
+        </button>
       </div>
 
       {mailbox.authMode === "demo" && (
         <div className="rounded-md border border-gold-200 bg-gold-50/60 px-4 py-3 text-xs text-gold-900">
           Legacy local mailbox record detected. Live send/sync requires Google or Microsoft OAuth tokens
           stored in the encrypted backend vault for this exact staff mailbox.
+        </div>
+      )}
+
+      {serverMailboxError && (
+        <div className="rounded-md border border-gold-200 bg-gold-50/60 px-4 py-3 text-xs text-gold-900">
+          Mailbox status could not be verified: {serverMailboxError}
+        </div>
+      )}
+
+      {mailboxSyncStatus && mailbox.status === "connected" && (
+        <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-900">
+          {mailboxSyncStatus}
         </div>
       )}
 
@@ -1178,6 +1338,8 @@ function mailboxUrlForContact(
     threadId: comm?.threadId,
     externalThreadId: comm?.externalThreadId,
     externalUrl: comm?.externalUrl,
+    rfc822MessageId: comm?.rfc822MessageId,
+    messageIdHeader: comm?.messageIdHeader,
   });
 }
 
@@ -1304,6 +1466,12 @@ function ActiveContactPane({
         subject: msg.subject,
         threadId: msg.threadId,
         replyToId: msg.replyToId,
+        bodyHtml: msg.bodyHtml,
+        cc: msg.cc,
+        bcc: msg.bcc,
+        externalThreadId: msg.externalThreadId,
+        inReplyToHeader: msg.replyToMessageIdHeader,
+        references: msg.references,
         body: msg.body,
         attachments: msg.attachments,
         createdById: userId,
@@ -1425,7 +1593,7 @@ function ActiveContactPane({
                   {r.row.subject && (
                     <div className="font-medium mb-0.5">{r.row.subject}</div>
                   )}
-                  <RichMessageBody body={body} tenantId={tenantId} />
+                  <RichMessageBody body={body} tenantId={tenantId} message={r.kind === "comm" ? r.row : undefined} />
                   {attachments.length > 0 && (
                     <div className="mt-2 space-y-1.5">
                       {attachments.map((attachment) => (
@@ -1526,7 +1694,21 @@ function replyTargetForRow(row: Communication | MarketingMessage): ReplyTarget {
   const threadId = (row as Communication).threadId ?? `thread_msg_${row.id}`;
   const rawSubject = row.subject?.trim() || "your message";
   const subject = /^re:/i.test(rawSubject) ? rawSubject : `Re: ${rawSubject}`;
-  return { threadId, subject, replyToId: row.id, toSummary: rawSubject };
+  const comm = "mailboxOrigin" in row ? row : undefined;
+  const references = [
+    ...(comm?.references ?? []),
+    comm?.messageIdHeader,
+    comm?.externalMessageId,
+  ].filter((value): value is string => Boolean(value));
+  return {
+    threadId,
+    subject,
+    replyToId: row.id,
+    toSummary: rawSubject,
+    externalThreadId: comm?.externalThreadId,
+    replyToMessageIdHeader: comm?.messageIdHeader ?? comm?.externalMessageId,
+    references,
+  };
 }
 
 function InternalThreadsList({

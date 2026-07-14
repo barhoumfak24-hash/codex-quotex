@@ -1,11 +1,17 @@
+import { useEffect, useState } from "react";
 import { MasterBackButton } from "@/components/layout/MasterBackButton";
 import { Card, CardHeader, StatCard } from "@/components/ui/Card";
 import { api } from "@/lib/api";
-import { isLivePlatformAgency } from "@/lib/demoData";
 import { fmt } from "@/lib/format";
+import { listReconciledLivePlatformAgencies, reconcilePaidSoftwareSalesToAgencies } from "@/lib/softwareSaleProvisioning";
 
 export function UsageAnalyticsPage() {
-  const agencies = api.agencies.list().filter(isLivePlatformAgency);
+  const [, setRev] = useState(0);
+  useEffect(() => {
+    if (reconcilePaidSoftwareSalesToAgencies().length > 0) setRev((r) => r + 1);
+  }, []);
+
+  const agencies = listReconciledLivePlatformAgencies();
   let totalProspects = 0;
   let totalMessages = 0;
   let totalDeposits = 0;

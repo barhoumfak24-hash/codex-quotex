@@ -430,6 +430,17 @@ model Communication {
   mailbox                Json     @default("{}")
   attachments            Json     @default("[]")
   body                   String   @db.Text
+  bodyHtml               String?  @map("body_html") @db.Text
+  rawMimeRef             String?  @map("raw_mime_ref") @db.Text
+  messageIdHeader        String?  @map("message_id_header") @db.Text
+  inReplyToHeader        String?  @map("in_reply_to_header") @db.Text
+  references             Json     @default("[]") @map("reference_headers")
+  toRecipients           Json     @default("[]") @map("to_recipients")
+  ccRecipients           Json     @default("[]") @map("cc_recipients")
+  bccRecipients          Json     @default("[]") @map("bcc_recipients")
+  snippet                String?  @db.Text
+  isRead                 Boolean  @default(false) @map("is_read")
+  mailboxLabels          Json     @default("[]") @map("mailbox_labels")
   resolution             Json     @default("{}")
   sentAt                 DateTime? @map("sent_at")
   createdAt              DateTime @default(now()) @map("created_at")
@@ -442,6 +453,8 @@ model Communication {
   @@index([tenantId, customerId])
   @@index([tenantId, prospectId])
   @@index([tenantId, threadId])
+  @@index([tenantId, messageIdHeader])
+  @@index([tenantId, inReplyToHeader])
   @@index([tenantId, createdAt])
   @@map("communications")
 }

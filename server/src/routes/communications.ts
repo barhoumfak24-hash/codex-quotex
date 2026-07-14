@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { requireAuth, requireRole } from "../middleware/auth.js";
 import { sendEmail } from "../services/email.js";
@@ -41,6 +42,7 @@ const invoicePayloadSchema = z.object({
   phone: z.string().optional(),
   website: z.string().optional(),
   agencyCode: z.string().min(1),
+  productLabel: z.string().optional(),
   seats: z.number().int().positive(),
   estimatedMonthly: z.number().nonnegative(),
   setupFee: z.number().nonnegative().default(0),
@@ -69,12 +71,17 @@ communicationsRoutes.post("/software-sale/signing-email", ...requirePlatformDeli
   }
 
   const payload = parsed.data;
+  const emailReference = paymentAuthorizationEmailReference();
   const result = await sendEmail({
     to: payload.email,
-    subject: `Action needed: e-sign Quotex plan documents for ${payload.agencyName}`,
-    html: signingEmailHtml(payload),
-    text: signingEmailText(payload),
-    categories: ["software-sale", "esign"],
+    subject: `Quotex payment authorization ${emailReference} - ${payload.agencyName}`,
+    html: signingEmailHtml(payload, emailReference),
+    text: signingEmailText(payload, emailReference),
+    headers: {
+      "X-Quotex-Message-Type": "payment-authorization",
+      "X-Quotex-Email-Reference": emailReference,
+    },
+    categories: ["software-sale", "payment-authorization"],
   });
 
   return res.status(result.status === "failed" ? 502 : 200).json({ ok: result.status !== "failed", result });
@@ -91,8 +98,8 @@ communicationsRoutes.post("/software-sale/signing-sms", ...requirePlatformDelive
 
   const result = await sendSms({
     to: payload.phone,
-    body: `Quotex documents and payment authorization for ${payload.agencyName}: ${payload.signingLink} Please review, sign, enter payment method, and submit from the secure packet.`,
-    metadata: { agencyName: payload.agencyName, kind: "software-sale-esign" },
+    body: `Quotex payment authorization for ${payload.agencyName}: ${payload.signingLink} Please review the payment terms, sign the required authorizations, enter the payment method, and submit the secure packet.`,
+    metadata: { agencyName: payload.agencyName, kind: "software-sale-payment-authorization" },
   });
 
   return res.status(result.status === "failed" ? 502 : 200).json({ ok: result.status !== "failed", result });
@@ -118,7 +125,11 @@ communicationsRoutes.post("/software-sale/invoice-email", ...requirePlatformDeli
   return res.status(result.status === "failed" ? 502 : 200).json({ ok: result.status !== "failed", result });
 });
 
-function signingEmailHtml(payload: z.infer<typeof signingPayloadSchema>) {
+function paymentAuthorizationEmailReference() {
+  return `QTX-PAY-${Date.now().toString(36).toUpperCase()}-${randomUUID().slice(0, 8).toUpperCase()}`;
+}
+
+function signingEmailHtml(payload: z.infer<typeof signingPayloadSchema>, emailReference: string) {
   const documentList = payload.documents
     .map(
       (document) =>
@@ -127,26 +138,31 @@ function signingEmailHtml(payload: z.infer<typeof signingPayloadSchema>) {
     .join("");
 
   return emailShell(
-    "Review and e-sign your Quotex plan documents",
+    "Complete your Quotex payment authorization",
     `
       <p>Hi ${escapeHtml(payload.contactName)},</p>
-      <p>Your Quotex software plan documents and payment authorization for <strong>${escapeHtml(payload.agencyName)}</strong> are ready for review. Open the secure packet, sign each required document, enter the payment method, then submit everything from the same page.</p>
+      <p>Your Quotex payment authorization for <strong>${escapeHtml(payload.agencyName)}</strong> is ready. The required electronic signatures are captured inside the same secure payment packet.</p>
+      <p>Open the secure packet, review the payment terms, sign each required authorization document, enter the payment method, and submit the packet from that page.</p>
+      <p style="font-size:13px;color:#666;">Payment authorization reference: <strong>${escapeHtml(emailReference)}</strong></p>
       <ul>${documentList}</ul>
-      ${button(payload.signingLink, "Open secure packet")}
-      <p style="font-size:13px;color:#666;">If the button does not open, paste this link into your browser:<br>${escapeHtml(payload.signingLink)}</p>
+      ${button(payload.signingLink, "Open payment authorization")}
     `
   );
 }
 
-function signingEmailText(payload: z.infer<typeof signingPayloadSchema>) {
+function signingEmailText(payload: z.infer<typeof signingPayloadSchema>, emailReference: string) {
   const docs = payload.documents.map((document) => `- ${document.title}${document.version ? ` (${document.version})` : ""}`).join("\n");
   return `Hi ${payload.contactName},
 
-Your Quotex software plan documents and payment authorization for ${payload.agencyName} are ready for review. Open the secure packet, sign each required document, enter the payment method, then submit everything from the same page.
+Your Quotex payment authorization for ${payload.agencyName} is ready. The required electronic signatures are captured inside the same secure payment packet.
+
+Open the secure packet, review the payment terms, sign each required authorization document, enter the payment method, and submit the packet from that page.
+
+Payment authorization reference: ${emailReference}
 
 ${docs}
 
-Open the secure packet:
+Open the payment authorization:
 ${payload.signingLink}
 `;
 }
@@ -218,6 +234,7 @@ function invoiceEmailHtml(payload: z.infer<typeof invoicePayloadSchema>) {
       </div>
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:18px 0;">
         ${invoiceRow("Invoice record", payload.saleId)}
+        ${invoiceRow("Product", payload.productLabel ?? "Full Quotex software")}
         ${invoiceRow("Staff users", String(payload.seats))}
         ${invoiceRow("Website / app package", payload.websiteAppAddOnLabel ?? "Software only")}
         ${invoiceRow("Website / app monthly", money(payload.websiteAppAddOnMonthly ?? 0))}
@@ -261,6 +278,7 @@ Email: ${payload.email}
 ${payload.phone ? `Phone: ${payload.phone}\n` : ""}${payload.website ? `Website: ${payload.website}\n` : ""}
 Agency code: ${payload.agencyCode}
 Invoice record: ${payload.saleId}
+Product: ${payload.productLabel ?? "Full Quotex software"}
 Purchase source: ${payload.source === "master_portal" ? "Master portal assisted purchase" : "Secure checkout purchase"}
 Payment method: ${payload.paymentMode === "manual_invoice" ? "Master-assisted invoice" : "Checkout payment"}
 ${payload.stripeCheckoutSessionId ? `Transaction reference: ${payload.stripeCheckoutSessionId}\n` : ""}

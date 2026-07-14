@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { DollarSign, Pencil, Save, TrendingUp, Users, X } from "lucide-react";
 import { MasterBackButton } from "@/components/layout/MasterBackButton";
@@ -6,8 +6,8 @@ import { Card, CardHeader } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { api } from "@/lib/api";
-import { isLivePlatformAgency } from "@/lib/demoData";
 import { fmt } from "@/lib/format";
+import { listReconciledLivePlatformAgencies, reconcilePaidSoftwareSalesToAgencies } from "@/lib/softwareSaleProvisioning";
 import {
   SOFTWARE_USER_MONTHLY_PRICE_USD,
   WEBSITE_APP_ADD_ON_OPTIONS,
@@ -27,7 +27,12 @@ export function BillingPage() {
   const [priceOverrideError, setPriceOverrideError] = useState("");
 
   const refresh = () => setRev((r) => r + 1);
-  const agencies = api.agencies.list().filter(isLivePlatformAgency);
+
+  useEffect(() => {
+    if (reconcilePaidSoftwareSalesToAgencies().length > 0) refresh();
+  }, []);
+
+  const agencies = listReconciledLivePlatformAgencies();
   const activeAgencies = agencies.filter((agency) => agency.active);
   const softwareSales = api.softwareSales.list();
   const openSales = softwareSales.filter((sale) => sale.status !== "closed");
@@ -128,13 +133,13 @@ export function BillingPage() {
           title="Software checkout queue"
           subtitle={`${openSales.length} open request${openSales.length === 1 ? "" : "s"} from the transaction website. Payment state updates automatically once webhooks are connected.`}
         />
-        {softwareSales.length === 0 ? (
+        {openSales.length === 0 ? (
           <div className="rounded-md border border-dashed border-ink-200 bg-ink-50 px-4 py-6 text-center text-sm text-ink-500">
-            No software checkout requests yet. Submissions from the transaction website will appear here.
+            No open software checkout requests. Completed paid purchases move into Agency monthly billing.
           </div>
         ) : (
           <div className="divide-y divide-ink-100">
-            {softwareSales.map((sale) => {
+            {openSales.map((sale) => {
               const monthlyPrice = saleMonthlyValue(sale);
               const addOn = WEBSITE_APP_ADD_ON_OPTIONS[sale.websiteAppAddOn ?? "none"];
               return (
@@ -191,7 +196,7 @@ export function BillingPage() {
                         <div className="text-[11px] uppercase tracking-wider text-ink-400">Value</div>
                         <div className="mt-1">{fmt.money(monthlyPrice)}/mo</div>
                         <div className="text-xs text-ink-500">
-                          {fmt.money(softwareSaleMonthlyTotalForSeats(sale.seats, "none"))} software
+                          {fmt.money(softwareSaleMonthlyTotalForSeats(sale.seats, "none", sale.termMonths, sale.product))} software
                           {sale.websiteAppAddOnMonthly ? ` + ${fmt.money(sale.websiteAppAddOnMonthly)} add-on` : ""}
                         </div>
                         <div className="text-xs text-ink-500">
@@ -271,7 +276,7 @@ export function BillingPage() {
                     <div className="font-semibold text-ink-900">{agency.name}</div>
                     <div className="mt-1 flex flex-wrap items-center gap-2">
                       <Badge tone={agency.active ? "success" : "neutral"}>
-                        {agency.active ? "Active" : "Inactive"}
+                        {agency.active ? "Active" : "Deactivated"}
                       </Badge>
                       {hasOverride && <Badge tone="gold">Special price</Badge>}
                     </div>
@@ -520,5 +525,8 @@ function saleTone(status: SoftwareSaleStatus): "neutral" | "info" | "success" | 
 }
 
 function saleMonthlyValue(sale: SoftwareSale): number {
-  return sale.estimatedMonthly || softwareSaleMonthlyTotalForSeats(sale.seats, sale.websiteAppAddOn);
+  return (
+    sale.estimatedMonthly ||
+    softwareSaleMonthlyTotalForSeats(sale.seats, sale.websiteAppAddOn, sale.termMonths, sale.product)
+  );
 }

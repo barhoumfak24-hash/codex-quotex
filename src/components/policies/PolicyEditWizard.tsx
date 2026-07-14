@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { ArrowLeft, ArrowRight, Send, X } from "lucide-react";
 import { Modal } from "@/components/ui/Modal";
 import { api } from "@/lib/api";
+import { isVinInputField, normalizeVinFieldValue } from "@/lib/vinInput";
 import type { Asset, AssetType } from "@/types";
 import {
   ADD_ASSET_QUESTIONNAIRES,
@@ -116,7 +117,11 @@ export function PolicyEditWizard({
   }
 
   function setField(key: string, value: string) {
-    setAnswers((a) => ({ ...a, [key]: value }));
+    const field = questionnaire?.fields.find((item) => item.key === key);
+    setAnswers((a) => ({
+      ...a,
+      [key]: normalizeVinFieldValue({ key, label: field?.label }, value),
+    }));
   }
 
   function missingRequired(): QField[] {
@@ -441,10 +446,12 @@ function FieldInput({
         type={field.type === "date" ? "date" : field.type === "number" || field.type === "currency" ? "number" : "text"}
         className="input"
         value={value}
-        onChange={(e) => onChange(e.target.value)}
+        onChange={(e) => onChange(normalizeVinFieldValue(field, e.target.value))}
         placeholder={field.placeholder}
         inputMode={field.type === "number" || field.type === "currency" ? "decimal" : undefined}
         min={field.type === "currency" || field.type === "number" ? 0 : undefined}
+        autoCapitalize={isVinInputField(field) ? "characters" : undefined}
+        spellCheck={isVinInputField(field) ? false : undefined}
       />
       {helper}
     </div>
