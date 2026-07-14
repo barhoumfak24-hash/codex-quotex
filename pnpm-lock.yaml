@@ -64,6 +64,15 @@ importers:
         specifier: ^3.2.6
         version: 3.2.6(@types/node@25.9.4)(jiti@1.21.7)(jsdom@29.1.1)(tsx@4.22.4)
 
+  packages/quotex-connect:
+    devDependencies:
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+      vite:
+        specifier: 6.4.3
+        version: 6.4.3(@types/node@25.9.4)(jiti@1.21.7)(tsx@4.22.4)
+
   server:
     dependencies:
       '@prisma/client':

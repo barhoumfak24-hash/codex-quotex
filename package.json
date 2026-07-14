@@ -15,6 +15,7 @@
     "build:website": "tsc -b && vite build --mode website --outDir dist-website",
     "build:app": "tsc -b && vite build --mode agency-app --outDir dist-app",
     "build:checkout": "tsc -b && vite build --mode checkout --outDir dist-checkout",
+    "connect:build": "pnpm -C packages/quotex-connect run build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
