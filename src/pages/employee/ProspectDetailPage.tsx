@@ -376,6 +376,8 @@ export function ProspectDetailPage() {
 
         <ContactActivitiesCard
           title="Open activities for this prospect"
+          tenantId={agency.id}
+          prospectId={prospect.id}
           openActivities={openActivities}
           resolvedActivities={resolvedActivities}
           emptyHint="No open activities for this prospect right now."

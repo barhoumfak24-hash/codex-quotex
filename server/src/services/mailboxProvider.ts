@@ -19,6 +19,9 @@ export type MailboxSendInput = {
   subject?: string;
   text?: string;
   html?: string;
+  replyToMessageIdHeader?: string;
+  references?: string[];
+  externalThreadId?: string;
   attachments?: MailboxSendAttachment[];
 };
 
@@ -27,10 +30,18 @@ export type MailboxSendResult = {
   externalMessageId?: string;
   externalThreadId?: string;
   externalUrl?: string;
+  rfc822MessageId?: string;
+  messageIdHeader?: string;
   status: "sent";
 };
 
-type MailboxConnectionRow = {
+export type MailboxSyncCursor = {
+  gmailHistoryId?: string;
+  graphDeltaLink?: string;
+  updatedAt?: string;
+};
+
+export type MailboxConnectionRow = {
   id: string;
   tenant_id: string;
   user_id: string | null;
@@ -44,7 +55,7 @@ type TokenVaultRow = {
   encrypted_payload: Prisma.JsonValue;
 };
 
-type TokenPayload = {
+export type TokenPayload = {
   provider: "google" | "microsoft";
   accessToken: string;
   refreshToken?: string;
@@ -55,6 +66,7 @@ type TokenPayload = {
   externalAccountId?: string;
   email?: string;
   connectedAt?: string;
+  syncCursor?: MailboxSyncCursor;
 };
 
 type ProviderConfig = {
@@ -62,6 +74,12 @@ type ProviderConfig = {
   clientSecret: string;
   tokenEndpoint: string;
   scopes: string[];
+};
+
+type MailboxConnectionLookupInput = {
+  tenantId: string;
+  userId: string;
+  connectionId?: string;
 };
 
 export async function sendMailboxEmail(input: MailboxSendInput): Promise<MailboxSendResult> {
@@ -83,7 +101,36 @@ export async function sendMailboxEmail(input: MailboxSendInput): Promise<Mailbox
   throw new Error(`Unsupported mailbox provider: ${connection.provider}.`);
 }
 
-async function resolveMailboxConnection(input: MailboxSendInput): Promise<MailboxConnectionRow> {
+export async function readFreshMailboxToken(input: MailboxConnectionLookupInput): Promise<{
+  connection: MailboxConnectionRow;
+  token: TokenPayload;
+}> {
+  const connection = await resolveMailboxConnection(input);
+  if (connection.status !== "connected") {
+    throw new Error("Mailbox is not connected. Reconnect the staff mailbox before syncing.");
+  }
+  const token = await readMailboxToken(connection);
+  return { connection, token: await ensureFreshToken(connection, token) };
+}
+
+export async function writeMailboxSyncCursor(
+  connection: MailboxConnectionRow,
+  token: TokenPayload,
+  cursor: MailboxSyncCursor
+): Promise<TokenPayload> {
+  const next: TokenPayload = {
+    ...token,
+    syncCursor: {
+      ...(token.syncCursor ?? {}),
+      ...cursor,
+      updatedAt: new Date().toISOString(),
+    },
+  };
+  await writeMailboxToken(connection, next);
+  return next;
+}
+
+async function resolveMailboxConnection(input: MailboxConnectionLookupInput): Promise<MailboxConnectionRow> {
   const rows = input.connectionId
     ? await prisma.$queryRaw<MailboxConnectionRow[]>`
         SELECT id, tenant_id, user_id, provider, address, status, token_vault_ref
@@ -184,6 +231,16 @@ async function ensureFreshToken(connection: MailboxConnectionRow, token: TokenPa
   return next;
 }
 
+async function writeMailboxToken(connection: MailboxConnectionRow, token: TokenPayload) {
+  await prisma.$executeRaw`
+    UPDATE mailbox_token_vault
+    SET encrypted_payload = ${JSON.stringify(encryptTokenPayload(token))}::jsonb,
+        updated_at = now()
+    WHERE connection_id = ${connection.id}
+      AND tenant_id = ${connection.tenant_id}
+  `;
+}
+
 async function sendGoogleMail(
   connection: MailboxConnectionRow,
   token: TokenPayload,
@@ -197,6 +254,8 @@ async function sendGoogleMail(
     subject: input.subject,
     text: input.text,
     html: input.html,
+    replyToMessageIdHeader: input.replyToMessageIdHeader,
+    references: input.references,
     attachments: input.attachments,
   });
   const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
@@ -205,7 +264,10 @@ async function sendGoogleMail(
       authorization: `Bearer ${token.accessToken}`,
       "content-type": "application/json",
     },
-    body: JSON.stringify({ raw: base64Url(Buffer.from(raw, "utf8")) }),
+    body: JSON.stringify({
+      raw: base64Url(Buffer.from(raw, "utf8")),
+      threadId: input.externalThreadId,
+    }),
   });
   const json = (await safeJson(res)) as { id?: string; threadId?: string; error?: { message?: string } } | null;
   if (!res.ok || !json?.id) {
@@ -214,15 +276,18 @@ async function sendGoogleMail(
     throw new Error(message);
   }
 
+  const sentMetadata = await readGmailMessageMetadata(json.id, connection.address, token.accessToken).catch(() => null);
+  const messageIdHeader = sentMetadata?.messageIdHeader;
+
   await markConnectionSent(connection.id);
   return {
     provider: "google",
     status: "sent",
     externalMessageId: json.id,
     externalThreadId: json.threadId,
-    externalUrl: `https://mail.google.com/mail/u/${encodeURIComponent(connection.address)}/#all/${encodeURIComponent(
-      json.threadId ?? json.id
-    )}`,
+    externalUrl: gmailExactMessageUrl(connection.address, messageIdHeader),
+    rfc822MessageId: messageIdHeader,
+    messageIdHeader,
   };
 }
 
@@ -247,9 +312,18 @@ async function sendMicrosoftMail(
       ccRecipients: (input.cc ?? []).map(graphRecipient),
       bccRecipients: (input.bcc ?? []).map(graphRecipient),
       attachments: (input.attachments ?? []).map(graphAttachment),
+      internetMessageHeaders: graphThreadHeaders(input),
     }),
   });
-  const created = (await safeJson(createRes)) as { id?: string; conversationId?: string; webLink?: string; error?: { message?: string } } | null;
+  const created = (await safeJson(createRes)) as
+    | {
+        id?: string;
+        conversationId?: string;
+        webLink?: string;
+        internetMessageId?: string;
+        error?: { message?: string };
+      }
+    | null;
   if (!createRes.ok || !created?.id) {
     const message = created?.error?.message ?? `Microsoft draft creation failed with ${createRes.status}.`;
     await markConnectionError(connection.id, message);
@@ -273,8 +347,50 @@ async function sendMicrosoftMail(
     status: "sent",
     externalMessageId: created.id,
     externalThreadId: created.conversationId,
-    externalUrl: created.webLink ?? "https://outlook.office.com/mail/sentitems",
+    externalUrl: created.webLink,
+    rfc822MessageId: created.internetMessageId,
+    messageIdHeader: created.internetMessageId,
   };
+}
+
+async function readGmailMessageMetadata(
+  messageId: string,
+  mailboxAccount: string,
+  accessToken: string
+): Promise<{ messageIdHeader?: string; externalUrl?: string }> {
+  const url = new URL(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}`);
+  url.searchParams.set("format", "metadata");
+  url.searchParams.append("metadataHeaders", "Message-ID");
+  const res = await fetch(url.toString(), {
+    headers: { authorization: `Bearer ${accessToken}` },
+  });
+  const json = (await safeJson(res)) as
+    | {
+        payload?: { headers?: { name: string; value: string }[] };
+        error?: { message?: string };
+      }
+    | null;
+  if (!res.ok) throw new Error(json?.error?.message ?? `Gmail metadata lookup failed with ${res.status}.`);
+  const headers = new Map(
+    (json?.payload?.headers ?? []).map((header) => [header.name.toLowerCase(), header.value])
+  );
+  const messageIdHeader = headers.get("message-id");
+  return {
+    messageIdHeader,
+    externalUrl: gmailExactMessageUrl(mailboxAccount, messageIdHeader),
+  };
+}
+
+function gmailExactMessageUrl(mailboxAccount: string, messageIdHeader?: string): string | undefined {
+  const rfc822MessageId = normalizeRfc822MessageId(messageIdHeader);
+  if (!rfc822MessageId) return undefined;
+  return `https://mail.google.com/mail/u/?authuser=${encodeURIComponent(
+    mailboxAccount
+  )}#search/rfc822msgid:${encodeURIComponent(rfc822MessageId)}`;
+}
+
+function normalizeRfc822MessageId(value?: string): string {
+  return (value ?? "").trim().replace(/^<+/, "").replace(/>+$/, "");
 }
 
 function providerConfig(provider: "google" | "microsoft"): ProviderConfig {
@@ -317,6 +433,8 @@ function buildMimeMessage(input: {
   subject?: string;
   text?: string;
   html?: string;
+  replyToMessageIdHeader?: string;
+  references?: string[];
   attachments?: MailboxSendAttachment[];
 }): string {
   const boundary = `quotex_${base64Url(randomBytes(18))}`;
@@ -328,6 +446,8 @@ function buildMimeMessage(input: {
     input.cc?.length ? `Cc: ${input.cc.map(formatAddress).join(", ")}` : "",
     input.bcc?.length ? `Bcc: ${input.bcc.map(formatAddress).join(", ")}` : "",
     `Subject: ${encodeMimeHeader(input.subject || "Message from your agent")}`,
+    input.replyToMessageIdHeader ? `In-Reply-To: ${normalizeMessageId(input.replyToMessageIdHeader)}` : "",
+    input.references?.length ? `References: ${input.references.map(normalizeMessageId).join(" ")}` : "",
     "MIME-Version: 1.0",
   ].filter(Boolean);
 
@@ -386,6 +506,23 @@ function buildMimeMessage(input: {
     `--${boundary}--`,
     "",
   ].join("\r\n");
+}
+
+function graphThreadHeaders(input: MailboxSendInput) {
+  const headers: { name: string; value: string }[] = [];
+  if (input.replyToMessageIdHeader) {
+    headers.push({ name: "In-Reply-To", value: normalizeMessageId(input.replyToMessageIdHeader) });
+  }
+  if (input.references?.length) {
+    headers.push({ name: "References", value: input.references.map(normalizeMessageId).join(" ") });
+  }
+  return headers.length > 0 ? headers : undefined;
+}
+
+function normalizeMessageId(value: string): string {
+  const clean = value.trim();
+  if (!clean) return "";
+  return clean.startsWith("<") && clean.endsWith(">") ? clean : `<${clean.replace(/^<|>$/g, "")}>`;
 }
 
 function graphRecipient(email: string) {

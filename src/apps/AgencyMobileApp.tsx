@@ -3,7 +3,7 @@ import type { MouseEvent } from "react";
 import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { ArrowRight, Building2, LogIn, Sparkles } from "lucide-react";
 import { CustomerLayout } from "@/components/layout/CustomerLayout";
-import { QuotexMark } from "@/components/layout/Logo";
+import { QuotexMark, QuotexWordmark } from "@/components/layout/Logo";
 import { RequireRole } from "@/components/layout/RequireRole";
 import { CustomerLoginPage } from "@/pages/auth/CustomerLoginPage";
 import { CustomerSignupPage } from "@/pages/auth/CustomerSignupPage";
@@ -88,6 +88,7 @@ export function AgencyMobileApp() {
               <Route path={routePath("/login")} element={<CustomerLoginPage />} />
               <Route path={routePath("/signup")} element={<CustomerSignupPage />} />
               <Route path={routePath("/marketing/contact")} element={<MarketingSmartContactPage />} />
+              <Route path={routePath("/customer/questionnaire/:sessionId")} element={<ClientQuestionnairePage />} />
               <Route
                 path={routePath("/quote/start")}
                 element={
@@ -121,7 +122,6 @@ export function AgencyMobileApp() {
                 <Route path={routePath("/customer/claims")} element={<CustomerClaimsPage />} />
                 <Route path={routePath("/customer/settings")} element={<CustomerSettingsPage />} />
                 <Route path={routePath("/customer/quote/new")} element={<QuoteFlowPage />} />
-                <Route path={routePath("/customer/questionnaire/:sessionId")} element={<ClientQuestionnairePage />} />
               </Route>
 
               <Route path={routePath("/services")} element={<Navigate to={appPath("/")} replace />} />
@@ -148,9 +148,9 @@ function QuotexAppHome({ appPath }: { appPath: (path: string) => string }) {
   return (
     <main className="flex min-h-full flex-col px-5 py-5">
       <header className="flex items-center gap-3">
-        <QuotexMark className="h-12 w-12 border border-ink-200 bg-black shadow-sm" letterClassName="text-[30px] text-white" />
+        <QuotexMark size="xl" className="shadow-sm" />
         <div className="min-w-0">
-          <div className="font-display text-2xl leading-none text-ink-950">Quotex</div>
+          <QuotexWordmark className="text-2xl text-ink-950" />
           <div className="mt-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-gold-700">
             Client app
           </div>

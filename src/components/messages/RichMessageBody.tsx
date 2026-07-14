@@ -1,13 +1,15 @@
-import type { ReactNode } from "react";
-import { Check } from "lucide-react";
+import { useMemo, useState, type ReactNode } from "react";
+import { Check, ImageOff, ShieldCheck } from "lucide-react";
 import {
   MarketingPamphletCard,
   type MarketingPamphletRenderData,
   type PamphletThemeId,
 } from "@/components/marketing/MarketingPamphletCard";
 import { electronicSignaturePreviewStyle } from "@/lib/electronicSignature";
+import { sanitizeEmailHtml, stripEmailHtml } from "@/lib/emailHtml";
 import { splitEmailSignatureBody, type EmailSignatureBlock } from "@/lib/emailSignature";
 import { api } from "@/lib/api";
+import type { Communication } from "@/types";
 
 const MARKETING_EMAIL_BODY_MARKER = "[[quotex:marketing-email-body]]";
 const MARKETING_PAMPHLET_MARKER = "[[quotex:marketing-pamphlet]]";
@@ -15,9 +17,40 @@ const MARKETING_PAMPHLET_DATA_PREFIX = "[[quotex:marketing-pamphlet-data:";
 const MARKETING_PAMPHLET_DATA_SUFFIX = "]]";
 const MARKETING_CTA_CLASSNAME = "marketing-cta-link";
 
-export function RichMessageBody({ body, tenantId }: { body: string; tenantId?: string }) {
-  const { message, signature } = splitEmailSignatureBody(body);
-  const marketingSections = parseMarketingCampaignSections(message);
+type RenderableCommunication = Pick<
+  Communication,
+  | "bodyHtml"
+  | "mailboxOrigin"
+  | "direction"
+  | "externalRecipientName"
+  | "externalRecipientEmail"
+  | "mailboxAccount"
+  | "subject"
+  | "to"
+  | "cc"
+  | "bcc"
+  | "createdAt"
+  | "snippet"
+  | "mailboxLabels"
+  | "rawMimeRef"
+  | "messageIdHeader"
+>;
+
+export function RichMessageBody({
+  body,
+  tenantId,
+  message,
+}: {
+  body: string;
+  tenantId?: string;
+  message?: RenderableCommunication;
+}) {
+  if (message?.mailboxOrigin === "provider_sync" && message.bodyHtml?.trim()) {
+    return <ProviderEmailMessage body={body} message={message} />;
+  }
+
+  const { message: textMessage, signature } = splitEmailSignatureBody(body);
+  const marketingSections = parseMarketingCampaignSections(textMessage);
 
   if (marketingSections) {
     return (
@@ -33,8 +66,87 @@ export function RichMessageBody({ body, tenantId }: { body: string; tenantId?: s
 
   return (
     <div className="space-y-2">
-      {message.trim() && <MessageBlocks body={message} />}
+      {textMessage.trim() && <MessageBlocks body={textMessage} />}
       <EmailSignaturePreview signature={signature} />
+    </div>
+  );
+}
+
+function ProviderEmailMessage({
+  body,
+  message,
+}: {
+  body: string;
+  message: RenderableCommunication;
+}) {
+  const [showImages, setShowImages] = useState(false);
+  const srcDoc = useMemo(
+    () => sanitizeEmailHtml(message.bodyHtml ?? "", { allowRemoteImages: showImages }),
+    [message.bodyHtml, showImages]
+  );
+  const fallback = stripEmailHtml(message.bodyHtml ?? body);
+  const from =
+    message.direction === "inbound"
+      ? message.externalRecipientName || message.externalRecipientEmail || "External sender"
+      : message.mailboxAccount || "You";
+  const to = (message.to && message.to.length > 0 ? message.to : message.externalRecipientEmail ? [message.externalRecipientEmail] : []).join(", ");
+  const cc = (message.cc ?? []).join(", ");
+  return (
+    <div className="overflow-hidden rounded-md border border-ink-200 bg-white text-ink-950">
+      <div className="border-b border-ink-100 bg-ink-50/70 px-3 py-2 text-[11px] text-ink-600">
+        <div className="grid gap-1 sm:grid-cols-[4.5rem_1fr]">
+          <span className="font-semibold uppercase tracking-wider text-ink-400">From</span>
+          <span className="min-w-0 break-words">{from}</span>
+          {to && (
+            <>
+              <span className="font-semibold uppercase tracking-wider text-ink-400">To</span>
+              <span className="min-w-0 break-words">{to}</span>
+            </>
+          )}
+          {cc && (
+            <>
+              <span className="font-semibold uppercase tracking-wider text-ink-400">Cc</span>
+              <span className="min-w-0 break-words">{cc}</span>
+            </>
+          )}
+          {message.subject && (
+            <>
+              <span className="font-semibold uppercase tracking-wider text-ink-400">Subject</span>
+              <span className="min-w-0 break-words">{message.subject}</span>
+            </>
+          )}
+        </div>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 font-medium text-emerald-700">
+            <ShieldCheck className="h-3 w-3" />
+            Sandboxed email HTML
+          </span>
+          {(message.mailboxLabels ?? []).slice(0, 4).map((label) => (
+            <span key={label} className="rounded-full bg-white px-2 py-0.5 text-ink-500 ring-1 ring-ink-100">
+              {label}
+            </span>
+          ))}
+          <button
+            type="button"
+            className="ml-auto inline-flex items-center gap-1 rounded border border-ink-200 bg-white px-2 py-1 font-medium text-ink-700 transition hover:border-gold-300 hover:text-ink-950"
+            onClick={() => setShowImages((current) => !current)}
+          >
+            <ImageOff className="h-3 w-3" />
+            {showImages ? "Hide remote images" : "Show remote images"}
+          </button>
+        </div>
+      </div>
+      <iframe
+        title={message.subject ? `Email body: ${message.subject}` : "Email body"}
+        sandbox=""
+        srcDoc={srcDoc}
+        className="block h-[min(560px,60vh)] w-full bg-white"
+      />
+      {!message.bodyHtml?.trim() && fallback && (
+        <div className="border-t border-ink-100 p-3 text-sm">
+          <MessageBlocks body={fallback} />
+        </div>
+      )}
     </div>
   );
 }

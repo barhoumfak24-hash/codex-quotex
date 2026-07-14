@@ -111,6 +111,47 @@ export function NewContactModal({
     return kind === "prospect" ? "prospect" : "client";
   }
 
+  function extractionStatusTitle(out: AiExtractedContact) {
+    switch (out.outcome) {
+      case "created_ready":
+        return "Ready to create";
+      case "duplicate_found":
+        return "Possible duplicate found";
+      case "low_quality_retake":
+        return "Upload needs a clearer copy";
+      case "password_required":
+        return "Password-protected file";
+      case "unsupported":
+        return "Unsupported file";
+      case "no_client_found":
+        return "No client fields found";
+      case "error":
+        return "Extraction needs review";
+      case "needs_confirm":
+      default:
+        return "Confirm extracted details";
+    }
+  }
+
+  function extractionBannerClass(out: AiExtractedContact) {
+    if (out.outcome === "created_ready") {
+      return "border-emerald-200 bg-emerald-50 text-emerald-900";
+    }
+    if (
+      out.outcome === "no_client_found" ||
+      out.outcome === "low_quality_retake" ||
+      out.outcome === "password_required" ||
+      out.outcome === "unsupported"
+    ) {
+      return "border-amber-200 bg-amber-50 text-amber-900";
+    }
+    return "border-sky-200 bg-sky-50 text-sky-900";
+  }
+
+  function evidenceFor(fieldKey: string) {
+    return extracted?.fieldEvidence?.[fieldKey];
+  }
+
   function hasUsableEmail(value: string): boolean {
     const email = value.trim();
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && !/@example\./i.test(email);
@@ -129,30 +170,40 @@ export function NewContactModal({
   function extractionIsReliable(out: AiExtractedContact, draft: FormState): boolean {
     const confidence = Number.isFinite(out.confidence) ? out.confidence : 0;
     const sources = out.sources.join(" ").toLowerCase();
+    const evidence = out.fieldEvidence ?? {};
     const hasDocumentSignal =
       out.sources.length > 0 &&
       !sources.includes("no readable contact fields") &&
       !sources.includes("no fields were confidently extracted") &&
       !sources.includes("no fabricated filename data");
     return (
-      confidence >= 0.55 &&
+      out.autoCreateEligible === true &&
+      out.requiredFieldsPresent === true &&
+      (out.peopleDetected ?? 1) <= 1 &&
+      confidence >= 0.94 &&
       hasDocumentSignal &&
       hasUsableName(draft.name) &&
-      hasUsableEmail(draft.email)
+      hasUsableEmail(draft.email) &&
+      evidence.name?.verified === true &&
+      evidence.email?.verified === true &&
+      (evidence.name?.confidence ?? 0) >= 0.92 &&
+      (evidence.email?.confidence ?? 0) >= 0.92
     );
   }
 
   function formFromExtraction(out: AiExtractedContact): { next: FormState; filled: Set<string> } {
     const next: FormState = { ...EMPTY };
     const filled = new Set<string>();
-    if (out.lineOfBusiness === "commercial" || out.businessName) {
+    const evidence = out.fieldEvidence ?? {};
+    const canUse = (field: string) => !out.fieldEvidence || evidence[field]?.verified === true;
+    if (canUse("lineOfBusiness") && (out.lineOfBusiness === "commercial" || out.businessName)) {
       next.lineOfBusiness = "commercial";
       filled.add("lineOfBusiness");
-    } else if (out.lineOfBusiness === "personal") {
+    } else if (canUse("lineOfBusiness") && out.lineOfBusiness === "personal") {
       next.lineOfBusiness = "personal";
       filled.add("lineOfBusiness");
     }
-    if (out.businessName) {
+    if (out.businessName && canUse("businessName")) {
       next.businessName = out.businessName;
       filled.add("businessName");
       if (!out.name) {
@@ -160,35 +211,66 @@ export function NewContactModal({
         filled.add("name");
       }
     }
-    if (out.name) {
+    if (out.name && canUse("name")) {
       next.name = out.name;
       filled.add("name");
     }
-    if (out.email) {
+    if (out.email && canUse("email")) {
       next.email = out.email;
       filled.add("email");
     }
-    if (out.phone) {
+    if (out.phone && canUse("phone")) {
       next.phone = out.phone;
       filled.add("phone");
     }
-    if (out.address) {
+    if (out.address && canUse("address")) {
       next.mailingAddress = out.address;
       filled.add("mailingAddress");
     }
-    if (out.assetType) {
+    if (out.assetType && canUse("assetType")) {
       next.assetType = out.assetType;
       filled.add("assetType");
     }
-    if (out.estimatedValue) {
+    if (out.estimatedValue && canUse("estimatedValue")) {
       next.estimatedValue = out.estimatedValue;
       filled.add("estimatedValue");
     }
-    if (out.notes) {
+    if (out.notes && canUse("notes")) {
       next.notes = out.notes;
       filled.add("notes");
     }
     return { next, filled };
+  }
+
+  function findDuplicateContact(draft: FormState): string | null {
+    const email = draft.email.trim().toLowerCase();
+    const phone = draft.phone.replace(/\D/g, "");
+    const name = draft.name.trim().toLowerCase();
+    const tenantCustomers = api.customers.list(agency!.id, { includeArchived: true });
+    const tenantProspects = api.prospects.listByTenant(agency!.id, {
+      includeArchived: true,
+      includeConverted: true,
+    });
+    const userMatch = email ? api.users.byEmail(email) : undefined;
+    if (userMatch && userMatch.tenantId === agency!.id) return `Duplicate user: ${userMatch.name}`;
+    const customerMatch = tenantCustomers.find((contact) => {
+      const contactPhone = (contact.phone ?? "").replace(/\D/g, "");
+      return (
+        (email && contact.email.toLowerCase() === email) ||
+        (phone.length >= 10 && contactPhone.endsWith(phone.slice(-10))) ||
+        (name && contact.name.toLowerCase() === name)
+      );
+    });
+    if (customerMatch) return `Duplicate client: ${customerMatch.name}`;
+    const prospectMatch = tenantProspects.find((contact) => {
+      const contactPhone = (contact.phone ?? "").replace(/\D/g, "");
+      return (
+        (email && contact.email.toLowerCase() === email) ||
+        (phone.length >= 10 && contactPhone.endsWith(phone.slice(-10))) ||
+        (name && contact.name.toLowerCase() === name)
+      );
+    });
+    return prospectMatch ? `Duplicate prospect: ${prospectMatch.name}` : null;
   }
 
   function autoCreateFromExtraction(
@@ -216,6 +298,11 @@ export function NewContactModal({
       setError(
         "AI could not create this commercial-lines client because the file did not contain a verifiable business name."
       );
+      return false;
+    }
+    const duplicate = findDuplicateContact(draft);
+    if (duplicate) {
+      setError(`${duplicate}. Review the prefilled record instead of creating a duplicate.`);
       return false;
     }
 
@@ -334,6 +421,11 @@ export function NewContactModal({
       if (autoCreateFromExtraction(next, extractedContact, filled, file.name)) {
         resetAll();
         onClose();
+      } else {
+        setExtracted(extractedContact);
+        setForm(next);
+        setEnriched(filled);
+        setMode("manual");
       }
     } catch (err) {
       setError(
@@ -352,6 +444,11 @@ export function NewContactModal({
     if (!form.email.trim()) { setError("Email is required."); return; }
     if (kind === "client" && form.lineOfBusiness === "commercial" && !form.businessName.trim()) {
       setError("Business name is required for commercial-lines clients.");
+      return;
+    }
+    const duplicate = findDuplicateContact(form);
+    if (duplicate) {
+      setError(`${duplicate}. Open the existing record instead of creating a duplicate.`);
       return;
     }
 
@@ -557,8 +654,9 @@ export function NewContactModal({
           {(mode === "manual" || extracted) && (
             <>
               {extracted && (
-                <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+                <div className={`rounded-md border p-3 text-sm ${extractionBannerClass(extracted)}`}>
                   <CheckCircle2 className="inline h-4 w-4 mr-1" />
+                  <strong>{extractionStatusTitle(extracted)}</strong>
                   Extracted from <strong>{aiFileName}</strong>. Confirm or edit anything that looks
                   off — fields filled by the AI are marked.
                 </div>
@@ -571,6 +669,7 @@ export function NewContactModal({
                       <FieldRow
                         label={kind === "client" ? "Client line *" : "Prospect line *"}
                         ai={enriched.has("lineOfBusiness")}
+                        evidence={evidenceFor("lineOfBusiness")}
                       >
                         <div className="flex flex-wrap gap-2">
                           {(["personal", "commercial"] as const).map((line) => {
@@ -595,7 +694,11 @@ export function NewContactModal({
                     </div>
                     {kind === "client" && form.lineOfBusiness === "commercial" && (
                       <div className="sm:col-span-2">
-                        <FieldRow label="Business name *" ai={enriched.has("businessName")}>
+                        <FieldRow
+                          label="Business name *"
+                          ai={enriched.has("businessName")}
+                          evidence={evidenceFor("businessName")}
+                        >
                           <input
                             className="input"
                             required
@@ -608,22 +711,22 @@ export function NewContactModal({
                     )}
                   </>
                 )}
-                <FieldRow label="Full name *" ai={enriched.has("name")}>
+                <FieldRow label="Full name *" ai={enriched.has("name")} evidence={evidenceFor("name")}>
                   <input className="input" required value={form.name} onChange={(e) => set("name", e.target.value)} />
                 </FieldRow>
-                <FieldRow label="Email *" ai={enriched.has("email")}>
+                <FieldRow label="Email *" ai={enriched.has("email")} evidence={evidenceFor("email")}>
                   <input className="input" type="email" required value={form.email} onChange={(e) => set("email", e.target.value)} />
                 </FieldRow>
-                <FieldRow label="Phone" ai={enriched.has("phone")}>
+                <FieldRow label="Phone" ai={enriched.has("phone")} evidence={evidenceFor("phone")}>
                   <input className="input" value={form.phone} onChange={(e) => set("phone", e.target.value)} />
                 </FieldRow>
-                <FieldRow label="Mailing address" ai={enriched.has("mailingAddress")}>
+                <FieldRow label="Mailing address" ai={enriched.has("mailingAddress")} evidence={evidenceFor("address")}>
                   <AddressAutocomplete
                     value={form.mailingAddress}
                     onChange={(v) => set("mailingAddress", v)}
                   />
                 </FieldRow>
-                <FieldRow label="Interested in" ai={enriched.has("assetType")}>
+                <FieldRow label="Interested in" ai={enriched.has("assetType")} evidence={evidenceFor("assetType")}>
                   <select
                     className="input"
                     value={form.assetType}
@@ -636,7 +739,11 @@ export function NewContactModal({
                     ))}
                   </select>
                 </FieldRow>
-                <FieldRow label="Estimated asset value (USD)" ai={enriched.has("estimatedValue")}>
+                <FieldRow
+                  label="Estimated asset value (USD)"
+                  ai={enriched.has("estimatedValue")}
+                  evidence={evidenceFor("estimatedValue")}
+                >
                   <input
                     className="input"
                     type="number"
@@ -648,7 +755,7 @@ export function NewContactModal({
                   />
                 </FieldRow>
                 <div className="sm:col-span-2">
-                  <FieldRow label="Notes" ai={enriched.has("notes")}>
+                  <FieldRow label="Notes" ai={enriched.has("notes")} evidence={evidenceFor("notes")}>
                     <textarea
                       className="input min-h-[60px]"
                       value={form.notes}
@@ -742,12 +849,15 @@ export function NewContactModal({
 function FieldRow({
   label,
   ai,
+  evidence,
   children,
 }: {
   label: string;
   ai?: boolean;
+  evidence?: NonNullable<AiExtractedContact["fieldEvidence"]>[string];
   children: React.ReactNode;
 }) {
+  const confidence = evidence ? Math.round(evidence.confidence * 100) : null;
   return (
     <div>
       <div className="flex items-center gap-1.5 mb-1">
@@ -762,6 +872,17 @@ function FieldRow({
         )}
       </div>
       {children}
+      {ai && evidence && (
+        <details className="mt-1 rounded-md border border-gold-100 bg-gold-50/60 px-2 py-1 text-[11px] text-ink-600">
+          <summary className="cursor-pointer font-semibold text-gold-800">
+            {evidence.sourceKind.replace(/_/g, " ")}{confidence !== null ? ` - ${confidence}%` : ""}
+          </summary>
+          <div className="mt-1 leading-relaxed">{evidence.evidence}</div>
+        </details>
+      )}
+      {ai && !evidence && (
+        <div className="mt-1 text-[11px] text-ink-500">AI-filled value. Source evidence unavailable.</div>
+      )}
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { createHmac, pbkdf2Sync, randomBytes, randomInt, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import { Router } from "express";
+import { Router, type Response } from "express";
 import jwt from "jsonwebtoken";
 import { z } from "zod";
 import { requireAuth } from "../middleware/auth.js";
@@ -28,6 +28,7 @@ type ManagerStepUpChallenge = {
 
 const managerChallenges = new Map<string, ManagerStepUpChallenge>();
 let managerStepUpTableReady: Promise<void> | null = null;
+const PLATFORM_TENANT_ID = "agency_quotex_platform";
 
 type ManagerStepUpChallengeRow = {
   id: string;
@@ -43,18 +44,30 @@ type ManagerStepUpChallengeRow = {
 };
 
 const endpoints = [
+  { method: "POST", path: "/login", description: "Canonical customer, staff, and master login" },
+  { method: "GET", path: "/session", description: "Return current canonical session user" },
   { method: "POST", path: "/google/callback", description: "Exchange Google id_token -> session" },
   { method: "POST", path: "/email/send-link", description: "Send magic link to customer email" },
   { method: "POST", path: "/email/verify", description: "Verify magic link token, create session" },
   { method: "POST", path: "/employee/login", description: "Agency user login (email+password+MFA)" },
   { method: "POST", path: "/employee/register", description: "Create a hashed agency staff account" },
   { method: "POST", path: "/employee/promote-local", description: "Migrate a verified legacy staff account into hashed server auth" },
-  { method: "POST", path: "/master/login", description: "Master admin login (SSO + hardware MFA required)" },
+  { method: "POST", path: "/master/login", description: "Master admin login with a server-issued platform session" },
+  { method: "POST", path: "/master/create", description: "Create the one allowed master admin account" },
+  { method: "POST", path: "/master/promote-local", description: "Migrate a verified legacy master account into hashed server auth" },
   { method: "POST", path: "/manager-2fa/request", description: "Email a manager step-up verification code" },
   { method: "POST", path: "/manager-2fa/verify", description: "Verify a manager step-up code" },
   { method: "POST", path: "/logout", description: "Invalidate session" },
   { method: "GET", path: "/me", description: "Return current session user" },
 ];
+
+authRoutes.use((_req, res, next) => {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.setHeader("Surrogate-Control", "no-store");
+  next();
+});
 
 const requestManagerStepUpSchema = z.object({
   email: z.string().email().max(254).optional(),
@@ -74,10 +87,45 @@ const employeeLoginSchema = z.object({
   password: z.string().min(1).max(500),
 });
 
+const canonicalLoginSchema = z.object({
+  scope: z.enum(["customer", "staff", "master"]),
+  identifier: z.string().min(3).max(254),
+  password: z.string().min(1).max(500),
+  tenantId: z.string().min(1).max(120).optional().nullable(),
+});
+
+const masterLoginSchema = z.object({
+  email: z.string().email().max(254),
+  password: z.string().min(1).max(500),
+});
+
+const masterCreateSchema = z.object({
+  name: z.string().min(1).max(240),
+  email: z.string().email().max(254),
+  password: z.string().min(12).max(500),
+});
+
+const masterLocalPromotionSchema = z.object({
+  password: z.string().min(12).max(500),
+  user: z.object({
+    id: z.string().min(1).max(120).optional(),
+    role: z.literal("master_admin"),
+    email: z.string().email().max(254),
+    name: z.string().min(1).max(240),
+    active: z.boolean().optional(),
+    staffAccessStatus: z.enum(["active", "banned", "deleted", "inactive"]).optional(),
+  }),
+});
+
+const optionalSnapshotEmailSchema = z.preprocess(
+  (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+  z.string().email().max(254).optional()
+);
+
 const staffAgencySnapshotSchema = z.object({
   id: z.string().min(1).max(120),
   name: z.string().min(1).max(240),
-  contactEmail: z.string().email().max(254).optional(),
+  contactEmail: optionalSnapshotEmailSchema,
   phone: z.string().max(80).optional(),
   address: z.string().max(500).optional(),
   website: z.string().max(500).optional(),
@@ -137,6 +185,152 @@ const employeeLocalPromotionSchema = z.object({
 
 authRoutes.get("/", (_req, res) => res.json({ resource: "auth", endpoints }));
 
+authRoutes.post("/login", async (req, res) => {
+  if (!databaseConfigured()) {
+    return authFailure(res, 503, "server_unreachable", "Server authentication is not connected to the production database.");
+  }
+  const parsed = canonicalLoginSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    return authFailure(res, 400, "invalid_credentials", "Login request is incomplete.");
+  }
+
+  const identifier = parsed.data.identifier.trim().toLowerCase();
+  const password = parsed.data.password;
+  if (parsed.data.scope === "master") {
+    const result = await authenticateMasterForLogin(identifier, password);
+    if (!result.ok) return authFailure(res, result.status, result.reason);
+    return sendCanonicalSession(res, result.user);
+  }
+  if (parsed.data.scope === "staff") {
+    const result = await authenticateStaffForLogin(identifier, password);
+    if (!result.ok) return authFailure(res, result.status, result.reason);
+    return sendCanonicalSession(res, result.user);
+  }
+
+  const result = await authenticateCustomerForLogin(identifier, password, parsed.data.tenantId);
+  if (!result.ok) return authFailure(res, result.status, result.reason);
+  return sendCanonicalSession(res, result.user);
+});
+
+authRoutes.post("/master/login", async (req, res) => {
+  if (!databaseConfigured()) {
+    return res.status(503).json({
+      ok: false,
+      error: "database_unavailable",
+      message: "Server authentication is not connected to the production database.",
+    });
+  }
+  const parsed = masterLoginSchema.safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+
+  const email = parsed.data.email.trim().toLowerCase();
+  const user = await prisma.user.findFirst({
+    where: { role: "master_admin", email: { equals: email, mode: "insensitive" } },
+  });
+  if (!user || blockedStaffStatus(user.status)) {
+    return res.status(401).json({ ok: false, error: "invalid_credentials" });
+  }
+  if (!user.passwordHash || !verifyPasswordHashForLogin(parsed.data.password, user.passwordHash)) {
+    return res.status(401).json({ ok: false, error: "invalid_credentials" });
+  }
+
+  await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } }).catch(() => null);
+  return sendMasterSession(res, user);
+});
+
+authRoutes.post("/master/create", async (req, res) => {
+  if (!databaseConfigured()) {
+    return res.status(503).json({
+      ok: false,
+      error: "database_unavailable",
+      message: "Server authentication is not connected to the production database.",
+    });
+  }
+  const parsed = masterCreateSchema.safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+
+  const email = parsed.data.email.trim().toLowerCase();
+  const existing = await prisma.user.findFirst({ where: { role: "master_admin" } });
+  if (existing) {
+    if (existing.email.toLowerCase() !== email || blockedStaffStatus(existing.status)) {
+      return res.status(409).json({ ok: false, error: "master_account_exists" });
+    }
+    if (existing.passwordHash && verifyPasswordHashForLogin(parsed.data.password, existing.passwordHash)) {
+      await prisma.user.update({ where: { id: existing.id }, data: { lastLoginAt: new Date() } }).catch(() => null);
+      return sendMasterSession(res, existing);
+    }
+    if (!existing.passwordHash) {
+      const repaired = await prisma.user.update({
+        where: { id: existing.id },
+        data: {
+          name: parsed.data.name.trim(),
+          email,
+          status: "active",
+          passwordHash: hashPasswordForStorage(parsed.data.password),
+          passwordChangedAt: new Date(),
+          profile: { profileCompleted: true, platformOwner: true, masterPasswordInitializedAt: new Date().toISOString() },
+          lastLoginAt: new Date(),
+        },
+      });
+      return sendMasterSession(res, repaired);
+    }
+    return res.status(409).json({ ok: false, error: "master_account_exists" });
+  }
+
+  const platformTenant = await ensurePlatformTenant();
+  const user = await prisma.user.create({
+    data: {
+      id: `user_${randomUUID()}`,
+      tenantId: platformTenant.id,
+      name: parsed.data.name.trim(),
+      email,
+      phone: null,
+      role: "master_admin",
+      status: "active",
+      passwordHash: hashPasswordForStorage(parsed.data.password),
+      passwordChangedAt: new Date(),
+      profile: { profileCompleted: true, platformOwner: true },
+      permissions: {},
+      lastLoginAt: new Date(),
+    },
+  });
+
+  return sendMasterSession(res, user);
+});
+
+authRoutes.post("/master/promote-local", async (req, res) => {
+  if (!databaseConfigured()) {
+    return res.status(503).json({
+      ok: false,
+      error: "database_unavailable",
+      message: "Server authentication is not connected to the production database.",
+    });
+  }
+  const parsed = masterLocalPromotionSchema.safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+  if (
+    parsed.data.user.active === false ||
+    parsed.data.user.staffAccessStatus === "banned" ||
+    parsed.data.user.staffAccessStatus === "deleted" ||
+    parsed.data.user.staffAccessStatus === "inactive"
+  ) {
+    return res.status(401).json({ ok: false, error: "invalid_credentials" });
+  }
+
+  const user = await promoteMasterAccount({
+    email: parsed.data.user.email,
+    password: parsed.data.password,
+    name: parsed.data.user.name,
+    localUserId: parsed.data.user.id,
+  });
+  if (!user || blockedStaffStatus(user.status)) {
+    return res.status(401).json({ ok: false, error: "invalid_credentials" });
+  }
+
+  await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } }).catch(() => null);
+  return sendMasterSession(res, user);
+});
+
 authRoutes.post("/employee/login", async (req, res) => {
   if (!databaseConfigured()) {
     return res.status(503).json({
@@ -156,14 +350,50 @@ authRoutes.post("/employee/login", async (req, res) => {
     },
     include: { agency: true },
   });
-  if (user && blockedStaffStatus(user.status)) {
+  if (user && (user.status === "banned" || user.status === "deleted")) {
     return res.status(401).json({ ok: false, error: "invalid_credentials" });
+  }
+  if (user?.status === "inactive") {
+    if (user.agency?.active && user.passwordHash && verifyPasswordHashForLogin(parsed.data.password, user.passwordHash)) {
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: { status: "active" },
+        include: { agency: true },
+      });
+    } else {
+      const repairedUser = await promoteSnapshotStaffForLogin(identifier, parsed.data.password, user.tenantId);
+      if (
+        !repairedUser ||
+        blockedStaffStatus(repairedUser.status) ||
+        !repairedUser.agency?.active ||
+        !repairedUser.passwordHash ||
+        !verifyPasswordHashForLogin(parsed.data.password, repairedUser.passwordHash)
+      ) {
+        return res.status(401).json({ ok: false, error: "invalid_credentials" });
+      }
+      user = repairedUser;
+    }
   }
   if (!user || !user.passwordHash) {
     user = await promoteSnapshotStaffForLogin(identifier, parsed.data.password);
   }
   if (!user || user.status === "banned" || user.status === "deleted" || user.status === "inactive") {
     return res.status(401).json({ ok: false, error: "invalid_credentials" });
+  }
+  if (!user.agency?.active) {
+    const repairedUser = await promoteSnapshotStaffForLogin(identifier, parsed.data.password, user.tenantId);
+    if (
+      repairedUser &&
+      !blockedStaffStatus(repairedUser.status) &&
+      repairedUser.agency?.active &&
+      repairedUser.passwordHash &&
+      verifyPasswordHashForLogin(parsed.data.password, repairedUser.passwordHash)
+    ) {
+      user = repairedUser;
+    }
+  }
+  if (!user.agency?.active) {
+    return res.status(403).json({ ok: false, error: "inactive_agency" });
   }
   if (!user.passwordHash) {
     return res.status(403).json({
@@ -412,6 +642,76 @@ authRoutes.post("/manager-2fa/verify", requireAuth, async (req, res) => {
   });
 });
 
+authRoutes.get("/me", requireAuth, async (req, res) => {
+  if (!req.auth) return res.status(401).json({ ok: false, error: "unauthorized" });
+  if (!databaseConfigured()) {
+    return res.status(503).json({
+      ok: false,
+      error: "database_unavailable",
+      message: "Server authentication is not connected to the production database.",
+    });
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: req.auth.userId },
+    include: { agency: true },
+  });
+  if (!user || blockedStaffStatus(user.status)) {
+    return res.status(401).json({ ok: false, error: "invalid_session" });
+  }
+  if (user.role !== "master_admin" && !user.agency?.active) {
+    return res.status(403).json({ ok: false, error: "inactive_agency" });
+  }
+
+  res.json({
+    ok: true,
+    user: {
+      id: user.id,
+      tenantId: user.role === "master_admin" ? null : user.tenantId,
+      branchId: user.branchId,
+      role: user.role,
+      email: user.email,
+      name: user.name,
+      agency: user.role === "master_admin" ? undefined : sessionAgencyPayload(user.agency),
+    },
+  });
+});
+
+authRoutes.get("/session", requireAuth, async (req, res) => {
+  if (!req.auth) return authFailure(res, 401, "invalid_credentials");
+  if (!databaseConfigured()) {
+    return authFailure(res, 503, "server_unreachable", "Server authentication is not connected to the production database.");
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: req.auth.userId },
+    include: { agency: true },
+  });
+  if (!user || blockedStaffStatus(user.status)) {
+    return authFailure(res, 401, "invalid_credentials");
+  }
+  if (user.role !== "master_admin" && !user.agency?.active) {
+    return authFailure(res, 403, "agency_inactive");
+  }
+
+  return res.json({
+    ok: true,
+    user: {
+      id: user.id,
+      tenantId: user.role === "master_admin" ? null : user.tenantId,
+      branchId: user.branchId,
+      role: user.role,
+      email: user.email,
+      name: user.name,
+      agency: user.role === "master_admin" ? undefined : sessionAgencyPayload(user.agency),
+    },
+  });
+});
+
+authRoutes.post("/logout", (_req, res) => {
+  res.json({ ok: true });
+});
+
 for (const endpoint of endpoints) {
   if (endpoint.path === "/" || endpoint.path.startsWith("/manager-2fa/")) continue;
   const method = endpoint.method.toLowerCase() as "get" | "post" | "put" | "patch" | "delete";
@@ -432,9 +732,347 @@ type StaffInputErrorCode = "missing_fields" | "invalid_email" | "weak_password";
 type StaffAccountResult =
   | { ok: true; user: Awaited<ReturnType<typeof prisma.user.findFirst>> & { agency: NonNullable<Awaited<ReturnType<typeof prisma.agency.findFirst>>> } }
   | { ok: false; error: "agency_not_found" | "inactive_agency" | "duplicate_email" | "slot_limit" | "weak_password" | "missing_fields" | "invalid_credentials" };
+type MasterSessionUser = {
+  id: string;
+  tenantId: string;
+  branchId: string | null;
+  role: string;
+  status: string;
+  passwordHash: string | null;
+  email: string;
+  name: string;
+  permissions: unknown;
+};
+type SessionAgency = {
+  id: string;
+  name: string;
+  contactEmail: string;
+  phone: string | null;
+  address: string | null;
+  website: string | null;
+  websiteSlug: string | null;
+  websiteEnabled: boolean;
+  serviceAreas: unknown;
+  agencyCodePreview: string | null;
+  tier: string;
+  active: boolean;
+  allowedUsers: number;
+  allowedProspectsPerMonth: number;
+  allowedAiMessagesPerMonth: number;
+  allowedCarriers: number;
+  createdAt: Date;
+};
 
 const SNAPSHOT_STAFF_ROLES = new Set(["agent", "manager", "csr"]);
 const ACTIVE_STAFF_ROLES = ["agent", "manager", "csr", "agency_owner", "agency_admin"] as const;
+
+type AuthFailReason =
+  | "invalid_credentials"
+  | "account_not_found"
+  | "account_disabled"
+  | "agency_inactive"
+  | "password_not_set"
+  | "rate_limited"
+  | "server_unreachable"
+  | "wrong_portal";
+
+type CanonicalSessionUser = {
+  id: string;
+  tenantId: string;
+  branchId: string | null;
+  role: string;
+  status: string;
+  passwordHash: string | null;
+  email: string;
+  name: string;
+  permissions: unknown;
+  agency?: SessionAgency | null;
+};
+
+type LoginOutcome =
+  | { ok: true; user: CanonicalSessionUser }
+  | { ok: false; status: number; reason: AuthFailReason };
+
+function authFailure(res: Response, status: number, reason: AuthFailReason, message?: string) {
+  return res.status(status).json({
+    ok: false,
+    reason,
+    error: reason,
+    ...(message ? { message } : {}),
+  });
+}
+
+function sendCanonicalSession(res: Response, user: CanonicalSessionUser) {
+  const isMaster = user.role === "master_admin";
+  const token = issueSessionJwt({
+    userId: user.id,
+    role: user.role,
+    tenantId: isMaster ? null : user.tenantId,
+    branchId: user.branchId,
+    permissions: permissionsFromJson(user.permissions),
+  });
+
+  return res.json({
+    ok: true,
+    token,
+    expiresIn: SESSION_TTL,
+    user: {
+      id: user.id,
+      tenantId: isMaster ? null : user.tenantId,
+      branchId: user.branchId,
+      role: user.role,
+      email: user.email,
+      name: user.name,
+      agency: isMaster ? undefined : sessionAgencyPayload(user.agency),
+    },
+  });
+}
+
+async function authenticateMasterForLogin(email: string, password: string): Promise<LoginOutcome> {
+  const user = await prisma.user.findFirst({
+    where: { role: "master_admin", email: { equals: email, mode: "insensitive" } },
+  });
+  if (!user) {
+    const otherPortal = await prisma.user.findFirst({ where: { email: { equals: email, mode: "insensitive" } } });
+    return { ok: false, status: otherPortal ? 403 : 401, reason: otherPortal ? "wrong_portal" : "invalid_credentials" };
+  }
+  if (blockedStaffStatus(user.status)) return { ok: false, status: 403, reason: "account_disabled" };
+  if (!user.passwordHash) return { ok: false, status: 409, reason: "password_not_set" };
+  if (!verifyPasswordHashForLogin(password, user.passwordHash)) {
+    return { ok: false, status: 401, reason: "invalid_credentials" };
+  }
+  const updated = await prisma.user.update({
+    where: { id: user.id },
+    data: { lastLoginAt: new Date() },
+  }).catch(() => user);
+  return { ok: true, user: { ...updated, agency: null } };
+}
+
+async function authenticateStaffForLogin(identifier: string, password: string): Promise<LoginOutcome> {
+  let user = await prisma.user.findFirst({
+    where: {
+      role: { in: [...SNAPSHOT_STAFF_ROLES] },
+      email: { equals: identifier, mode: "insensitive" },
+    },
+    include: { agency: true },
+  });
+  if (!user) {
+    const otherPortal = await prisma.user.findFirst({ where: { email: { equals: identifier, mode: "insensitive" } } });
+    if (otherPortal) return { ok: false, status: 403, reason: "wrong_portal" };
+    const promoted = await promoteSnapshotStaffForLogin(identifier, password);
+    if (!promoted) return { ok: false, status: 401, reason: "invalid_credentials" };
+    user = promoted;
+  }
+
+  if (user.status === "banned" || user.status === "deleted") {
+    return { ok: false, status: 403, reason: "account_disabled" };
+  }
+  if (user.status === "inactive") {
+    if (user.agency?.active && user.passwordHash && verifyPasswordHashForLogin(password, user.passwordHash)) {
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: { status: "active" },
+        include: { agency: true },
+      });
+    } else {
+      const repaired = await promoteSnapshotStaffForLogin(identifier, password, user.tenantId);
+      if (!repaired || blockedStaffStatus(repaired.status) || !repaired.agency?.active) {
+        return { ok: false, status: 403, reason: "account_disabled" };
+      }
+      user = repaired;
+    }
+  }
+
+  if (!user.passwordHash) {
+    const promoted = await promoteSnapshotStaffForLogin(identifier, password, user.tenantId);
+    if (promoted) user = promoted;
+  }
+  if (!user.agency?.active) return { ok: false, status: 403, reason: "agency_inactive" };
+  if (!user.passwordHash) return { ok: false, status: 409, reason: "password_not_set" };
+  if (!verifyPasswordHashForLogin(password, user.passwordHash)) {
+    const promoted = await promoteSnapshotStaffForLogin(identifier, password, user.tenantId);
+    if (
+      !promoted ||
+      blockedStaffStatus(promoted.status) ||
+      !promoted.agency?.active ||
+      !promoted.passwordHash ||
+      !verifyPasswordHashForLogin(password, promoted.passwordHash)
+    ) {
+      return { ok: false, status: 401, reason: "invalid_credentials" };
+    }
+    user = promoted;
+  }
+
+  const updated = await prisma.user.update({
+    where: { id: user.id },
+    data: { lastLoginAt: new Date() },
+    include: { agency: true },
+  }).catch(() => user);
+  return { ok: true, user: updated };
+}
+
+async function authenticateCustomerForLogin(email: string, password: string, tenantId?: string | null): Promise<LoginOutcome> {
+  const where = {
+    role: "customer",
+    email: { equals: email, mode: "insensitive" as const },
+    ...(tenantId ? { tenantId } : {}),
+  };
+  let user = await prisma.user.findFirst({ where, include: { agency: true } });
+  if (!user) {
+    const otherPortal = await prisma.user.findFirst({
+      where: {
+        email: { equals: email, mode: "insensitive" },
+        ...(tenantId ? { tenantId } : {}),
+      },
+    });
+    if (otherPortal) return { ok: false, status: 403, reason: "wrong_portal" };
+    const promoted = await promoteSnapshotCustomerForLogin(email, password, tenantId);
+    if (!promoted) return { ok: false, status: 401, reason: "invalid_credentials" };
+    user = promoted;
+  }
+
+  if (blockedStaffStatus(user.status)) return { ok: false, status: 403, reason: "account_disabled" };
+  if (!user.agency?.active) return { ok: false, status: 403, reason: "agency_inactive" };
+  if (!user.passwordHash) {
+    const promoted = await promoteSnapshotCustomerForLogin(email, password, tenantId ?? user.tenantId);
+    if (promoted) user = promoted;
+  }
+  if (!user.passwordHash) return { ok: false, status: 409, reason: "password_not_set" };
+  if (!verifyPasswordHashForLogin(password, user.passwordHash)) {
+    const promoted = await promoteSnapshotCustomerForLogin(email, password, tenantId ?? user.tenantId);
+    if (!promoted || !promoted.passwordHash || !verifyPasswordHashForLogin(password, promoted.passwordHash)) {
+      return { ok: false, status: 401, reason: "invalid_credentials" };
+    }
+    user = promoted;
+  }
+
+  const updated = await prisma.user.update({
+    where: { id: user.id },
+    data: { lastLoginAt: new Date() },
+    include: { agency: true },
+  }).catch(() => user);
+  return { ok: true, user: updated };
+}
+
+function sendMasterSession(res: Response, user: MasterSessionUser) {
+  const token = issueSessionJwt({
+    userId: user.id,
+    role: "master_admin",
+    tenantId: null,
+    branchId: null,
+    permissions: permissionsFromJson(user.permissions),
+  });
+
+  return res.json({
+    ok: true,
+    token,
+    expiresIn: SESSION_TTL,
+    user: {
+      id: user.id,
+      tenantId: null,
+      branchId: null,
+      role: "master_admin",
+      email: user.email,
+      name: user.name,
+    },
+  });
+}
+
+function sessionAgencyPayload(agency: SessionAgency | null | undefined) {
+  if (!agency) return undefined;
+  return {
+    id: agency.id,
+    name: agency.name,
+    contactEmail: agency.contactEmail,
+    phone: agency.phone,
+    address: agency.address,
+    website: agency.website,
+    websiteSlug: agency.websiteSlug,
+    websiteEnabled: agency.websiteEnabled,
+    serviceAreas: Array.isArray(agency.serviceAreas)
+      ? agency.serviceAreas.filter((area): area is string => typeof area === "string")
+      : [],
+    agencyCodePreview: agency.agencyCodePreview,
+    tier: agency.tier,
+    active: agency.active,
+    allowedUsers: agency.allowedUsers,
+    allowedProspectsPerMonth: agency.allowedProspectsPerMonth,
+    allowedAiMessagesPerMonth: agency.allowedAiMessagesPerMonth,
+    allowedCarriers: agency.allowedCarriers,
+    createdAt: agency.createdAt.toISOString(),
+  };
+}
+
+async function ensurePlatformTenant() {
+  const existing = await prisma.agency.findUnique({ where: { id: PLATFORM_TENANT_ID } });
+  if (existing) return existing;
+  return prisma.agency.create({
+    data: {
+      id: PLATFORM_TENANT_ID,
+      name: "Quotex Platform",
+      contactEmail: "contact@quotexinsurance.com",
+      phone: "517-294-2671",
+      website: "https://quotexinsurance.com",
+      tier: "platform",
+      active: true,
+      allowedUsers: 1,
+      websiteEnabled: false,
+      serviceAreas: [],
+      websiteSettings: {},
+      carrierRunnerSettings: {},
+      billingSettings: {},
+      performanceSettings: {},
+    },
+  });
+}
+
+async function promoteMasterAccount(input: {
+  email: string;
+  password: string;
+  name: string;
+  localUserId?: string;
+}): Promise<MasterSessionUser | null> {
+  const email = fieldString(input.email).toLowerCase();
+  const name = fieldString(input.name) || email;
+  if (!email || input.password.length < 12) return null;
+
+  const existingMaster = await prisma.user.findFirst({ where: { role: "master_admin" } });
+  if (existingMaster && existingMaster.email.toLowerCase() !== email) return null;
+  if (existingMaster && blockedStaffStatus(existingMaster.status)) return null;
+  if (existingMaster?.passwordHash) {
+    return verifyPasswordHashForLogin(input.password, existingMaster.passwordHash) ? existingMaster : null;
+  }
+
+  const platformTenant = await ensurePlatformTenant();
+  const data = {
+    tenantId: platformTenant.id,
+    branchId: null,
+    name,
+    email,
+    phone: null,
+    role: "master_admin",
+    status: "active",
+    passwordHash: hashPasswordForStorage(input.password),
+    passwordChangedAt: new Date(),
+    profile: { profileCompleted: true, platformOwner: true, legacyLocalAuthPromotedAt: new Date().toISOString() },
+    permissions: {},
+  };
+
+  if (existingMaster) {
+    return prisma.user.update({
+      where: { id: existingMaster.id },
+      data,
+    });
+  }
+
+  return prisma.user.create({
+    data: {
+      id: fieldString(input.localUserId) || `user_${randomUUID()}`,
+      ...data,
+      lastLoginAt: new Date(),
+    },
+  });
+}
 
 function employeeRegisterErrorCode(input: unknown, error: z.ZodError<z.infer<typeof employeeRegisterSchema>>): StaffInputErrorCode {
   const body = isRecord(input) ? input : {};
@@ -839,6 +1477,77 @@ async function promoteSnapshotStaffForLogin(identifier: string, password: string
             businessEmail: email.toLowerCase(),
             profileCompleted: true,
           },
+          permissions: {},
+        },
+        include: { agency: true },
+      });
+  return user;
+}
+
+async function promoteSnapshotCustomerForLogin(email: string, password: string, requiredTenantId?: string | null) {
+  const snapshot = await loadCurrentAppStateSnapshot();
+  if (!snapshot) return null;
+  const normalized = email.trim().toLowerCase();
+  const userSnapshot = snapshotArray(snapshot, "users").find((user) => {
+    if (fieldString(user.role) !== "customer") return false;
+    if (user.active === false) return false;
+    if (requiredTenantId && fieldString(user.tenantId) !== requiredTenantId) return false;
+    return fieldString(user.email).toLowerCase() === normalized;
+  });
+  if (!userSnapshot) return null;
+  const snapshotPassword = fieldString(userSnapshot.generatedPassword);
+  if (!snapshotPassword || !timingSafeEqualString(snapshotPassword, password)) return null;
+
+  const tenantId = fieldString(userSnapshot.tenantId);
+  if (!tenantId) return null;
+  const agencySnapshot = snapshotArray(snapshot, "agencies").find((agency) => fieldString(agency.id) === tenantId);
+  if (!agencySnapshot) return null;
+  const agencyCode = snapshotAgencyCode(agencySnapshot);
+  const agency = await upsertAgencyFromSnapshot(agencySnapshot, agencyCode, normalized);
+  if (!agency?.active) return null;
+
+  const name = fieldString(userSnapshot.name) || normalized;
+  const existing = await prisma.user.findFirst({
+    where: {
+      role: "customer",
+      tenantId: agency.id,
+      email: { equals: normalized, mode: "insensitive" },
+    },
+    include: { agency: true },
+  });
+  const profile = {
+    ...(existing && isRecord(existing.profile) ? existing.profile : {}),
+    profileCompleted: true,
+    legacyLocalAuthPromotedAt: new Date().toISOString(),
+  };
+  const user = existing
+    ? await prisma.user.update({
+        where: { id: existing.id },
+        data: {
+          tenantId: agency.id,
+          branchId: fieldString(userSnapshot.branchId) || existing.branchId,
+          name,
+          phone: nullableFieldString(userSnapshot.phone) ?? existing.phone,
+          status: "active",
+          passwordHash: hashPasswordForStorage(password),
+          passwordChangedAt: new Date(),
+          profile,
+        },
+        include: { agency: true },
+      })
+    : await prisma.user.create({
+        data: {
+          id: fieldString(userSnapshot.id) || `user_${randomUUID()}`,
+          tenantId: agency.id,
+          branchId: nullableFieldString(userSnapshot.branchId),
+          name,
+          email: normalized,
+          phone: nullableFieldString(userSnapshot.phone),
+          role: "customer",
+          status: "active",
+          passwordHash: hashPasswordForStorage(password),
+          passwordChangedAt: new Date(),
+          profile,
           permissions: {},
         },
         include: { agency: true },

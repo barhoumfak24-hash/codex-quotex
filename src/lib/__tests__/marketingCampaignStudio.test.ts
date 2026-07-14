@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   draftMarketingStudioCampaign,
   MARKETING_STUDIO_CTA_BUTTON,
@@ -38,6 +38,14 @@ const rawDraft = {
       "A polished business owner stands inside a modern operations office overlooking a small fleet vehicle and storefront. Editorial lighting, premium realistic photography, no text, no logos, no paperwork.",
   },
 };
+
+beforeEach(() => {
+  vi.stubEnv("VITE_ALLOW_BROWSER_AI_FALLBACKS", "true");
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 describe("marketingCampaignStudio", () => {
   it("generates a complete campaign without requiring a connected server AI provider", async () => {

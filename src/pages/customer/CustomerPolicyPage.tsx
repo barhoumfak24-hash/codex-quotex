@@ -7,6 +7,7 @@ import { DocumentList } from "@/components/ui/DocumentList";
 import { PolicyStatusBadge, RenewalStatusBadge } from "@/components/ui/StatusBadge";
 import { Timeline } from "@/components/ui/Timeline";
 import { api } from "@/lib/api";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import { toSurfaceRoute } from "@/lib/appSurface";
 import { fmt } from "@/lib/format";
 import { useCustomer } from "@/lib/useCustomer";
@@ -40,7 +41,7 @@ export function CustomerPolicyPage() {
       </Button>
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="font-display text-3xl">{asset?.label ?? "Policy"}</h1>
+          <h1 className="font-display text-3xl">{asset ? assetDisplayName(asset) : "Policy"}</h1>
           <p className="text-ink-500 text-sm mt-1">
             {carrier?.name} · <span className="font-mono">{fmt.policyRef(policy)}</span>
           </p>

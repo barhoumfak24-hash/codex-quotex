@@ -65,7 +65,36 @@ export function EmployeeDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agency?.id, user?.id]);
   const navigate = useNavigate();
-  if (!agency || !user) return null;
+  if (!user) return null;
+  if (!agency) {
+    return (
+      <div className="p-6">
+        <Card className="max-w-3xl">
+          <CardHeader
+            title="Agency workspace is loading"
+            subtitle="Quotex is reconnecting your agency workspace. If this stays here, reload the portal or sign in again."
+            action={
+              <button
+                type="button"
+                className="btn-secondary inline-flex items-center gap-2"
+                onClick={() => window.location.reload()}
+              >
+                <RotateCcw className="h-4 w-4" />
+                Reload
+              </button>
+            }
+          />
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => navigate("/employee/login", { replace: true })}
+          >
+            Sign in again
+          </button>
+        </Card>
+      </div>
+    );
+  }
   const dashboardRouteState = { fromDashboard: true };
   const viewer = { id: user.id, role: user.role };
   const reminders = api.reminders.listForUser(agency.id, user.id);

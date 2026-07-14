@@ -36,6 +36,7 @@ import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { useIntegrationNotice } from "@/lib/integrationNotice";
 import { api } from "@/lib/api";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import { fmt } from "@/lib/format";
 import { fileToCommunicationAttachment, formatAttachmentSize } from "@/lib/messageAttachments";
 import { buildPolicyAssociatedAddresses } from "@/lib/policyAddresses";
@@ -227,6 +228,7 @@ export function EmployeePolicyPage() {
     return <EmptyState title="Policy not found" />;
   }
   const asset = api.assets.get(policy.assetId);
+  const assetName = asset ? assetDisplayName(asset) : undefined;
   const carrier = api.carriers.get(policy.carrierId);
   const documents = api.documents.listByEntity({ policyId });
   const sendingDocuments =
@@ -287,7 +289,7 @@ export function EmployeePolicyPage() {
     const lines = buildPolicySummary({
       policy: livePolicy,
       customerName: customer?.name,
-      assetLabel: asset?.label,
+      assetLabel: assetName,
       carrierName: carrier?.name,
     });
     const blob = new Blob([lines.join("\n")], { type: "text/plain;charset=utf-8" });
@@ -331,11 +333,11 @@ export function EmployeePolicyPage() {
       ``,
       `Thank you for trusting us with your coverage. Please do not hesitate to reach out with any questions.`
     );
-    setSendSubject(`Your ${asset?.label ?? "policy"} summary · ${fmt.policyRef(livePolicy)}`);
+    setSendSubject(`Your ${assetName ?? "policy"} summary · ${fmt.policyRef(livePolicy)}`);
     lines = buildPolicyOverviewClientMessage({
       policy: livePolicy,
       customerName: customer.name,
-      assetLabel: asset?.label,
+      assetLabel: assetName,
       carrierName: carrier?.name,
       description: desc,
     });
@@ -357,7 +359,7 @@ export function EmployeePolicyPage() {
       `Policy overview:`,
       `Policy type: ${api.helpers.departmentLabel(livePolicy)}`,
       `Client: ${liveCustomer.name}`,
-      `Asset: ${asset?.label ?? "Not listed"}`,
+      `Asset: ${assetName ?? "Not listed"}`,
       `Carrier: ${carrier?.name ?? "Not listed"}`,
       `Policy number: ${fmt.policyRef(livePolicy)}`,
       `Status: ${fmt.titleCase(livePolicy.status)}`,
@@ -400,8 +402,8 @@ export function EmployeePolicyPage() {
       `Hi ${firstName},`,
       ``,
       isSingle
-        ? `I've sent over the ${docLabel.toLowerCase()} for ${asset?.label ?? "your policy"}.`
-        : `I've sent over the selected policy documents for ${asset?.label ?? "your policy"}.`,
+        ? `I've sent over the ${docLabel.toLowerCase()} for ${assetName ?? "your policy"}.`
+        : `I've sent over the selected policy documents for ${assetName ?? "your policy"}.`,
       ``,
       isSingle ? `Document: ${selectedDocuments[0].fileName}` : `Documents:`,
       ...(!isSingle ? documentLines : []),
@@ -413,7 +415,7 @@ export function EmployeePolicyPage() {
       `Policy overview:`,
       `Policy type: ${api.helpers.departmentLabel(livePolicy)}`,
       `Client: ${customer.name}`,
-      `Asset: ${asset?.label ?? "Not listed"}`,
+      `Asset: ${assetName ?? "Not listed"}`,
       `Carrier: ${carrier?.name ?? "Not listed"}`,
       `Policy number: ${fmt.policyRef(livePolicy)}`,
       `Status: ${fmt.titleCase(livePolicy.status)}`,
@@ -437,8 +439,8 @@ export function EmployeePolicyPage() {
     );
     setSendSubject(
       isSingle
-        ? `${docLabel}: ${asset?.label ?? fmt.policyRef(livePolicy)}`
-        : `Policy documents: ${asset?.label ?? fmt.policyRef(livePolicy)}`
+        ? `${docLabel}: ${assetName ?? fmt.policyRef(livePolicy)}`
+        : `Policy documents: ${assetName ?? fmt.policyRef(livePolicy)}`
     );
     setSendBody(lines.join("\n"));
     setSendExtraAttachments([]);
@@ -534,7 +536,7 @@ export function EmployeePolicyPage() {
       `Policy: ${fmt.policyRef(livePolicy)}`,
       `Carrier: ${carrier?.name ?? "Not listed"}`,
       `Client: ${liveCustomer.name}`,
-      `Asset: ${asset?.label ?? "Not listed"}`,
+      `Asset: ${assetName ?? "Not listed"}`,
       ``,
       `Documents attached:`,
       ...documentLines,
@@ -795,7 +797,7 @@ export function EmployeePolicyPage() {
       customerId: liveCustomer.id,
       channel: "email",
       direction: "outbound",
-      subject: sendSubject.trim() || `Your ${asset?.label ?? "policy"} summary`,
+      subject: sendSubject.trim() || `Your ${assetName ?? "policy"} summary`,
       body: sendBody,
       attachments: attachments.length > 0 ? attachments : undefined,
       createdById: liveUser.id,
@@ -932,7 +934,7 @@ export function EmployeePolicyPage() {
       </Button>
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="min-w-0">
-          <h1 className="font-display text-3xl">{asset?.label ?? "Policy"}</h1>
+          <h1 className="font-display text-3xl">{assetName ?? "Policy"}</h1>
           <p className="text-ink-500 text-sm mt-1">
             {carrier?.name ?? "—"} ·{" "}
             <span className="font-mono">{fmt.policyRef(policy)}</span>
@@ -1029,7 +1031,7 @@ export function EmployeePolicyPage() {
           <dl className="text-sm space-y-2">
             <Row label="Client" value={customer?.name ?? "—"} />
             <Row label="Carrier" value={carrier?.name ?? "—"} />
-            <Row label="Asset" value={asset?.label ?? "—"} />
+            <Row label="Asset" value={assetName ?? "—"} />
             <Row
               label="Policy number"
               value={<span className="font-mono">{fmt.policyRef(policy)}</span>}
@@ -2589,7 +2591,7 @@ function preferredParticipantType(
   policy: Policy,
   asset?: import("@/types").Asset
 ): PolicyParticipant["participantType"] {
-  const text = `${asset?.type ?? ""} ${asset?.label ?? ""} ${policy.policyNumber ?? ""}`.toLowerCase();
+  const text = `${asset?.type ?? ""} ${asset ? assetDisplayName(asset) : ""} ${policy.policyNumber ?? ""}`.toLowerCase();
   if (/\byacht|boat|marine|vessel\b/.test(text)) return "operator";
   if (/\bhome|property|estate|residence\b/.test(text)) return "household_member";
   if (policy.department === "commercial") return "operations_contact";
@@ -2729,7 +2731,7 @@ function describePolicy(
 
   const summary =
     `This is a ${line} policy${
-      asset ? ` covering ${asset.label} (${assetType})` : ""
+      asset ? ` covering ${assetDisplayName(asset)} (${assetType})` : ""
     }, underwritten by ${carrierName}. ` +
     `It took effect ${fmt.date(policy.effectiveDate)} and renews ${fmt.date(
       policy.renewalDate

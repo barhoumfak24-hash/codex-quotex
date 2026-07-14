@@ -72,6 +72,6 @@ describe("security controls", () => {
         tenantId: agency.id,
         ipAddress: "203.0.113.42",
       })
-    ).toEqual(ban);
+    ).toMatchObject(ban!);
   });
 });

@@ -2,7 +2,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { useState } from "react";
 import { AuthShell } from "./AuthShell";
 import { resolveAgencyByKey } from "@/lib/agencyWebsite";
-import { useAuth } from "@/lib/auth";
+import { authFailureMessage, useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
 import { isStaffRole, staffRoleLabel, type StaffRole } from "@/lib/roles";
@@ -70,6 +70,7 @@ export function EmployeeLoginPage() {
             setMode("signIn");
             setError(null);
           }}
+          disabled={submitting}
         >
           Sign in
         </button>
@@ -82,6 +83,7 @@ export function EmployeeLoginPage() {
             setMode("create");
             setError(null);
           }}
+          disabled={submitting}
         >
           Create account
         </button>
@@ -90,6 +92,7 @@ export function EmployeeLoginPage() {
       <form
         onSubmit={async (e) => {
           e.preventDefault();
+          if (submitting) return;
           setError(null);
           setSubmitting(true);
           const data = new FormData(e.currentTarget);
@@ -127,17 +130,20 @@ export function EmployeeLoginPage() {
 
             const identifier = String(data.get("identifier")).trim();
             const password = String(data.get("password"));
-            const u = await signInStaff(identifier, password);
-            if (!u || !isStaffRole(u.role)) {
-              setError(
-                u
-                  ? "That account isn't an agency user. Use the master portal in the footer."
-                  : "Email or password didn't match an active agency staff account."
-              );
+            const result = await signInStaff(identifier, password);
+            if (!result.ok) {
+              setError(authFailureMessage(result.reason, "staff"));
+              return;
+            }
+            const u = result.user;
+            if (!isStaffRole(u.role)) {
+              setError("That account isn't an agency user. Use the correct portal.");
               return;
             }
             if (u.tenantId) setAgencyId(u.tenantId);
             nav(postLoginPath);
+          } catch {
+            setError("Agency sign-in could not be completed. Refresh and try again.");
           } finally {
             setSubmitting(false);
           }

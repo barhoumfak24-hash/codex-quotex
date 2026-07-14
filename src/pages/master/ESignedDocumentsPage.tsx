@@ -423,15 +423,15 @@ function recoverSoftwareSaleFromCompletedPacket(packet: RemoteCheckoutPacket): S
       customMonthlyPriceUsd: packet.customMonthlyPriceUsd,
       customMonthlyPriceReason: packet.customMonthlyPriceReason,
       source: packet.source ?? "master_portal",
-      paymentMode: packet.paymentMode ?? "manual_invoice",
+      paymentMode: packet.paymentMode ?? "stripe_checkout",
       notes: `Recovered from completed e-sign packet ${packet.id}.`,
       signingPacketId: packet.id,
-      stripeCheckoutSessionId: packet.stripeCheckoutSessionId ?? `recovered_${packet.id}`,
+      stripeCheckoutSessionId: packet.stripeCheckoutSessionId,
       invoiceEmailSentAt: packet.invoiceEmailSentAt,
       invoiceEmailStatus: packet.invoiceEmailStatus,
       invoiceEmailProvider: packet.invoiceEmailProvider,
       invoiceEmailError: packet.invoiceEmailError,
-      status: packet.invoiceEmailStatus === "sent" ? "provisioning" : "paid",
+      status: packet.invoiceEmailStatus === "sent" ? "provisioning" : "checkout_pending",
     });
   } catch {
     return null;

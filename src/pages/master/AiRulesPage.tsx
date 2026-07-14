@@ -28,10 +28,10 @@ export function AiRulesPage() {
       <Card>
         <CardHeader title="Provider routing" />
         <p className="text-sm text-ink-600">
-          Configure <code>AI_PROVIDER</code> in <code>server/.env</code> (openai | anthropic |
-          gemini | stub). Use <code>OPENAI_API_KEY</code> and <code>OPENAI_MODEL</code> for the production
-          OpenAI route. Production AI calls must route through server-side endpoints with audit logging,
-          rate limits, and tenant checks enabled.
+          Quotex AI is OpenAI-only in production. Keep <code>OPENAI_API_KEY</code> and model-routing
+          variables server-side only; never expose them through <code>VITE_</code> browser variables.
+          Production AI calls must route through server-side endpoints with audit logging, rate limits,
+          and tenant checks enabled.
         </p>
       </Card>
     </div>

@@ -10,6 +10,7 @@ import { Timeline } from "@/components/ui/Timeline";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import {
   BILLING_STATUS_LABEL,
   billingCarrierUrl,
@@ -172,7 +173,7 @@ export function EmployeeBillingDetailPage() {
       buildBillingSummaryMessage({
         policy: livePolicy,
         customerName: liveCustomer.name,
-        assetLabel: asset?.label,
+        assetLabel: asset ? assetDisplayName(asset) : undefined,
         carrier,
         latestPaidPayment,
       })
@@ -217,7 +218,7 @@ export function EmployeeBillingDetailPage() {
         <div className="min-w-0">
           <h1 className="font-display text-3xl">{fmt.policyRef(policy)} billing</h1>
           <p className="mt-1 text-sm text-ink-500">
-            {carrier?.name ?? "Carrier"} - {asset?.label ?? "Asset not recorded"} - {customer.name}
+            {carrier?.name ?? "Carrier"} - {asset ? assetDisplayName(asset) : "Asset not recorded"} - {customer.name}
           </p>
         </div>
         <div className="flex max-w-3xl flex-wrap items-center justify-end gap-2">
@@ -284,7 +285,7 @@ export function EmployeeBillingDetailPage() {
                   <Row label="Policy" value={<span className="font-mono">{fmt.policyRef(policy)}</span>} />
                   <Row label="Client" value={customer.name} />
                   <Row label="Carrier" value={carrier?.name ?? "Carrier missing"} />
-                  <Row label="Asset" value={asset?.label ?? "Asset not recorded"} />
+                  <Row label="Asset" value={asset ? assetDisplayName(asset) : "Asset not recorded"} />
                   <Row label="Premium" value={premiumFor(policy) ? fmt.money(premiumFor(policy) ?? 0) : "Not recorded"} />
                   <Row label="How paid" value={billingMethodLabel(policy.billingMethod)} />
                   <Row label="Payment plan" value={billingFrequencyLabel(policy)} />

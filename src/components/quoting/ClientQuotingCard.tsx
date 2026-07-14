@@ -6,6 +6,10 @@ import { AddressAutocomplete } from "@/components/ui/AddressAutocomplete";
 import { AiQuotingWorkspace } from "@/components/quoting/AiQuotingWorkspace";
 import { api } from "@/lib/api";
 import { deriveAssetLabel } from "@/lib/assetLabels";
+import {
+  assetDisplayName,
+  assetDisplaySubtitleLabel,
+} from "@/lib/assetDisplay";
 import { categoryQuestionnaire } from "@/lib/categoryQuestionnaires";
 import { fmt } from "@/lib/format";
 import { subscribeToDbChanges } from "@/lib/db";
@@ -324,8 +328,8 @@ function ContactQuotingCard({
     : "Required";
   const setupAssetLabel = pickedAsset
     ? selectedAssets.length > 1
-      ? `${pickedAsset.label} + ${selectedAssets.length - 1} more`
-      : pickedAsset.label
+      ? `${assetDisplayName(pickedAsset)} + ${selectedAssets.length - 1} more`
+      : assetDisplayName(pickedAsset)
     : selectedLineOfBusiness === "commercial"
     ? "None - not required"
     : selectedNewCategory
@@ -623,7 +627,7 @@ function ContactQuotingCard({
               <select className="hidden" value="" onChange={() => undefined}>
               {matchingAssets.map((a) => (
                 <option key={a.id} value={a.id}>
-                  {a.label} · {api.helpers.assetTypeLabel(a.type)} ·{" "}
+                  {assetDisplayName(a)} · {assetDisplaySubtitleLabel(a.type)} ·{" "}
                   {fmt.money(a.estimatedValue)}
                 </option>
               ))}
@@ -918,7 +922,7 @@ function AssetMultiSelectPicker({
   const filteredAssets = assets.filter((asset) => {
     if (!normalizedSearch) return true;
     const searchableText = [
-      asset.label,
+      assetDisplayName(asset),
       api.helpers.assetTypeLabel(asset.type),
       fmt.money(asset.estimatedValue),
       Object.values(asset.details ?? {}).join(" "),
@@ -941,13 +945,13 @@ function AssetMultiSelectPicker({
                   : "border-ink-200 bg-white text-ink-700"
               }`}
             >
-              <span className="truncate">{asset.label}</span>
+              <span className="truncate">{assetDisplayName(asset)}</span>
               {index === 0 && <span className="text-[10px] uppercase tracking-wider">Primary</span>}
               <button
                 type="button"
                 className="rounded-full p-0.5 text-ink-500 hover:bg-ink-100 hover:text-ink-900"
                 onClick={() => onToggle(asset.id)}
-                aria-label={`Remove ${asset.label}`}
+                aria-label={`Remove ${assetDisplayName(asset)}`}
               >
                 <X className="h-3 w-3" />
               </button>
@@ -992,9 +996,9 @@ function AssetMultiSelectPicker({
             >
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="truncate text-sm font-semibold">{asset.label}</div>
+                  <div className="truncate text-sm font-semibold">{assetDisplayName(asset)}</div>
                   <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-ink-500">
-                    <span>{api.helpers.assetTypeLabel(asset.type)}</span>
+                    <span>{assetDisplaySubtitleLabel(asset.type)}</span>
                     <span>{fmt.money(asset.estimatedValue)}</span>
                     {isPrimary && (
                       <span className="rounded-full bg-gold-100 px-2 py-0.5 font-semibold text-gold-900">

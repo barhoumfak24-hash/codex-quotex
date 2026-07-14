@@ -10,6 +10,7 @@ import { Modal } from "@/components/ui/Modal";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import { matchesAiCustomFilter } from "@/lib/aiCustomFilters";
 import {
   billingFrequencyLabel,
@@ -258,7 +259,7 @@ export function AccountingPage() {
                   <td className="px-4 py-5 align-middle">
                     <div className="font-mono text-sm font-semibold text-ink-900">{fmt.policyRef(row.policy)}</div>
                     <div className="truncate text-xs text-ink-500">
-                      {asset?.label ?? "Asset not recorded"} - {api.helpers.departmentLabel(row.policy)}
+                      {asset ? assetDisplayName(asset) : "Asset not recorded"} - {api.helpers.departmentLabel(row.policy)}
                     </div>
                   </td>
                   <td className="px-4 py-5 align-middle">
@@ -341,7 +342,7 @@ function AccountingDetailModal({ row, onClose }: { row: AccountingRow | null; on
               <Field label="Client" value={row.customer.name} />
               <Field label="Policy" value={fmt.policyRef(row.policy)} mono />
               <Field label="Carrier" value={row.carrier?.name ?? "Carrier missing"} />
-              <Field label="Asset" value={asset?.label ?? "Asset not recorded"} />
+              <Field label="Asset" value={asset ? assetDisplayName(asset) : "Asset not recorded"} />
               <Field label="Billing method" value={billingMethodLabel(row.policy.billingMethod)} />
               <Field label="Payment plan" value={billingFrequencyLabel(row.policy)} />
               <Field label="Account / reference" value={row.policy.billingAccountNumber ?? row.policy.billingReference ?? "Not recorded"} />
@@ -647,7 +648,7 @@ function accountingSearchParts(row: AccountingRow): string[] {
     row.customer.email,
     row.customer.phone,
     row.carrier?.name,
-    asset?.label,
+    asset ? assetDisplayName(asset) : undefined,
     row.policy.policyNumber,
     fmt.policyRef(row.policy),
     api.helpers.departmentLabel(row.policy),

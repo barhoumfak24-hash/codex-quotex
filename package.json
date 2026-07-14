@@ -33,6 +33,7 @@
     "dr:check": "pnpm run backup:check",
     "dr:backup": "pnpm run backup:all",
     "dr:live-check": "node scripts/dr-live-check.mjs",
+    "dr:state-drill": "node scripts/dr-state-restore-drill.mjs",
     "dr:incident": "node scripts/dr-create-incident.mjs",
     "dr:tenant-snapshot": "node scripts/dr-export-tenant-snapshot.mjs",
     "deploy:prod": "node scripts/deploy-quotex-production.mjs",

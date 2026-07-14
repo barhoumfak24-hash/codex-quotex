@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import { MemoryRouter } from "react-router-dom";
 import type { StatusEvent } from "@/types";
+import { db } from "@/lib/db";
 import { Timeline } from "../Timeline";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -14,6 +15,7 @@ let root: Root;
 
 beforeEach(() => {
   if (typeof window !== "undefined" && window.localStorage) window.localStorage.clear();
+  db.reset();
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
@@ -120,5 +122,58 @@ describe("Timeline", () => {
     });
 
     expect(container.textContent).not.toContain("Open to client");
+  });
+
+  it("opens provider-synced inbound email remarks in the real email app", async () => {
+    const { api } = await import("@/lib/api");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    api.users.update(manager.id, {
+      businessEmail: "advisor@gmail.com",
+      mailProvider: "gmail",
+    });
+
+    const inbound = api.mailbox.mirrorExternalEmail({
+      tenantId: agency.id,
+      mailboxUserId: manager.id,
+      externalMessageId: "gmail_timeline_msg_1",
+      externalThreadId: "gmail_timeline_thread_1",
+      externalUrl: "https://mail.google.com/mail/u/0/#inbox/gmail_timeline_msg_1",
+      from: customer.email,
+      to: ["advisor@gmail.com"],
+      subject: "Updated roof photos",
+      body: "I sent the roof photos over.",
+      sentAt: "2026-06-05T15:30:00.000Z",
+    });
+    const event = api.status
+      .listFor({ customerId: customer.id })
+      .find((row) => row.communicationId === inbound?.id);
+    expect(event).toBeTruthy();
+
+    act(() => {
+      root.render(
+        <MemoryRouter initialEntries={[`/employee/clients/${customer.id}#client-remarks`]}>
+          <Timeline events={[event!]} />
+        </MemoryRouter>
+      );
+    });
+
+    const timelineButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Email received: Updated roof photos.")
+    ) as HTMLButtonElement;
+    expect(timelineButton).toBeTruthy();
+
+    act(() => {
+      timelineButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const providerLink = Array.from(container.querySelectorAll("a")).find((anchor) =>
+      anchor.textContent?.includes("Open in Gmail")
+    ) as HTMLAnchorElement;
+    expect(providerLink).toBeTruthy();
+    expect(providerLink.getAttribute("href")).toBe(
+      "https://mail.google.com/mail/u/0/#inbox/gmail_timeline_msg_1"
+    );
   });
 });

@@ -50,6 +50,7 @@ import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { useIntegrationNotice } from "@/lib/integrationNotice";
 import { api } from "@/lib/api";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import { fmt } from "@/lib/format";
 import {
   isRoutingManagerRole,
@@ -331,12 +332,12 @@ export function TasksPage() {
       const prospect = session.prospectId ? api.prospects.get(session.prospectId) : undefined;
       if (session.customerId && !api.customers.canSee(customer, viewer)) return null;
       if (session.prospectId && !prospect) return null;
+      if (session.prospectId && !api.prospects.canSee(prospect, viewer)) return null;
       const ownerIds = effectiveOwnerIds({
         assignedToId: session.createdById,
         customerId: session.customerId,
         prospectId: session.prospectId,
       });
-      if (queueAgentId !== null && !ownerIds.includes(queueAgentId)) return null;
       const ownerLabel =
         ownerIds
           .map((id) => api.users.get(id)?.name)
@@ -360,7 +361,7 @@ export function TasksPage() {
         contactKind,
         href,
         ownerLabel,
-        assetLabel: asset?.label ?? api.helpers.assetTypeLabel(session.assetType),
+        assetLabel: asset ? assetDisplayName(asset) : api.helpers.assetTypeLabel(session.assetType),
         lineLabel: session.lineOfBusiness === "commercial" ? "Commercial" : "Personal",
         updatedAt: session.updatedAt,
         completedAt: implementedAt,
@@ -386,7 +387,6 @@ export function TasksPage() {
         assignedToId: quote.assignedAgentId ?? customer?.assignedAgentId,
         customerId: quote.customerId,
       });
-      if (queueAgentId !== null && !ownerIds.includes(queueAgentId)) return null;
       const ownerLabel =
         ownerIds
           .map((id) => api.users.get(id)?.name)
@@ -2250,7 +2250,7 @@ function ActivityCard({
                   )
                 }
               />
-              <Row label="Asset" value={asset?.label ?? "—"} />
+              <Row label="Asset" value={asset ? assetDisplayName(asset) : "—"} />
               <Row
                 label={assignedAgents.length > 1 ? "Assigned agents" : "Assigned agent"}
                 value={

@@ -46,13 +46,36 @@ function questionnaireEditorLabel(meta: QuestionnaireResponseMeta): string {
   return `${meta.updatedByName} (${role})`;
 }
 
-function QuestionEditMeta({ meta }: { meta?: QuestionnaireResponseMeta }) {
+function aiQuestionSourceLabel(meta: QuestionnaireResponseMeta): string {
+  const parts = [
+    meta.sourceLabel || meta.sourceName,
+    typeof meta.confidence === "number" ? `${Math.round(meta.confidence * 100)}% confidence` : "",
+    meta.observedDate ? `observed ${fmt.date(meta.observedDate)}` : "",
+  ].filter(Boolean);
+  return parts.join(" - ");
+}
+
+function QuestionEditMeta({
+  meta,
+  needsManual,
+}: {
+  meta?: QuestionnaireResponseMeta;
+  needsManual?: boolean;
+}) {
   if (!meta) {
-    return <div className="mt-1 text-[11px] text-ink-400">Shared field - not edited yet.</div>;
+    return (
+      <div className={`mt-1 text-[11px] ${needsManual ? "font-medium text-amber-900" : "text-ink-400"}`}>
+        {needsManual ? "Not found - enter manually." : "Shared field - not edited yet."}
+      </div>
+    );
   }
+  const aiSource = meta.updatedByRole === "ai" ? aiQuestionSourceLabel(meta) : "";
   return (
-    <div className="mt-1 text-[11px] text-ink-500">
-      Last edited by {questionnaireEditorLabel(meta)} - {fmt.dateTime(meta.updatedAt)}
+    <div className="mt-1 space-y-0.5 text-[11px] text-ink-500">
+      <div>
+        Last edited by {questionnaireEditorLabel(meta)} - {fmt.dateTime(meta.updatedAt)}
+      </div>
+      {aiSource && <div className="text-emerald-700">Source: {aiSource}</div>}
     </div>
   );
 }
@@ -73,6 +96,14 @@ export function ClientQuestionnairePage() {
   const [incompleteWarningOpen, setIncompleteWarningOpen] = useState(false);
   const [incompleteFieldsRevealed, setIncompleteFieldsRevealed] = useState(false);
   const session = sessionId ? api.quoting.get(sessionId) : undefined;
+  const linkedCustomer =
+    session?.customerId
+      ? api.customers.list(session.tenantId).find((c) => c.id === session.customerId)
+      : undefined;
+  const linkedProspect =
+    session?.prospectId
+      ? api.prospects.listByTenant(session.tenantId).find((p) => p.id === session.prospectId)
+      : undefined;
   const myCustomer =
     session?.customerId && user
       ? api.customers.list(session.tenantId).find((c) => c.userId === user.id)
@@ -90,6 +121,10 @@ export function ClientQuestionnairePage() {
   const actor =
     user && myCustomer
       ? { id: user.id, name: myCustomer.name, role: "customer" as const }
+      : linkedCustomer
+      ? { id: linkedCustomer.id, name: linkedCustomer.name, role: "customer" as const }
+      : linkedProspect
+      ? { id: linkedProspect.id, name: linkedProspect.name, role: "customer" as const }
       : undefined;
   const lastEdit = Object.values(session?.questionnaireResponseMeta ?? {}).sort((a, b) =>
     a.updatedAt < b.updatedAt ? 1 : -1
@@ -109,15 +144,15 @@ export function ClientQuestionnairePage() {
     setIncompleteFieldsRevealed(false);
   }, [session?.id]);
 
-  if (!sessionId || !user) {
+  if (!sessionId) {
     return <EmptyState title="Questionnaire link is invalid or expired." />;
   }
-  // The client portal only ever lets the signed-in customer see
-  // sessions tied to their own customerId (defense-in-depth).
-  if (!session || !session.customerId) {
+  if (!session || (!session.customerId && !session.prospectId)) {
     return <EmptyState title="Questionnaire not found." />;
   }
-  if (!myCustomer || myCustomer.id !== session.customerId) {
+  // If the visitor is already signed in as a customer, keep the account ownership check.
+  // Anonymous emailed links can still open the questionnaire directly.
+  if (user?.role === "customer" && (!myCustomer || myCustomer.id !== session.customerId)) {
     return (
       <EmptyState title="This questionnaire isn't tied to your account. Reach out to your agent if you got the link in error." />
     );
@@ -312,7 +347,10 @@ export function ClientQuestionnairePage() {
                     Missing required field. You can still submit after confirming the warning.
                   </div>
                 )}
-                <QuestionEditMeta meta={session.questionnaireResponseMeta?.[q.id]} />
+                <QuestionEditMeta
+                  meta={session.questionnaireResponseMeta?.[q.id]}
+                  needsManual={q.required && !(responses[q.id] ?? "").trim()}
+                />
               </div>
               );
             })}

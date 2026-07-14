@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { ArrowUpRight, Bot, Building2, ChevronDown, ChevronUp, Cog, FileText, Image as ImageIcon, Mail, Paperclip, Search, User } from "lucide-react";
+import { ArrowUpRight, Bot, Building2, ChevronDown, ChevronUp, Cog, ExternalLink, FileText, Image as ImageIcon, Mail, Paperclip, Search, User } from "lucide-react";
 import type {
   Communication,
   CommunicationAttachment,
@@ -12,9 +12,11 @@ import type {
 } from "@/types";
 import { fmt } from "@/lib/format";
 import { api } from "@/lib/api";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import { Modal } from "./Modal";
 import { Badge } from "./Badge";
 import { DocumentViewerModal } from "./DocumentViewerModal";
+import { inferMailProvider, mailboxThreadUrl, mailProviderShortLabel } from "@/lib/mailProvider";
 
 const sourceIcons = {
   customer: User,
@@ -356,6 +358,7 @@ function StatusDetail({
   const relatedTarget = relatedRemarkTarget(event, context, messageRow);
   const currentUrl = `${location.pathname}${location.search}${location.hash}`;
   const navigableRelatedTarget = relatedTarget?.to === currentUrl ? null : relatedTarget;
+  const providerTarget = providerMessageTargetForCommunication(comm);
 
   return (
     <div className="space-y-4">
@@ -367,19 +370,34 @@ function StatusDetail({
         <Field label="Facilitated by">{eventActorName(event) ?? "—"}</Field>
         {customer && <Field label="Customer">{customer.name}</Field>}
         {prospect && <Field label="Prospect">{prospect.name}</Field>}
-        {asset && <Field label="Asset">{asset.label}</Field>}
+        {asset && <Field label="Asset">{assetDisplayName(asset)}</Field>}
         {policy && <Field label="Policy">{fmt.policyRef(policy)}</Field>}
       </dl>
 
-      {navigableRelatedTarget && (
-        <Link
-          to={navigableRelatedTarget.to}
-          onClick={onNavigate}
-          className="btn-outline inline-flex text-sm"
-        >
-          <ArrowUpRight className="h-3.5 w-3.5" />
-          {navigableRelatedTarget.label}
-        </Link>
+      {(navigableRelatedTarget || providerTarget) && (
+        <div className="flex flex-wrap gap-2">
+          {navigableRelatedTarget && (
+            <Link
+              to={navigableRelatedTarget.to}
+              onClick={onNavigate}
+              className="btn-outline inline-flex text-sm"
+            >
+              <ArrowUpRight className="h-3.5 w-3.5" />
+              {navigableRelatedTarget.label}
+            </Link>
+          )}
+          {providerTarget && (
+            <a
+              href={providerTarget.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-outline inline-flex text-sm"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              {providerTarget.label}
+            </a>
+          )}
+        </div>
       )}
 
       {attachments.length > 0 && (
@@ -563,6 +581,7 @@ function InlineMessagePreview({
   const communication = isComm ? messageRow.row : null;
   const attachments = communication?.attachments ?? [];
   const [previewDocument, setPreviewDocument] = useState<Document | null>(null);
+  const providerTarget = providerMessageTargetForCommunication(communication);
 
   return (
     <div className="rounded-md border border-ink-100 bg-ink-50/40 p-3 space-y-2">
@@ -573,13 +592,26 @@ function InlineMessagePreview({
           <span>·</span>
           <span>{fmt.dateTime(at)}</span>
         </div>
-        <button
-          type="button"
-          className="text-ink-500 hover:text-ink-900"
-          onClick={onCollapse}
-        >
-          Hide
-        </button>
+        <div className="flex items-center gap-3">
+          {providerTarget && (
+            <a
+              href={providerTarget.href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 font-semibold text-gold-700 hover:text-ink-900"
+            >
+              <ExternalLink className="h-3 w-3" />
+              {providerTarget.label}
+            </a>
+          )}
+          <button
+            type="button"
+            className="text-ink-500 hover:text-ink-900"
+            onClick={onCollapse}
+          >
+            Hide
+          </button>
+        </div>
       </div>
       {subject && (
         <div className="text-sm font-semibold text-ink-900">{subject}</div>
@@ -634,6 +666,33 @@ function InlineMessagePreview({
       />
     </div>
   );
+}
+
+function providerMessageTargetForCommunication(
+  message?: Communication | null
+): { href: string; label: string } | null {
+  if (!message || message.channel !== "email") return null;
+  const customer = message.customerId ? api.customers.get(message.customerId) : null;
+  const prospect = message.prospectId ? api.prospects.get(message.prospectId) : null;
+  const contactEmail =
+    message.externalRecipientEmail ??
+    customer?.email ??
+    prospect?.email;
+  const mailbox = message.mailboxAccount?.trim() || "";
+  if (!mailbox && !message.externalUrl) return null;
+  const provider = message.mailboxProvider ?? inferMailProvider(mailbox || contactEmail || "");
+  const href = mailboxThreadUrl({
+    mailbox: mailbox || contactEmail || "",
+    provider,
+    contactEmail,
+    subject: message.subject,
+    threadId: message.threadId,
+    externalThreadId: message.externalThreadId,
+    externalUrl: message.externalUrl,
+    rfc822MessageId: message.rfc822MessageId,
+    messageIdHeader: message.messageIdHeader,
+  });
+  return { href, label: `Open in ${mailProviderShortLabel(provider)}` };
 }
 
 function communicationAttachmentPreviewDocument(

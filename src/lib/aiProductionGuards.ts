@@ -40,11 +40,12 @@ export interface AiProductionGateDecision {
 
 export const AI_DOCUMENT_AUTOFILL_CONFIDENCE_FLOOR = 0.8;
 export const AI_AUTHORITATIVE_WRITE_CONFIDENCE_FLOOR = 0.85;
-export const AI_QUESTIONNAIRE_PREFILL_CONFIDENCE_FLOOR = 0.6;
+export const AI_QUESTIONNAIRE_PREFILL_CONFIDENCE_FLOOR = 0.55;
 
 const UNSAFE_DOCUMENT_SOURCE_KINDS = new Set<PublicDataFieldSourceKind>([
   "model_estimate",
   "public_web",
+  "imagery_vision",
   "unknown",
 ]);
 
@@ -69,18 +70,29 @@ export function findAiPublicEvidence(
   const normalizedFieldKey = normalizeAiEvidenceKey(fieldKey);
   const compactFieldKey = normalizedFieldKey.replace(/\s+/g, "");
   if (!normalizedFieldKey) return undefined;
-  return Object.entries(evidence).find(([key, item]) => {
-    const normalizedKey = normalizeAiEvidenceKey(key);
-    const normalizedItemKey = normalizeAiEvidenceKey(item.fieldKey);
-    const compactKey = normalizedKey.replace(/\s+/g, "");
-    const compactItemKey = normalizedItemKey.replace(/\s+/g, "");
-    return (
-      normalizedKey === normalizedFieldKey ||
-      normalizedItemKey === normalizedFieldKey ||
-      compactKey === compactFieldKey ||
-      compactItemKey === compactFieldKey
-    );
-  })?.[1];
+  const matches = Object.entries(evidence)
+    .map(([key, item]) => {
+      const normalizedKey = normalizeAiEvidenceKey(key);
+      const normalizedItemKey = normalizeAiEvidenceKey(item.fieldKey);
+      const compactKey = normalizedKey.replace(/\s+/g, "");
+      const compactItemKey = normalizedItemKey.replace(/\s+/g, "");
+      const exact =
+        normalizedKey === normalizedFieldKey ||
+        normalizedItemKey === normalizedFieldKey;
+      const compact = compactKey === compactFieldKey || compactItemKey === compactFieldKey;
+      if (!exact && !compact) return null;
+      return { exact, item };
+    })
+    .filter((match): match is { exact: boolean; item: PublicDataFieldEvidence } => Boolean(match));
+  if (matches.length === 0) return undefined;
+  return matches.sort((left, right) => {
+    const leftSourceBacked = left.item.sourceKind !== "model_estimate" && left.item.sourceKind !== "unknown";
+    const rightSourceBacked = right.item.sourceKind !== "model_estimate" && right.item.sourceKind !== "unknown";
+    if (leftSourceBacked !== rightSourceBacked) return leftSourceBacked ? -1 : 1;
+    if (left.exact !== right.exact) return left.exact ? -1 : 1;
+    if (left.item.verified !== right.item.verified) return left.item.verified ? -1 : 1;
+    return right.item.confidence - left.item.confidence;
+  })[0]?.item;
 }
 
 export function aiEvidenceAllowsDocumentAutofill(
@@ -100,8 +112,40 @@ export function aiEvidenceAllowsQuestionnairePrefill(
 ): boolean {
   if (!item) return true;
   if (UNSAFE_QUESTIONNAIRE_PREFILL_SOURCE_KINDS.has(item.sourceKind)) return false;
+  if (
+    (item.sourceKind === "web_search" || item.sourceKind === "public_web") &&
+    !evidenceHasCitationUrl(item)
+  ) {
+    return false;
+  }
+  if (item.sourceKind === "imagery_vision") {
+    return item.confidence >= 0.65 && evidenceHasCitationUrl(item);
+  }
   if (item.confidence < AI_QUESTIONNAIRE_PREFILL_CONFIDENCE_FLOOR) return false;
-  return item.verified || item.sourceKind === "public_web" || item.sourceKind === "public_geocoder";
+  return (
+    item.verified ||
+    item.sourceKind === "public_web" ||
+    item.sourceKind === "web_search" ||
+    item.sourceKind === "public_geocoder" ||
+    item.sourceKind === "government_api" ||
+    item.sourceKind === "commercial_provider"
+  );
+}
+
+function evidenceHasCitationUrl(item: PublicDataFieldEvidence): boolean {
+  if (urlLooksLikeHttpCitation(item.sourceUrl)) return true;
+  return /\bsource url:\s*https?:\/\//i.test(item.notes ?? "");
+}
+
+function urlLooksLikeHttpCitation(value: unknown): boolean {
+  const text = String(value ?? "").trim();
+  if (!text) return false;
+  try {
+    const url = new URL(text);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 export function aiEvidenceAllowsAuthoritativeWrite(

@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Copy, Plus, RefreshCw } from "lucide-react";
 import { Card, EmptyState } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
@@ -7,7 +7,8 @@ import { Modal } from "@/components/ui/Modal";
 import { AddressAutocomplete } from "@/components/ui/AddressAutocomplete";
 import { MasterBackButton } from "@/components/layout/MasterBackButton";
 import { api } from "@/lib/api";
-import { isLivePlatformAgency } from "@/lib/demoData";
+import { useAuth } from "@/lib/auth";
+import { listReconciledLivePlatformAgencies, reconcilePaidSoftwareSalesToAgencies } from "@/lib/softwareSaleProvisioning";
 import {
   addMonthsToDateInput,
   agencyPlanRenewalIso,
@@ -20,13 +21,20 @@ import { TIER_LIMITS } from "@/lib/tiers";
 import type { SoftwarePlanTermMonths, SubscriptionTier } from "@/types";
 
 export function AgenciesPage() {
+  const { user } = useAuth();
   const [, setRev] = useState(0);
   const [open, setOpen] = useState(false);
   const [agencyAddress, setAgencyAddress] = useState("");
   const [copiedCodeId, setCopiedCodeId] = useState<string | null>(null);
   const [changedCodeId, setChangedCodeId] = useState<string | null>(null);
-  const agencies = api.agencies.list().filter(isLivePlatformAgency);
+  const agencies = listReconciledLivePlatformAgencies();
+  const activeAgencies = agencies.filter((agency) => agency.active);
+  const deactivatedAgencies = agencies.filter((agency) => !agency.active);
   const refresh = () => setRev((r) => r + 1);
+
+  useEffect(() => {
+    if (reconcilePaidSoftwareSalesToAgencies().length > 0) refresh();
+  }, []);
 
   function copyAgencyCode(agencyId: string) {
     const code = api.agencies.revealCodeForMaster(agencyId);
@@ -44,6 +52,144 @@ export function AgenciesPage() {
     setChangedCodeId(agencyId);
     refresh();
     setTimeout(() => setChangedCodeId((id) => (id === agencyId ? null : id)), 1400);
+  }
+
+  function deactivateAgency(agencyId: string) {
+    api.agencies.deactivate(agencyId, { actorId: user?.id });
+    refresh();
+  }
+
+  function reactivateAgency(agencyId: string) {
+    api.agencies.reactivate(agencyId);
+    refresh();
+  }
+
+  function renderAgencyTable(
+    rows: typeof agencies,
+    title: string,
+    description: string,
+    emptyText: string
+  ) {
+    return (
+      <Card padded={false}>
+        <div className="flex items-center justify-between gap-4 border-b border-ink-100 px-6 py-4">
+          <div>
+            <h2 className="font-display text-xl">{title}</h2>
+            <p className="mt-1 text-sm text-ink-500">{description}</p>
+          </div>
+          <Badge tone={rows.length ? "info" : "neutral"}>
+            {rows.length} {rows.length === 1 ? "agency" : "agencies"}
+          </Badge>
+        </div>
+        {rows.length === 0 ? (
+          <div className="px-6 py-8 text-sm text-ink-500">{emptyText}</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1080px] text-sm">
+              <thead>
+                <tr className="border-b border-ink-100 text-left text-xs uppercase tracking-wider text-ink-500">
+                  <th className="px-6 py-3">Agency</th>
+                  <th className="px-6 py-3">Code</th>
+                  <th className="px-6 py-3">Tier</th>
+                  <th className="px-6 py-3">Term / renewal</th>
+                  <th className="px-6 py-3">Service area</th>
+                  <th className="px-6 py-3">Created</th>
+                  <th className="px-6 py-3">Status</th>
+                  <th className="px-6 py-3"></th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-ink-100">
+                {rows.map((a) => {
+                  const agencyCode = api.agencies.revealCodeForMaster(a.id) ?? "";
+                  const renewal = agencyRenewalStatus(a);
+                  return (
+                    <tr key={a.id} className={a.active ? "" : "bg-ink-50/60"}>
+                      <td className="px-6 py-4">
+                        <div className="font-medium">{a.name}</div>
+                        <div className="text-xs text-ink-500">{a.contactEmail}</div>
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <input
+                            className="input !h-9 !py-1 !text-xs font-mono w-32"
+                            readOnly
+                            value={agencyCode}
+                            onFocus={(e) => e.currentTarget.select()}
+                            aria-label={`${a.name} agency code`}
+                          />
+                          <button
+                            type="button"
+                            className="btn-outline text-xs !px-2"
+                            onClick={() => regenerateAgencyCode(a.id)}
+                            title="Automatically regenerate a new unused agency sign-in code"
+                          >
+                            <RefreshCw className="h-3.5 w-3.5" />
+                            {changedCodeId === a.id ? "Regenerated" : "Regenerate code"}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-outline text-xs !px-2"
+                            onClick={() => copyAgencyCode(a.id)}
+                            title="Copy agency code"
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                            {copiedCodeId === a.id ? "Copied" : "Copy"}
+                          </button>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 capitalize">{a.tier}</td>
+                      <td className="px-6 py-4">
+                        <div className="font-medium text-ink-900">{agencyPlanTermMonths(a)} months</div>
+                        <div className="mt-0.5 text-xs text-ink-500">
+                          Renews {fmt.date(agencyPlanRenewalIso(a))}
+                        </div>
+                        <div className="mt-1">
+                          <Badge tone={renewal.tone}>{renewal.label}</Badge>
+                        </div>
+                      </td>
+                      <td className="px-6 py-4 text-ink-700">{a.serviceAreas.join(", ") || "Not set"}</td>
+                      <td className="px-6 py-4 text-ink-700">{fmt.date(a.createdAt)}</td>
+                      <td className="px-6 py-4">
+                        <Badge tone={a.active ? "success" : "neutral"}>
+                          {a.active ? "Active" : "Deactivated"}
+                        </Badge>
+                        {!a.active && (
+                          <div className="mt-1 text-xs text-ink-500">Billing suspended</div>
+                        )}
+                      </td>
+                      <td className="px-6 py-4">
+                        <div className="flex justify-end gap-2">
+                          <Link to={`/master/agencies/${a.id}`} className="btn-outline text-xs inline-flex">
+                            Manage
+                          </Link>
+                          {a.active ? (
+                            <button
+                              type="button"
+                              className="btn-outline text-xs"
+                              onClick={() => deactivateAgency(a.id)}
+                            >
+                              Deactivate
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn-outline text-xs"
+                              onClick={() => reactivateAgency(a.id)}
+                            >
+                              Reactivate
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    );
   }
 
   return (
@@ -70,87 +216,20 @@ export function AgenciesPage() {
           }
         />
       ) : (
-        <Card padded={false}>
-          <div className="overflow-x-auto">
-          <table className="w-full min-w-[980px] text-sm">
-            <thead>
-              <tr className="text-left text-xs uppercase tracking-wider text-ink-500 border-b border-ink-100">
-                <th className="px-6 py-3">Agency</th>
-                <th className="px-6 py-3">Code</th>
-                <th className="px-6 py-3">Tier</th>
-                <th className="px-6 py-3">Term / renewal</th>
-                <th className="px-6 py-3">Service area</th>
-                <th className="px-6 py-3">Created</th>
-                <th className="px-6 py-3">Status</th>
-                <th className="px-6 py-3"></th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-ink-100">
-              {agencies.map((a) => {
-                const agencyCode = api.agencies.revealCodeForMaster(a.id) ?? "";
-                const renewal = agencyRenewalStatus(a);
-                return (
-                <tr key={a.id}>
-                  <td className="px-6 py-4">
-                    <div className="font-medium">{a.name}</div>
-                    <div className="text-xs text-ink-500">{a.contactEmail}</div>
-                  </td>
-                  <td className="px-6 py-4">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <input
-                        className="input !h-9 !py-1 !text-xs font-mono w-32"
-                        readOnly
-                        value={agencyCode}
-                        onFocus={(e) => e.currentTarget.select()}
-                        aria-label={`${a.name} agency code`}
-                      />
-                      <button
-                        type="button"
-                        className="btn-outline text-xs !px-2"
-                        onClick={() => regenerateAgencyCode(a.id)}
-                        title="Automatically regenerate a new unused agency sign-in code"
-                      >
-                        <RefreshCw className="h-3.5 w-3.5" />
-                        {changedCodeId === a.id ? "Regenerated" : "Regenerate code"}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn-outline text-xs !px-2"
-                        onClick={() => copyAgencyCode(a.id)}
-                        title="Copy agency code"
-                      >
-                        <Copy className="h-3.5 w-3.5" />
-                        {copiedCodeId === a.id ? "Copied" : "Copy"}
-                      </button>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4 capitalize">{a.tier}</td>
-                  <td className="px-6 py-4">
-                    <div className="font-medium text-ink-900">{agencyPlanTermMonths(a)} months</div>
-                    <div className="mt-0.5 text-xs text-ink-500">
-                      Renews {fmt.date(agencyPlanRenewalIso(a))}
-                    </div>
-                    <div className="mt-1">
-                      <Badge tone={renewal.tone}>{renewal.label}</Badge>
-                    </div>
-                  </td>
-                  <td className="px-6 py-4 text-ink-700">{a.serviceAreas.join(", ")}</td>
-                  <td className="px-6 py-4 text-ink-700">{fmt.date(a.createdAt)}</td>
-                  <td className="px-6 py-4">
-                    <Badge tone={a.active ? "success" : "neutral"}>{a.active ? "Active" : "Inactive"}</Badge>
-                  </td>
-                  <td className="px-6 py-4 text-right">
-                    <Link to={`/master/agencies/${a.id}`} className="btn-outline text-xs inline-flex">
-                      Manage
-                    </Link>
-                  </td>
-                </tr>
-                );
-              })}
-            </tbody>
-          </table>
-          </div>
-        </Card>
+        <div className="space-y-6">
+          {renderAgencyTable(
+            activeAgencies,
+            "Active agencies",
+            "Agencies currently allowed to use the platform and remain billable.",
+            "No active agencies."
+          )}
+          {renderAgencyTable(
+            deactivatedAgencies,
+            "Deactivated agencies",
+            "Agencies removed from active access. Billing is suspended while they remain here.",
+            "No deactivated agencies."
+          )}
+        </div>
       )}
 
       <Modal open={open} onClose={() => setOpen(false)} title="Create agency">

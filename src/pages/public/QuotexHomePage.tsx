@@ -15,7 +15,7 @@ import {
   Smartphone,
   X,
 } from "lucide-react";
-import { QuotexMark } from "@/components/layout/Logo";
+import { QuotexMark, QuotexWordmark } from "@/components/layout/Logo";
 import { QuotexSiteFooter } from "@/components/layout/QuotexSiteFooter";
 import { api } from "@/lib/api";
 import { PUBLIC_WHAT_IT_DOES_VIDEOS } from "@/lib/trainingVideos";
@@ -426,7 +426,7 @@ export function QuotexHomePage() {
             />
             <span>
               <span className="block font-display text-xl leading-none text-white">
-                Quotex Insurance
+                <QuotexWordmark />
               </span>
               <span className="mt-1.5 block text-[11px] font-medium leading-none text-white/45">
                 Agency operating system
@@ -595,7 +595,9 @@ export function QuotexHomePage() {
                     className="h-11 w-11 ring-1 ring-white/15"
                     letterClassName="text-[29px]"
                   />
-                  <span className="font-display text-2xl leading-none">Quotex Insurance</span>
+                  <span className="font-display text-2xl leading-none">
+                    <QuotexWordmark />
+                  </span>
                 </Link>
                 <div>
                   <div className="text-xs font-semibold uppercase tracking-[0.16em] text-white/60">Guided walkthrough</div>
@@ -630,7 +632,9 @@ export function QuotexHomePage() {
 
             <section className="invisible-scroll-pane max-h-[calc(100dvh-1.5rem)] min-h-0 overflow-y-auto p-5 sm:max-h-[calc(100dvh-3rem)] sm:p-6 lg:p-8">
               <div className="mb-4 pr-12 lg:hidden">
-                <div className="font-display text-2xl text-black">Quotex Insurance</div>
+                <div className="font-display text-2xl text-black">
+                  <QuotexWordmark />
+                </div>
                 <h2 className="mt-5 font-display text-4xl leading-tight text-black">
                   See Quotex in action.
                 </h2>
@@ -1561,8 +1565,10 @@ function MiniSidebar({ active }: { active: string }) {
   return (
     <div className="rounded-md border border-stone-200 bg-white p-3 shadow-sm">
       <div className="mb-3 flex items-center gap-2">
-        <span className="grid h-8 w-8 place-items-center rounded-md bg-black font-display text-lg text-white">Q</span>
-        <span className="text-[10px] font-semibold text-stone-700">Quotex Insurance</span>
+        <QuotexMark className="h-8 w-8" />
+        <span className="font-display text-[12px] font-semibold leading-none text-stone-700">
+          <QuotexWordmark />
+        </span>
       </div>
       {[active, "Messages", "Clients", "Policies", "Billing"].map((item, index) => (
         <div
@@ -1607,7 +1613,7 @@ function MobileSnippet({ children, title }: { children: ReactNode; title: string
               <div className="font-display text-lg">{title}</div>
               <div className="text-[9px] text-stone-500">Client portal</div>
             </div>
-            <span className="grid h-7 w-7 place-items-center rounded-md bg-black font-display text-base text-white">Q</span>
+            <QuotexMark className="h-7 w-7" />
           </div>
           <div className="mt-3 space-y-2">{children}</div>
         </div>

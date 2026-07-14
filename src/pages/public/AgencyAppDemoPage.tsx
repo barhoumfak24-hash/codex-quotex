@@ -15,7 +15,7 @@ import {
   Sparkles,
   UserRound,
 } from "lucide-react";
-import { QuotexMark } from "@/components/layout/Logo";
+import { QuotexMark, QuotexWordmark } from "@/components/layout/Logo";
 import { buildAgencyWebsiteProfile } from "@/lib/agencyWebsite";
 import { api } from "@/lib/api";
 import { fmt } from "@/lib/format";
@@ -78,7 +78,9 @@ export function AgencyAppDemoPage() {
             <Link to="/" className="flex items-center gap-3">
               <QuotexMark className="h-11 w-11 ring-1 ring-white/15" letterClassName="text-[28px]" />
               <span>
-                <span className="block font-display text-xl leading-none">Quotex Insurance</span>
+                <span className="block font-display text-xl leading-none">
+                  <QuotexWordmark />
+                </span>
                 <span className="mt-1.5 block text-[11px] font-medium leading-none text-white/45">
                   Quotex client app
                 </span>

@@ -128,6 +128,7 @@ export function SoftwareApp() {
         <Route path="/employee/prospects/:prospectId" element={<ProspectDetailPage />} />
         <Route path="/employee/prospects/:prospectId/quote-flow" element={<EmployeeQuoteFlowWorkspacePage />} />
         <Route path="/employee/clients" element={<ClientsPage />} />
+        <Route path="/employee/ai-quoting-workspace" element={<Navigate to="/employee" replace />} />
         <Route path="/employee/clients/:customerId" element={<ClientDetailPage />} />
         <Route path="/employee/clients/:customerId/quote-flow" element={<EmployeeQuoteFlowWorkspacePage />} />
         <Route path="/employee/clients/:customerId/assets/:assetId" element={<EmployeeAssetPage />} />
@@ -151,6 +152,16 @@ export function SoftwareApp() {
         <Route path="/employee/hr" element={<EmployeeHrPage />} />
         <Route path="/employee/settings" element={<AgencySettingsPage />} />
         <Route path="/employee/account-settings" element={<EmployeeAccountSettingsPage />} />
+      </Route>
+
+      <Route
+        element={
+          <RequireRole roles={["master_admin"]} redirectTo="/master/login">
+            <EmployeeLayout />
+          </RequireRole>
+        }
+      >
+        <Route path="/master/demos/software/clients/:customerId" element={<ClientDetailPage />} />
       </Route>
 
       <Route

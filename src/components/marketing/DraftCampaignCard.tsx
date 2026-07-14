@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { api } from "@/lib/api";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import { aiAssetTypeAliases, matchesAiCustomFilter } from "@/lib/aiCustomFilters";
 import { subscribeToDbChanges } from "@/lib/db";
 import { fmt } from "@/lib/format";
@@ -1260,7 +1261,7 @@ function customerMatchesCustomAudience(tenantId: string, customer: CustomerProfi
       customer.garagingAddress,
       customer.lineOfBusiness,
       ...assets.flatMap((asset) => [
-        asset.label,
+        assetDisplayName(asset),
         asset.type,
         api.helpers.assetTypeLabel(asset.type),
         asset.status,

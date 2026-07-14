@@ -28,6 +28,7 @@ import type {
   StatusEvent,
   User,
 } from "@/types";
+import { applyCarrierPortalPlaybook } from "./carrierPortalPlaybooks";
 import { protectAgencyCode } from "./credentials";
 
 // Deterministic ids so cross references work in the seed.
@@ -75,7 +76,7 @@ export const SEED_AGENCIES: Agency[] = [
     carrierRunnerContactEmail: "downloads@palmcoastpc.example",
     carrierRunnerContactPhone: "+1 (555) 312-0099",
     carrierRunnerLastTestStatus: "not_tested",
-    carrierRunnerNotes: "Configuration placeholder. Store carrier portal credentials in the vault, run a supervised sign-in/download test, then activate production sync.",
+    carrierRunnerNotes: "Configuration placeholder. Run only from an existing signed-in carrier browser session, then activate production sync after supervised testing.",
     serviceAreas: ["FL", "GA", "SC"],
     ...palmCoastAgencyCode,
     tier: "mid",
@@ -326,7 +327,7 @@ const GREAT_LAKES_STATES = ["MI","OH","IN","IL","WI","MN","IA","PA"];
 // Numbers are illustrative for the demo, NOT carrier-confidential.
 // =====================================================================
 
-export const SEED_CARRIERS: Carrier[] = [
+const RAW_SEED_CARRIERS: Carrier[] = [
   // ---- HNW specialists ------------------------------------------------
   {
     id: id("carrier_chubb"),
@@ -339,11 +340,10 @@ export const SEED_CARRIERS: Carrier[] = [
     quotingAutomation: {
       provider: "AI carrier portal runner",
       agentPortalUrl: "https://www.chubb.com/us-en/agents-brokers.html",
-      credentialReference: "vault://agency/chubb/agent-portal",
       mfaMode: "staff_prompt",
       status: "configured",
       notes:
-        "Uses authorized agency carrier-portal credentials to retrieve quotes, documents, billing updates, renewals, and claim updates.",
+        "Uses the agent's existing signed-in carrier browser session to retrieve quotes, documents, billing updates, renewals, and claim updates.",
     },
     appetiteNotes: "Coastal homes $1.5M+, high-value autos, fine art, jewelry. Strong in FL/NY/CA.",
     tendencyNotes: "Premium pricing, generous limits, white-glove claims. Slower to bind.",
@@ -373,11 +373,10 @@ export const SEED_CARRIERS: Carrier[] = [
     quotingAutomation: {
       provider: "AI carrier portal runner",
       agentPortalUrl: "https://www.pureinsurance.com/member-login",
-      credentialReference: "vault://agency/pure/agent-portal",
       mfaMode: "staff_prompt",
       status: "configured",
       notes:
-        "Uses authorized agency carrier-portal credentials to retrieve quotes, documents, billing updates, renewals, and claim updates.",
+        "Uses the agent's existing signed-in carrier browser session to retrieve quotes, documents, billing updates, renewals, and claim updates.",
     },
     appetiteNotes: "Membership-based reciprocal. HNW homes, yachts, umbrella.",
     tendencyNotes: "Aggressive on retention, white-glove claims, ~5–10% under Chubb.",
@@ -622,11 +621,10 @@ export const SEED_CARRIERS: Carrier[] = [
     quotingAutomation: {
       provider: "AI carrier portal runner",
       agentPortalUrl: "https://progressivecommercial.com/agent-login/",
-      credentialReference: "vault://carrier/progressive/agency-rater",
       status: "configured",
       mfaMode: "staff_prompt",
       notes:
-        "Configuration placeholder for carrier-approved web rater automation. Production stores credentials in a vault and runs from the server worker.",
+        "Configuration placeholder for carrier-approved web rater automation. Production uses the agent's existing signed-in browser session and stops at login, MFA, bind, or payment screens.",
     },
     appetiteNotes: "Auto-heavy. Home via partner programs.",
     tendencyNotes: "Aggressive on auto.",
@@ -646,11 +644,10 @@ export const SEED_CARRIERS: Carrier[] = [
     quotingAutomation: {
       provider: "AI carrier portal runner",
       agentPortalUrl: "https://agents.allstate.com",
-      credentialReference: "vault://carrier/allstate/agency-rater",
       status: "configured",
       mfaMode: "staff_prompt",
       notes:
-        "Configuration placeholder for carrier-approved web rater automation. Production stores credentials in a vault and runs from the server worker.",
+        "Configuration placeholder for carrier-approved web rater automation. Production uses the agent's existing signed-in browser session and stops at login, MFA, bind, or payment screens.",
     },
     appetiteNotes: "Home, auto, umbrella. Standard market.",
     tendencyNotes: "At-market pricing.",
@@ -672,11 +669,10 @@ export const SEED_CARRIERS: Carrier[] = [
     quotingAutomation: {
       provider: "AI carrier portal runner",
       agentPortalUrl: "https://agents.farmers.com",
-      credentialReference: "vault://carrier/farmers/agency-rater",
       status: "configured",
       mfaMode: "staff_prompt",
       notes:
-        "Configuration placeholder for carrier-approved web rater automation. Production stores credentials in a vault and runs from the server worker.",
+        "Configuration placeholder for carrier-approved web rater automation. Production uses the agent's existing signed-in browser session and stops at login, MFA, bind, or payment screens.",
     },
     appetiteNotes: "Home, auto, umbrella, jewelry.",
     tendencyNotes: "Slightly above market on home.",
@@ -1097,6 +1093,8 @@ export const SEED_CARRIERS: Carrier[] = [
     createdAt: now(176),
   },
 ];
+
+export const SEED_CARRIERS: Carrier[] = RAW_SEED_CARRIERS.map(applyCarrierPortalPlaybook);
 
 // Each demo agency is linked to a representative mix of carriers
 // so the estimator's appetite-matching has enough carriers to
@@ -1657,7 +1655,7 @@ export const SEED_PROSPECTS: Prospect[] = [
   },
 ];
 
-type AcordFormSeed = {
+export type AcordFormSeed = {
   number: string;
   name: string;
   fileName: string;
@@ -1666,7 +1664,7 @@ type AcordFormSeed = {
   use: string;
 };
 
-const ACORD_FORM_CATALOG: AcordFormSeed[] = [
+export const ACORD_FORM_CATALOG: AcordFormSeed[] = [
   {
     number: "3",
     name: "Claims / Occurrence Notice",
@@ -1906,6 +1904,30 @@ const ACORD_FORM_CATALOG: AcordFormSeed[] = [
     sourceFileName: "Acord-129-Vehicle-Schedule-form.pdf",
     line: "Commercial lines",
     use: "List vehicles attached to a commercial auto or fleet submission.",
+  },
+  {
+    number: "130 Scenario 1",
+    name: "Workers Compensation Application Packet",
+    fileName: "ACORD-130-Scenario-1-Documents.pdf",
+    sourceFileName: "ACORD 130 Scenario 1 Documents.pdf",
+    line: "Commercial lines",
+    use: "Collect workers compensation application details for the first supplied ACORD 130 scenario packet.",
+  },
+  {
+    number: "130 Scenario 2",
+    name: "Workers Compensation Application Packet",
+    fileName: "ACORD-130-Scenario-2-Documents.pdf",
+    sourceFileName: "ACORD 130 Scenario 2 Documents.pdf",
+    line: "Commercial lines",
+    use: "Collect workers compensation application details for the second supplied ACORD 130 scenario packet.",
+  },
+  {
+    number: "130 Scenario 3",
+    name: "Workers Compensation Application Packet",
+    fileName: "ACORD-130-Scenario-3-Documents.pdf",
+    sourceFileName: "ACORD 130 Scenario 3 Documents.pdf",
+    line: "Commercial lines",
+    use: "Collect workers compensation application details for the third supplied ACORD 130 scenario packet.",
   },
   {
     number: "131",
@@ -2971,7 +2993,7 @@ export const SEED_CATEGORIES: InsuranceCategory[] = [
   commercialCategory({ id: "cat_com_telecom", label: "Telecom / Communications", description: "Telecom providers, tower work, fiber, networks, cyber, E&O, and infrastructure.", assetType: "other", icon: "ShieldCheck", sortOrder: 1219 }),
   commercialCategory({ id: "cat_com_life_sciences", label: "Life Sciences / Medical Device", description: "Biotech, medical device, product liability, clinical trials, cyber, and E&O.", assetType: "other", icon: "ShieldCheck", sortOrder: 1220 }),
   commercialCategory({ id: "cat_com_clinical_trials", label: "Clinical Trials", description: "Human subject research, trial liability, foreign trials, participant injury, and sponsors.", assetType: "other", icon: "HeartPulse", sortOrder: 1221 }),
-  commercialCategory({ id: "cat_com_product_recall", label: "Product Recall / Contamination", description: "Recall expense, brand damage, contamination, withdrawal, and crisis response.", assetType: "other", icon: "ShieldCheck", sortOrder: 1222 }),
+  commercialCategory({ id: "cat_com_contamination_recall", label: "Product Recall / Contamination", description: "Recall expense, brand damage, contamination, withdrawal, and crisis response.", assetType: "other", icon: "ShieldCheck", sortOrder: 1222 }),
   commercialCategory({ id: "cat_com_franchise", label: "Franchise / Multi-Location", description: "Franchisees, franchisors, multi-location schedules, brand standards, and operations.", assetType: "other", icon: "Building2", sortOrder: 1223 }),
   commercialCategory({ id: "cat_com_event_cancellation", label: "Event Cancellation", description: "Cancellation, non-appearance, weather, communicable disease, and revenue protection.", assetType: "umbrella_liability", icon: "Sparkles", sortOrder: 1224 }),
   commercialCategory({ id: "cat_com_film_production", label: "Film / Media Production", description: "Production packages, cast, equipment, E&O, locations, vehicles, and props.", assetType: "other", icon: "Sparkles", sortOrder: 1225 }),

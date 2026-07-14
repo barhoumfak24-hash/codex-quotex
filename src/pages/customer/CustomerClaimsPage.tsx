@@ -3,6 +3,7 @@ import { Mail, Phone, Search, Send } from "lucide-react";
 import { Card, CardHeader, EmptyState } from "@/components/ui/Card";
 import { CarrierClaimLink } from "@/components/ui/CarrierClaimLink";
 import { api } from "@/lib/api";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import { fmt } from "@/lib/format";
 import { toTelHref } from "@/lib/phone";
 import { useTenant } from "@/lib/tenant";
@@ -76,7 +77,7 @@ export function CustomerClaimsPage() {
         body: trimmed,
       });
       const asset = assets.find((a) => a.id === contactAssetId);
-      const label = asset ? asset.label : "your selection";
+      const label = asset ? assetDisplayName(asset) : "your selection";
       setContactBanner(
         `Your agent has been alerted about a claim for ${label}. We've logged this on your status timeline.`
       );
@@ -135,7 +136,7 @@ export function CustomerClaimsPage() {
               <option value="">— Not sure / pick later —</option>
               {assets.map((a) => (
                 <option key={a.id} value={a.id}>
-                  {a.label}
+                  {assetDisplayName(a)}
                 </option>
               ))}
             </select>
@@ -194,7 +195,7 @@ export function CustomerClaimsPage() {
             {policyCarrierRows.map(({ policy, carrier, asset }) => (
               <li key={policy.id} className="py-3 flex items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="text-sm font-medium truncate">{asset?.label ?? "—"}</div>
+                  <div className="text-sm font-medium truncate">{asset ? assetDisplayName(asset) : "—"}</div>
                   <div className="text-xs text-ink-500 truncate">
                     {carrier?.name ?? "Unknown carrier"} ·{" "}
                     <span className="font-mono">{fmt.policyRef(policy)}</span>

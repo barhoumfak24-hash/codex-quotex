@@ -6,6 +6,7 @@ import { Disclaimer } from "@/components/ui/Disclaimer";
 import { Timeline } from "@/components/ui/Timeline";
 import { PolicyStatusBadge } from "@/components/ui/StatusBadge";
 import { api } from "@/lib/api";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import { fmt } from "@/lib/format";
 import { useCustomer } from "@/lib/useCustomer";
 
@@ -19,6 +20,7 @@ export function CustomerDashboard() {
   const quoteRequests = api.quotes.listByCustomer(customer.id);
   const events = api.status.listFor({ customerId: customer.id }).filter((e) => e.visibility === "customer_visible");
   const upcomingRenewal = policies.find((p) => p.renewalStatus === "upcoming");
+  const upcomingRenewalAsset = upcomingRenewal ? api.assets.get(upcomingRenewal.assetId) : undefined;
 
   return (
     <div className="space-y-6">
@@ -59,7 +61,7 @@ export function CustomerDashboard() {
 
       {upcomingRenewal && (
         <Disclaimer>
-          Renewal upcoming: <strong>{api.assets.get(upcomingRenewal.assetId)?.label}</strong> on{" "}
+          Renewal upcoming: <strong>{upcomingRenewalAsset ? assetDisplayName(upcomingRenewalAsset) : "asset"}</strong> on{" "}
           {fmt.date(upcomingRenewal.renewalDate)}. Your agent has been notified.
         </Disclaimer>
       )}
@@ -80,7 +82,7 @@ export function CustomerDashboard() {
                   return (
                     <li key={a.id} className="py-4 flex items-center justify-between gap-4">
                       <Link to={`/customer/assets/${a.id}`} className="min-w-0 flex-1">
-                        <div className="text-sm font-semibold text-ink-900 truncate">{a.label}</div>
+                        <div className="text-sm font-semibold text-ink-900 truncate">{assetDisplayName(a)}</div>
                         <div className="text-xs text-ink-500 mt-0.5">
                           {api.helpers.assetTypeLabel(a.type)} · {fmt.money(a.estimatedValue)}
                         </div>

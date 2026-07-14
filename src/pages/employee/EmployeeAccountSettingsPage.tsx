@@ -1,12 +1,31 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ExternalLink, Loader2, Lock, LogOut, Mail, Pencil, Save, ShieldCheck, UserCog, X } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  ExternalLink,
+  Loader2,
+  Lock,
+  LogOut,
+  Mail,
+  Pencil,
+  Save,
+  ShieldCheck,
+  UserCog,
+  X,
+} from "lucide-react";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { EmployeeBackButton } from "@/components/layout/EmployeeBackButton";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
-import { startMailboxOAuth, type MailboxOAuthProvider } from "@/lib/mailboxOAuth";
+import {
+  listMailboxConnections,
+  listMailboxDiagnostics,
+  startMailboxOAuth,
+  type MailboxDiagnostic,
+  type MailboxOAuthProvider,
+} from "@/lib/mailboxOAuth";
 import {
   inferMailProvider,
   isValidBusinessEmail,
@@ -15,6 +34,7 @@ import {
   MAIL_PROVIDER_OPTIONS,
 } from "@/lib/mailProvider";
 import type { MailProvider } from "@/types";
+import type { ConnectedMailbox } from "@/types";
 
 function lockedFieldClass(locked: boolean) {
   return locked
@@ -24,6 +44,17 @@ function lockedFieldClass(locked: boolean) {
 
 function roleLabel(role: string) {
   return role.replace(/_/g, " ").replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function formatMailboxTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
 }
 
 export function EmployeeAccountSettingsPage() {
@@ -37,6 +68,12 @@ export function EmployeeAccountSettingsPage() {
   const [profileSaved, setProfileSaved] = useState(false);
   const [mailboxNotice, setMailboxNotice] = useState<string | null>(null);
   const [mailboxConnecting, setMailboxConnecting] = useState<MailboxOAuthProvider | null>(null);
+  const [serverMailboxes, setServerMailboxes] = useState<ConnectedMailbox[]>([]);
+  const [serverMailboxLoading, setServerMailboxLoading] = useState(false);
+  const [serverMailboxError, setServerMailboxError] = useState<string | null>(null);
+  const [mailboxDiagnostics, setMailboxDiagnostics] = useState<MailboxDiagnostic[]>([]);
+  const [mailboxDiagnosticsLoading, setMailboxDiagnosticsLoading] = useState(false);
+  const [mailboxDiagnosticsError, setMailboxDiagnosticsError] = useState<string | null>(null);
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [passwordSaved, setPasswordSaved] = useState(false);
   const [profileDraft, setProfileDraft] = useState({
@@ -99,11 +136,71 @@ export function EmployeeAccountSettingsPage() {
     window.history.replaceState(null, "", `${window.location.pathname}${window.location.hash}`);
   }, []);
 
+  useEffect(() => {
+    if (!liveUser || !agency?.id) {
+      setServerMailboxes([]);
+      setServerMailboxError(null);
+      setMailboxDiagnostics([]);
+      setMailboxDiagnosticsError(null);
+      return;
+    }
+    let cancelled = false;
+    setServerMailboxLoading(true);
+    setMailboxDiagnosticsLoading(true);
+    setServerMailboxError(null);
+    setMailboxDiagnosticsError(null);
+    Promise.all([
+      listMailboxConnections({ user: liveUser, tenantId: agency.id, mineOnly: true }),
+      listMailboxDiagnostics({ user: liveUser, tenantId: agency.id, mineOnly: true }),
+    ])
+      .then(([connectionsResult, diagnosticsResult]) => {
+        if (cancelled) return;
+        if (connectionsResult.ok) {
+          setServerMailboxes(connectionsResult.connections);
+          setServerMailboxError(null);
+        } else {
+          setServerMailboxes([]);
+          setServerMailboxError(
+            connectionsResult.message ?? connectionsResult.error ?? "Mailbox status could not be checked."
+          );
+        }
+        if (diagnosticsResult.ok) {
+          setMailboxDiagnostics(diagnosticsResult.diagnostics);
+          setMailboxDiagnosticsError(null);
+        } else {
+          setMailboxDiagnostics([]);
+          setMailboxDiagnosticsError(
+            diagnosticsResult.message ?? diagnosticsResult.error ?? "Mailbox diagnostics could not be checked."
+          );
+        }
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setServerMailboxes([]);
+        setMailboxDiagnostics([]);
+        setServerMailboxError(error instanceof Error ? error.message : "Mailbox status could not be checked.");
+        setMailboxDiagnosticsError(error instanceof Error ? error.message : "Mailbox diagnostics could not be checked.");
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setServerMailboxLoading(false);
+          setMailboxDiagnosticsLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [agency?.id, liveUser?.id, liveUser?.tenantId, liveUser?.role]);
+
   const displayEmail = liveUser?.businessEmail ?? liveUser?.email ?? "";
   const staffMailbox = liveUser ? api.mailboxes.staff(liveUser.id) : undefined;
-  const mailboxAddress = staffMailbox?.address ?? displayEmail;
-  const mailboxProvider = staffMailbox?.provider ?? inferMailProvider(mailboxAddress);
-  const mailboxRequirements = api.mailboxes.productionRequirements(staffMailbox);
+  const serverMailbox =
+    serverMailboxes.find((mailbox) => mailbox.ownerType === "staff" && mailbox.userId === liveUser?.id) ??
+    serverMailboxes[0];
+  const effectiveMailbox = serverMailbox ?? staffMailbox;
+  const mailboxAddress = effectiveMailbox?.address ?? displayEmail;
+  const mailboxProvider = effectiveMailbox?.provider ?? inferMailProvider(mailboxAddress);
+  const mailboxRequirements = api.mailboxes.productionRequirements(effectiveMailbox);
   const providerText = useMemo(
     () => mailProviderLabel(liveUser?.mailProvider ?? inferMailProvider(displayEmail)),
     [displayEmail, liveUser?.mailProvider]
@@ -310,7 +407,7 @@ export function EmployeeAccountSettingsPage() {
             <input
               className={lockedFieldClass(profileLocked)}
               value={profileDraft.firstName}
-              readOnly={profileLocked}
+              disabled={profileLocked}
               onChange={(event) => updateProfileDraft("firstName", event.target.value)}
             />
           </label>
@@ -319,7 +416,7 @@ export function EmployeeAccountSettingsPage() {
             <input
               className={lockedFieldClass(profileLocked)}
               value={profileDraft.lastName}
-              readOnly={profileLocked}
+              disabled={profileLocked}
               onChange={(event) => updateProfileDraft("lastName", event.target.value)}
             />
           </label>
@@ -328,7 +425,7 @@ export function EmployeeAccountSettingsPage() {
             <input
               className={lockedFieldClass(profileLocked)}
               value={profileDraft.businessEmail}
-              readOnly={profileLocked}
+              disabled={profileLocked}
               onChange={(event) => {
                 const value = event.target.value;
                 updateProfileDraft("businessEmail", value);
@@ -341,7 +438,7 @@ export function EmployeeAccountSettingsPage() {
             <input
               className={lockedFieldClass(profileLocked)}
               value={profileDraft.phone}
-              readOnly={profileLocked}
+              disabled={profileLocked}
               onChange={(event) => updateProfileDraft("phone", event.target.value)}
             />
           </label>
@@ -350,7 +447,7 @@ export function EmployeeAccountSettingsPage() {
             <input
               className={lockedFieldClass(profileLocked)}
               value={profileDraft.title}
-              readOnly={profileLocked}
+              disabled={profileLocked}
               placeholder="Account executive, CSR, manager..."
               onChange={(event) => updateProfileDraft("title", event.target.value)}
             />
@@ -470,16 +567,38 @@ export function EmployeeAccountSettingsPage() {
           <div className="rounded-md border border-ink-100 bg-ink-50 px-3 py-2">
             <div className="text-[10px] uppercase tracking-wider text-ink-500">Status</div>
             <div className="mt-1 text-sm font-semibold text-ink-900">
-              {staffMailbox?.status === "connected" ? "Connected" : "Needs authorization"}
+              {serverMailboxLoading
+                ? "Checking..."
+                : effectiveMailbox?.status === "connected"
+                  ? "Connected"
+                  : "Needs authorization"}
             </div>
           </div>
           <div className="rounded-md border border-ink-100 bg-ink-50 px-3 py-2">
-            <div className="text-[10px] uppercase tracking-wider text-ink-500">Mode</div>
+            <div className="text-[10px] uppercase tracking-wider text-ink-500">
+              {effectiveMailbox?.lastSyncAt || effectiveMailbox?.lastSendAt ? "Last activity" : "Mode"}
+            </div>
             <div className="mt-1 text-sm font-semibold text-ink-900">
-              {staffMailbox?.authMode === "demo" ? "Legacy local record" : staffMailbox?.authMode ?? "Pending"}
+              {effectiveMailbox?.lastSyncAt
+                ? `Synced ${formatMailboxTime(effectiveMailbox.lastSyncAt)}`
+                : effectiveMailbox?.lastSendAt
+                  ? `Sent ${formatMailboxTime(effectiveMailbox.lastSendAt)}`
+                  : effectiveMailbox?.authMode === "demo"
+                    ? "Legacy local record"
+                    : effectiveMailbox?.authMode ?? "Pending"}
             </div>
           </div>
         </div>
+        {serverMailboxError && (
+          <div className="mt-4 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
+            {serverMailboxError}
+          </div>
+        )}
+        {effectiveMailbox?.lastError && (
+          <div className="mt-4 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
+            Last mailbox error: {effectiveMailbox.lastError}
+          </div>
+        )}
         {mailboxRequirements.length > 0 && (
           <div className="mt-4 rounded-md border border-gold-200 bg-gold-50/60 px-3 py-2 text-xs text-gold-900">
             <div className="font-semibold">Production requirements</div>
@@ -490,6 +609,11 @@ export function EmployeeAccountSettingsPage() {
             </ul>
           </div>
         )}
+        <MailboxSyncPanel
+          diagnostics={mailboxDiagnostics}
+          loading={mailboxDiagnosticsLoading}
+          error={mailboxDiagnosticsError}
+        />
       </Card>
 
       <Card>
@@ -555,7 +679,7 @@ export function EmployeeAccountSettingsPage() {
               type="password"
               className={lockedFieldClass(securityLocked)}
               value={passwordDraft.current}
-              readOnly={securityLocked}
+              disabled={securityLocked}
               onChange={(event) =>
                 setPasswordDraft((draft) => ({ ...draft, current: event.target.value }))
               }
@@ -567,7 +691,7 @@ export function EmployeeAccountSettingsPage() {
               type="password"
               className={lockedFieldClass(securityLocked)}
               value={passwordDraft.next}
-              readOnly={securityLocked}
+              disabled={securityLocked}
               onChange={(event) =>
                 setPasswordDraft((draft) => ({ ...draft, next: event.target.value }))
               }
@@ -579,7 +703,7 @@ export function EmployeeAccountSettingsPage() {
               type="password"
               className={lockedFieldClass(securityLocked)}
               value={passwordDraft.confirm}
-              readOnly={securityLocked}
+              disabled={securityLocked}
               onChange={(event) =>
                 setPasswordDraft((draft) => ({ ...draft, confirm: event.target.value }))
               }
@@ -620,4 +744,128 @@ export function EmployeeAccountSettingsPage() {
       </Card>
     </div>
   );
+}
+
+function MailboxSyncPanel({
+  diagnostics,
+  loading,
+  error,
+}: {
+  diagnostics: MailboxDiagnostic[];
+  loading: boolean;
+  error: string | null;
+}) {
+  const first = diagnostics[0];
+  return (
+    <div className="mt-4 rounded-md border border-ink-100 bg-white p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-500">Mailbox sync</div>
+          <p className="mt-1 text-xs text-ink-500">
+            Inbound replies mirror through provider API polling. Reconnect once after scope changes.
+          </p>
+        </div>
+        {loading ? (
+          <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-1 text-[11px] font-semibold text-blue-700">
+            <Loader2 className="h-3 w-3 animate-spin" /> Checking
+          </span>
+        ) : first?.hasReadScope && first.tokenStatus === "valid" ? (
+          <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-1 text-[11px] font-semibold text-emerald-700">
+            <CheckCircle2 className="h-3 w-3" /> Read ready
+          </span>
+        ) : (
+          <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-2 py-1 text-[11px] font-semibold text-rose-700">
+            <AlertTriangle className="h-3 w-3" /> Needs attention
+          </span>
+        )}
+      </div>
+
+      {error && (
+        <div className="mt-3 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
+          {error}
+        </div>
+      )}
+
+      {!loading && diagnostics.length === 0 && !error && (
+        <div className="mt-3 rounded-md border border-gold-200 bg-gold-50 px-3 py-2 text-xs text-gold-900">
+          No live mailbox connection has been authorized yet.
+        </div>
+      )}
+
+      <div className="mt-3 space-y-3">
+        {diagnostics.map((item) => (
+          <div key={item.id} className="rounded-md border border-ink-100 bg-ink-50 p-3">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <div>
+                <div className="text-sm font-semibold text-ink-900">{item.address}</div>
+                <div className="text-xs text-ink-500">{mailProviderLabel(providerToMailProvider(item.provider))}</div>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                <HealthPill ok={item.hasReadScope} label={item.hasReadScope ? "Read scope" : "No read scope"} />
+                <HealthPill ok={item.cursorPresent} label={item.cursorPresent ? "Cursor saved" : "No cursor yet"} />
+                <HealthPill ok={item.tokenStatus === "valid"} label={item.tokenStatus === "valid" ? "Token valid" : "Re-auth needed"} />
+              </div>
+            </div>
+            <div className="mt-3 grid gap-2 text-xs md:grid-cols-4">
+              <Metric label="Last poll" value={item.lastPoll ? formatMailboxTime(item.lastPoll.at) : "Not run yet"} />
+              <Metric label="Fetched" value={item.lastPoll ? String(item.lastPoll.fetched) : "0"} />
+              <Metric label="Created" value={item.lastPoll ? String(item.lastPoll.created) : "0"} />
+              <Metric label="Inbound 24h" value={String(item.inboundLast24h)} />
+            </div>
+            <div className="mt-3 grid gap-2 text-xs md:grid-cols-3">
+              <Metric label="Updated" value={item.lastPoll ? String(item.lastPoll.updated) : "0"} />
+              <Metric label="Deduped" value={item.lastPoll ? String(item.lastPoll.deduped) : "0"} />
+              <Metric label="Errors" value={item.lastPoll ? String(item.lastPoll.errors) : "0"} />
+            </div>
+            <div className="mt-3 rounded-md bg-white px-3 py-2 text-[11px] text-ink-500">
+              <div className="font-semibold text-ink-700">Granted scopes</div>
+              <div className="mt-1 break-words">{item.grantedScopes.length ? item.grantedScopes.join(", ") : "None reported"}</div>
+            </div>
+            {item.lastError && (
+              <div className="mt-2 rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-medium text-rose-700">
+                {item.lastError}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-3 rounded-md border border-gold-200 bg-gold-50/60 px-3 py-2 text-xs text-gold-900">
+        <div className="font-semibold">Required one-time checks</div>
+        <ul className="mt-1 list-disc space-y-1 pl-4">
+          <li>Reconnect the mailbox after this update so Google or Microsoft grants read permission.</li>
+          <li>Confirm the Vercel Cron job for mailbox polling is enabled after deployment.</li>
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+function HealthPill({ ok, label }: { ok: boolean; label: string }) {
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-semibold ${
+        ok ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"
+      }`}
+    >
+      {ok ? <CheckCircle2 className="h-3 w-3" /> : <AlertTriangle className="h-3 w-3" />}
+      {label}
+    </span>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-ink-100 bg-white px-3 py-2">
+      <div className="text-[10px] uppercase tracking-wider text-ink-500">{label}</div>
+      <div className="mt-1 font-semibold text-ink-900">{value}</div>
+    </div>
+  );
+}
+
+function providerToMailProvider(provider: string): MailProvider {
+  const normalized = provider.trim().toLowerCase();
+  if (normalized === "google" || normalized === "gmail") return "gmail";
+  if (normalized === "microsoft" || normalized === "outlook") return "outlook";
+  return "other";
 }

@@ -14,7 +14,7 @@
 // =====================================================================
 
 import { api } from "@/lib/api";
-import { postServerAi } from "@/lib/aiGateway";
+import { browserAiFallbacksAllowed, postServerAi } from "@/lib/aiGateway";
 import { fmt } from "@/lib/format";
 import { isStaffRole, staffRoleLabel } from "@/lib/roles";
 import { isContactProfileActivity } from "@/lib/taskFilters";
@@ -4798,6 +4798,14 @@ export async function askPortalAssistantSmart(
     const related = sanitizeRelated(llm.related, local.related);
     return { ...local, text, related };
   } catch {
+    if (!browserAiFallbacksAllowed()) {
+      return {
+        text:
+          "Portal assistant AI is temporarily unavailable. Please try again once the AI service is back online.",
+        related: local.related,
+        topicId: "ai-unavailable",
+      };
+    }
     return local;
   }
 }

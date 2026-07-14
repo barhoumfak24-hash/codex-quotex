@@ -125,6 +125,8 @@ export function UnifiedApp() {
       <Route path="/master/login" element={<MasterLoginPage />} />
       <Route path="/quote/start" element={<QuoteStartGate />} />
       <Route path="/agency/quote/start" element={<QuoteStartGate />} />
+      <Route path="/customer/questionnaire/:sessionId" element={<ClientQuestionnairePage />} />
+      <Route path="/agency/customer/questionnaire/:sessionId" element={<ClientQuestionnairePage />} />
 
       <Route
         element={
@@ -142,7 +144,6 @@ export function UnifiedApp() {
         <Route path="/customer/claims" element={<CustomerClaimsPage />} />
         <Route path="/customer/settings" element={<CustomerSettingsPage />} />
         <Route path="/customer/quote/new" element={<QuoteFlowPage />} />
-        <Route path="/customer/questionnaire/:sessionId" element={<ClientQuestionnairePage />} />
       </Route>
 
       <Route
@@ -161,7 +162,6 @@ export function UnifiedApp() {
         <Route path="/agency/customer/claims" element={<CustomerClaimsPage />} />
         <Route path="/agency/customer/settings" element={<CustomerSettingsPage />} />
         <Route path="/agency/customer/quote/new" element={<QuoteFlowPage />} />
-        <Route path="/agency/customer/questionnaire/:sessionId" element={<ClientQuestionnairePage />} />
       </Route>
 
       <Route
@@ -183,6 +183,7 @@ export function UnifiedApp() {
         <Route path="/employee/prospects/:prospectId" element={<ProspectDetailPage />} />
         <Route path="/employee/prospects/:prospectId/quote-flow" element={<EmployeeQuoteFlowWorkspacePage />} />
         <Route path="/employee/clients" element={<ClientsPage />} />
+        <Route path="/employee/ai-quoting-workspace" element={<Navigate to="/employee" replace />} />
         <Route path="/employee/clients/:customerId" element={<ClientDetailPage />} />
         <Route path="/employee/clients/:customerId/quote-flow" element={<EmployeeQuoteFlowWorkspacePage />} />
         <Route path="/employee/clients/:customerId/assets/:assetId" element={<EmployeeAssetPage />} />
@@ -206,6 +207,16 @@ export function UnifiedApp() {
         <Route path="/employee/hr" element={<EmployeeHrPage />} />
         <Route path="/employee/settings" element={<AgencySettingsPage />} />
         <Route path="/employee/account-settings" element={<EmployeeAccountSettingsPage />} />
+      </Route>
+
+      <Route
+        element={
+          <RequireRole roles={["master_admin"]} redirectTo="/master/login">
+            <EmployeeLayout />
+          </RequireRole>
+        }
+      >
+        <Route path="/master/demos/software/clients/:customerId" element={<ClientDetailPage />} />
       </Route>
 
       <Route

@@ -6,6 +6,7 @@ import {
   documentTypeLabelForTemplate,
 } from "@/lib/documentTemplateFields";
 import { detectFillableDocumentFields } from "@/lib/fillableDocumentFields";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import { fmt } from "@/lib/format";
 import { FileDropZone } from "@/components/ui/FileDropZone";
 import { Modal } from "@/components/ui/Modal";
@@ -172,7 +173,7 @@ export function DocumentUploader({
       customerName: customer?.name,
       customerEmail: customer?.email,
       customerPhone: customer?.phone,
-      assetLabel: asset?.label,
+      assetLabel: asset ? assetDisplayName(asset) : undefined,
       assetValue: asset?.estimatedValue ? money.format(asset.estimatedValue) : undefined,
       policyNumber: policy?.policyNumber,
       carrierName: carrier?.name,

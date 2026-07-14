@@ -2,6 +2,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { api } from "@/lib/api";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import {
   BILLING_STATUS_LABEL,
   billingMethodLabel,
@@ -39,7 +40,7 @@ export function ClientBillingCard({
                 <div className="min-w-0">
                   <div className="truncate font-mono text-sm font-semibold text-ink-900">{fmt.policyRef(policy)}</div>
                   <div className="mt-0.5 truncate text-xs text-ink-500">
-                    {carrier?.name ?? "Carrier"} - {asset?.label ?? "Asset not recorded"} - {billingMethodLabel(policy.billingMethod)}
+                    {carrier?.name ?? "Carrier"} - {asset ? assetDisplayName(asset) : "Asset not recorded"} - {billingMethodLabel(policy.billingMethod)}
                   </div>
                 </div>
                 <div className="flex shrink-0 items-center justify-end gap-2">

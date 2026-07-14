@@ -20,6 +20,7 @@ import { isAddressLikeKey, MapLink } from "@/components/ui/MapLink";
 import { PolicyStatusBadge, RenewalStatusBadge } from "@/components/ui/StatusBadge";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { assetDisplayName, formatAssetDetailValue } from "@/lib/assetDisplay";
 import { fmt } from "@/lib/format";
 import type { AssetType, Document, Policy } from "@/types";
 
@@ -158,7 +159,7 @@ export function PolicyDetailCard({
             <div className="min-w-0">
               <div className="flex items-center gap-2 flex-wrap">
                 <h3 className="font-display text-xl text-ink-900 truncate">
-                  {asset?.label ?? carrier?.name ?? "Policy"}
+                  {asset ? assetDisplayName(asset) : carrier?.name ?? "Policy"}
                 </h3>
                 <Badge tone="neutral">{policyTypeLabel}</Badge>
               </div>
@@ -263,7 +264,7 @@ export function PolicyDetailCard({
                         {shouldMap ? (
                           <MapLink address={v} className="max-w-full justify-end text-right" />
                         ) : (
-                          maskSensitive(k, String(v))
+                          maskSensitive(k, formatAssetDetailValue(k, v))
                         )}
                       </dd>
                     </div>

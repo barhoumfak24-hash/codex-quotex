@@ -1,25 +1,42 @@
 import { timingSafeEqual } from "node:crypto";
 import { Router, type Request } from "express";
 import { z } from "zod";
+import { authenticateRequest, type AuthContext } from "../middleware/auth.js";
 import { readRemoteState, supabaseStateConfigured, writeRemoteState } from "../services/supabaseState.js";
+import {
+  mergeStateSnapshotForAuth,
+  scopeStateSnapshotForAuth,
+  stateScopeForAuth,
+} from "../services/stateSnapshotScope.js";
 
 export const stateRoutes = Router();
 
 const statePayloadSchema = z.object({
   snapshot: z.unknown(),
+  baseRevision: z.number().int().nonnegative().nullable().optional(),
 });
 
 stateRoutes.get("/:stateId", async (req, res, next) => {
   try {
     res.set("Cache-Control", "no-store, max-age=0");
-    if (!stateAccessAllowed(req)) return res.status(401).json({ error: "unauthorized" });
+    const access = stateAccess(req);
+    if (!access) return res.status(401).json({ error: "unauthorized" });
     if (!supabaseStateConfigured()) return res.status(503).json({ found: false, error: "state_sync_not_configured" });
 
     const stateId = normalizeStateId(req.params.stateId);
     if (!stateId) return res.status(400).json({ error: "invalid_state_id" });
 
     const row = await readRemoteState(appStateId(stateId));
-    return res.json({ found: Boolean(row), snapshot: row?.snapshot ?? null, updatedAt: row?.updated_at });
+    const scoped = row
+      ? scopeStateSnapshotForAuth(row.snapshot, access.auth)
+      : { scoped: stateScopeForAuth(access.auth) === "tenant", snapshot: null };
+    return res.json({
+      found: Boolean(row),
+      scoped: scoped.scoped,
+      snapshot: scoped.snapshot,
+      updatedAt: row?.updated_at,
+      revision: row?.revision ?? null,
+    });
   } catch (error) {
     next(error);
   }
@@ -28,7 +45,8 @@ stateRoutes.get("/:stateId", async (req, res, next) => {
 stateRoutes.put("/:stateId", async (req, res, next) => {
   try {
     res.set("Cache-Control", "no-store, max-age=0");
-    if (!stateAccessAllowed(req)) return res.status(401).json({ error: "unauthorized" });
+    const access = stateAccess(req);
+    if (!access) return res.status(401).json({ error: "unauthorized" });
     if (!supabaseStateConfigured()) return res.status(503).json({ ok: false, error: "state_sync_not_configured" });
 
     const stateId = normalizeStateId(req.params.stateId);
@@ -37,8 +55,34 @@ stateRoutes.put("/:stateId", async (req, res, next) => {
     const parsed = statePayloadSchema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: "invalid_state", details: parsed.error.flatten() });
 
-    const row = await writeRemoteState(appStateId(stateId), parsed.data.snapshot);
-    return res.json({ ok: true, snapshot: row.snapshot, updatedAt: row.updated_at });
+    const id = appStateId(stateId);
+    const isTenantScoped = stateScopeForAuth(access.auth) === "tenant";
+    const current = isTenantScoped ? await readRemoteState(id) : null;
+    const snapshot = isTenantScoped
+      ? mergeStateSnapshotForAuth(current?.snapshot ?? {}, parsed.data.snapshot, access.auth)
+      : parsed.data.snapshot;
+    const baseRevision = isTenantScoped ? current?.revision ?? null : parsed.data.baseRevision;
+
+    const result = await writeRemoteState(id, snapshot, baseRevision);
+    if (!result.ok) {
+      const scopedConflict = scopeStateSnapshotForAuth(result.current.snapshot, access.auth);
+      return res.status(409).json({
+        ok: false,
+        error: "state_revision_conflict",
+        scoped: scopedConflict.scoped,
+        snapshot: scopedConflict.snapshot,
+        updatedAt: result.current.updated_at,
+        revision: result.current.revision,
+      });
+    }
+    const scoped = scopeStateSnapshotForAuth(result.row.snapshot, access.auth);
+    return res.json({
+      ok: true,
+      scoped: scoped.scoped,
+      snapshot: scoped.snapshot,
+      updatedAt: result.row.updated_at,
+      revision: result.row.revision,
+    });
   } catch (error) {
     next(error);
   }
@@ -52,12 +96,25 @@ function normalizeStateId(value: string | undefined) {
   return value?.trim().replace(/[^a-z0-9-]/gi, "").slice(0, 80) ?? "";
 }
 
-function stateAccessAllowed(req: Request): boolean {
+type StateAccess = {
+  auth: AuthContext | null;
+  tokenAccess: boolean;
+};
+
+function stateAccess(req: Request): StateAccess | null {
+  const auth = authenticateRequest(req);
+  if (auth) return { auth, tokenAccess: false };
+
   const expected = process.env.STATE_SYNC_TOKEN?.trim();
-  if (!expected) return true;
+  if (!expected) {
+    return process.env.NODE_ENV === "production" ? null : { auth: null, tokenAccess: true };
+  }
   const headerToken = req.header("x-state-sync-token")?.trim();
   const bearer = req.header("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
-  return constantTimeEquals(headerToken ?? "", expected) || constantTimeEquals(bearer ?? "", expected);
+  if (constantTimeEquals(headerToken ?? "", expected) || constantTimeEquals(bearer ?? "", expected)) {
+    return { auth: null, tokenAccess: true };
+  }
+  return null;
 }
 
 function constantTimeEquals(received: string, expected: string): boolean {

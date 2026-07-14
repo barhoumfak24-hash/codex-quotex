@@ -14,10 +14,17 @@ import {
   aiGenerateCommercialQuestionnaire,
   aiMapAcordFields,
 } from "./ai";
-import type { ActivityResolution } from "./ai";
+import { ACORD_FORM_CATALOG, type AcordFormSeed } from "./seed";
+import {
+  buildAssetLabelFromDetails,
+  normalizeAssetDetails,
+  uppercaseVinTokens,
+} from "./assetDisplay";
+import type { ActivityResolution, AiAcordFieldMapping } from "./ai";
 import { db } from "./db";
 import { fmt } from "./format";
 import { uid, nowIso } from "./id";
+import { apiBaseUrl } from "./apiBase";
 import {
   generateConnectionSecret,
   generatePassword,
@@ -57,6 +64,7 @@ import {
   carrierRunnerTriggerLabel,
   shouldQueueCarrierRunnerRenewalJob,
 } from "./carrierRunnerJobs";
+import { buildCarrierDirectory } from "./carrierDirectory";
 import { categoryQuotingQuestions } from "./categoryQuestionnaires";
 import {
   appendEmailSignatureBlock,
@@ -87,7 +95,7 @@ import {
   vinValidationIssue,
 } from "./assetLabels";
 import { isLockingMasterAccount } from "./masterAccount";
-import { TIER_LIMITS } from "./tiers";
+import { agencyMonthlyPriceUsd, TIER_LIMITS } from "./tiers";
 import {
   buildDocumentTemplateFields,
   documentTypeLabelForTemplate,
@@ -177,6 +185,8 @@ import type {
   Policy,
   PolicyStatus,
   PublicDataEvidenceMap,
+  PublicDataFieldEvidence,
+  PublicDataFieldSourceKind,
   MarketingConfig,
   MarketingAttachment,
   InternalMessage,
@@ -190,6 +200,7 @@ import type {
   QuoteRequest,
   CommercialCarrierRecommendation,
   CommercialCarrierSubmission,
+  CommercialCarrierSubmissionQuote,
   QuotingQuestion,
   QuotingLineOfBusiness,
   QuotingSession,
@@ -322,6 +333,15 @@ type QuestionnaireLookupKind =
   | "naics"
   | "sic"
   | "value"
+  | "yearBuilt"
+  | "squareFootage"
+  | "roofMaterial"
+  | "roofAge"
+  | "construction"
+  | "occupancy"
+  | "floodZone"
+  | "distanceToCoast"
+  | "lotSize"
   | "city"
   | "state"
   | "zip";
@@ -358,6 +378,30 @@ function questionnaireLookupKind(value: string): QuestionnaireLookupKind | null 
     return "yearStarted";
   }
   if (lookup.includes("yearsinbusiness") || lookup.includes("timeinbusiness")) return "yearsInBusiness";
+  if (lookup.includes("yearbuilt") || lookup.includes("builtyear")) return "yearBuilt";
+  if (lookup.includes("squarefootage") || lookup.includes("livingarea") || lookup.includes("buildingarea")) {
+    return "squareFootage";
+  }
+  if (
+    lookup.includes("roofmaterial") ||
+    lookup.includes("rooftype") ||
+    lookup.includes("roofcovering") ||
+    (lookup.includes("roof") &&
+      (lookup.includes("material") ||
+        lookup.includes("shape") ||
+        lookup.includes("pitch") ||
+        lookup.includes("skylight")))
+  ) {
+    return "roofMaterial";
+  }
+  if (lookup.includes("roofage") || lookup.includes("roofyear")) return "roofAge";
+  if (lookup.includes("constructiontype") || lookup.includes("construction")) return "construction";
+  if (lookup.includes("occupancy") || lookup.includes("occupied") || lookup.includes("primaryuse")) {
+    return "occupancy";
+  }
+  if (lookup.includes("floodzone") || lookup.includes("femazone")) return "floodZone";
+  if (lookup.includes("distancetocoast") || lookup.includes("coastdistance")) return "distanceToCoast";
+  if (lookup.includes("lotsize") || lookup.includes("acreage") || lookup.includes("landarea")) return "lotSize";
   if (
     lookup.includes("legalbusinessname") ||
     lookup.includes("businesslegalname") ||
@@ -422,6 +466,34 @@ function questionnaireFieldKeyMatchesQuestion(question: QuotingQuestion, recordK
 
 function valueLooksLikeAddress(value: string): boolean {
   return /\d/.test(value) && /\b(st|street|rd|road|ave|avenue|dr|drive|ln|lane|blvd|boulevard|ct|court|cir|circle|way|pkwy|parkway|hwy|highway|pl|place|terrace|ter|trail|trl|mi|fl|ga|sc|ny|ca|tx|il|oh|pa|zip)\b/i.test(value);
+}
+
+function valueLooksLikeFourDigitYear(value: string): boolean {
+  const year = Number(value.trim());
+  return Number.isInteger(year) && year >= 1800 && year <= new Date().getFullYear() + 2;
+}
+
+function valueLooksLikeNumericAnswer(value: string): boolean {
+  return /^\$?\s*\d[\d,]*(?:\.\d+)?$/.test(value.trim());
+}
+
+function valueContainsQuestionnaireNumber(value: string): boolean {
+  return /\d/.test(value.trim());
+}
+
+function valueLooksLikeQuestionnaireUnavailableNote(value: string): boolean {
+  return /\b(unknown|not public|not publicly|not found|no public|n\/a|not available|requires|needed|verify|applicant|attestation|clue|loss runs?)\b/i.test(
+    value
+  );
+}
+
+function valueLooksLikeUnavailableAiAnswer(value: string): boolean {
+  return (
+    /^(unknown|n\/a|none|not found|not public|not available|requires)\b/i.test(value) ||
+    /\b(not found|not public|not publicly|no public|not available|unable to confirm|unable to determine|requires applicant|requires client|requires insured|applicant attestation|clue|loss runs?)\b/i.test(
+      value
+    )
+  );
 }
 
 function questionLooksAddressOnly(question: QuotingQuestion): boolean {
@@ -546,6 +618,10 @@ function questionnaireAnswerLooksCompatible(question: QuotingQuestion, rawValue:
   const value = cleanQuestionnairePrefillValue(rawValue);
   if (!value) return false;
   const lookup = questionnaireLookupText(question);
+  const unavailableNote = valueLooksLikeQuestionnaireUnavailableNote(value);
+  const normalizedQuestion = normalizeQuestionnaireLookup(
+    `${question.label} ${(question.acordFieldLabels ?? []).join(" ")}`
+  );
   const labeledLines = value
     .split(/\r?\n|;\s+/)
     .map((line) => line.trim())
@@ -561,24 +637,85 @@ function questionnaireAnswerLooksCompatible(question: QuotingQuestion, rawValue:
   if (lookup.includes("businessidentity") || lookup.includes("legalbusinessnameentitytype")) {
     return labeledLines.some((line) => /^Legal business name:\s+.+/i.test(line));
   }
-  const normalizedQuestion = normalizeQuestionnaireLookup(
-    `${question.label} ${(question.acordFieldLabels ?? []).join(" ")}`
-  );
+  if (valueLooksLikeAddress(value)) {
+    if (
+      /\b(operation|operations|product|products|service|services|revenue|payroll|employee|employees)\b/.test(
+        normalizedQuestion
+      )
+    ) {
+      return false;
+    }
+    return (
+      questionLooksAddressOnly(question) ||
+      lookupLooksPropertyComposite(lookup) ||
+      questionExplicitlyAllowsAddressAnswer(question)
+    );
+  }
   if (
-    valueLooksLikeAddress(value) &&
-    /\b(operation|operations|product|products|service|services|revenue|payroll|employee|employees)\b/.test(
+    lookup.includes("yearbuilt") ||
+    lookup.includes("roofyear") ||
+    lookup.includes("modelyear") ||
+    lookup.includes("yearstarted")
+  ) {
+    return valueLooksLikeFourDigitYear(value) || unavailableNote;
+  }
+  if (lookup.includes("yearsinbusiness") || lookup.includes("roofage")) {
+    return valueLooksLikeNumericAnswer(value) || valueContainsQuestionnaireNumber(value) || unavailableNote;
+  }
+  if (
+    lookup.includes("squarefootage") ||
+    lookup.includes("livingarea") ||
+    lookup.includes("buildingarea") ||
+    lookup.includes("lotsize") ||
+    lookup.includes("numberofstories") ||
+    lookup.includes("stories") ||
+    lookup.includes("bedrooms") ||
+    lookup.includes("bathrooms")
+  ) {
+    return valueLooksLikeNumericAnswer(value) || valueContainsQuestionnaireNumber(value) || unavailableNote;
+  }
+  if (
+    lookup.includes("occupancy") ||
+    lookup.includes("occupied") ||
+    lookup.includes("primaryuse") ||
+    lookup.includes("propertyuse")
+  ) {
+    return /\b(primary|secondary|seasonal|vacation|rental|tenant|owner|occupied|vacant)\b/i.test(value) || unavailableNote;
+  }
+  if (
+    lookup.includes("constructiontype") ||
+    lookup.includes("construction") ||
+    lookup.includes("roofmaterial") ||
+    lookup.includes("rooftype") ||
+    (lookup.includes("roof") &&
+      (lookup.includes("material") ||
+        lookup.includes("shape") ||
+        lookup.includes("pitch") ||
+        lookup.includes("skylight"))) ||
+    lookup.includes("floodzone") ||
+    lookup.includes("protectionclass")
+  ) {
+    return !valueLooksLikeAddress(value) && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) && value.length <= 220;
+  }
+  if (
+    /\b(loss|claim|incident|conviction|violation|mvr|bankruptcy|cancel|nonrenew|audit|payroll|revenue|sales|fein|tax id|ssn|social security)\b/.test(
       normalizedQuestion
     )
   ) {
-    return false;
+    return unavailableNote;
   }
   if (
-    valueLooksLikeAddress(value) &&
-    !questionLooksAddressOnly(question) &&
-    !lookupLooksPropertyComposite(lookup) &&
-    !questionExplicitlyAllowsAddressAnswer(question)
+    lookup.includes("estimatedvalue") ||
+    lookup.includes("appraisedvalue") ||
+    lookup.includes("agreedvalue") ||
+    lookup.includes("scheduledvalue") ||
+    lookup.includes("requestedamount") ||
+    lookup.includes("requestedlimit") ||
+    lookup.includes("exposurevalue") ||
+    lookup.includes("replacementcost") ||
+    lookup.includes("marketvalue")
   ) {
-    return false;
+    return valueLooksLikeNumericAnswer(value) || valueContainsQuestionnaireNumber(value) || unavailableNote;
   }
   if (questionRequiresRegisteredBusinessName(question) && !valueLooksLikeBusinessEntityName(value)) {
     return false;
@@ -589,6 +726,21 @@ function questionnaireAnswerLooksCompatible(question: QuotingQuestion, rawValue:
     return value.replace(/\D/g, "").length >= 9;
   }
   return true;
+}
+
+function questionnaireAnswerLooksConcreteForAiPrefill(
+  question: QuotingQuestion,
+  rawValue: unknown
+): boolean {
+  const value = cleanQuestionnairePrefillValue(rawValue);
+  if (!value || valueLooksLikeUnavailableAiAnswer(value)) return false;
+  return questionnaireAnswerLooksCompatible(question, value);
+}
+
+function requireEveryQuestion(questions: QuotingQuestion[]): QuotingQuestion[] {
+  return questions.map((question) =>
+    question.required ? question : { ...question, required: true }
+  );
 }
 
 function questionSpecificAcordLabelMatchesRecordKey(question: QuotingQuestion, recordKey: string): boolean {
@@ -697,6 +849,47 @@ function compatibleQuestionnaireMappingKey(
   return null;
 }
 
+function questionnaireEvidenceFromMapping(
+  mapping: AiAcordFieldMapping | undefined,
+  fieldKey: string,
+  updatedAt: string
+): PublicDataFieldEvidence | undefined {
+  if (!mapping) return undefined;
+  const sourceKind =
+    mapping.sourceKind && mapping.sourceKind !== "unknown" ? mapping.sourceKind : "model_estimate";
+  const sourceUrl = cleanQuestionnairePrefillValue(mapping.sourceUrl);
+  const confidence = Math.max(0.45, Math.min(1, Number(mapping.confidence) || 0.72));
+  if (
+    questionnaireMappingRequiresCitation(sourceKind) &&
+    !sourceUrl
+  ) {
+    return undefined;
+  }
+  const rationale = cleanQuestionnairePrefillValue(mapping.rationale);
+  return {
+    fieldKey,
+    sourceKind,
+    sourceLabel: cleanQuestionnairePrefillValue(mapping.sourceLabel) || "OpenAI questionnaire research",
+    sourceUrl: sourceUrl || undefined,
+    confidence,
+    verified: mapping.verified === true,
+    allowDocumentAutofill: false,
+    collectedAt: updatedAt,
+    notes: [rationale || "Editable questionnaire prefill from OpenAI research. Review before carrier submission.", sourceUrl ? `Source URL: ${sourceUrl}` : ""]
+      .filter(Boolean)
+      .join(" "),
+  };
+}
+
+function questionnaireMappingRequiresCitation(sourceKind: PublicDataFieldSourceKind): boolean {
+  return (
+    sourceKind === "web_search" ||
+    sourceKind === "public_web" ||
+    sourceKind === "government_api" ||
+    sourceKind === "commercial_provider"
+  );
+}
+
 function questionnaireQuestionLookupKeys(question: QuotingQuestion): string[] {
   return [
     question.acordFieldKey,
@@ -706,6 +899,35 @@ function questionnaireQuestionLookupKeys(question: QuotingQuestion): string[] {
   ]
     .map((value) => cleanQuestionnairePrefillValue(value))
     .filter(Boolean);
+}
+
+function questionnaireResponseAiMetaFor(
+  updatedAt: string,
+  evidence?: PublicDataFieldEvidence
+): QuestionnaireResponseMeta {
+  return {
+    updatedAt,
+    updatedById: "ai",
+    updatedByName: "QuoteX AI",
+    updatedByRole: "ai",
+    sourceKind: evidence?.sourceKind ?? "client_intake",
+    sourceName: evidence?.sourceLabel ?? "QuoteX system",
+    sourceLabel: evidence?.sourceLabel ?? "QuoteX system",
+    sourceUrl: evidence?.sourceUrl,
+    confidence: evidence?.confidence,
+    observedDate: evidence?.observedDate,
+    verified: evidence?.verified,
+    sourceNotes: evidence?.notes,
+  };
+}
+
+function questionnaireEvidenceForQuestion(
+  question: QuotingQuestion,
+  evidence?: PublicDataEvidenceMap
+): PublicDataFieldEvidence | undefined {
+  return questionnaireQuestionLookupKeys(question)
+    .map((key) => findAiPublicEvidence(evidence, key))
+    .find((item): item is PublicDataFieldEvidence => Boolean(item && aiEvidenceAllowsQuestionnairePrefill(item)));
 }
 
 function questionnaireRecordEntryFor(
@@ -745,6 +967,21 @@ function questionnaireRecordEntryFor(
     if (value) return { key: recordKey, value };
   }
   return undefined;
+}
+
+function questionnaireAnswerHasUnsafeAiEvidence(
+  question: QuotingQuestion,
+  evidence?: PublicDataEvidenceMap
+): boolean {
+  if (!evidence) return false;
+  const matchedEvidence = questionnaireQuestionLookupKeys(question)
+    .map((key) => findAiPublicEvidence(evidence, key))
+    .filter((item): item is PublicDataFieldEvidence => Boolean(item));
+  if (matchedEvidence.length === 0) return false;
+  return (
+    matchedEvidence.some((item) => item.sourceKind === "model_estimate") &&
+    !matchedEvidence.some((item) => aiEvidenceAllowsQuestionnairePrefill(item))
+  );
 }
 
 function questionCanUseQuoteAddress(question: QuotingQuestion): boolean {
@@ -1039,14 +1276,12 @@ function seedKnownQuestionnaireResponses(input: {
   input.questions.forEach((question) => {
     const answer = knownQuestionnaireAnswerFor(question, input);
     if (!answer) return;
-    if (!questionnaireAnswerLooksCompatible(question, answer)) return;
+    if (!questionnaireAnswerLooksConcreteForAiPrefill(question, answer)) return;
     questionnaireResponses[question.id] = answer;
-    questionnaireResponseMeta[question.id] = {
-      updatedAt: input.updatedAt,
-      updatedById: "ai",
-      updatedByName: "QuoteX AI",
-      updatedByRole: "ai",
-    };
+    questionnaireResponseMeta[question.id] = questionnaireResponseAiMetaFor(
+      input.updatedAt,
+      questionnaireEvidenceForQuestion(question, input.publicFieldEvidence)
+    );
   });
 
   const missingFields = input.questions
@@ -1099,6 +1334,14 @@ function mergeSeededQuestionnaireResponses(input: {
     Object.entries(input.session.questionnaireResponses ?? {}).filter(([questionId, value]) => {
       if (!questionIds.has(questionId)) return false;
       const question = questionsById.get(questionId);
+      if (
+        question &&
+        input.session.questionnaireResponseMeta?.[questionId]?.updatedByRole === "ai" &&
+        (questionnaireAnswerHasUnsafeAiEvidence(question, input.publicFieldEvidence) ||
+          valueLooksLikeUnavailableAiAnswer(cleanQuestionnairePrefillValue(value)))
+      ) {
+        return false;
+      }
       return question ? questionnaireAnswerLooksCompatible(question, value) : false;
     })
   );
@@ -1163,11 +1406,11 @@ function completePersonalQuestionnaireQuestions(input: {
           missingFields: labels,
         })
       : [];
-  return dedupeQuotingQuestionsByLabel([
+  return requireEveryQuestion(dedupeQuotingQuestionsByLabel([
     ...(input.category ? categoryQuotingQuestions(input.category) : []),
     ...aiQuestions,
     ...(input.existingQuestions ?? []),
-  ]);
+  ]));
 }
 
 function quoteSessionAddressContext(session: QuotingSession): string | undefined {
@@ -1219,7 +1462,14 @@ function ensureCompletePersonalCategoryQuestionnaire(session: QuotingSession): Q
 
   fullQuestions.forEach((question) => {
     const exactValue = cleanQuestionnairePrefillValue(existingResponses[question.id]);
-    if (exactValue && questionnaireAnswerLooksCompatible(question, exactValue)) {
+    if (
+      exactValue &&
+      questionnaireAnswerLooksCompatible(question, exactValue) &&
+      !(
+        existingMeta[question.id]?.updatedByRole === "ai" &&
+        valueLooksLikeUnavailableAiAnswer(exactValue)
+      )
+    ) {
       questionnaireResponses[question.id] = exactValue;
       if (existingMeta[question.id]) questionnaireResponseMeta[question.id] = existingMeta[question.id];
       return;
@@ -1233,6 +1483,12 @@ function ensureCompletePersonalCategoryQuestionnaire(session: QuotingSession): Q
     const labelValue = cleanQuestionnairePrefillValue(existingResponses[labelMatch.id]);
     if (!labelValue) return;
     if (!questionnaireAnswerLooksCompatible(question, labelValue)) return;
+    if (
+      existingMeta[labelMatch.id]?.updatedByRole === "ai" &&
+      valueLooksLikeUnavailableAiAnswer(labelValue)
+    ) {
+      return;
+    }
     questionnaireResponses[question.id] = labelValue;
     questionnaireResponseMeta[question.id] =
       existingMeta[labelMatch.id] ??
@@ -1809,7 +2065,19 @@ function applySenderEmailSignature(
 }
 
 function normalizeEmail(value?: string): string {
-  return (value ?? "").trim().toLowerCase();
+  const raw = (value ?? "").trim();
+  if (!raw) return "";
+  const bracketed = raw.match(/<([^>]+)>/)?.[1] ?? raw;
+  const email = bracketed.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i)?.[0];
+  return (email ?? bracketed).trim().toLowerCase();
+}
+
+function displayNameFromEmailHeader(value?: string): string | undefined {
+  const raw = (value ?? "").trim();
+  if (!raw) return undefined;
+  const match = raw.match(/^"?([^"<]+?)"?\s*<[^>]+>$/);
+  const name = (match?.[1] ?? "").trim();
+  return name || undefined;
 }
 
 function mailboxForUser(userId?: string): {
@@ -1905,9 +2173,14 @@ function buildMailboxOutboxJob(row: Communication): MailboxOutboxJob | null {
     mailboxAccount: row.mailboxAccount,
     mailboxProvider: row.mailboxProvider,
     to,
+    cc: row.cc,
+    bcc: row.bcc,
     subject: row.subject,
-    body: row.body,
-    bodyFormat: "plain",
+    body: row.bodyHtml?.trim() || row.body,
+    bodyFormat: row.bodyHtml?.trim() ? "html" : "plain",
+    replyToMessageIdHeader: row.inReplyToHeader,
+    references: row.references,
+    externalThreadId: row.externalThreadId,
     attachments: row.attachments,
     idempotencyKey: `communication:${row.tenantId}:${row.id}`,
     status,
@@ -1926,12 +2199,19 @@ function updateCommunicationDeliveryFromOutbox(
     externalMessageId?: string;
     externalThreadId?: string;
     externalUrl?: string;
+    rfc822MessageId?: string;
+    messageIdHeader?: string;
   }
 ) {
   const patch: Partial<Communication> = { deliveryStatus: status };
   if (provider?.externalMessageId) patch.externalMessageId = provider.externalMessageId;
   if (provider?.externalThreadId) patch.externalThreadId = provider.externalThreadId;
   if (provider?.externalUrl) patch.externalUrl = provider.externalUrl;
+  const rfc822MessageId = provider?.rfc822MessageId ?? provider?.messageIdHeader;
+  if (rfc822MessageId) {
+    patch.rfc822MessageId = rfc822MessageId;
+    patch.messageIdHeader = rfc822MessageId;
+  }
   db.update("communications", job.communicationId, patch);
 }
 
@@ -1955,6 +2235,186 @@ function reconcileOutboxFromProviderMessage(row: Communication) {
     lastAttemptAt: nowIso(),
     updatedAt: nowIso(),
   });
+}
+
+type MailboxDeliveryProviderResult = {
+  provider?: "google" | "microsoft" | "transactional";
+  status?: "sent";
+  externalMessageId?: string;
+  externalThreadId?: string;
+  externalUrl?: string;
+  rfc822MessageId?: string;
+  messageIdHeader?: string;
+  fallbackReason?: string;
+};
+
+const liveMailboxDeliveryInFlight = new Set<string>();
+
+function scheduleLiveMailboxDelivery(row: Communication, job: MailboxOutboxJob) {
+  if (!shouldAttemptLiveMailboxDelivery(row, job)) return;
+  const sender = row.createdById ? db.list("users").find((user) => user.id === row.createdById) : undefined;
+  if (!sender) {
+    markOutboxFailedLocal(job.id, "No sender user was available for live email delivery.");
+    return;
+  }
+  void deliverMailboxOutboxJob({
+    tenantId: row.tenantId,
+    user: sender,
+    jobId: job.id,
+  });
+}
+
+function shouldAttemptLiveMailboxDelivery(row: Communication, job: MailboxOutboxJob) {
+  if (isTestRuntime()) return false;
+  if (typeof window === "undefined" || typeof fetch !== "function") return false;
+  if (row.channel !== "email" || row.direction !== "outbound") return false;
+  if (row.mailboxOrigin === "provider_sync") return false;
+  return job.status === "queued" && job.to.length > 0;
+}
+
+async function deliverMailboxOutboxJob(input: { tenantId: string; user: User; jobId: string }) {
+  if (liveMailboxDeliveryInFlight.has(input.jobId)) return;
+  const queued = db.list("mailboxOutbox").find((job) => job.id === input.jobId);
+  if (!queued || queued.status === "sent" || queued.status === "sending" || queued.status === "cancelled") return;
+
+  liveMailboxDeliveryInFlight.add(input.jobId);
+  const sending = markOutboxSendingLocal(input.jobId);
+  if (!sending) {
+    liveMailboxDeliveryInFlight.delete(input.jobId);
+    return;
+  }
+
+  try {
+    const response = await fetch(`${apiBaseUrl()}/mailboxes/send`, {
+      method: "POST",
+      headers: liveMailboxAuthHeaders(input.user, input.tenantId),
+      body: JSON.stringify(mailboxSendPayload(sending)),
+    });
+    const json = (await response.json().catch(() => null)) as
+      | { ok: true; result: MailboxDeliveryProviderResult }
+      | { ok: false; message?: string; error?: unknown }
+      | null;
+
+    if (!response.ok || !json?.ok) {
+      const message =
+        (json && "message" in json && json.message) ||
+        `Mailbox send failed with ${response.status} ${response.statusText}.`;
+      markOutboxFailedLocal(input.jobId, message);
+      return;
+    }
+
+    markOutboxSentLocal(input.jobId, json.result);
+  } catch (error) {
+    markOutboxFailedLocal(
+      input.jobId,
+      error instanceof Error ? error.message : "Mailbox send failed."
+    );
+  } finally {
+    liveMailboxDeliveryInFlight.delete(input.jobId);
+  }
+}
+
+function markOutboxSendingLocal(id: string): MailboxOutboxJob | null {
+  const job = db.list("mailboxOutbox").find((row) => row.id === id);
+  if (!job || job.status === "sent" || job.status === "cancelled") return job ?? null;
+  const updated = db.update("mailboxOutbox", id, {
+    status: "sending",
+    attemptCount: job.attemptCount + 1,
+    lastAttemptAt: nowIso(),
+    lastError: undefined,
+    updatedAt: nowIso(),
+  });
+  if (updated) updateCommunicationDeliveryFromOutbox(updated, "sending");
+  return updated;
+}
+
+function markOutboxSentLocal(id: string, provider: MailboxDeliveryProviderResult = {}): MailboxOutboxJob | null {
+  const job = db.list("mailboxOutbox").find((row) => row.id === id);
+  if (!job) return null;
+  const updated = db.update("mailboxOutbox", id, {
+    status: "sent",
+    providerMessageId: provider.externalMessageId ?? job.providerMessageId,
+    providerThreadId: provider.externalThreadId ?? job.providerThreadId,
+    providerUrl: provider.externalUrl ?? job.providerUrl,
+    lastAttemptAt: nowIso(),
+    lastError: provider.fallbackReason
+      ? `Sent through transactional fallback: ${provider.fallbackReason}`
+      : undefined,
+    updatedAt: nowIso(),
+  });
+  if (updated) {
+    updateCommunicationDeliveryFromOutbox(updated, "sent", provider);
+    markMailboxSent(updated.mailboxConnectionId);
+  }
+  return updated;
+}
+
+function markOutboxFailedLocal(id: string, error: string): MailboxOutboxJob | null {
+  const job = db.list("mailboxOutbox").find((row) => row.id === id);
+  if (!job) return null;
+  const updated = db.update("mailboxOutbox", id, {
+    status: "failed",
+    lastError: error,
+    lastAttemptAt: nowIso(),
+    updatedAt: nowIso(),
+  });
+  if (updated) {
+    updateCommunicationDeliveryFromOutbox(updated, "failed");
+    if (updated.mailboxConnectionId) {
+      db.update("connectedMailboxes", updated.mailboxConnectionId, {
+        lastError: error,
+        updatedAt: nowIso(),
+      });
+    }
+  }
+  return updated;
+}
+
+function mailboxSendPayload(job: MailboxOutboxJob) {
+  return {
+    connectionId: job.mailboxConnectionId,
+    to: job.to,
+    cc: job.cc,
+    bcc: job.bcc,
+    subject: job.subject,
+    text: job.bodyFormat === "html" ? undefined : job.body,
+    html: job.bodyFormat === "html" ? job.body : undefined,
+    replyTo: job.mailboxAccount,
+    replyToMessageIdHeader: job.replyToMessageIdHeader,
+    references: job.references,
+    externalThreadId: job.externalThreadId,
+    attachments: (job.attachments ?? []).map((attachment) => ({
+      fileName: attachment.fileName,
+      fileType: attachment.fileType,
+      dataUrl: attachment.dataUrl,
+    })),
+  };
+}
+
+function liveMailboxAuthHeaders(user: User, tenantId: string): HeadersInit {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "x-user-id": user.id,
+    "x-user-role": user.role,
+    "x-tenant-id": tenantId,
+  };
+  if (user.branchId) headers["x-branch-id"] = user.branchId;
+  const token = authToken();
+  if (token) headers.authorization = `Bearer ${token}`;
+  return headers;
+}
+
+function authToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return (
+    window.localStorage.getItem("quotex.authToken") ||
+    window.localStorage.getItem("quotex.jwt") ||
+    null
+  );
+}
+
+function isTestRuntime() {
+  return typeof process !== "undefined" && process.env.NODE_ENV === "test";
 }
 
 type MarketingCampaignPamphletPayload = {
@@ -2199,8 +2659,41 @@ function resolveEmailContact(
   return null;
 }
 
+function threadIdFromReferencedHeaders(
+  tenantId: string,
+  input: { externalThreadId?: string; inReplyToHeader?: string; references?: string[] }
+): string | null {
+  const normalizedRefs = new Set(
+    [input.inReplyToHeader, ...(input.references ?? [])]
+      .map((value) => normalizeMessageHeaderId(value))
+      .filter(Boolean)
+  );
+  const match = db
+    .list("communications")
+    .find((row) => {
+      if (row.tenantId !== tenantId || row.channel !== "email") return false;
+      if (input.externalThreadId && row.externalThreadId === input.externalThreadId) return true;
+      const rowHeaders = [
+        row.messageIdHeader,
+        row.externalMessageId,
+        row.inReplyToHeader,
+        ...(row.references ?? []),
+      ].map((value) => normalizeMessageHeaderId(value));
+      return rowHeaders.some((value) => value && normalizedRefs.has(value));
+    });
+  return match?.threadId ?? null;
+}
+
+function normalizeMessageHeaderId(value?: string): string {
+  return (value ?? "").trim().replace(/^<|>$/g, "").toLowerCase();
+}
+
 function communicationStatusEvent(row: Communication) {
   if (!row.customerId && !row.prospectId) return;
+  const existing = db
+    .list("statusEvents")
+    .find((event) => event.communicationId === row.id);
+  if (existing) return;
   const channelLabel =
     row.channel === "email" ? "Email"
     : row.channel === "call" ? "Call"
@@ -2217,7 +2710,7 @@ function communicationStatusEvent(row: Communication) {
     customerId: row.customerId,
     prospectId: row.prospectId,
     communicationId: row.id,
-    createdAt: nowIso(),
+    createdAt: row.createdAt || nowIso(),
     createdById: row.createdById,
   });
 }
@@ -4067,6 +4560,56 @@ function queueVehicleLabelUpgrade(assetId: string, expectedLabel?: string): void
   void upgradeVehicleAssetLabelFromVin(assetId, expectedLabel);
 }
 
+function textRecordValue(record: Record<string, unknown> | undefined, keys: string[]): string {
+  if (!record) return "";
+  for (const key of keys) {
+    const exact = record[key];
+    if (exact !== null && exact !== undefined && String(exact).trim()) return String(exact).trim();
+    const matchedKey = Object.keys(record).find(
+      (candidate) => candidate.toLowerCase() === key.toLowerCase()
+    );
+    const matched = matchedKey ? record[matchedKey] : undefined;
+    if (matched !== null && matched !== undefined && String(matched).trim()) {
+      return String(matched).trim();
+    }
+  }
+  return "";
+}
+
+function syncVehicleAssetIdentityFromSession(session: QuotingSession): void {
+  if (session.assetType !== "luxury_vehicle" || !session.assetId) return;
+  const asset = db.list("assets").find((row) => row.id === session.assetId);
+  if (!asset || asset.type !== "luxury_vehicle") return;
+  const publicFields = session.publicFields ?? {};
+  const details = session.assetDetails ?? {};
+  const yearMakeModel = textRecordValue(publicFields, ["Year / make / model", "yearMakeModel"]);
+  const [yearFromYmm, makeFromYmm, ...modelFromYmm] = yearMakeModel.split(/\s+/).filter(Boolean);
+  const nextDetails: Record<string, unknown> = {
+    ...(asset.details ?? {}),
+    ...details,
+  };
+  const year = textRecordValue(publicFields, ["year", "Model year", "ModelYear"]) || textRecordValue(details, ["year"]);
+  const make = textRecordValue(publicFields, ["make", "Make"]) || textRecordValue(details, ["make"]);
+  const model = textRecordValue(publicFields, ["model", "Model"]) || textRecordValue(details, ["model"]);
+  const trim =
+    textRecordValue(publicFields, ["trim", "VIN-decoded trim", "series"]) ||
+    textRecordValue(details, ["trim", "series"]);
+  if (year) nextDetails.year = year;
+  else if (yearFromYmm) nextDetails.year = yearFromYmm;
+  if (make) nextDetails.make = make;
+  else if (makeFromYmm) nextDetails.make = makeFromYmm;
+  if (model) nextDetails.model = model;
+  else if (modelFromYmm.length > 0) nextDetails.model = modelFromYmm.join(" ");
+  if (trim) nextDetails.trim = trim;
+  const nextLabel = buildAssetLabelFromDetails({
+    type: "luxury_vehicle",
+    details: nextDetails,
+    categoryLabel: "Vehicle",
+    fallbackLabel: asset.label,
+  });
+  api.assets.update(asset.id, { label: nextLabel, details: nextDetails });
+}
+
 type CommercialAcordTemplateSelection = NonNullable<QuotingSession["commercialAcordTemplates"]>[number];
 
 function selectedCommercialAcordTemplates(
@@ -4082,7 +4625,11 @@ function selectedCommercialAcordTemplates(
   ).length;
   return db
     .list("documents")
-    .filter((d) => selected.has(d.id) && d.tenantId === tenantId)
+    .filter(
+      (d) =>
+        selected.has(d.id) &&
+        (d.tenantId === tenantId || isBundledAcordTemplateDocument(d))
+    )
     .map((d, index) => {
       const templateLike = {
         templateId: d.id,
@@ -4191,6 +4738,12 @@ function sortQuotingSessionsByWorkRecency(a: QuotingSession, b: QuotingSession):
 }
 
 function commercialApplicationSentAtForSession(session: QuotingSession): string | undefined {
+  // The workflow milestone records that the agent completed carrier dispatch.
+  // Provider delivery continues to be tracked independently on each
+  // Communication, so a queued mailbox job must not move the quote flow back
+  // to ACORD review or prevent a later supplemental round.
+  if (session.commercialApplicationSentAt) return session.commercialApplicationSentAt;
+
   const applicationMessageIds = Array.from(
     new Set(
       (session.commercialCarrierSubmissions ?? []).flatMap(
@@ -4209,9 +4762,15 @@ function commercialApplicationSentAtForSession(session: QuotingSession): string 
       const status = communications.get(messageId)?.deliveryStatus;
       return status === "sent" || status === "synced";
     });
-    if (!providerConfirmed) return undefined;
+    const submissionWasDispatched = (session.commercialCarrierSubmissions ?? []).some(
+      (submission) =>
+        !!submission.sentAt &&
+        (submission.applicationMessageIds ?? []).some((messageId) =>
+          applicationMessageIds.includes(messageId)
+        )
+    );
+    if (!providerConfirmed && !submissionWasDispatched) return undefined;
   }
-  if (session.commercialApplicationSentAt) return session.commercialApplicationSentAt;
   const submission = (session.commercialCarrierSubmissions ?? []).find(
     (item) =>
       (item.applicationMessageIds?.length ?? 0) > 0 ||
@@ -4222,7 +4781,8 @@ function commercialApplicationSentAtForSession(session: QuotingSession): string 
       item.status === "declined" ||
       item.status === "needs_client_info" ||
       item.status === "needs_supplemental" ||
-      item.status === "supplemental_sent"
+      item.status === "supplemental_sent" ||
+      item.status === "agent_review"
   );
   return (
     submission?.sentAt ??
@@ -4272,6 +4832,9 @@ function ensureQuotingSessionConsistency(session: QuotingSession): QuotingSessio
     patch.questionnaireQuestions = initialCommercialQuestionnaireQuestions(current);
   }
 
+  if (applicationSentAt && current.status === "gathering_info") {
+    patch.status = "awaiting_reply";
+  }
   if (current.quotes.length > 0 && current.status === "gathering_info") {
     patch.status =
       current.commercialSecondRoundSentAt && !current.commercialSupplementalsCompletedAt
@@ -4296,21 +4859,25 @@ function initialCommercialQuestionnaireQuestions(session: QuotingSession): Quoti
   const knownFieldsByTemplateId = knownAcordFieldsByTemplateId(
     templates,
     session,
-    session.questionnaireResponses ?? {},
+    {},
     "application"
   );
 
-  return commercialBaseQuestionnaireQuestions(session).concat(
-    acordMissingFieldQuestions(templates, {
-      contactName: contact?.name ?? "Commercial applicant",
-      agencyName: agency?.name,
-      estimatedValue: session.estimatedValue,
-      state: session.state,
-      publicFields: session.publicFields,
-      publicFieldEvidence: session.publicFieldEvidence,
-      assetDetails: session.assetDetails,
-      knownFieldsByTemplateId,
-    })
+  return filterCommercialBaseQuestionsAnsweredByTrustedAi(
+    commercialBaseQuestionnaireQuestions(session).concat(
+      acordMissingFieldQuestions(templates, {
+        contactName: contact?.name ?? "Commercial applicant",
+        agencyName: agency?.name,
+        estimatedValue: session.estimatedValue,
+        state: session.state,
+        publicFields: session.publicFields,
+        publicFieldEvidence: session.publicFieldEvidence,
+        assetDetails: session.assetDetails,
+        knownFieldsByTemplateId,
+      })
+    ),
+    session.questionnaireResponses ?? {},
+    session.questionnaireResponseMeta ?? {}
   );
 }
 
@@ -4321,6 +4888,47 @@ function commercialBaseQuestionnaireQuestions(session: QuotingSession): QuotingQ
     carrierList: [],
     knownPublicFields: session.publicFields,
   }).filter((question) => !question.carrierId);
+}
+
+function filterCommercialBaseQuestionsAnsweredByTrustedAi(
+  questions: QuotingQuestion[],
+  responses: Record<string, string>,
+  meta: Record<string, QuestionnaireResponseMeta>
+): QuotingQuestion[] {
+  return questions.filter((question) => {
+    if (!question.id.startsWith("base-")) return true;
+    if (commercialBaseQuestionMustRemainVisible(question)) return true;
+    const value = cleanQuestionnairePrefillValue(responses[question.id]);
+    if (!value) return true;
+    return !questionnaireResponseMetaIsTrustedAiSeed(meta[question.id]);
+  });
+}
+
+function commercialBaseQuestionMustRemainVisible(question: QuotingQuestion): boolean {
+  return /\b(claim|claims|loss|losses)\b/i.test(`${question.id} ${question.label}`);
+}
+
+function questionnaireResponseMetaIsTrustedAiSeed(meta: QuestionnaireResponseMeta | undefined): boolean {
+  if (!meta || meta.updatedByRole !== "ai") return false;
+  if (meta.verified) return true;
+  return new Set([
+    "agent_seed",
+    "client_intake",
+    "validated_address",
+    "public_geocoder",
+    "government_api",
+    "commercial_provider",
+    "carrier_api",
+  ]).has(String(meta.sourceKind ?? ""));
+}
+
+function missingFieldsForQuestionSet(
+  questions: QuotingQuestion[],
+  responses: Record<string, string>
+): string[] {
+  return questions
+    .filter((question) => question.required && !responses[question.id]?.trim())
+    .map((question) => question.label);
 }
 
 function commercialSupplementalQuestionsForCarrier(carrier: Carrier): {
@@ -4662,6 +5270,28 @@ function compactAcordAiDetails(
   return out;
 }
 
+function compactAcordAiEvidence(
+  evidence: PublicDataEvidenceMap | undefined,
+  limit = 60
+): Record<string, Record<string, string | number | boolean>> {
+  if (!evidence) return {};
+  const out: Record<string, Record<string, string | number | boolean>> = {};
+  for (const [key, item] of Object.entries(evidence).slice(0, limit)) {
+    out[key] = {
+      fieldKey: item.fieldKey,
+      sourceKind: item.sourceKind,
+      sourceLabel: item.sourceLabel,
+      ...(item.sourceUrl ? { sourceUrl: item.sourceUrl } : {}),
+      confidence: item.confidence,
+      verified: item.verified,
+      allowDocumentAutofill: item.allowDocumentAutofill,
+      ...(item.observedDate ? { observedDate: item.observedDate } : {}),
+      ...(item.notes ? { notes: item.notes.slice(0, 220) } : {}),
+    };
+  }
+  return out;
+}
+
 function compactAcordAiDossier(
   session: QuotingSession,
   responses: Record<string, string>,
@@ -4702,6 +5332,7 @@ function compactAcordAiDossier(
       state: session.state,
       assetDetails: compactAcordAiDetails(session.assetDetails, 30),
       publicFields: compactAcordAiDetails(session.publicFields, 60),
+      publicFieldEvidence: compactAcordAiEvidence(session.publicFieldEvidence, 60),
     },
     assets: dossier.assets.slice(0, 12).map((asset) => ({
       id: asset.id,
@@ -4791,7 +5422,11 @@ function acordAiFieldsForTemplate(
 }
 
 function questionnaireAiFieldsForSession(session: QuotingSession) {
-  return initialCommercialQuestionnaireQuestions(session).map((question) => ({
+  return questionnaireAiFieldsForQuestions(initialCommercialQuestionnaireQuestions(session));
+}
+
+function questionnaireAiFieldsForQuestions(questions: QuotingQuestion[]) {
+  return questions.map((question) => ({
     id: question.id,
     label: question.label,
     acordFieldLabels: question.acordFieldLabels ?? [],
@@ -4799,6 +5434,289 @@ function questionnaireAiFieldsForSession(session: QuotingSession) {
     required: question.required === true,
     kind: question.kind,
   }));
+}
+
+function aiProviderErrorBlocksWorkflow(
+  session: Pick<QuotingSession, "aiProviderError" | "aiProviderErrorCode">
+): boolean {
+  void session;
+  return false;
+}
+
+function aiProviderErrorCodeFromCaught(error: unknown): string {
+  const detail = (error as { detail?: { error?: unknown } })?.detail;
+  const status = (error as { detail?: { status?: unknown } })?.detail?.status;
+  const detailError = typeof detail?.error === "string" ? detail.error.trim() : "";
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  const combined = `${detailError} ${message}`;
+  const normalized = combined.toLowerCase();
+  if (
+    status === 504 ||
+    normalized.includes("function_invocation_timeout") ||
+    normalized.includes("timeout") ||
+    normalized.includes("abort")
+  ) {
+    return "timeout";
+  }
+  if (detailError) return detailError;
+  return "provider_unavailable";
+}
+
+function personalCategoryAnswerHints(category?: InsuranceCategory): Record<string, string> {
+  if (!category || category.lineOfBusiness === "commercial") return {};
+  const text = normalizeQuestionnaireLookup(`${category.id} ${category.label} ${category.description}`);
+  if (text.includes("primaryhome") || (text.includes("primary") && text.includes("residence"))) {
+    return { occupancy: "Primary", Occupancy: "Primary" };
+  }
+  if (text.includes("vacation") || text.includes("secondary")) {
+    return { occupancy: "Secondary", Occupancy: "Secondary" };
+  }
+  if (text.includes("rental") || text.includes("investment") || text.includes("tenantoccupied")) {
+    return { occupancy: "Rental", Occupancy: "Rental" };
+  }
+  if (text.includes("vacant")) {
+    return { occupancy: "Vacant", Occupancy: "Vacant" };
+  }
+  return {};
+}
+
+async function applyServerQuestionnaireMappingToSession(
+  session: QuotingSession,
+  questions: QuotingQuestion[] = session.questionnaireQuestions ?? [],
+  responses: Record<string, string> = session.questionnaireResponses ?? {}
+): Promise<QuotingSession> {
+  const questionnaireFields = questionnaireAiFieldsForQuestions(questions);
+  if (questionnaireFields.length === 0) return session;
+
+  const publicFields: Record<string, unknown> = { ...(session.publicFields ?? {}) };
+  const publicFieldEvidence: PublicDataEvidenceMap = { ...(session.publicFieldEvidence ?? {}) };
+  let questionnaireResponses: Record<string, string> = { ...(session.questionnaireResponses ?? {}) };
+  let questionnaireResponseMeta: Record<string, QuestionnaireResponseMeta> = {
+    ...(session.questionnaireResponseMeta ?? {}),
+  };
+  let questionnaireAddedCount = 0;
+  let summary = "";
+  let mappedProviderError: string | undefined;
+  let mappedProviderErrorCode: string | undefined;
+
+  try {
+    const mapped = await aiMapAcordFields({
+      tenantId: session.tenantId,
+      template: {
+        documentName:
+          session.lineOfBusiness === "commercial"
+            ? "Commercial questionnaire"
+            : "Personal lines questionnaire",
+        fileName:
+          session.lineOfBusiness === "commercial"
+            ? "commercial-questionnaire"
+            : "personal-lines-questionnaire",
+        formNumber: session.lineOfBusiness === "commercial" ? "Commercial intake" : "Personal intake",
+      },
+      fields: questionnaireFields,
+      dossier: compactAcordAiDossier(session, responses),
+      intent: "questionnaire_prefill",
+    });
+    summary = mapped.summary;
+    mappedProviderError = mapped.providerError;
+    mappedProviderErrorCode = mapped.providerErrorCode;
+    const updatedAt = nowIso();
+    const questionsById = new Map(questions.map((question) => [question.id, question]));
+    const mappingContext = {
+      contactName: contactForQuotingSession(session)?.name,
+      publicFields,
+      address: quoteSessionAddressContext(session),
+    };
+    const appliedFieldKeys = new Set<string>();
+    const applyOne = (
+      fieldKey: string,
+      value: unknown,
+      targetId?: string,
+      mapping?: AiAcordFieldMapping
+    ) => {
+      const directQuestion =
+        targetId && questionsById.has(targetId) ? questionsById.get(targetId) : undefined;
+      const evidence =
+        findAiPublicEvidence(mapped.publicFieldEvidence, fieldKey) ??
+        (directQuestion ? questionnaireEvidenceFromMapping(mapping, fieldKey, updatedAt) : undefined);
+      if (!evidence || !aiEvidenceAllowsQuestionnairePrefill(evidence)) return false;
+      const compatibilityKey = directQuestion
+        ? compatibleQuestionnaireMappingKey(directQuestion, fieldKey, value, mappingContext) ??
+          (questionnaireAnswerLooksCompatible(directQuestion, value) ? directQuestion.label : null)
+        : fieldKey;
+      if (!compatibilityKey) return false;
+      if (!mappedFieldValueIsCompatible(compatibilityKey, value, mappingContext)) return false;
+      const question =
+        directQuestion ??
+        questions.find((candidate) => {
+          const entry = questionnaireRecordEntryFor(candidate, { [fieldKey]: value });
+          return entry
+            ? questionRecordEntryIsCompatible(candidate, entry.key, entry.value)
+            : false;
+        });
+      if (!question) return false;
+      if (
+        targetId &&
+        directQuestion &&
+        !questionRecordEntryIsCompatible(
+          question,
+          compatibilityKey,
+          cleanQuestionnairePrefillValue(value)
+        )
+      ) {
+        return false;
+      }
+      const cleanedValue = cleanQuestionnairePrefillValue(value);
+      if (!cleanedValue) return false;
+      if (!questionnaireAnswerLooksConcreteForAiPrefill(question, cleanedValue)) return false;
+      const existingAnswer = cleanQuestionnairePrefillValue(questionnaireResponses[question.id]);
+      const existingEvidence =
+        findAiPublicEvidence(publicFieldEvidence, compatibilityKey) ??
+        findAiPublicEvidence(publicFieldEvidence, question.label);
+      const canReplaceEstimateOnlyAnswer =
+        !!existingAnswer &&
+        questionnaireResponseMeta[question.id]?.updatedByRole === "ai" &&
+        existingEvidence?.sourceKind === "model_estimate" &&
+        evidence.sourceKind !== "model_estimate" &&
+        aiEvidenceAllowsQuestionnairePrefill(evidence);
+      const canReplaceEstimateOnlyPublicField =
+        existingEvidence?.sourceKind === "model_estimate" && evidence.sourceKind !== "model_estimate";
+      if (existingAnswer && !canReplaceEstimateOnlyAnswer) return false;
+      questionnaireResponses[question.id] = cleanedValue;
+      const acceptedEvidence = {
+        ...evidence,
+        collectedAt: evidence.collectedAt || updatedAt,
+      };
+      questionnaireResponseMeta[question.id] = questionnaireResponseAiMetaFor(updatedAt, acceptedEvidence);
+      if (!publicFields[fieldKey] || canReplaceEstimateOnlyAnswer || canReplaceEstimateOnlyPublicField) {
+        publicFields[fieldKey] = cleanedValue;
+        publicFieldEvidence[fieldKey] = acceptedEvidence;
+      }
+      if (
+        directQuestion &&
+        (!publicFields[question.label] ||
+          canReplaceEstimateOnlyAnswer ||
+          canReplaceEstimateOnlyPublicField ||
+          !aiEvidenceAllowsQuestionnairePrefill(findAiPublicEvidence(publicFieldEvidence, question.label)))
+      ) {
+        publicFields[question.label] = cleanedValue;
+        publicFieldEvidence[question.label] = {
+          ...acceptedEvidence,
+          fieldKey: question.label,
+        };
+      }
+      questionnaireAddedCount += 1;
+      appliedFieldKeys.add(fieldKey);
+      return true;
+    };
+
+    for (const mapping of mapped.mappings ?? []) {
+      applyOne(mapping.targetField, mapping.value, mapping.targetId, mapping);
+    }
+    for (const [fieldKey, value] of Object.entries(mapped.fields)) {
+      if (appliedFieldKeys.has(fieldKey)) continue;
+      applyOne(fieldKey, value);
+    }
+  } catch (error) {
+    summary =
+      error instanceof Error
+        ? `OpenAI research could not complete: ${error.message}`
+        : "OpenAI research could not complete.";
+    mappedProviderError = error instanceof Error ? error.message : "OpenAI research could not complete.";
+    mappedProviderErrorCode = aiProviderErrorCodeFromCaught(error);
+  }
+
+  const now = nowIso();
+  const contact = contactForQuotingSession(session);
+  const seeded = mergeSeededQuestionnaireResponses({
+    session: {
+      ...session,
+      publicFields,
+      publicFieldEvidence,
+      questionnaireResponses,
+      questionnaireResponseMeta,
+      updatedAt: now,
+    },
+    questions,
+    contactName: contact?.name,
+    contactEmail: contact?.email,
+    contactPhone: contact?.phone,
+    businessName: contact && "businessName" in contact ? contact.businessName : undefined,
+    address: quoteSessionAddressContext({ ...session, publicFields }),
+    estimatedValue: session.estimatedValue,
+    assetDetails: session.assetDetails,
+    publicFields,
+    publicFieldEvidence,
+    updatedAt: now,
+  });
+  questionnaireResponses = seeded.questionnaireResponses;
+  questionnaireResponseMeta = seeded.questionnaireResponseMeta;
+  const finalAddedCount = questions.filter(
+    (question) =>
+      !cleanQuestionnairePrefillValue(session.questionnaireResponses?.[question.id]) &&
+      !!cleanQuestionnairePrefillValue(questionnaireResponses[question.id])
+  ).length;
+  const responsesChanged = questions.some(
+    (question) =>
+      cleanQuestionnairePrefillValue(session.questionnaireResponses?.[question.id]) !==
+      cleanQuestionnairePrefillValue(questionnaireResponses[question.id])
+  );
+  const missingFields = questions
+    .filter((question) => question.required && !questionnaireResponses[question.id]?.trim())
+    .map((question) => question.label);
+  const missingFieldsChanged =
+    session.missingFields.length !== missingFields.length ||
+    session.missingFields.some((field, index) => field !== missingFields[index]);
+  const mappingStatusChanged = !!summary && !session.aiSummary?.includes(summary);
+  const providerStatusChanged =
+    (session.aiProviderError ?? "") !== (mappedProviderError ?? "") ||
+    (session.aiProviderErrorCode ?? "") !== (mappedProviderErrorCode ?? "");
+  if (
+    !responsesChanged &&
+    !missingFieldsChanged &&
+    questionnaireAddedCount === 0 &&
+    !mappingStatusChanged &&
+    !providerStatusChanged
+  ) {
+    return session;
+  }
+  const mappingResultLine =
+    finalAddedCount > 0
+      ? `OpenAI research prefilled ${finalAddedCount} editable questionnaire answer${
+          finalAddedCount === 1 ? "" : "s"
+        } for review.`
+      : mappingStatusChanged
+        ? "OpenAI research did not add any editable questionnaire answers."
+        : "";
+  return (
+    db.update("quotingSessions", session.id, {
+      publicFields,
+      publicFieldEvidence,
+      questionnaireResponses,
+      questionnaireResponseMeta,
+      missingFields,
+      aiSummary: [
+        session.aiSummary,
+        mappingResultLine,
+        summary,
+      ]
+        .filter(Boolean)
+        .join(" "),
+      aiProviderError: mappedProviderError,
+      aiProviderErrorCode: mappedProviderErrorCode,
+      updatedAt: now,
+    }) ?? {
+      ...session,
+      publicFields,
+      publicFieldEvidence,
+      questionnaireResponses,
+      questionnaireResponseMeta,
+      missingFields,
+      aiProviderError: mappedProviderError,
+      aiProviderErrorCode: mappedProviderErrorCode,
+      updatedAt: now,
+    }
+  );
 }
 
 async function applyServerAcordMappingToCommercialSession(
@@ -4821,6 +5739,14 @@ async function applyServerAcordMappingToCommercialSession(
   const summaries: string[] = [];
   let addedCount = 0;
   let questionnaireAddedCount = 0;
+  let mappedProviderError: string | undefined;
+  let mappedProviderErrorCode: string | undefined;
+  const recordProviderFailure = (mapped: Awaited<ReturnType<typeof aiMapAcordFields>>) => {
+    if (!mapped.providerError) return;
+    mappedProviderError = mapped.providerError;
+    mappedProviderErrorCode = mapped.providerErrorCode || "provider_unavailable";
+    if (mapped.summary) summaries.push(mapped.summary);
+  };
   const applyQuestionnaireMappedResult = (
     mapped: Awaited<ReturnType<typeof aiMapAcordFields>>,
     questions: QuotingQuestion[]
@@ -4833,13 +5759,21 @@ async function applyServerAcordMappingToCommercialSession(
       publicFields,
       address: (session as { address?: string }).address,
     };
-    const applyOne = (fieldKey: string, value: unknown, targetId?: string) => {
-      const evidence = findAiPublicEvidence(mapped.publicFieldEvidence, fieldKey);
-      if (!evidence || !aiEvidenceAllowsQuestionnairePrefill(evidence)) return false;
+    const applyOne = (
+      fieldKey: string,
+      value: unknown,
+      targetId?: string,
+      mapping?: AiAcordFieldMapping
+    ) => {
       const directQuestion =
         targetId && questionsById.has(targetId) ? questionsById.get(targetId) : undefined;
+      const evidence =
+        findAiPublicEvidence(mapped.publicFieldEvidence, fieldKey) ??
+        (directQuestion ? questionnaireEvidenceFromMapping(mapping, fieldKey, updatedAt) : undefined);
+      if (!evidence || !aiEvidenceAllowsQuestionnairePrefill(evidence)) return false;
       const compatibilityKey = directQuestion
-        ? compatibleQuestionnaireMappingKey(directQuestion, fieldKey, value, mappingContext)
+        ? compatibleQuestionnaireMappingKey(directQuestion, fieldKey, value, mappingContext) ??
+          (questionnaireAnswerLooksCompatible(directQuestion, value) ? directQuestion.label : null)
         : fieldKey;
       if (!compatibilityKey) return false;
       if (!mappedFieldValueIsCompatible(compatibilityKey, value, mappingContext)) return false;
@@ -4857,19 +5791,27 @@ async function applyServerAcordMappingToCommercialSession(
       }
       const cleanedValue = cleanQuestionnairePrefillValue(value);
       if (!cleanedValue) return false;
+      if (!questionnaireAnswerLooksConcreteForAiPrefill(question, cleanedValue)) return false;
       if (questionnaireResponses[question.id]?.trim()) return false;
       questionnaireResponses[question.id] = cleanedValue;
-      questionnaireResponseMeta[question.id] = {
-        updatedAt,
-        updatedById: "ai",
-        updatedByName: "QuoteX AI",
-        updatedByRole: "ai",
+      const acceptedEvidence = {
+        ...evidence,
+        collectedAt: evidence.collectedAt || updatedAt,
       };
+      questionnaireResponseMeta[question.id] = questionnaireResponseAiMetaFor(updatedAt, acceptedEvidence);
       if (!publicFields[fieldKey]) {
         publicFields[fieldKey] = value;
-        publicFieldEvidence[fieldKey] = {
-          ...evidence,
-          collectedAt: evidence.collectedAt || updatedAt,
+        publicFieldEvidence[fieldKey] = acceptedEvidence;
+      }
+      if (
+        directQuestion &&
+        (!publicFields[question.label] ||
+          !aiEvidenceAllowsQuestionnairePrefill(findAiPublicEvidence(publicFieldEvidence, question.label)))
+      ) {
+        publicFields[question.label] = cleanedValue;
+        publicFieldEvidence[question.label] = {
+          ...acceptedEvidence,
+          fieldKey: question.label,
         };
       }
       questionnaireAddedCount += 1;
@@ -4878,7 +5820,7 @@ async function applyServerAcordMappingToCommercialSession(
     };
 
     for (const mapping of mapped.mappings ?? []) {
-      applyOne(mapping.targetField, mapping.value, mapping.targetId);
+      applyOne(mapping.targetField, mapping.value, mapping.targetId, mapping);
     }
     for (const [fieldKey, value] of Object.entries(mapped.fields)) {
       if (appliedFieldKeys.has(fieldKey)) continue;
@@ -4926,10 +5868,14 @@ async function applyServerAcordMappingToCommercialSession(
         dossier: compactAcordAiDossier(session, responses),
         intent: "questionnaire_prefill",
       });
+      recordProviderFailure(mapped);
       applyQuestionnaireMappedResult(mapped, questionnaireQuestionsForMapping);
       applyMappedResult(mapped);
-    } catch {
-      // Server AI mapping is advisory; deterministic fill still runs below.
+    } catch (error) {
+      mappedProviderError =
+        error instanceof Error ? error.message : "OpenAI research could not complete questionnaire prefill.";
+      mappedProviderErrorCode = aiProviderErrorCodeFromCaught(error);
+      summaries.push(`OpenAI research could not complete questionnaire prefill: ${mappedProviderError}`);
     }
   }
 
@@ -4938,25 +5884,29 @@ async function applyServerAcordMappingToCommercialSession(
     const fields = acordAiFieldsForTemplate(template, templateDocument);
     if (fields.length === 0) continue;
     try {
-      applyMappedResult(
-        await aiMapAcordFields({
-          tenantId: session.tenantId,
-          template: {
-            documentName: template.documentName,
-            fileName: template.fileName,
-            formNumber: template.formNumber,
-          },
-          fields,
-          dossier: compactAcordAiDossier(session, responses, templateDocument),
-        })
-      );
-    } catch {
-      // ACORD AI mapping is advisory. The deterministic fill engine
-      // still runs with the already-known dossier data when the server
-      // mapper is unavailable.
+      const mapped = await aiMapAcordFields({
+        tenantId: session.tenantId,
+        template: {
+          documentName: template.documentName,
+          fileName: template.fileName,
+          formNumber: template.formNumber,
+        },
+        fields,
+        dossier: compactAcordAiDossier(session, responses, templateDocument),
+      });
+      recordProviderFailure(mapped);
+      applyMappedResult(mapped);
+    } catch (error) {
+      mappedProviderError =
+        error instanceof Error ? error.message : "OpenAI-backed ACORD mapping could not complete.";
+      mappedProviderErrorCode = aiProviderErrorCodeFromCaught(error);
+      summaries.push(`OpenAI-backed ACORD mapping could not complete: ${mappedProviderError}`);
     }
   }
-  if (addedCount === 0 && questionnaireAddedCount === 0) return session;
+  const providerStatusChanged =
+    (session.aiProviderError ?? "") !== (mappedProviderError ?? "") ||
+    (session.aiProviderErrorCode ?? "") !== (mappedProviderErrorCode ?? "");
+  if (addedCount === 0 && questionnaireAddedCount === 0 && !providerStatusChanged) return session;
   const now = nowIso();
   const uniqueSummaries = Array.from(new Set(summaries)).slice(0, 4);
   return (
@@ -4981,6 +5931,8 @@ async function applyServerAcordMappingToCommercialSession(
       ]
         .filter(Boolean)
         .join(" "),
+      aiProviderError: mappedProviderError,
+      aiProviderErrorCode: mappedProviderErrorCode,
       updatedAt: now,
     }) ?? {
       ...session,
@@ -4988,6 +5940,8 @@ async function applyServerAcordMappingToCommercialSession(
       publicFieldEvidence,
       questionnaireResponses,
       questionnaireResponseMeta,
+      aiProviderError: mappedProviderError,
+      aiProviderErrorCode: mappedProviderErrorCode,
       updatedAt: now,
     }
   );
@@ -5305,6 +6259,304 @@ function commercialSubmissionDocumentId(
   return submission.applicationDocumentIds?.[0] ?? submission.supplementalDocumentIds?.[0];
 }
 
+function uniqueStrings(values: (string | undefined | null)[]): string[] {
+  return Array.from(new Set(values.filter((value): value is string => !!value)));
+}
+
+function commercialSubmissionStableId(session: QuotingSession, carrierId: string): string {
+  return `commercial-submission-${session.id}-${carrierId}`;
+}
+
+function commercialSubmissionThreadId(
+  session: QuotingSession,
+  submissionId: string,
+  kind: "application" | "supplemental"
+): string {
+  return `commercial:${session.tenantId}:${session.id}:${submissionId}:${kind}`;
+}
+
+function commercialSubmissionThreadIds(submission: CommercialCarrierSubmission): Set<string> {
+  return new Set([
+    ...(submission.applicationThreadIds ?? []),
+    ...(submission.supplementalThreadIds ?? []),
+  ]);
+}
+
+function commercialSubmissionExternalThreadIds(submission: CommercialCarrierSubmission): Set<string> {
+  return new Set([
+    ...(submission.applicationExternalThreadIds ?? []),
+    ...(submission.supplementalExternalThreadIds ?? []),
+  ]);
+}
+
+function currencyStringToNumber(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const match = value.match(/\$?\s?([\d,]+(?:\.\d{2})?)/);
+  if (!match) return undefined;
+  const parsed = Number(match[1].replace(/,/g, ""));
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : undefined;
+}
+
+function carrierReplySentences(text: string): string[] {
+  return text
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((sentence) => sentence.trim())
+    .filter(Boolean)
+    .slice(0, 20);
+}
+
+function carrierReplyEvidence(text: string, patterns: RegExp[]): string[] {
+  return carrierReplySentences(text)
+    .filter((sentence) => patterns.some((pattern) => pattern.test(sentence)))
+    .slice(0, 8);
+}
+
+function parseCommercialCarrierReplyFromCommunication(
+  communication: Communication,
+  submission: CommercialCarrierSubmission
+): {
+  quote: CommercialCarrierSubmissionQuote;
+  status: CommercialCarrierSubmission["status"];
+  premiumEstimate?: number;
+  finalPremium?: number;
+  declinedReason?: string;
+  underwriterNotes?: string;
+  missingFields?: string[];
+  agentReviewReason?: string;
+} {
+  const parsedAt = nowIso();
+  const text = [
+    communication.subject ?? "",
+    communication.body,
+    communication.bodyHtml ?? "",
+    ...(communication.attachments ?? []).map((attachment) =>
+      [attachment.fileName, attachment.description].filter(Boolean).join(" ")
+    ),
+  ].join("\n");
+  const attachmentIds = (communication.attachments ?? [])
+    .filter(
+      (attachment) =>
+        /\.pdf$/i.test(attachment.fileName) ||
+        /pdf/i.test(attachment.fileType) ||
+        /supplement/i.test(attachment.fileName)
+    )
+    .map((attachment) => attachment.id);
+  const premiums = uniqueStrings(
+    text.match(/\$\s?\d[\d,]*(?:\.\d{2})?(?:\s?(?:annual|annually|year|yr|premium))?/gi) ?? []
+  ).slice(0, 8);
+  const limits = uniqueStrings(
+    text.match(/\$?\s?\d[\d,]*(?:\.\d{2})?(?:\s?(?:limit|coverage|occurrence|aggregate))/gi) ?? []
+  ).slice(0, 8);
+  const deductibles = uniqueStrings(
+    text.match(/\$?\s?\d[\d,]*(?:\.\d{2})?(?:\s?(?:deductible|ded))/gi) ?? []
+  ).slice(0, 8);
+  const declineEvidence = carrierReplyEvidence(text, [
+    /\bdeclin(?:e|ed|ing)\b/i,
+    /\bno appetite\b/i,
+    /\bunable to quote\b/i,
+    /\bcannot quote\b/i,
+    /\bnot able to offer\b/i,
+  ]);
+  const moreInfoEvidence = carrierReplyEvidence(text, [
+    /\bsupplemental\b/i,
+    /\bmore information\b/i,
+    /\badditional information\b/i,
+    /\bneed(?:ed|s)?\b/i,
+    /\brequir(?:e|ed|es)\b/i,
+  ]);
+  const quoteEvidence = carrierReplyEvidence(text, [
+    /\bquote\b/i,
+    /\bpremium\b/i,
+    /\bindication\b/i,
+    /\bproposal\b/i,
+    /\bbind(?:able|ing)?\b/i,
+  ]);
+  const requestedItems = moreInfoEvidence
+    .map((line) => line.replace(/^(please|we|carrier|underwriter)\s+/i, "").trim())
+    .filter((line) => line.length > 8)
+    .slice(0, 8);
+  const nextSteps = carrierReplyEvidence(text, [
+    /\bnext step\b/i,
+    /\bsubject to\b/i,
+    /\bunderwriting\b/i,
+    /\bsignature\b/i,
+  ]);
+  const firstPremium = currencyStringToNumber(premiums[0]);
+
+  if (declineEvidence.length > 0) {
+    return {
+      status: "declined",
+      declinedReason: declineEvidence[0],
+      underwriterNotes: declineEvidence.join(" "),
+      quote: {
+        outcome: "declined",
+        parsedAt,
+        confidence: 0.84,
+        declineReason: declineEvidence[0],
+        evidenceSnippets: declineEvidence,
+      } as CommercialCarrierSubmissionQuote,
+    };
+  }
+
+  if (attachmentIds.length > 0 || requestedItems.length > 0) {
+    const missingFields =
+      requestedItems.length > 0
+        ? requestedItems
+        : (communication.attachments ?? [])
+            .filter((attachment) => attachmentIds.includes(attachment.id))
+            .map((attachment) => `Complete ${attachment.fileName}`);
+    return {
+      status: attachmentIds.length > 0 ? "needs_supplemental" : "needs_client_info",
+      premiumEstimate: firstPremium,
+      underwriterNotes: uniqueStrings([...moreInfoEvidence, ...quoteEvidence]).join(" "),
+      missingFields,
+      quote: {
+        outcome: "more_info_required",
+        premiums,
+        limits,
+        deductibles,
+        requestedItems: missingFields,
+        supplementalAttachmentIds: attachmentIds,
+        carrierNotes: quoteEvidence,
+        nextSteps,
+        evidenceSnippets: uniqueStrings([...moreInfoEvidence, ...quoteEvidence]),
+        parsedAt,
+        confidence: attachmentIds.length > 0 ? 0.82 : 0.74,
+      },
+    };
+  }
+
+  if (premiums.length > 0 && quoteEvidence.length > 0) {
+    return {
+      status: "accepted",
+      premiumEstimate: firstPremium,
+      finalPremium: firstPremium,
+      underwriterNotes: quoteEvidence.join(" "),
+      quote: {
+        outcome: "quoted",
+        premiums,
+        limits,
+        deductibles,
+        carrierNotes: quoteEvidence,
+        nextSteps,
+        evidenceSnippets: quoteEvidence,
+        parsedAt,
+        confidence: 0.8,
+      },
+    };
+  }
+
+  const acceptedEvidence = carrierReplyEvidence(text, [
+    /\bcan proceed\b/i,
+    /\bwe can consider\b/i,
+    /\baccepted\b/i,
+    /\bappetite\b/i,
+  ]);
+  if (acceptedEvidence.length > 0) {
+    return {
+      status: "accepted",
+      underwriterNotes: acceptedEvidence.join(" "),
+      quote: {
+        outcome: "accepted",
+        carrierNotes: acceptedEvidence,
+        evidenceSnippets: acceptedEvidence,
+        parsedAt,
+        confidence: 0.74,
+      },
+    };
+  }
+
+  return {
+    status: "agent_review",
+    agentReviewReason:
+      "Carrier reply did not clearly state quote, decline, or supplemental outcome.",
+    underwriterNotes: carrierReplySentences(text).slice(0, 4).join(" "),
+    quote: {
+      outcome: "pending",
+      premiums,
+      limits,
+      deductibles,
+      evidenceSnippets: carrierReplySentences(text).slice(0, 4),
+      parsedAt,
+      confidence: 0.42,
+    },
+  };
+}
+
+function commercialCarrierReplyQuestions(
+  submission: CommercialCarrierSubmission,
+  carrierName: string
+): QuotingQuestion[] {
+  return (submission.missingFields ?? [])
+    .filter((label) => label.trim().length > 0)
+    .map((label) => ({
+      id: `second-${submission.carrierId}-${fieldSlug(label)}`,
+      section: "Carrier supplemental details",
+      label: label.replace(`${carrierName}: `, ""),
+      kind: /details|describe|explain|summary|operations|litigation|locations|supplement/i.test(label)
+        ? "textarea"
+        : /number|count|employees|vehicles|sq ft|revenue|payroll|premium|limit/i.test(label)
+        ? "number"
+        : "text",
+      required: true,
+      round: "second_round",
+      carrierId: submission.carrierId,
+    }));
+}
+
+function communicationMatchesCommercialSubmission(
+  session: QuotingSession,
+  submission: CommercialCarrierSubmission,
+  communication: Communication
+): boolean {
+  const submissionId =
+    submission.submissionId ?? commercialSubmissionStableId(session, submission.carrierId);
+  if (communication.carrierSubmissionId === submissionId) return true;
+  if (communication.threadId && commercialSubmissionThreadIds(submission).has(communication.threadId)) {
+    return true;
+  }
+  if (
+    communication.externalThreadId &&
+    commercialSubmissionExternalThreadIds(submission).has(communication.externalThreadId)
+  ) {
+    return true;
+  }
+  if (
+    communication.carrierContactId &&
+    (submission.underwriterContactIds ?? []).includes(communication.carrierContactId)
+  ) {
+    const contact = contactForQuotingSession(session);
+    const haystack = [communication.subject ?? "", communication.body].join(" ").toLowerCase();
+    const contactName = (contact?.name ?? "").toLowerCase();
+    return haystack.includes(submissionId.toLowerCase()) || (!!contactName && haystack.includes(contactName));
+  }
+  return false;
+}
+
+function linkInboundCarrierCommunicationToSubmission(row: Communication): Communication {
+  if (row.direction !== "inbound") return row;
+  const sessions = db
+    .list("quotingSessions")
+    .filter(
+      (session) =>
+        session.tenantId === row.tenantId &&
+        session.lineOfBusiness === "commercial" &&
+        (session.commercialCarrierSubmissions?.length ?? 0) > 0
+    );
+  for (const session of sessions) {
+    const match = (session.commercialCarrierSubmissions ?? []).find((submission) =>
+      communicationMatchesCommercialSubmission(session, submission, row)
+    );
+    if (match) {
+      const submissionId = match.submissionId ?? commercialSubmissionStableId(session, match.carrierId);
+      return db.update("communications", row.id, { carrierSubmissionId: submissionId }) ?? row;
+    }
+  }
+  return row;
+}
+
 function logCommercialCarrierEmailStatus(input: {
   session: QuotingSession;
   carrierName: string;
@@ -5353,6 +6605,9 @@ function attachCommercialUnderwriterMessages(
   );
 
   return submissions.map((submission) => {
+    const submissionId =
+      submission.submissionId ?? commercialSubmissionStableId(session, submission.carrierId);
+    const threadId = commercialSubmissionThreadId(session, submissionId, kind);
     if (targetCarrierIds && !targetCarrierIds.has(submission.carrierId)) {
       return submission;
     }
@@ -5365,7 +6620,7 @@ function attachCommercialUnderwriterMessages(
     const carrier = db.list("carriers").find((candidate) => candidate.id === submission.carrierId);
     const underwriters = carrierUnderwriters(session.tenantId, submission.carrierId);
     const attachments = completedAttachments;
-    const messageIds = underwriters.map((underwriter) => {
+    const messages = underwriters.map((underwriter) => {
       const draft = emailDrafts?.find(
         (candidate) =>
           candidate.carrierId === submission.carrierId &&
@@ -5377,17 +6632,23 @@ function attachCommercialUnderwriterMessages(
         carrierContactId: underwriter.id,
         channel: "email",
         direction: "outbound",
+        threadId,
+        carrierSubmissionId: submissionId,
         subject:
           draft?.subject ??
           (kind === "application"
             ? `Commercial application package - ${contactName}`
             : `Commercial supplemental package - ${contactName}`),
         body:
-          draft?.body ??
-          commercialApplicationBody(
-            underwriter.name,
-            kind
-          ),
+          [
+            draft?.body ??
+              commercialApplicationBody(
+                underwriter.name,
+                kind
+              ),
+            "",
+            `Submission reference: ${submissionId}`,
+          ].join("\n"),
         attachments,
         createdById: session.createdById,
       });
@@ -5400,10 +6661,14 @@ function attachCommercialUnderwriterMessages(
         attachmentCount: attachments.length,
         firstDocumentId: attachments.find((attachment) => attachment.documentId)?.documentId,
       });
-      return message.id;
+      return message;
     });
+    const messageIds = messages.map((message) => message.id);
+    const threadIds = uniqueStrings(messages.map((message) => message.threadId));
+    const externalThreadIds = uniqueStrings(messages.map((message) => message.externalThreadId));
     return {
       ...submission,
+      submissionId,
       underwriterContactIds: Array.from(
         new Set([...(submission.underwriterContactIds ?? []), ...underwriters.map((contact) => contact.id)])
       ),
@@ -5418,6 +6683,12 @@ function attachCommercialUnderwriterMessages(
             applicationMessageIds: Array.from(
               new Set([...(submission.applicationMessageIds ?? []), ...messageIds])
             ),
+            applicationThreadIds: Array.from(
+              new Set([...(submission.applicationThreadIds ?? []), ...threadIds])
+            ),
+            applicationExternalThreadIds: Array.from(
+              new Set([...(submission.applicationExternalThreadIds ?? []), ...externalThreadIds])
+            ),
           }
         : {
             supplementalDocumentIds: Array.from(
@@ -5428,6 +6699,12 @@ function attachCommercialUnderwriterMessages(
             ),
             supplementalMessageIds: Array.from(
               new Set([...(submission.supplementalMessageIds ?? []), ...messageIds])
+            ),
+            supplementalThreadIds: Array.from(
+              new Set([...(submission.supplementalThreadIds ?? []), ...threadIds])
+            ),
+            supplementalExternalThreadIds: Array.from(
+              new Set([...(submission.supplementalExternalThreadIds ?? []), ...externalThreadIds])
             ),
           }),
     };
@@ -5496,6 +6773,7 @@ function mergeCommercialSubmissionArtifacts(
     if (!previous) return submission;
     return {
       ...submission,
+      submissionId: previous.submissionId ?? submission.submissionId,
       submissionMethod: previous.submissionMethod ?? submission.submissionMethod,
       connectorLabel: previous.connectorLabel ?? submission.connectorLabel,
       automationJobId: previous.automationJobId ?? submission.automationJobId,
@@ -5518,10 +6796,40 @@ function mergeCommercialSubmissionArtifacts(
           ...(submission.applicationMessageIds ?? []),
         ])
       ),
+      applicationThreadIds: Array.from(
+        new Set([
+          ...(previous.applicationThreadIds ?? []),
+          ...(submission.applicationThreadIds ?? []),
+        ])
+      ),
+      applicationExternalThreadIds: Array.from(
+        new Set([
+          ...(previous.applicationExternalThreadIds ?? []),
+          ...(submission.applicationExternalThreadIds ?? []),
+        ])
+      ),
       supplementalMessageIds: Array.from(
         new Set([
           ...(previous.supplementalMessageIds ?? []),
           ...(submission.supplementalMessageIds ?? []),
+        ])
+      ),
+      supplementalThreadIds: Array.from(
+        new Set([
+          ...(previous.supplementalThreadIds ?? []),
+          ...(submission.supplementalThreadIds ?? []),
+        ])
+      ),
+      supplementalExternalThreadIds: Array.from(
+        new Set([
+          ...(previous.supplementalExternalThreadIds ?? []),
+          ...(submission.supplementalExternalThreadIds ?? []),
+        ])
+      ),
+      replyCommunicationIds: Array.from(
+        new Set([
+          ...(previous.replyCommunicationIds ?? []),
+          ...(submission.replyCommunicationIds ?? []),
         ])
       ),
       supplementalDocumentIds: Array.from(
@@ -5530,6 +6838,12 @@ function mergeCommercialSubmissionArtifacts(
           ...(submission.supplementalDocumentIds ?? []),
         ])
       ),
+      quote: previous.quote ?? submission.quote,
+      premiumEstimate: previous.premiumEstimate ?? submission.premiumEstimate,
+      finalPremium: previous.finalPremium ?? submission.finalPremium,
+      underwriterNotes: previous.underwriterNotes ?? submission.underwriterNotes,
+      parseConfidence: previous.parseConfidence ?? submission.parseConfidence,
+      agentReviewReason: previous.agentReviewReason ?? submission.agentReviewReason,
     };
   });
 }
@@ -5586,6 +6900,7 @@ function analyzeCommercialCarrierPipeline(
   const secondRoundQuestions: QuotingQuestion[] = [];
 
   const submissions = targetQuotes.map((q, index) => {
+    const submissionId = commercialSubmissionStableId(session, q.carrierId);
     const carrier = carriers.find((c) => c.id === q.carrierId);
     const carrierDocs = commercialDocs.filter((d) => d.carrierId === q.carrierId);
     const connector = carrier ? getCarrierQuoteProviderReadiness(carrier) : null;
@@ -5642,6 +6957,7 @@ function analyzeCommercialCarrierPipeline(
       (session.commercialSecondRoundSentAt && unanswered.length === 0)
     ) {
       return {
+        submissionId,
         carrierId: q.carrierId,
         status:
           (carrierDocs.length > 0 && index > 1) ||
@@ -5682,6 +6998,7 @@ function analyzeCommercialCarrierPipeline(
         });
       });
       return {
+        submissionId,
         carrierId: q.carrierId,
         status: "needs_client_info",
         sentAt: stampedAt,
@@ -5699,6 +7016,7 @@ function analyzeCommercialCarrierPipeline(
     }
 
     return {
+      submissionId,
       carrierId: q.carrierId,
       status: "declined",
       sentAt: stampedAt,
@@ -5779,6 +7097,13 @@ function markCommercialSubmissionsAwaitingResponse(
     status: "awaiting_response",
     responseAt: undefined,
     acceptedAt: undefined,
+    replyCommunicationIds: [],
+    quote: undefined,
+    premiumEstimate: undefined,
+    finalPremium: undefined,
+    underwriterNotes: undefined,
+    parseConfidence: undefined,
+    agentReviewReason: undefined,
     missingFields: undefined,
     declinedReason: undefined,
     aiRationale: `Application packet sent through ${
@@ -5835,6 +7160,37 @@ const AGENCY_PRICE_FIELDS = new Set<keyof Agency>([
   "monthlyPriceOverrideReason",
   "monthlyPriceOverrideUpdatedAt",
 ]);
+
+const AGENCY_DEACTIVATION_BILLING_REASON =
+  "Billing suspended because agency was deactivated in the master portal.";
+
+const AGENCY_DEACTIVATION_RESTORE_FIELDS: (keyof Agency)[] = [
+  "tier",
+  "softwareProduct",
+  "allowedUsers",
+  "allowedProspectsPerMonth",
+  "allowedAiMessagesPerMonth",
+  "allowedCarriers",
+  "websiteAppAddOn",
+  "softwarePlanTermMonths",
+  "softwarePlanStartedAt",
+  "softwarePlanRenewsAt",
+  "softwarePlanRenewalContractPacketId",
+  "softwarePlanRenewalContractSentAt",
+  "softwarePlanRenewalContractRecipientEmail",
+  "softwarePlanRenewalContractSignedAt",
+  "softwarePlanRenewalContractSignedByName",
+  "softwarePlanRenewalContractSignedByEmail",
+  "softwarePlanLastRenewedAt",
+  "monthlyPriceOverrideUsd",
+  "monthlyPriceOverrideReason",
+  "monthlyPriceOverrideUpdatedAt",
+  "stripeCustomerId",
+  "stripeSubscriptionId",
+  "stripeSubscriptionTermStartedAt",
+  "stripeSubscriptionTermEndsAt",
+  "stripeSubscriptionCancelAt",
+];
 
 const AGENCY_WEBSITE_FIELDS = new Set<keyof Agency>([
   "website",
@@ -5928,6 +7284,40 @@ function cleanAgencyActivityMetadata(
   );
 }
 
+function createAgencyDeactivationSnapshot(agency: Agency): NonNullable<Agency["deactivationSnapshot"]> {
+  const values: Record<string, unknown> = {};
+  const missingFields: string[] = [];
+  for (const field of AGENCY_DEACTIVATION_RESTORE_FIELDS) {
+    const value = agency[field];
+    if (value === undefined) {
+      missingFields.push(field);
+    } else {
+      values[field] = structuredClone(value);
+    }
+  }
+  return {
+    capturedAt: nowIso(),
+    values,
+    missingFields,
+  };
+}
+
+function patchFromAgencyDeactivationSnapshot(
+  snapshot: Agency["deactivationSnapshot"]
+): Partial<Agency> {
+  if (!snapshot) return {};
+  const patch: Record<string, unknown> = {};
+  const missing = new Set(snapshot.missingFields);
+  for (const field of AGENCY_DEACTIVATION_RESTORE_FIELDS) {
+    if (missing.has(field)) {
+      patch[field] = undefined;
+    } else if (Object.prototype.hasOwnProperty.call(snapshot.values, field)) {
+      patch[field] = structuredClone(snapshot.values[field]);
+    }
+  }
+  return patch as Partial<Agency>;
+}
+
 function createMasterAgencyActivity(
   input: Omit<MasterAgencyActivity, "id" | "createdAt"> & { createdAt?: string }
 ): MasterAgencyActivity {
@@ -5960,6 +7350,58 @@ function logAgencyActivity(
     source,
     metadata: cleanAgencyActivityMetadata(metadata),
   });
+}
+
+function createAgencyDeactivationNotice(agency: Agency, actorId?: string): Communication | null {
+  const recipient = normalizeEmail(agency.contactEmail);
+  if (!recipient) return null;
+  return api.communications.create({
+    tenantId: agency.id,
+    externalRecipientName: agency.name,
+    externalRecipientEmail: recipient,
+    externalRecipientRole: "Agency billing contact",
+    channel: "email",
+    direction: "outbound",
+    subject: "Quotex agency access deactivated",
+    body: [
+      `Hi ${agency.name},`,
+      "",
+      "Your Quotex agency workspace has been deactivated by the master portal.",
+      "",
+      "Billing has been suspended effective immediately. Staff access, portal workflows, and connected agency services are paused until the account is reactivated.",
+      "",
+      "If this was unexpected, reply to this message or contact Quotex Insurance Support.",
+      "",
+      "Thank you,",
+      "Quotex Insurance",
+    ].join("\n"),
+    createdById:
+      actorId ??
+      db.list("users").find((user) => user.role === "master_admin" && user.active)?.id ??
+      "master_portal",
+  });
+}
+
+function restoreAgencyStaffAccessAfterReactivation(agencyId: string, actorId?: string): number {
+  let restored = 0;
+  for (const user of db.list("users")) {
+    if (user.tenantId !== agencyId || !isStaffRole(user.role)) continue;
+    if (user.staffAccessStatus === "banned" || user.staffAccessStatus === "deleted") continue;
+
+    const needsAccessPatch = !user.active || user.staffAccessStatus !== "active";
+    const updated = needsAccessPatch
+      ? db.update("users", user.id, {
+          active: true,
+          staffAccessStatus: "active",
+          staffAccessUpdatedAt: nowIso(),
+          staffAccessUpdatedById: actorId,
+        })
+      : user;
+    if (!updated) continue;
+    upsertStaffMailboxAuthorization(updated, actorId);
+    restored += 1;
+  }
+  return restored;
 }
 
 function classifyAgencyPatchActivity(
@@ -6108,6 +7550,87 @@ function syncLegacyDemoRequests() {
     db.insert("demoLeads", row);
     existingIds.add(id);
   }
+}
+
+function acordLineOfBusinessFromCatalog(
+  line: AcordFormSeed["line"]
+): Document["lineOfBusiness"] | undefined {
+  if (line === "Personal lines") return "personal";
+  if (line === "Commercial lines") return "commercial";
+  return undefined;
+}
+
+function bundledAcordTemplateId(tenantId: string, form: AcordFormSeed): string {
+  const tenantSlug = tenantId.replace(/[^a-z0-9]+/gi, "_").toLowerCase();
+  const formSlug = form.number.replace(/[^a-z0-9]+/gi, "_").toLowerCase();
+  return `doc_acord_${tenantSlug}_${formSlug}`;
+}
+
+function isBundledAcordTemplateDocument(document: Document): boolean {
+  const path = `${document.storagePath ?? ""} ${document.downloadUrl ?? ""}`;
+  const label = `${document.fileName} ${document.documentName ?? ""}`;
+  return (
+    document.fileType === "application/pdf" &&
+    /acord/i.test(label) &&
+    (path.includes("/acord/") ||
+      String(document.templateFields?.["Bundled PDF"] ?? "").toLowerCase().includes("yes")) &&
+    !document.customerId &&
+    !document.assetId &&
+    !document.policyId &&
+    !document.claimId &&
+    !document.carrierId &&
+    !document.quoteRequestId
+  );
+}
+
+function ensureBundledAcordTemplatesForTenant(tenantId: string): void {
+  const existingFileNames = new Set(
+    db
+      .list("documents")
+      .filter(
+        (document) =>
+          document.tenantId === tenantId && isBundledAcordTemplateDocument(document)
+      )
+      .map((document) => document.fileName)
+  );
+  const uploadedById =
+    db
+      .list("users")
+      .find(
+        (user) =>
+          user.tenantId === tenantId &&
+          (user.role === "manager" || user.role === "agent")
+      )?.id ?? "system";
+  ACORD_FORM_CATALOG.forEach((form) => {
+    if (existingFileNames.has(form.fileName)) return;
+    db.insert("documents", {
+      id: bundledAcordTemplateId(tenantId, form),
+      tenantId,
+      uploadedById,
+      fileName: form.fileName,
+      fileType: "application/pdf",
+      documentName: `ACORD ${form.number} - ${form.name}`,
+      templateFields: {
+        "ACORD form number": `ACORD ${form.number}`,
+        "Form name": form.name,
+        "Line / category": form.line,
+        "Typical use": form.use,
+        "Source file": form.sourceFileName,
+        "Bundled PDF": "Yes - loaded from the agency-provided PDF set",
+        "Agency action": "Use this uploaded PDF as the agency template.",
+      },
+      lineOfBusiness: acordLineOfBusinessFromCatalog(form.line),
+      required: false,
+      type: "agency_template",
+      visibility: "employee_only",
+      status: "approved",
+      storagePath: `/acord/${form.fileName}`,
+      downloadUrl: `/acord/${form.fileName}`,
+      agencyId: tenantId,
+      uploadedAt: nowIso(),
+    });
+    existingFileNames.add(form.fileName);
+  });
 }
 
 export const api = {
@@ -6507,14 +8030,81 @@ export const api = {
       }
       return updated ? { ok: true, agency: updated } : { ok: false, reason: "missing" };
     },
-    deactivate(id: string) {
-      const updated = db.update("agencies", id, { active: false });
+    deactivate(
+      id: string,
+      options: { actorId?: string; sendNotice?: boolean } = {}
+    ): Agency | null {
+      const agency = db.list("agencies").find((a) => a.id === id);
+      if (!agency) return null;
+      if (!agency.active) return agency;
+      const suspendedAt = nowIso();
+      const deactivationSnapshot = createAgencyDeactivationSnapshot(agency);
+      const updated = db.update("agencies", id, {
+        active: false,
+        deactivationSnapshot,
+        monthlyPriceOverrideUsd: 0,
+        monthlyPriceOverrideReason: AGENCY_DEACTIVATION_BILLING_REASON,
+        monthlyPriceOverrideUpdatedAt: suspendedAt,
+      });
       if (updated) {
+        const notice =
+          options.sendNotice === false
+            ? null
+            : createAgencyDeactivationNotice(updated, options.actorId);
         logAgencyActivity(
           updated,
           "agency_deactivated",
           "Agency deactivated",
-          `${updated.name} was marked inactive in the master portal.`
+          `${updated.name} was marked inactive in the master portal. Billing was suspended and the agency contact was notified.`,
+          {
+            billingStatus: "suspended",
+            monthlyPriceUsd: 0,
+            snapshotCapturedAt: deactivationSnapshot.capturedAt,
+            noticeRecipient: updated.contactEmail,
+            noticeCommunicationId: notice?.id ?? null,
+            noticeDeliveryStatus: notice?.deliveryStatus ?? null,
+          }
+        );
+      }
+      return updated;
+    },
+    reactivate(id: string, options: { actorId?: string } = {}): Agency | null {
+      const agency = db.list("agencies").find((a) => a.id === id);
+      if (!agency) return null;
+      const restoredPatch = patchFromAgencyDeactivationSnapshot(agency.deactivationSnapshot);
+      const restoredFromSnapshot = !!agency.deactivationSnapshot;
+      const clearSuspension =
+        !restoredFromSnapshot &&
+        agency.monthlyPriceOverrideUsd === 0 &&
+        agency.monthlyPriceOverrideReason === AGENCY_DEACTIVATION_BILLING_REASON;
+      const updated = db.update("agencies", id, {
+        ...restoredPatch,
+        active: true,
+        deactivationSnapshot: undefined,
+        ...(clearSuspension
+          ? {
+              monthlyPriceOverrideUsd: undefined,
+              monthlyPriceOverrideReason: undefined,
+              monthlyPriceOverrideUpdatedAt: undefined,
+            }
+          : {}),
+      });
+      if (updated) {
+        const restoredStaffCount = restoreAgencyStaffAccessAfterReactivation(updated.id, options.actorId);
+        void db.syncNow();
+        logAgencyActivity(
+          updated,
+          "agency_plan_updated",
+          "Agency reactivated",
+          `${updated.name} was reactivated in the master portal.${
+            restoredFromSnapshot || clearSuspension ? " Billing resumed under the agency's saved plan." : ""
+          }`,
+          {
+            billingStatus: restoredFromSnapshot || clearSuspension ? "resumed" : "unchanged",
+            monthlyPriceUsd: agencyMonthlyPriceUsd(updated),
+            restoredFromSnapshot,
+            restoredStaffCount,
+          }
         );
       }
       return updated;
@@ -7434,6 +9024,8 @@ export const api = {
         externalMessageId?: string;
         externalThreadId?: string;
         externalUrl?: string;
+        rfc822MessageId?: string;
+        messageIdHeader?: string;
       } = {}
     ): MailboxOutboxJob | null {
       const job = this.get(id);
@@ -7504,13 +9096,10 @@ export const api = {
       const all = tenantFilter(db.list("customers"), tenantId);
       return opts?.includeArchived ? all : all.filter((c) => !c.archived);
     },
-    // Access-controlled list. Agents only see clients a manager has
-    // assigned to them; managers and master_admin see everything in
-    // the tenant. Pass this from any agent-portal surface that
-    // enumerates clients (Clients tab, dashboards, dropdowns,
-    // policy-by-customer joins, etc.). The unfiltered `list` is
-    // reserved for places that need a tenant-wide count regardless
-    // of viewer (e.g. master analytics).
+    // Access-controlled list. Agency staff see every active client in
+    // their own tenant. Assignment is a routing/notification concern,
+    // not a client-directory visibility gate; use listOwned() for
+    // alert/badge surfaces that should only light up for assigned work.
     listVisible(
       tenantId: string,
       viewer: { id: string; role: Role } | undefined,
@@ -7518,10 +9107,9 @@ export const api = {
     ): CustomerProfile[] {
       const all = this.list(tenantId, opts);
       if (!viewer) return [];
-      if (viewer.role === "manager" || viewer.role === "master_admin")
+      if (viewer.role === "master_admin") return all;
+      if (viewer.role === "manager" || viewer.role === "agent" || viewer.role === "csr") {
         return all;
-      if (viewer.role === "agent" || viewer.role === "csr") {
-        return all.filter((c) => contactIsOwnedBy(c, viewer.id));
       }
       return [];
     },
@@ -7541,18 +9129,18 @@ export const api = {
       }
       return [];
     },
-    // Single-row guard mirroring listVisible. Returns true if the
-    // viewer is allowed to see this customer; used by detail pages
-    // to redirect agents away from clients that aren't theirs.
+    // Single-row guard mirroring listVisible. Agency staff can open
+    // any client in their own agency; assignment remains separate for
+    // routing, activity ownership, and notification scoping.
     canSee(
       customer: CustomerProfile | undefined | null,
       viewer: { id: string; role: Role } | undefined
     ): boolean {
       if (!customer || !viewer) return false;
-      if (viewer.role === "manager" || viewer.role === "master_admin")
-        return true;
-      if (viewer.role === "agent" || viewer.role === "csr") {
-        return contactIsOwnedBy(customer, viewer.id);
+      if (viewer.role === "master_admin") return true;
+      if (viewer.role === "manager" || viewer.role === "agent" || viewer.role === "csr") {
+        const viewerUser = db.list("users").find((u) => u.id === viewer.id);
+        return viewerUser ? viewerUser.tenantId === customer.tenantId : true;
       }
       return false;
     },
@@ -7724,12 +9312,37 @@ export const api = {
       return db.list("assets").find((a) => a.id === id);
     },
     create(input: Omit<Asset, "id" | "createdAt">): Asset {
-      const row: Asset = { ...input, id: uid("asset"), createdAt: nowIso() };
+      const details = normalizeAssetDetails(input.details ?? {});
+      const label =
+        input.type === "luxury_vehicle"
+          ? buildAssetLabelFromDetails({
+              type: input.type,
+              details,
+              fallbackLabel: input.label,
+            })
+          : uppercaseVinTokens(input.label);
+      const row: Asset = { ...input, label, details, id: uid("asset"), createdAt: nowIso() };
       db.insert("assets", row);
       return row;
     },
     update(id: string, patch: Partial<Asset>) {
-      return db.update("assets", id, patch);
+      const existing = db.list("assets").find((asset) => asset.id === id);
+      const details = patch.details ? normalizeAssetDetails(patch.details) : undefined;
+      const label =
+        existing && (patch.label !== undefined || details)
+          ? existing.type === "luxury_vehicle"
+            ? buildAssetLabelFromDetails({
+                type: existing.type,
+                details: details ?? existing.details ?? {},
+                fallbackLabel: patch.label ?? existing.label,
+              })
+            : uppercaseVinTokens(patch.label ?? existing.label)
+          : patch.label;
+      return db.update("assets", id, {
+        ...patch,
+        ...(label !== undefined ? { label } : {}),
+        ...(details ? { details } : {}),
+      });
     },
     upgradeVehicleLabelFromVin(assetId: string, expectedLabel?: string) {
       return upgradeVehicleAssetLabelFromVin(assetId, expectedLabel);
@@ -8698,10 +10311,9 @@ export const api = {
     ): Prospect[] {
       const all = this.listByTenant(tenantId, opts);
       if (!viewer) return [];
-      if (viewer.role === "manager" || viewer.role === "master_admin")
+      if (viewer.role === "master_admin") return all;
+      if (viewer.role === "manager" || viewer.role === "agent" || viewer.role === "csr") {
         return all;
-      if (viewer.role === "agent" || viewer.role === "csr") {
-        return all.filter((p) => contactIsOwnedBy(p, viewer.id));
       }
       return [];
     },
@@ -8723,10 +10335,10 @@ export const api = {
       viewer: { id: string; role: Role } | undefined
     ): boolean {
       if (!prospect || !viewer) return false;
-      if (viewer.role === "manager" || viewer.role === "master_admin")
-        return true;
-      if (viewer.role === "agent" || viewer.role === "csr") {
-        return contactIsOwnedBy(prospect, viewer.id);
+      if (viewer.role === "master_admin") return true;
+      if (viewer.role === "manager" || viewer.role === "agent" || viewer.role === "csr") {
+        const viewerUser = db.list("users").find((u) => u.id === viewer.id);
+        return viewerUser ? viewerUser.tenantId === prospect.tenantId : true;
       }
       return false;
     },
@@ -9061,6 +10673,9 @@ export const api = {
   carriers: {
     list(): Carrier[] {
       return db.list("carriers");
+    },
+    directory(tenantId?: string) {
+      return buildCarrierDirectory(tenantId ? this.listForTenant(tenantId) : this.list());
     },
     listForTenant(tenantId: string): Carrier[] {
       const links = db.list("carrierLinks").filter((l) => l.tenantId === tenantId && l.active);
@@ -9719,6 +11334,7 @@ export const api = {
     // /employee/documents → "Agency templates & forms". Returned
     // newest-first.
     listTemplates(tenantId: string): Document[] {
+      ensureBundledAcordTemplatesForTenant(tenantId);
       return db
         .list("documents")
         .filter(
@@ -12062,8 +13678,9 @@ export const api = {
       db.insert("communications", row);
       if (outboxJob) {
         db.insert("mailboxOutbox", outboxJob);
-        if (outboxJob.status !== "failed") markMailboxSent(row.mailboxConnectionId);
+        scheduleLiveMailboxDelivery(row, outboxJob);
       }
+      const linkedRow = row.direction === "inbound" ? linkInboundCarrierCommunicationToSubmission(row) : row;
 
       // Every email / SMS / call to or from a customer gets a
       // timeline row so the client status report shows the full
@@ -12071,9 +13688,9 @@ export const api = {
       // as source=customer, outbound from staff as source=agent.
       // Customer-visible visibility keeps the customer's own
       // portal timeline honest about messages we sent them.
-      communicationStatusEvent(row);
+      communicationStatusEvent(linkedRow);
 
-      return row;
+      return linkedRow;
     },
   },
 
@@ -12096,8 +13713,19 @@ export const api = {
       from: string;
       to: string[];
       cc?: string[];
+      bcc?: string[];
       subject?: string;
       body: string;
+      bodyHtml?: string;
+      rawMimeRef?: string;
+      rfc822MessageId?: string;
+      messageIdHeader?: string;
+      inReplyToHeader?: string;
+      references?: string[];
+      attachments?: CommunicationAttachment[];
+      snippet?: string;
+      isRead?: boolean;
+      mailboxLabels?: string[];
       sentAt?: string;
       direction?: "inbound" | "outbound";
     }): Communication | null {
@@ -12118,27 +13746,61 @@ export const api = {
           ? recipients.find((email) => email !== mailboxAddress)
           : from;
       if (!contactEmail) return null;
-      const contact = resolveEmailContact(input.tenantId, contactEmail);
-      if (!contact) return null;
+      const contact =
+        resolveEmailContact(input.tenantId, contactEmail) ??
+        ({
+          externalRecipientEmail: contactEmail,
+          externalRecipientName:
+            displayNameFromEmailHeader(direction === "inbound" ? input.from : undefined) ??
+            contactEmail,
+          externalRecipientRole: "External contact",
+        } satisfies Pick<
+          Communication,
+          "customerId" | "prospectId" | "carrierContactId" | "externalRecipientEmail" | "externalRecipientName" | "externalRecipientRole"
+        >);
 
       const existing = db
         .list("communications")
         .find(
           (c) =>
             c.tenantId === input.tenantId &&
-            c.externalMessageId === input.externalMessageId &&
+            (c.externalMessageId === input.externalMessageId ||
+              (!!input.messageIdHeader && c.messageIdHeader === input.messageIdHeader)) &&
             normalizeEmail(c.mailboxAccount) === mailboxAddress
         );
       if (existing) {
-        return db.update("communications", existing.id, {
+        const updatedExisting = db.update("communications", existing.id, {
           subject: input.subject ?? existing.subject,
           body: input.body,
+          bodyHtml: input.bodyHtml ?? existing.bodyHtml,
+          rawMimeRef: input.rawMimeRef ?? existing.rawMimeRef,
+          rfc822MessageId: input.rfc822MessageId ?? input.messageIdHeader ?? existing.rfc822MessageId,
+          messageIdHeader: input.messageIdHeader ?? existing.messageIdHeader,
+          inReplyToHeader: input.inReplyToHeader ?? existing.inReplyToHeader,
+          references: input.references ?? existing.references,
+          to: input.to,
+          cc: input.cc,
+          bcc: input.bcc,
+          attachments: input.attachments ?? existing.attachments,
+          snippet: input.snippet ?? existing.snippet,
+          isRead: input.isRead ?? existing.isRead,
+          mailboxLabels: input.mailboxLabels ?? existing.mailboxLabels,
           deliveryStatus: direction === "inbound" ? "received" : "synced",
           externalThreadId: input.externalThreadId ?? existing.externalThreadId,
           externalUrl: input.externalUrl ?? existing.externalUrl,
         }) ?? existing;
+        const linkedExisting = direction === "inbound"
+          ? linkInboundCarrierCommunicationToSubmission(updatedExisting)
+          : updatedExisting;
+        communicationStatusEvent(linkedExisting);
+        return linkedExisting;
       }
 
+      const referencedThreadId = threadIdFromReferencedHeaders(input.tenantId, {
+        externalThreadId: input.externalThreadId,
+        inReplyToHeader: input.inReplyToHeader,
+        references: input.references,
+      });
       const subjectKey = (input.subject ?? "message")
         .trim()
         .toLowerCase()
@@ -12152,10 +13814,23 @@ export const api = {
         channel: "email",
         direction,
         subject: input.subject,
-        threadId: input.externalThreadId
+        threadId: referencedThreadId ?? (input.externalThreadId
           ? `provider:${provider}:${input.externalThreadId}`
-          : `provider:${provider}:${contactEmail}:${subjectKey}`,
+          : `provider:${provider}:${contactEmail}:${subjectKey}`),
         body: input.body,
+        bodyHtml: input.bodyHtml,
+        rawMimeRef: input.rawMimeRef,
+        rfc822MessageId: input.rfc822MessageId ?? input.messageIdHeader,
+        messageIdHeader: input.messageIdHeader,
+        inReplyToHeader: input.inReplyToHeader,
+        references: input.references,
+        to: input.to,
+        cc: input.cc,
+        bcc: input.bcc,
+        attachments: input.attachments,
+        snippet: input.snippet,
+        isRead: input.isRead,
+        mailboxLabels: input.mailboxLabels,
         createdById: direction === "outbound" ? input.mailboxUserId : undefined,
         mailboxOrigin: "provider_sync",
         mailboxAccount,
@@ -12178,8 +13853,9 @@ export const api = {
         markMailboxSent(userMailbox.connectionId);
         reconcileOutboxFromProviderMessage(row);
       }
-      communicationStatusEvent(row);
-      return row;
+      const linkedRow = direction === "inbound" ? linkInboundCarrierCommunicationToSubmission(row) : row;
+      communicationStatusEvent(linkedRow);
+      return linkedRow;
     },
   },
 
@@ -13933,7 +15609,11 @@ export const api = {
     }): QuotingSession {
       const now = nowIso();
       const category = input.categoryId ? api.categories.get(input.categoryId) : undefined;
-      const questions = category ? categoryQuotingQuestions(category) : [];
+      const categoryQuestions = category ? categoryQuotingQuestions(category) : [];
+      const questions =
+        (input.lineOfBusiness ?? category?.lineOfBusiness) === "commercial"
+          ? categoryQuestions
+          : requireEveryQuestion(categoryQuestions);
       const categoryQuestionIds = new Set(questions.map((question) => question.id));
       const answers = input.questionnaireAnswers ?? {};
       const nextResponses = Object.fromEntries(
@@ -14147,6 +15827,13 @@ export const api = {
       let questionnaireResponseMeta: Record<string, QuestionnaireResponseMeta> | undefined;
       let missingFields = prep.missingFields;
       const category = input.categoryId ? api.categories.get(input.categoryId) : undefined;
+      const seededAssetDetails =
+        lineOfBusiness === "personal"
+          ? {
+              ...personalCategoryAnswerHints(category),
+              ...(input.assetDetails ?? {}),
+            }
+          : input.assetDetails;
       const commercialAcordTemplates =
         lineOfBusiness === "commercial"
           ? selectedCommercialAcordTemplates(
@@ -14173,7 +15860,7 @@ export const api = {
         businessName: undefined,
         address: input.address,
           estimatedValue: input.estimatedValue,
-          assetDetails: input.assetDetails,
+          assetDetails: seededAssetDetails,
           publicFields: prep.publicFields,
           publicFieldEvidence: prep.publicFieldEvidence,
           updatedAt: createdAt,
@@ -14193,7 +15880,7 @@ export const api = {
         assetId: input.assetId,
         assetType: input.assetType,
         estimatedValue: input.estimatedValue ?? 0,
-        assetDetails: input.assetDetails,
+        assetDetails: seededAssetDetails,
         state,
         lineOfBusiness,
         commercialAcordTemplates,
@@ -14213,14 +15900,19 @@ export const api = {
       db.insert("quotingSessions", row);
       const mappedRow =
         lineOfBusiness === "commercial"
-          ? await applyServerAcordMappingToCommercialSession(row, {})
-          : row;
+          ? row
+          : await applyServerQuestionnaireMappingToSession(
+              row,
+              row.questionnaireQuestions ?? [],
+              row.questionnaireResponses ?? {}
+            );
       const syncedAcordTemplates = syncCommercialAcordPdfArtifacts(mappedRow, {}, "application");
       const activeRow = syncedAcordTemplates
         ? db.update("quotingSessions", mappedRow.id, {
             commercialAcordTemplates: syncedAcordTemplates,
           }) ?? mappedRow
         : mappedRow;
+      syncVehicleAssetIdentityFromSession(activeRow);
       logQuotingWorkflowProgress(activeRow, {
         message: `AI quoting workflow started for ${activeRow.lineOfBusiness === "commercial" ? "commercial" : "personal"} ${assetTypeDisplayName(activeRow.assetType)}.`,
         detail: [
@@ -14242,14 +15934,23 @@ export const api = {
         createdById: input.createdById,
       });
       // No missing fields + not commercial → run quotes immediately.
-      if (activeRow.status === "quoting") {
+      if (activeRow.status === "quoting" && !aiProviderErrorBlocksWorkflow(activeRow)) {
         return this.runQuotes(activeRow.id);
       }
       return activeRow;
     },
     async runAcordAiMapping(sessionId: string): Promise<QuotingSession | null> {
       const session = this.get(sessionId);
-      if (!session || session.lineOfBusiness !== "commercial") return session ?? null;
+      if (!session) return null;
+      if (session.lineOfBusiness !== "commercial") {
+        const mapped = await applyServerQuestionnaireMappingToSession(
+          session,
+          session.questionnaireQuestions ?? [],
+          session.questionnaireResponses ?? {}
+        );
+        syncVehicleAssetIdentityFromSession(mapped);
+        return mapped;
+      }
       const mapped = await applyServerAcordMappingToCommercialSession(
         session,
         session.questionnaireResponses ?? {}
@@ -14259,6 +15960,7 @@ export const api = {
         mapped.questionnaireResponses ?? {},
         "application"
       );
+      syncVehicleAssetIdentityFromSession(mapped);
       return syncedAcordTemplates
         ? db.update("quotingSessions", mapped.id, {
             commercialAcordTemplates: syncedAcordTemplates,
@@ -14269,6 +15971,7 @@ export const api = {
     prepareCommercialQuestionnaire(sessionId: string): QuotingSession | null {
       const session = this.get(sessionId);
       if (!session || session.lineOfBusiness !== "commercial") return session ?? null;
+      if (aiProviderErrorBlocksWorkflow(session)) return session;
 
       const preparedAt = nowIso();
       const syncedAcordTemplates = syncCommercialAcordPdfArtifacts(
@@ -14280,13 +15983,13 @@ export const api = {
         ...session,
         commercialAcordTemplates: syncedAcordTemplates ?? session.commercialAcordTemplates,
       };
-      const questionnaireQuestions = initialCommercialQuestionnaireQuestions(
+      const initialQuestions = initialCommercialQuestionnaireQuestions(
         sessionWithCurrentAcords
       );
       const contact = contactForQuotingSession(sessionWithCurrentAcords);
       const seeded = mergeSeededQuestionnaireResponses({
         session: sessionWithCurrentAcords,
-        questions: questionnaireQuestions,
+        questions: initialQuestions,
         contactName: contact?.name,
         contactEmail: contact?.email,
         contactPhone: contact?.phone,
@@ -14298,12 +16001,21 @@ export const api = {
         publicFieldEvidence: sessionWithCurrentAcords.publicFieldEvidence,
         updatedAt: preparedAt,
       });
+      const questionnaireQuestions = filterCommercialBaseQuestionsAnsweredByTrustedAi(
+        initialQuestions,
+        seeded.questionnaireResponses,
+        seeded.questionnaireResponseMeta
+      );
+      const missingFields = missingFieldsForQuestionSet(
+        questionnaireQuestions,
+        seeded.questionnaireResponses
+      );
       const updated = db.update("quotingSessions", sessionId, {
         commercialAcordTemplates: sessionWithCurrentAcords.commercialAcordTemplates,
         questionnaireQuestions,
         questionnaireResponses: seeded.questionnaireResponses,
         questionnaireResponseMeta: seeded.questionnaireResponseMeta,
-        missingFields: seeded.missingFields,
+        missingFields,
         commercialQuestionnairePreparedAt: session.commercialQuestionnairePreparedAt ?? preparedAt,
         status: "gathering_info",
         updatedAt: preparedAt,
@@ -14330,15 +16042,17 @@ export const api = {
     preparePersonalQuestionnaire(sessionId: string): QuotingSession | null {
       const session = this.get(sessionId);
       if (!session || session.lineOfBusiness === "commercial") return session ?? null;
+      if (aiProviderErrorBlocksWorkflow(session)) return session;
       if (session.personalQuestionnairePreparedAt) return session;
 
       const preparedAt = nowIso();
-      const questions = session.questionnaireQuestions ?? [];
+      const questions = requireEveryQuestion(session.questionnaireQuestions ?? []);
       const responses = session.questionnaireResponses ?? {};
       const missingFields = questions
         .filter((question) => question.required && !(responses[question.id] ?? "").trim())
         .map((question) => question.label);
       const updated = db.update("quotingSessions", sessionId, {
+        questionnaireQuestions: questions,
         personalQuestionnairePreparedAt: preparedAt,
         missingFields,
         status: "gathering_info",
@@ -14422,12 +16136,10 @@ export const api = {
 
       return updated;
     },
-    // Portal-link delivery used by both personal + commercial
+    // Questionnaire-link delivery used by both personal + commercial
     // sessions. Builds an outbound Communication pointing the
-    // client at /customer/questionnaire/<sessionId> instead of
-    // pasting questions inline. Auth on the link is handled by
-    // the customer portal — the client signs in to their account
-    // before they see the form.
+    // client/prospect directly at /customer/questionnaire/<sessionId>
+    // instead of pasting questions inline.
     sendPortalLink(sessionId: string, portalUrl: string): QuotingSession | null {
       const current = this.get(sessionId);
       const session =
@@ -14462,7 +16174,7 @@ export const api = {
         ``,
         `To run firm quotes for you, we need a few additional details. I've put together a short questionnaire (${questionCount} questions across ${sectionCount} sections — pre-filled with what we already have on file).`,
         ``,
-        `Sign in to your portal and fill it out here:`,
+        `Open and complete the questionnaire here:`,
         portalUrl,
         ``,
         `Once you submit, our AI runs the answers through every carrier we work with and I'll follow up with the top recommendations.`,
@@ -14475,7 +16187,7 @@ export const api = {
         ``,
         `A few carriers reviewed the commercial application and asked for supplemental form details that are not already on file. I put those follow-up questions into one short supplemental questionnaire (${questionCount} questions across ${sectionCount} sections).`,
         ``,
-        `Sign in to your portal and complete the supplemental questions here:`,
+        `Open and complete the supplemental questions here:`,
         portalUrl,
         ``,
         `Once you submit, Quotex completes the requested carrier supplementals, sends the information back to those markets, and updates the accepted-carrier ranking for your agent.`,
@@ -14617,7 +16329,11 @@ export const api = {
         carrierIds ??
         (kind === "supplemental"
           ? (sessionForPreview.commercialCarrierSubmissions ?? [])
-              .filter((submission) => submission.status === "needs_client_info")
+              .filter(
+                (submission) =>
+                  submission.status === "needs_client_info" ||
+                  submission.status === "needs_supplemental"
+              )
               .map((submission) => submission.carrierId)
           : []);
       return buildCommercialUnderwriterEmailDrafts(sessionForPreview, responses, kind, targets);
@@ -14625,110 +16341,127 @@ export const api = {
     readCommercialCarrierResponses(sessionId: string): QuotingSession | null {
       const session = this.get(sessionId);
       if (!session || session.lineOfBusiness !== "commercial") return session ?? null;
-      const pendingSubmissions = (session.commercialCarrierSubmissions ?? []).filter(
+      const submissions = session.commercialCarrierSubmissions ?? [];
+      const pendingSubmissions = submissions.filter(
         (submission) =>
           submission.status === "awaiting_response" ||
-          submission.status === "application_sent"
+          submission.status === "application_sent" ||
+          submission.status === "supplemental_sent"
       );
       if (pendingSubmissions.length === 0) return session;
 
+      const inbound = db
+        .list("communications")
+        .filter((communication) => communication.tenantId === session.tenantId && communication.direction === "inbound");
       const updatedAt = nowIso();
-      const responses = session.questionnaireResponses ?? {};
-      const selectedCarrierIds = pendingSubmissions.map((submission) => submission.carrierId);
-      const pipeline = analyzeCommercialCarrierPipeline(
-        session,
-        responses,
-        updatedAt,
-        selectedCarrierIds
-      );
-      const carrierSubmissions = mergeCommercialSubmissionArtifacts(
-        session,
-        pipeline.submissions
-      );
-      const commercialContact = session.prospectId
-        ? db.list("prospects").find((p) => p.id === session.prospectId)
-        : session.customerId
-        ? db.list("customers").find((c) => c.id === session.customerId)
-        : null;
+      let changed = false;
+      let questions = session.questionnaireQuestions ?? [];
+      const missingFields = new Set(session.missingFields ?? []);
+      const nextSubmissions = submissions.map((submission) => {
+        if (!pendingSubmissions.some((pending) => pending.carrierId === submission.carrierId)) {
+          return submission;
+        }
+        const submissionId =
+          submission.submissionId ?? commercialSubmissionStableId(session, submission.carrierId);
+        const replies = inbound.filter(
+          (communication) =>
+            communicationMatchesCommercialSubmission(session, { ...submission, submissionId }, communication) &&
+            !(submission.replyCommunicationIds ?? []).includes(communication.id)
+        );
+        if (replies.length === 0) return { ...submission, submissionId };
+        let current: CommercialCarrierSubmission = { ...submission, submissionId };
+        for (const reply of replies) {
+          const linkedReply =
+            reply.carrierSubmissionId === submissionId
+              ? reply
+              : db.update("communications", reply.id, { carrierSubmissionId: submissionId }) ?? reply;
+          const parsed = parseCommercialCarrierReplyFromCommunication(linkedReply, current);
+          const carrier = db.list("carriers").find((candidate) => candidate.id === current.carrierId);
+          current = {
+            ...current,
+            status: parsed.status,
+            responseAt: updatedAt,
+            acceptedAt: parsed.status === "accepted" ? updatedAt : current.acceptedAt,
+            replyCommunicationIds: uniqueStrings([
+              ...(current.replyCommunicationIds ?? []),
+              linkedReply.id,
+            ]),
+            quote: parsed.quote,
+            parseConfidence: parsed.quote.confidence,
+            premiumEstimate: parsed.premiumEstimate ?? current.premiumEstimate,
+            finalPremium: parsed.finalPremium ?? current.finalPremium,
+            declinedReason: parsed.declinedReason,
+            underwriterNotes: parsed.underwriterNotes,
+            missingFields: parsed.missingFields,
+            agentReviewReason: parsed.agentReviewReason,
+            aiRationale:
+              parsed.status === "agent_review"
+                ? parsed.agentReviewReason ?? "Carrier reply needs agent review before the workflow advances."
+                : `Carrier reply parsed from inbound message ${linkedReply.id}; outcome ${parsed.quote.outcome}.`,
+          };
+          if (parsed.missingFields?.length) {
+            parsed.missingFields.forEach((field) => missingFields.add(field));
+            const supplementalQuestions = commercialCarrierReplyQuestions(
+              current,
+              carrier?.name ?? "Carrier"
+            );
+            questions = appendUniqueQuestions(questions, supplementalQuestions);
+          }
+          logQuotingWorkflowProgress(session, {
+            message:
+              parsed.status === "agent_review"
+                ? `${carrier?.name ?? "Carrier"} reply needs agent review.`
+                : `${carrier?.name ?? "Carrier"} carrier reply captured.`,
+            detail:
+              parsed.status === "declined"
+                ? parsed.declinedReason ?? "Carrier declined without a stated reason."
+                : parsed.status === "needs_client_info" || parsed.status === "needs_supplemental"
+                ? `${parsed.missingFields?.length ?? 0} supplemental item${
+                    (parsed.missingFields?.length ?? 0) === 1 ? "" : "s"
+                  } captured from the carrier reply.`
+                : parsed.status === "accepted"
+                ? parsed.finalPremium
+                  ? `Quoted premium captured from the carrier reply: ${fmt.money(parsed.finalPremium)}.`
+                  : "Carrier reply indicates this market can proceed; no premium was stated."
+                : parsed.agentReviewReason ?? "Carrier reply is ambiguous.",
+            createdAt: updatedAt,
+            createdById: "ai",
+            communicationId: linkedReply.id,
+          });
+          changed = true;
+        }
+        return current;
+      });
+      if (!changed) return session;
 
-      if (pipeline.secondRoundQuestions.length > 0) {
-        const portalUrl = `/customer/questionnaire/${sessionId}`;
-        const subject = "Additional details needed for carrier supplementals";
-        const body = [
-          `Hi ${(commercialContact?.name ?? "there").split(/\s+/)[0]},`,
-          ``,
-          `A few carriers reviewed the commercial application and asked for supplemental details that are not already on file.`,
-          ``,
-          `Please complete the short second-round questionnaire here:`,
-          portalUrl,
-          ``,
-          `Once those answers come in, the AI will auto-complete the supplementals, send them back to the remaining carriers, and show your agent only the accepted carrier options.`,
-        ].join("\n");
-        const comm = api.communications.create({
-          tenantId: session.tenantId,
-          customerId: session.customerId,
-          prospectId: session.prospectId,
-          channel: "email",
-          direction: "outbound",
-          subject,
-          body,
-          createdById: session.createdById,
-        });
-        logQuotingWorkflowProgress(session, {
-          message: `AI read carrier responses and queued a second-round supplemental questionnaire.`,
-          detail: `${pipeline.acceptedCarrierIds.length} carrier${
-            pipeline.acceptedCarrierIds.length === 1 ? "" : "s"
-          } accepted or can proceed now; ${pipeline.secondRoundQuestions.length} supplemental field${
-            pipeline.secondRoundQuestions.length === 1 ? "" : "s"
-          } still need client input.`,
-          createdAt: updatedAt,
-          createdById: session.createdById,
-          communicationId: comm.id,
-        });
-        db.update("quotingSessions", sessionId, {
-          questionnaireQuestions: appendUniqueQuestions(
-            session.questionnaireQuestions ?? [],
-            pipeline.secondRoundQuestions
-          ),
-          questionnaireMessageId: comm.id,
-          questionnaireDraft: `Subject: ${subject}\n\n${body}`,
-          questionnaireSentAt: updatedAt,
-          commercialCarrierSubmissions: carrierSubmissions,
-          commercialSecondRoundSentAt: updatedAt,
-          missingFields: pipeline.secondRoundQuestions.map((q) => q.label),
-          aiSummary: `AI read carrier responses. ${pipeline.acceptedCarrierIds.length} market${
-            pipeline.acceptedCarrierIds.length === 1 ? "" : "s"
-          } can rank now; ${pipeline.secondRoundQuestions.length} supplemental field${
-            pipeline.secondRoundQuestions.length === 1 ? "" : "s"
-          } still need the client.`,
-          status: "awaiting_reply",
-          updatedAt,
-        });
-        return this.runQuotes(sessionId, {
-          status: "awaiting_reply",
-          aiSummary: `AI ranked ${pipeline.acceptedCarrierIds.length} accepted market${
-            pipeline.acceptedCarrierIds.length === 1 ? "" : "s"
-          } while supplemental answers remain pending.`,
-        });
+      const hasMissingInfo = nextSubmissions.some(
+        (submission) => submission.status === "needs_client_info" || submission.status === "needs_supplemental"
+      );
+      const hasAgentReview = nextSubmissions.some((submission) => submission.status === "agent_review");
+      const quotedCarrierCount = nextSubmissions.filter(
+        (submission) => submission.status === "accepted" && !!(submission.finalPremium ?? submission.premiumEstimate)
+      ).length;
+      const updatedSession = db.update("quotingSessions", sessionId, {
+        commercialCarrierSubmissions: nextSubmissions,
+        questionnaireQuestions: questions,
+        missingFields: Array.from(missingFields),
+        status: hasMissingInfo ? "awaiting_reply" : quotedCarrierCount > 0 ? "quoting" : session.status,
+        aiSummary: hasAgentReview
+          ? "One or more carrier replies need agent review before Quotex advances the workflow."
+          : hasMissingInfo
+          ? "Carrier replies were parsed and supplemental missing fields are ready for agent review."
+          : quotedCarrierCount > 0
+          ? `Carrier replies were parsed with ${quotedCarrierCount} quoted market${
+              quotedCarrierCount === 1 ? "" : "s"
+            } ready for ranking.`
+          : "Carrier replies were parsed and the workflow is waiting for more explicit carrier outcomes.",
+        updatedAt,
+      });
+      if (!updatedSession) return session;
+      if (!hasMissingInfo && !hasAgentReview && quotedCarrierCount > 0) {
+        return this.runQuotes(sessionId);
       }
-
-      db.update("quotingSessions", sessionId, {
-        commercialCarrierSubmissions: carrierSubmissions,
-        status: "quoting",
-        missingFields: [],
-        aiSummary: `AI read carrier responses and filtered the carrier list down to ${pipeline.acceptedCarrierIds.length} accepted market${
-          pipeline.acceptedCarrierIds.length === 1 ? "" : "s"
-        }.`,
-        updatedAt,
-      });
-      logQuotingWorkflowProgress(session, {
-        message: `AI read commercial carrier responses and ranked accepted markets.`,
-        detail: `${pipeline.acceptedCarrierIds.length} accepted market${
-          pipeline.acceptedCarrierIds.length === 1 ? "" : "s"
-        } moved into ranking.`,
-        createdAt: updatedAt,
-      });
-      return this.runQuotes(sessionId);
+      return updatedSession;
     },
     // Commercial flow: client submits structured answers from the
     // portal questionnaire. Stamps the responses, marks reply
@@ -14850,12 +16583,12 @@ export const api = {
           logQuotingWorkflowProgress(session, {
             message: `Commercial application packet sent to ${pipeline.submittedCarrierCount} carrier${
               pipeline.submittedCarrierCount === 1 ? "" : "s"
-            }; carrier responses are being processed now.`,
+            }; awaiting carrier responses.`,
             detail: `${portalAutomationCount} portal automation job${
               portalAutomationCount === 1 ? "" : "s"
             } queued. ${underwriterEmailCount} underwriter email${
               underwriterEmailCount === 1 ? "" : "s"
-            } created. Response classification runs immediately; supplemental-only markets still queue the follow-up round.`,
+            } created. Carrier outcomes will be classified only after an inbound reply is received and matched to the submission.`,
             createdAt: updatedAt,
             createdById: session.createdById,
             communicationId: firstCarrierMessageSubmission
@@ -14875,7 +16608,7 @@ export const api = {
             missingFields: [],
             aiSummary: `AI sent the completed ACORD application packet to ${pipeline.submittedCarrierCount} appetite-matched carrier${
               pipeline.submittedCarrierCount === 1 ? "" : "s"
-            } and is processing carrier responses now.`,
+            }. The workflow is awaiting real inbound carrier replies before any market is accepted, declined, or sent to review.`,
             status: "quoting",
             updatedAt,
           });
@@ -14884,11 +16617,27 @@ export const api = {
           }
           return this.readCommercialCarrierResponses(sessionId) ?? submittedSession;
         }
-        const carrierSubmissions = mergeCommercialSubmissionArtifacts(
-          session,
-          pipeline.submissions
+        const carrierSubmissions = applicationSentAt
+          ? session.commercialCarrierSubmissions ?? []
+          : mergeCommercialSubmissionArtifacts(session, pipeline.submissions);
+        const carrierReplySecondRoundQuestions = (session.questionnaireQuestions ?? []).filter(
+          (question) =>
+            question.round === "second_round" &&
+            question.carrierId &&
+            (session.commercialCarrierSubmissions ?? []).some(
+              (submission) =>
+                submission.carrierId === question.carrierId &&
+                (submission.status === "needs_client_info" ||
+                  submission.status === "needs_supplemental")
+            )
         );
-        if (!session.commercialSecondRoundSentAt && pipeline.secondRoundQuestions.length > 0) {
+        const allowSimulatedCarrierSecondRound = false;
+        if (
+          allowSimulatedCarrierSecondRound &&
+          !session.commercialSecondRoundSentAt &&
+          pipeline.secondRoundQuestions.length > 0 &&
+          carrierReplySecondRoundQuestions.length > 0
+        ) {
           const portalUrl = `/customer/questionnaire/${sessionId}`;
           const subject = "Additional details needed for carrier supplementals";
           const body = [
@@ -14981,9 +16730,33 @@ export const api = {
         }
         const supplementalCarrierIds = new Set(
           (session.commercialCarrierSubmissions ?? [])
-            .filter((submission) => submission.status === "needs_client_info")
+            .filter(
+              (submission) =>
+                submission.status === "needs_client_info" ||
+                submission.status === "needs_supplemental"
+            )
             .map((submission) => submission.carrierId)
         );
+        if (supplementalCarrierIds.size === 0) {
+          const waitingSession = db.update("quotingSessions", sessionId, {
+            questionnaireResponses: mergedResponses,
+            questionnaireResponseMeta: responseMeta,
+            commercialAcordTemplates:
+              syncedAcordTemplates ?? session.commercialAcordTemplates,
+            replyReceivedAt: updatedAt,
+            status: session.status === "complete" ? "complete" : "quoting",
+            commercialCarrierSubmissions:
+              session.commercialCarrierSubmissions ?? carrierSubmissions,
+            commercialApplicationSentAt:
+              applicationSentAt ?? session.commercialApplicationSentAt ?? updatedAt,
+            commercialSupplementalsCompletedAt: updatedAt,
+            missingFields: [],
+            aiSummary:
+              "No carrier supplemental request is pending. The workflow is still waiting for matched inbound carrier replies before ranking any market.",
+            updatedAt,
+          });
+          return waitingSession;
+        }
         const completedCarrierSubmissions = applicationSentAt
           ? attachCommercialUnderwriterMessages(
               { ...session, commercialApplicationSentAt: applicationSentAt, commercialCarrierSubmissions: carrierSubmissions },
@@ -14994,42 +16767,50 @@ export const api = {
               options?.commercialCarrierEmailDrafts
             )
           : carrierSubmissions;
-        db.update("quotingSessions", sessionId, {
+        const awaitingSupplementalResponses = completedCarrierSubmissions.map((submission) =>
+          supplementalCarrierIds.has(submission.carrierId)
+            ? {
+                ...submission,
+                status: "supplemental_sent" as const,
+                missingFields: undefined,
+                acceptedAt: undefined,
+                aiRationale:
+                  "Carrier supplemental package was sent. Awaiting the carrier's inbound response before AI classifies this market.",
+              }
+            : submission
+        );
+        const supplementalSession = db.update("quotingSessions", sessionId, {
           questionnaireResponses: mergedResponses,
           questionnaireResponseMeta: responseMeta,
           commercialAcordTemplates:
             syncedAcordTemplates ?? session.commercialAcordTemplates,
           replyReceivedAt: updatedAt,
           status: "quoting",
-          commercialCarrierSubmissions: completedCarrierSubmissions,
+          commercialCarrierSubmissions: awaitingSupplementalResponses,
           commercialApplicationSentAt:
             applicationSentAt ?? updatedAt,
           commercialSupplementalsCompletedAt: updatedAt,
           missingFields: [],
-          aiSummary: `AI submitted the commercial application to ${pipeline.submittedCarrierCount} appetite-matched carriers and filtered responses down to ${pipeline.acceptedCarrierIds.length} accepted market${
-            pipeline.acceptedCarrierIds.length === 1 ? "" : "s"
-          }.`,
+          aiSummary:
+            "AI sent the carrier-requested supplemental package. The workflow is awaiting matched inbound carrier replies before ranking any market.",
           updatedAt,
         });
-        const firstCompletedCarrierMessageSubmission = completedCarrierSubmissions.find((submission) =>
+        const firstCompletedCarrierMessageSubmission = awaitingSupplementalResponses.find((submission) =>
           commercialSubmissionMessageId(submission)
         );
         logQuotingWorkflowProgress(session, {
-          message: `${commercialContact?.name ?? "Client"} completed commercial quoting intake; AI filtered carrier responses and ranked accepted markets.`,
-          detail: `${pipeline.submittedCarrierCount} carrier application${
-            pipeline.submittedCarrierCount === 1 ? "" : "s"
-          } submitted; ${pipeline.acceptedCarrierIds.length} accepted market${
-            pipeline.acceptedCarrierIds.length === 1 ? "" : "s"
-          } moved into ranking.`,
+          message: `${commercialContact?.name ?? "Client"} completed commercial supplemental details; AI sent the package back to carriers.`,
+          detail:
+            "Carrier responses will be classified only after a matched inbound reply is received.",
           createdAt: updatedAt,
           communicationId: firstCompletedCarrierMessageSubmission
             ? commercialSubmissionMessageId(firstCompletedCarrierMessageSubmission)
             : undefined,
           documentId: firstCompletedCarrierMessageSubmission
-            ? commercialSubmissionDocumentId(firstCompletedCarrierMessageSubmission)
-            : undefined,
+              ? commercialSubmissionDocumentId(firstCompletedCarrierMessageSubmission)
+              : undefined,
         });
-        return this.runQuotes(sessionId);
+        return supplementalSession;
       }
       db.update("quotingSessions", sessionId, {
         questionnaireResponses: { ...(session.questionnaireResponses ?? {}), ...responses },
@@ -15188,9 +16969,37 @@ export const api = {
         session: { ...session, state },
         state,
       });
+      const carrierReplyPremiums =
+        session.lineOfBusiness === "commercial"
+          ? new Map(
+              (session.commercialCarrierSubmissions ?? [])
+                .filter((submission) => submission.finalPremium ?? submission.premiumEstimate)
+                .map((submission) => [
+                  submission.carrierId,
+                  {
+                    premium: submission.finalPremium ?? submission.premiumEstimate ?? 0,
+                    confidence: submission.parseConfidence ?? submission.quote?.confidence ?? 0.82,
+                  },
+                ])
+            )
+          : new Map<string, { premium: number; confidence: number }>();
+      const groundedQuotes =
+        carrierReplyPremiums.size > 0
+          ? quotes.map((quote) => {
+              const parsed = carrierReplyPremiums.get(quote.carrierId);
+              if (!parsed) return quote;
+              return {
+                ...quote,
+                premium: parsed.premium,
+                confidence: Math.max(quote.confidence, parsed.confidence),
+                fitReason: `${quote.fitReason} - carrier reply premium captured`,
+                apiStatus: quote.apiStatus === "no_api" ? "connected" : quote.apiStatus,
+              } satisfies CarrierQuote;
+            })
+          : quotes;
       const rankedAt = nowIso();
       const updated = db.update("quotingSessions", sessionId, {
-        quotes,
+        quotes: groundedQuotes,
         aiSummary: options?.aiSummary ?? summary,
         status: options?.status ?? "complete",
         updatedAt: rankedAt,
@@ -15198,8 +17007,8 @@ export const api = {
       logQuotingWorkflowProgress(updated, {
         message:
           updated.status === "awaiting_reply"
-            ? `AI ranked ${quotes.length} accepted market${quotes.length === 1 ? "" : "s"} while supplemental answers remain pending.`
-            : `AI carrier ranking completed with ${quotes.length} quote option${quotes.length === 1 ? "" : "s"}.`,
+            ? `AI ranked ${groundedQuotes.length} accepted market${groundedQuotes.length === 1 ? "" : "s"} while supplemental answers remain pending.`
+            : `AI carrier ranking completed with ${groundedQuotes.length} quote option${groundedQuotes.length === 1 ? "" : "s"}.`,
         detail: options?.aiSummary ?? summary,
         createdAt: rankedAt,
       });
@@ -15216,18 +17025,18 @@ export const api = {
         resolveQuoteMilestoneTasks(updated, ["supplemental_pending", "quote_ready"]);
         createQuoteReadyNotification(updated, {
           title:
-            quotes.length > 0
+            groundedQuotes.length > 0
               ? `${contact.name} quote options ready`
               : `${contact.name} quote review needed`,
           summary:
-            quotes.length > 0
-              ? `AI completed carrier ranking with ${quotes.length} quote option${
-                  quotes.length === 1 ? "" : "s"
+            groundedQuotes.length > 0
+              ? `AI completed carrier ranking with ${groundedQuotes.length} quote option${
+                  groundedQuotes.length === 1 ? "" : "s"
                 }. Review the ranked options when ready.`
               : "AI completed the carrier run but no quote options returned. Review carrier eligibility and decide the next step.",
-          severity: quotes.length > 0 ? "warning" : "urgent",
+          severity: groundedQuotes.length > 0 ? "warning" : "urgent",
           severityReason:
-            quotes.length > 0
+            groundedQuotes.length > 0
               ? "Carrier ranking is complete and ready for agent review."
               : "Carrier ranking completed without a market result.",
         });

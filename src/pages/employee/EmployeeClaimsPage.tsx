@@ -19,6 +19,7 @@ import { Modal } from "@/components/ui/Modal";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import { matchesAiCustomFilter } from "@/lib/aiCustomFilters";
 import { fmt } from "@/lib/format";
 import type { Asset, Carrier, Claim, CustomerProfile, Policy } from "@/types";
@@ -170,7 +171,7 @@ export function EmployeeClaimsPage() {
       tenantId: agencyId,
       source: "agent",
       message: `Claim status changed to ${CLAIM_STATUS_LABEL[status]} for ${
-        row.asset?.label ?? row.customer?.name ?? "client"
+        (row.asset ? assetDisplayName(row.asset) : row.customer?.name) ?? "client"
       }.`,
       visibility: "customer_visible",
       customerId: row.claim.customerId,
@@ -334,7 +335,7 @@ export function EmployeeClaimsPage() {
                     {fmt.policyRef(row.policy)}
                   </RouterLink>
                   <div className="mt-0.5 line-clamp-2 text-xs text-ink-500">
-                    {row.asset?.label ?? "Asset not recorded"} - {row.policy ? api.helpers.departmentLabel(row.policy) : "Policy pending"}
+                    {row.asset ? assetDisplayName(row.asset) : "Asset not recorded"} - {row.policy ? api.helpers.departmentLabel(row.policy) : "Policy pending"}
                   </div>
                 </td>
                 <td className="px-4 py-5 align-middle">
@@ -434,7 +435,7 @@ function ClaimDetailModal({
               to={`/employee/policies/${row.claim.policyId}`}
               className="font-medium text-ink-900 hover:text-gold-700 hover:underline"
             >
-              {row.asset?.label ?? fmt.policyRef(row.policy)}
+              {row.asset ? assetDisplayName(row.asset) : fmt.policyRef(row.policy)}
             </RouterLink>
             <div className="text-xs text-ink-500">{fmt.policyRef(row.policy)}</div>
           </div>
@@ -550,7 +551,7 @@ function AddClaimModal({
     const matchedPolicy = activePolicies.find((policy) => {
       const carrier = api.carriers.get(policy.carrierId);
       const asset = api.assets.get(policy.assetId);
-      return [policy.policyNumber, fmt.policyRef(policy), carrier?.name, asset?.label]
+      return [policy.policyNumber, fmt.policyRef(policy), carrier?.name, asset ? assetDisplayName(asset) : undefined]
         .filter(Boolean)
         .some((value) => normalized.includes(String(value).toLowerCase()));
     });
@@ -587,7 +588,7 @@ function AddClaimModal({
     api.status.create({
       tenantId,
       source: "agent",
-      message: `Claim opened for ${selectedAsset?.label ?? fmt.policyRef(selectedPolicy)} with ${
+      message: `Claim opened for ${selectedAsset ? assetDisplayName(selectedAsset) : fmt.policyRef(selectedPolicy)} with ${
         selectedCarrier?.name ?? "the carrier"
       }${externalClaimNumber.trim() ? ` (claim #${externalClaimNumber.trim()})` : ""}.`,
       visibility: "customer_visible",
@@ -659,7 +660,7 @@ function AddClaimModal({
               const asset = api.assets.get(policy.assetId);
               return (
                 <option key={policy.id} value={policy.id}>
-                  {asset?.label ?? fmt.policyRef(policy)} - {carrier?.name ?? "Carrier"} - {fmt.policyRef(policy)}
+                  {asset ? assetDisplayName(asset) : fmt.policyRef(policy)} - {carrier?.name ?? "Carrier"} - {fmt.policyRef(policy)}
                 </option>
               );
             })}
@@ -699,7 +700,7 @@ function AddClaimModal({
         {selectedPolicy && (
           <div className="rounded-md border border-ink-100 bg-ink-50/60 p-3 text-xs text-ink-600">
             <LifeBuoy className="mr-1 inline h-3.5 w-3.5 text-gold-600" />
-            {selectedCarrier?.name ?? "Carrier"} claim for {selectedAsset?.label ?? fmt.policyRef(selectedPolicy)}.
+            {selectedCarrier?.name ?? "Carrier"} claim for {selectedAsset ? assetDisplayName(selectedAsset) : fmt.policyRef(selectedPolicy)}.
           </div>
         )}
 
@@ -722,7 +723,7 @@ function claimSearchParts(row: ClaimRow): Array<string | undefined> {
     row.customer?.email,
     row.policy?.policyNumber,
     fmt.policyRef(row.policy),
-    row.asset?.label,
+    row.asset ? assetDisplayName(row.asset) : undefined,
     row.asset?.type,
     row.carrier?.name,
     row.claim.externalClaimNumber,

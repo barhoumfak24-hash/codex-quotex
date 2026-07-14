@@ -12,6 +12,7 @@ import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
 import { aiAssetTypeAliases, matchesAiCustomFilter } from "@/lib/aiCustomFilters";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import { fmt } from "@/lib/format";
 
 type ClientFilter =
@@ -166,7 +167,7 @@ export function ClientsPage() {
           row.customer.phone,
           row.customer.mailingAddress,
           row.customer.garagingAddress,
-          row.primaryAsset?.label,
+          row.primaryAsset ? assetDisplayName(row.primaryAsset) : undefined,
           row.primaryAsset ? api.helpers.assetTypeLabel(row.primaryAsset.type) : undefined,
           row.latestAction.label,
           row.marketingStatus,
@@ -176,7 +177,7 @@ export function ClientsPage() {
           ...(row.customer.additionalCsrIds ?? []).map((id) => api.users.get(id)?.name),
           ...row.additionalAgents.map((agent) => agent.name),
           ...row.assets.flatMap((asset) => [
-            asset.label,
+            assetDisplayName(asset),
             asset.type,
             api.helpers.assetTypeLabel(asset.type),
             asset.status,
@@ -192,7 +193,7 @@ export function ClientsPage() {
               fmt.titleCase(policy.status.replace(/_/g, " ")),
               policy.renewalStatus,
               carrier?.name,
-              asset?.label,
+              asset ? assetDisplayName(asset) : undefined,
             ];
           }),
           ...row.claims.map((claim) => claim.status),

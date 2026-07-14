@@ -36,6 +36,7 @@ import {
 import { fmt } from "@/lib/format";
 import { getAppSurface, toAppRoute, toSurfaceRoute } from "@/lib/appSurface";
 import { categoryQuestionnaire } from "@/lib/categoryQuestionnaires";
+import { isVinInputField, normalizeVinFieldValue, uppercaseVinInput } from "@/lib/vinInput";
 import type {
   AssetType,
   CategoryQuestion,
@@ -416,9 +417,9 @@ export function QuoteFlowPage() {
           enrichSeed.state = selectedAddressParts.state;
           enrichSeed.zip = selectedAddressParts.zip;
         }
-      } else if (idCfg.kind === "vin") enrichSeed.vin = assetId.trim();
+      } else if (idCfg.kind === "vin") enrichSeed.vin = uppercaseVinInput(assetId).trim();
       else enrichSeed.description = assetId.trim();
-      const enrichment = await aiEnrichAsset(assetType, enrichSeed);
+      const enrichment = await aiEnrichAsset(assetType, enrichSeed, categoryQuestions);
 
       // Merge enriched fields with the raw inputs so the estimate
       // has the richest picture available.
@@ -439,7 +440,8 @@ export function QuoteFlowPage() {
       ]);
 
       // 3. Quote row.
-      const rawDescription = `Express quote (${lineOfBusiness} lines): ${pickedCategory.label}. Asset: ${assetId.trim()}.`;
+      const displayAssetId = idCfg.kind === "vin" ? uppercaseVinInput(assetId).trim() : assetId.trim();
+      const rawDescription = `Express quote (${lineOfBusiness} lines): ${pickedCategory.label}. Asset: ${displayAssetId}.`;
       const quote = api.quotes.submitCustomerQuote({
         tenantId: agency.id,
         customerId: customer.id,
@@ -752,7 +754,7 @@ export function QuoteFlowPage() {
           setEmail={setEmail}
           assetId={assetId}
           setAssetId={(value) => {
-            setAssetId(value);
+            setAssetId(idCfg.kind === "vin" ? uppercaseVinInput(value) : value);
             setSelectedAddressParts(null);
           }}
           setSelectedAddressParts={setSelectedAddressParts}
@@ -763,7 +765,16 @@ export function QuoteFlowPage() {
           categoryQuestions={categoryQuestions}
           categoryAnswers={categoryAnswers}
           setCategoryAnswer={(key, value) =>
-            setCategoryAnswers((current) => ({ ...current, [key]: value }))
+            setCategoryAnswers((current) => ({
+              ...current,
+              [key]: normalizeVinFieldValue(
+                {
+                  key,
+                  label: categoryQuestions.find((question) => question.key === key)?.label,
+                },
+                value
+              ),
+            }))
           }
           idCfg={idCfg}
           busy={busy}
@@ -1079,20 +1090,24 @@ function CategoryQuestionField({
           allowMockFallback={false}
         />
       ) : (
-        <input
-          className="input"
-          type={
-            question.inputType === "number" || question.inputType === "currency"
+          <input
+            className="input"
+            type={
+              question.inputType === "number" || question.inputType === "currency"
               ? "number"
               : question.inputType === "date"
               ? "date"
               : "text"
           }
-          value={value}
-          onChange={(event) => onChange(event.target.value)}
-          placeholder={question.placeholder}
-          autoFocus
-        />
+            value={value}
+            onChange={(event) =>
+              onChange(normalizeVinFieldValue(question, event.target.value))
+            }
+            placeholder={question.placeholder}
+            autoCapitalize={isVinInputField(question) ? "characters" : undefined}
+            spellCheck={isVinInputField(question) ? false : undefined}
+            autoFocus
+          />
       )}
       {question.helpText && <p className="mt-1 text-[11px] text-ink-500">{question.helpText}</p>}
     </div>
@@ -1285,9 +1300,12 @@ function ExpressWizard({
               <input
                 className="input"
                 value={assetId}
-                onChange={(e) => setAssetId(e.target.value)}
+                onChange={(e) =>
+                  setAssetId(idCfg.kind === "vin" ? uppercaseVinInput(e.target.value) : e.target.value)
+                }
                 placeholder={idCfg.placeholder}
                 autoCapitalize={idCfg.kind === "vin" ? "characters" : undefined}
+                spellCheck={idCfg.kind === "vin" ? false : undefined}
                 autoFocus
               />
             )}

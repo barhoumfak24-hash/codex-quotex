@@ -15,6 +15,7 @@ import {
   X,
 } from "lucide-react";
 import { useAuth } from "@/lib/auth";
+import { QuotexMark, QuotexWordmark } from "@/components/layout/Logo";
 import { videoChapterPath, videosForRole, type VideoChapter } from "@/lib/trainingVideos";
 import {
   getTrainingVideoSource,
@@ -820,10 +821,10 @@ function SoftwareTrainingFrame({
       <div className="flex h-full overflow-hidden rounded-lg border border-stone-200 bg-white shadow-sm">
         <aside className={`${compact ? "w-20 p-2" : "w-32 p-3"} border-r border-stone-200 bg-[#fbfaf8]`}>
           <div className="flex items-center gap-2">
-            <span className={`${compact ? "h-6 w-6 text-sm" : "h-8 w-8 text-lg"} grid place-items-center rounded-md bg-black font-display text-white`}>
-              Q
-            </span>
-            {!compact && <span className="text-[10px] font-semibold leading-tight text-stone-700">Quotex<br />Insurance</span>}
+            <QuotexMark size={compact ? "sm" : "md"} className={compact ? "h-6 w-6" : "h-8 w-8"} />
+            {!compact && (
+              <QuotexWordmark className="max-w-[4.7rem] whitespace-normal text-[10px] font-semibold leading-tight text-stone-700" />
+            )}
           </div>
           <div className={`${compact ? "mt-3 space-y-1" : "mt-5 space-y-1.5"}`}>
             {navItems.map((item) => (

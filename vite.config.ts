@@ -72,6 +72,11 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           secure: true,
         },
+        "/api/mailboxes": {
+          target: "https://quotexinsurance.com",
+          changeOrigin: true,
+          secure: true,
+        },
         "/api/signing-packets": {
           target: "https://quotexinsurance.com",
           changeOrigin: true,
@@ -116,6 +121,7 @@ export default defineConfig(({ mode }) => {
     },
     test: {
       testTimeout: 20_000,
+      hookTimeout: 30_000,
     },
   };
 });

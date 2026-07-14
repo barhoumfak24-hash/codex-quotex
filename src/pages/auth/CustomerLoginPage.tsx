@@ -4,7 +4,7 @@ import { Building2 } from "lucide-react";
 import { AuthShell } from "./AuthShell";
 import { Modal } from "@/components/ui/Modal";
 import { api } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
+import { authFailureMessage, useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { getAppSurface, toAppRoute, toSurfaceRoute } from "@/lib/appSurface";
 
@@ -29,6 +29,7 @@ export function CustomerLoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [forgotOpen, setForgotOpen] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [selectedAgencyId, setSelectedAgencyId] = useState(
     () => agency?.id ?? activeAgencies[0]?.id ?? "agency_palmcoast"
   );
@@ -138,19 +139,23 @@ export function CustomerLoginPage() {
       </div>
 
       <form
-        onSubmit={(e) => {
+        onSubmit={async (e) => {
           e.preventDefault();
+          if (submitting) return;
           setError(null);
-          setAgencyId(selectedAgencyId);
-          const u = signInCustomer(email.trim(), password, selectedAgencyId);
-          if (!u) {
-            setError(
-              `Email and password don't match for ${selectedAgency?.name ?? "that agency"}. Try the Forgot password link below.`
-            );
-            return;
+          setSubmitting(true);
+          try {
+            setAgencyId(selectedAgencyId);
+            const result = await signInCustomer(email.trim(), password, selectedAgencyId);
+            if (!result.ok) {
+              setError(authFailureMessage(result.reason, "customer"));
+              return;
+            }
+            rememberBranchForUser(result.user);
+            nav(target, { replace: true });
+          } finally {
+            setSubmitting(false);
           }
-          rememberBranchForUser(u);
-          nav(target, { replace: true });
         }}
         className="space-y-3"
       >
@@ -183,8 +188,8 @@ export function CustomerLoginPage() {
           />
         </div>
         {error && <div className="text-xs text-rose-600">{error}</div>}
-        <button type="submit" className="btn-primary w-full">
-          Sign in
+        <button type="submit" className="btn-primary w-full" disabled={submitting}>
+          {submitting ? "Signing in..." : "Sign in"}
         </button>
         <button
           type="button"

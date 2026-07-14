@@ -1,9 +1,10 @@
-import { createContext, useContext, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import type { Agency } from "@/types";
 import { getConfiguredAgencyId, getCurrentHost } from "./appSurface";
 import { api } from "./api";
 import { useAuth } from "./auth";
 import { resolveAgencyByKey, resolveAgencyForWebsite } from "./agencyWebsite";
+import { subscribeToDbChanges } from "./db";
 
 interface TenantContextValue {
   agency: Agency | null;
@@ -41,11 +42,14 @@ function initialPublicAgencyId(): string {
 
 export function TenantProvider({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
+  const [dataRev, setDataRev] = useState(0);
   // Used only for the master admin's browsing selection and the public
   // (logged-out) marketing/quote context.
   const [floatingAgencyId, _setFloatingAgencyId] = useState<string | null>(() =>
     initialPublicAgencyId()
   );
+
+  useEffect(() => subscribeToDbChanges(() => setDataRev((rev) => rev + 1)), []);
 
   // Resolve the active agency:
   //   • signed-in agent / manager / customer → their OWN tenant, always
@@ -60,7 +64,7 @@ export function TenantProvider({ children }: { children: React.ReactNode }) {
 
   const agency = useMemo(
     () => (agencyId ? api.agencies.get(agencyId) ?? null : null),
-    [agencyId]
+    [agencyId, dataRev]
   );
 
   // Switching tenants is allowed only when there's no signed-in staff /

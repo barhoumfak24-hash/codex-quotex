@@ -6,6 +6,16 @@ Use this roster when planning, reviewing, or delegating work on Quotex. These sp
 
 Owns final decisions, code integration, test selection, and release risk. Keeps specialist findings aligned with the actual product flow.
 
+## Preference Memory Specialist
+
+Keeps owner preferences visible during every Codex task. Before finalizing, checks whether the latest safe code should be pushed to the configured Quotex Vercel production deployment, whether safety gates passed, and whether any blocker needs to be reported instead of bypassed.
+
+Output expected:
+- Standing owner preferences that apply
+- Verification completed
+- Deployment attempted or exact blocker
+- Follow-up risk if a gate failed
+
 ## Security / Compliance Specialist
 
 Review auth, RBAC, tenant isolation, secrets, rate limits, webhook signatures, file access, audit logs, carrier credentials, and production data exposure.
@@ -117,3 +127,4 @@ For large work:
 2. Explorer specialists answer bounded questions without editing code.
 3. Worker specialists edit disjoint file areas only.
 4. Lead Integrator reviews changes, runs checks, and writes final release notes.
+5. Preference Memory Specialist confirms whether the owner's deployment preference was satisfied or blocked by a safety gate.

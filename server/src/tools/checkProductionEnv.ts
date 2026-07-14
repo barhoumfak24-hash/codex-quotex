@@ -42,7 +42,9 @@ async function loadRepoProductionEnv() {
     if (!match) continue;
     const [, key, rawValue] = match;
     if (process.env[key]?.trim()) continue;
-    process.env[key] = stripEnvQuotes(rawValue.trim());
+    const value = stripEnvQuotes(rawValue.trim()).trim();
+    if (!value) continue;
+    process.env[key] = value;
   }
 }
 

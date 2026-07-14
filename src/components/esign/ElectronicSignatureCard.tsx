@@ -132,7 +132,7 @@ export function ElectronicSignatureCard({
             <input
               className={lockedFieldClass(locked)}
               value={locked ? savedSignature?.name ?? "" : draft.name}
-              readOnly={locked}
+              disabled={locked}
               placeholder="Type your full name"
               onChange={(event) => {
                 setDraft((current) => ({ ...current, name: event.target.value }));
@@ -170,7 +170,7 @@ export function ElectronicSignatureCard({
                 max={54}
                 className={lockedFieldClass(locked)}
                 value={locked ? savedSignature?.fontSize ?? 34 : draft.fontSize}
-                readOnly={locked}
+                disabled={locked}
                 onChange={(event) => {
                   setDraft((current) => ({ ...current, fontSize: Number(event.target.value) }));
                   setSavedAt(null);

@@ -1,13 +1,14 @@
 import { Link } from "react-router-dom";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Search, ShieldAlert, UserPlus } from "lucide-react";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Disclaimer } from "@/components/ui/Disclaimer";
 import { MasterBackButton } from "@/components/layout/MasterBackButton";
 import { api } from "@/lib/api";
-import { isLivePlatformAgency, isPresentationDemoAgencyId } from "@/lib/demoData";
+import { isPresentationDemoAgencyId } from "@/lib/demoData";
 import { fmt } from "@/lib/format";
+import { listReconciledLivePlatformAgencies, reconcilePaidSoftwareSalesToAgencies } from "@/lib/softwareSaleProvisioning";
 import { ADD_ON_USER_SLOT_MONTHLY_PRICE_USD, extraUserSlotsForAgency } from "@/lib/tiers";
 import type { User } from "@/types";
 
@@ -16,7 +17,11 @@ export function MasterUsersPage() {
   const [query, setQuery] = useState("");
   const refresh = () => setRev((r) => r + 1);
 
-  const agencies = api.agencies.list().filter(isLivePlatformAgency);
+  useEffect(() => {
+    if (reconcilePaidSoftwareSalesToAgencies().length > 0) setRev((r) => r + 1);
+  }, []);
+
+  const agencies = listReconciledLivePlatformAgencies();
   const allUsers = api
     .users
     .list()
@@ -100,7 +105,7 @@ export function MasterUsersPage() {
                 <div className="flex flex-wrap items-center gap-2">
                   {agency.name}
                   <Badge tone={agency.active ? "success" : "neutral"}>
-                    {agency.active ? "Active" : "Inactive"}
+                    {agency.active ? "Active" : "Deactivated"}
                   </Badge>
                   <Badge tone="gold">{fmt.titleCase(agency.tier)}</Badge>
                   <Badge tone="neutral">{api.agencies.maskedCode(agency)}</Badge>

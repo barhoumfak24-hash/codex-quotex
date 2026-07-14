@@ -6,7 +6,7 @@ import {
   QUOTEX_CONTACT_PHONE_HREF,
   QUOTEX_SUPPORT_EMAIL,
 } from "@/lib/quotexContact";
-import { QuotexMark } from "./Logo";
+import { QuotexMark, QuotexWordmark } from "./Logo";
 
 export function QuotexSiteFooter() {
   return (
@@ -19,7 +19,9 @@ export function QuotexSiteFooter() {
               letterClassName="text-[25px]"
             />
             <span>
-              <span className="block font-display text-xl leading-none">Quotex Insurance</span>
+              <span className="block font-display text-xl leading-none">
+                <QuotexWordmark />
+              </span>
               <span className="mt-1.5 block text-[11px] font-medium leading-none text-white/45">
                 Agency operating system
               </span>

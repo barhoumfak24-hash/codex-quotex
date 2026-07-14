@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   ArrowRight,
@@ -15,19 +15,17 @@ import {
 import { MasterBackButton } from "@/components/layout/MasterBackButton";
 import { Badge } from "@/components/ui/Badge";
 import { Card, CardHeader, StatCard } from "@/components/ui/Card";
-import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
 import { fmt } from "@/lib/format";
+import { useTenant } from "@/lib/tenant";
 
 const DEMO_AGENCY_ID = "agency_palmcoast";
 const DEMO_CUSTOMER_ID = "customer_demo";
-const DEMO_MANAGER_EMAIL = "manager@palmcoastpc.example";
-const DEMO_MANAGER_PASSWORD = "cedar-marlin-2104";
+const DEMO_SOFTWARE_CLIENT_PATH = `/master/demos/software/clients/${DEMO_CUSTOMER_ID}`;
 
 export function MasterDemosPage() {
   const navigate = useNavigate();
-  const { signInStaff } = useAuth();
-  const [error, setError] = useState<string | null>(null);
+  const { setAgencyId } = useTenant();
   const agency = api.agencies.get(DEMO_AGENCY_ID);
   const customer = api.customers.get(DEMO_CUSTOMER_ID);
   const policies = api.policies.listByCustomer(DEMO_CUSTOMER_ID);
@@ -45,13 +43,8 @@ export function MasterDemosPage() {
   );
   const carrierNameFor = (carrierId: string) => api.carriers.get(carrierId)?.name ?? "Carrier";
 
-  async function launchSoftwareDemo(path: string) {
-    setError(null);
-    const demoUser = await signInStaff(DEMO_MANAGER_EMAIL, DEMO_MANAGER_PASSWORD);
-    if (!demoUser) {
-      setError("The Palm Coast software demo account could not be opened. Refresh the demo data, then try again.");
-      return;
-    }
+  function launchSoftwareDemo(path: string) {
+    setAgencyId(DEMO_AGENCY_ID);
     navigate(path);
   }
 
@@ -67,12 +60,6 @@ export function MasterDemosPage() {
         </div>
         <Badge tone="gold">Fake Palm Coast data</Badge>
       </div>
-
-      {error && (
-        <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-          {error}
-        </div>
-      )}
 
       <div className="grid gap-4 md:grid-cols-4">
         <StatCard
@@ -117,7 +104,7 @@ export function MasterDemosPage() {
             <button
               type="button"
               className="btn-primary w-full justify-between"
-              onClick={() => launchSoftwareDemo(`/employee/clients/${DEMO_CUSTOMER_ID}`)}
+              onClick={() => launchSoftwareDemo(DEMO_SOFTWARE_CLIENT_PATH)}
             >
               Open software demo
               <ArrowRight className="h-4 w-4" />
@@ -127,7 +114,7 @@ export function MasterDemosPage() {
             <button
               type="button"
               className="btn-outline w-full justify-between"
-              onClick={() => launchSoftwareDemo(`/employee/clients/${DEMO_CUSTOMER_ID}#ai-quoting-workspace`)}
+              onClick={() => launchSoftwareDemo(`${DEMO_SOFTWARE_CLIENT_PATH}?quoteWorkspace=expanded`)}
             >
               Open AI quote demo
               <ArrowRight className="h-4 w-4" />

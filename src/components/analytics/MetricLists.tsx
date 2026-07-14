@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { ChevronUp, ExternalLink } from "lucide-react";
 import { isAddressLikeKey, MapLink } from "@/components/ui/MapLink";
 import { api } from "@/lib/api";
+import { assetDisplayName } from "@/lib/assetDisplay";
 import { fmt } from "@/lib/format";
 import type { CustomerProfile, Policy, Prospect, Renewal } from "@/types";
 
@@ -149,7 +150,7 @@ export function PolicyList({
                 rows={[
                   { label: "Client", value: c?.name ?? "—" },
                   { label: "Carrier", value: car?.name ?? "—" },
-                  { label: "Asset", value: asset?.label ?? "—" },
+                  { label: "Asset", value: asset ? assetDisplayName(asset) : "—" },
                   {
                     label: "Type",
                     value: asset ? api.helpers.assetTypeLabel(asset.type) : "—",

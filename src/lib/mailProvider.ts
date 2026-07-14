@@ -86,10 +86,20 @@ export function mailboxThreadUrl(input: {
   threadId?: string;
   externalThreadId?: string;
   externalUrl?: string;
+  rfc822MessageId?: string;
+  messageIdHeader?: string;
 }): string {
   if (input.externalUrl) return input.externalUrl;
   const mailbox = input.mailbox.trim();
   const encodedMailbox = encodeURIComponent(mailbox);
+  if (input.provider === "gmail") {
+    const rfc822MessageId = normalizeRfc822MessageId(input.rfc822MessageId ?? input.messageIdHeader);
+    if (rfc822MessageId) {
+      return `https://mail.google.com/mail/u/?authuser=${encodedMailbox}#search/rfc822msgid:${encodeURIComponent(
+        rfc822MessageId
+      )}`;
+    }
+  }
   const query = mailboxSearchQuery(input);
   const encodedQuery = encodeURIComponent(query);
   if (!query) return mailboxUrl(mailbox, input.provider);
@@ -108,6 +118,10 @@ export function mailboxThreadUrl(input: {
         ? `mailto:${encodeURIComponent(input.contactEmail)}`
         : mailboxUrl(mailbox, input.provider);
   }
+}
+
+function normalizeRfc822MessageId(value?: string): string {
+  return (value ?? "").trim().replace(/^<+/, "").replace(/>+$/, "");
 }
 
 export function isValidBusinessEmail(email: string): boolean {

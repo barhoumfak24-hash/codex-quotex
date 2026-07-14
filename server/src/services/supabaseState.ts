@@ -11,7 +11,12 @@ export interface RemoteStateRow {
   id: string;
   snapshot: unknown;
   updated_at?: string;
+  revision: number;
 }
+
+export type WriteRemoteStateResult =
+  | { ok: true; row: RemoteStateRow }
+  | { ok: false; conflict: true; current: RemoteStateRow };
 
 function env(name: string): string {
   return process.env[name]?.trim() ?? "";
@@ -39,9 +44,10 @@ function assertConfigured() {
   }
 }
 
-function stateUrl(id?: string): string {
+function stateUrl(id?: string, revision?: number): string {
   const url = new URL(`${supabaseUrl()}/rest/v1/${stateTable()}`);
   if (id) url.searchParams.set("id", `eq.${id}`);
+  if (typeof revision === "number") url.searchParams.set("revision", `eq.${revision}`);
   return url.toString();
 }
 
@@ -68,7 +74,7 @@ export async function readRemoteState(id: string): Promise<RemoteStateRow | null
   return rows[0] ?? null;
 }
 
-export async function writeRemoteState(id: string, snapshot: unknown): Promise<RemoteStateRow> {
+async function insertRemoteState(id: string, snapshot: unknown, revision = 0): Promise<RemoteStateRow> {
   assertConfigured();
   const res = await fetch(stateUrl(), {
     method: "POST",
@@ -79,6 +85,7 @@ export async function writeRemoteState(id: string, snapshot: unknown): Promise<R
     body: JSON.stringify({
       id,
       snapshot,
+      revision,
       updated_at: new Date().toISOString(),
     }),
   });
@@ -87,5 +94,47 @@ export async function writeRemoteState(id: string, snapshot: unknown): Promise<R
     throw new Error(`Supabase state write failed (${res.status}): ${text.slice(0, 300)}`);
   }
   const rows = (await res.json()) as RemoteStateRow[];
-  return rows[0] ?? { id, snapshot, updated_at: new Date().toISOString() };
+  return rows[0] ?? { id, snapshot, revision, updated_at: new Date().toISOString() };
+}
+
+export async function writeRemoteState(
+  id: string,
+  snapshot: unknown,
+  baseRevision?: number | null
+): Promise<WriteRemoteStateResult> {
+  assertConfigured();
+  if (baseRevision === undefined) {
+    const current = await readRemoteState(id);
+    return { ok: true, row: await insertRemoteState(id, snapshot, (current?.revision ?? -1) + 1) };
+  }
+
+  if (baseRevision === null) {
+    const current = await readRemoteState(id);
+    if (current) return { ok: false, conflict: true, current };
+    return { ok: true, row: await insertRemoteState(id, snapshot, 0) };
+  }
+
+  const nextRevision = baseRevision + 1;
+  const res = await fetch(stateUrl(id, baseRevision), {
+    method: "PATCH",
+    headers: {
+      ...headers(),
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify({
+      snapshot,
+      revision: nextRevision,
+      updated_at: new Date().toISOString(),
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Supabase state write failed (${res.status}): ${text.slice(0, 300)}`);
+  }
+  const rows = (await res.json()) as RemoteStateRow[];
+  if (rows[0]) return { ok: true, row: rows[0] };
+
+  const current = await readRemoteState(id);
+  if (current) return { ok: false, conflict: true, current };
+  return { ok: true, row: await insertRemoteState(id, snapshot, 0) };
 }

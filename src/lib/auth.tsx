@@ -3,8 +3,20 @@ import type { Agency, Branch, Role, User } from "@/types";
 import { api } from "./api";
 import { apiBaseUrl, envValue } from "./apiBase";
 import { db, subscribeToDbChanges } from "./db";
-import { isLockingMasterAccount } from "./masterAccount";
 import { isStaffRole, type StaffRole } from "./roles";
+
+export type AuthFailReason =
+  | "invalid_credentials"
+  | "account_not_found"
+  | "account_disabled"
+  | "agency_inactive"
+  | "password_not_set"
+  | "rate_limited"
+  | "server_unreachable"
+  | "wrong_portal"
+  | "no_session";
+
+export type AuthResult = { ok: true; user: User } | { ok: false; reason: AuthFailReason };
 
 interface AuthContextValue {
   user: User | null;
@@ -17,7 +29,7 @@ interface AuthContextValue {
     email: string,
     password: string,
     tenantId?: string | null
-  ) => User | null;
+  ) => Promise<AuthResult>;
   // Trigger a customer password reset. Generates a temporary
   // password for the local browser store; production should replace
   // this with a server-issued one-time reset token and email.
@@ -31,13 +43,16 @@ interface AuthContextValue {
     newPassword: string
   ) => { ok: true } | { ok: false; reason: string };
   // Staff sign-in: business email/username + password. Tenant is derived from the staff user.
-  signInStaff: (identifier: string, password: string) => Promise<User | null>;
-  signInMaster: (email: string, password: string) => User | null;
+  signInStaff: (identifier: string, password: string) => Promise<AuthResult>;
+  signInMaster: (email: string, password: string) => Promise<AuthResult>;
   createMasterAccount: (input: {
     name: string;
     email: string;
     password: string;
-  }) => { ok: true; user: User } | { ok: false; reason: "exists" | "invalid_email" | "weak_password" | "missing_name" };
+  }) => Promise<
+    | { ok: true; user: User }
+    | { ok: false; reason: "exists" | "invalid_email" | "weak_password" | "missing_name" | "server_unavailable" }
+  >;
   registerStaff: (input: {
     agencyCode: string;
     branchId?: string;
@@ -66,10 +81,12 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 // key, and other tabs in the same browser pick up the change via the
 // `storage` event.
 const STORAGE_KEY = "quotex.auth.userId.v1";
+const SESSION_CHANGED_KEY = "quotex.auth.sessionChanged.v1";
 const CLIENT_IP_KEY = "quotex.security.clientIp.v1";
 const AUTH_TOKEN_KEY = "quotex.authToken";
 const LEGACY_AUTH_TOKEN_KEY = "quotex.jwt";
 const SERVER_AUTH_USER_KEY = "quotex.auth.serverUser.v1";
+const AUTH_REQUEST_TIMEOUT_MS = 25_000;
 
 // Generates a 10-char alphanumeric temporary password for the
 // customer reset flow. Demo-grade — production hashes a one-time
@@ -91,9 +108,13 @@ function currentClientIpForSecurity(): string | undefined {
   return window.localStorage.getItem(CLIENT_IP_KEY) || "local-browser";
 }
 
-function accessBlockForUser(u: User | null): boolean {
+function accessBlockForUser(u: User | null, options: { trustServerSession?: boolean } = {}): boolean {
   if (!u || !u.tenantId) return false;
-  if (!u.active || u.staffAccessStatus === "banned" || u.staffAccessStatus === "deleted") return true;
+  const staffStatus = u.staffAccessStatus as string | undefined;
+  if (!u.active || staffStatus === "banned" || staffStatus === "deleted" || staffStatus === "inactive") return true;
+  if (options.trustServerSession) return false;
+  const agency = api.agencies.get(u.tenantId);
+  if (agency && !agency.active) return true;
   return !!api.security.accessBlockFor({
     tenantId: u.tenantId,
     userId: u.id,
@@ -107,87 +128,117 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // Tracks the last id we persisted, so we can ignore our own storage events.
   const lastIdRef = useRef<string | null>(null);
 
-  // Initial hydration from localStorage.
-  useEffect(() => {
-    const id = typeof window !== "undefined" ? window.localStorage.getItem(STORAGE_KEY) : null;
-    if (id) {
-      const u = api.users.get(id);
-      if (u && !accessBlockForUser(u)) {
-        lastIdRef.current = u.id;
-        setUser(u);
-      } else {
-        const serverUser = loadServerSessionUser();
-        if (serverUser && serverUser.id === id && !accessBlockForUser(serverUser)) {
-          lastIdRef.current = serverUser.id;
-          setUser(serverUser);
-        } else if (typeof window !== "undefined") {
-          window.localStorage.removeItem(STORAGE_KEY);
-          clearServerSessionUser();
-        }
-      }
-    } else {
-      const serverUser = loadServerSessionUser();
-      if (serverUser && !accessBlockForUser(serverUser)) {
-        lastIdRef.current = serverUser.id;
-        setUser(serverUser);
-      } else if (typeof window !== "undefined") {
-        clearServerSessionUser();
-      }
+  const persist = useCallback((u: User | null) => {
+    lastIdRef.current = u ? u.id : null;
+    setUser(u);
+    if (typeof window === "undefined") return;
+    safeStorageRemove(STORAGE_KEY);
+    if (!u) {
+      clearServerSessionToken();
     }
-    setLoading(false);
+    safeStorageSet(SESSION_CHANGED_KEY, String(Date.now()));
   }, []);
+
+  // Initial hydration from the server session only. Browser-local user records
+  // are not allowed to authenticate a production session.
+  useEffect(() => {
+    let cancelled = false;
+    migrateLegacyAuthStorage();
+    const tokenAtHydrationStart = currentServerSessionToken();
+
+    if (!tokenAtHydrationStart) {
+      setLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    establishServerCurrentSession(tokenAtHydrationStart)
+      .then((session) => {
+        if (cancelled) return;
+        const currentToken = currentServerSessionToken();
+        if (currentToken && currentToken !== tokenAtHydrationStart) return;
+        if (session.ok) {
+          const resolved = resolveAnyServerUser(session.user);
+          if (resolved && !accessBlockForUser(resolved, { trustServerSession: true })) {
+            storeServerSessionUser(resolved);
+            persist(resolved);
+          } else {
+            persist(null);
+          }
+        } else if (!isTransientSessionFailure(session.reason)) {
+          persist(null);
+        } else {
+          setUser(loadServerSessionUser());
+        }
+      })
+      .catch(() => {
+        if (!cancelled && currentServerSessionToken() === tokenAtHydrationStart) setUser(loadServerSessionUser());
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [persist]);
 
   // Cross-tab one-device enforcement: if another tab signs a different user
   // in or out, this tab reflects the change immediately.
   useEffect(() => {
     if (typeof window === "undefined") return;
     const onStorage = (e: StorageEvent) => {
-      if (e.key !== STORAGE_KEY) return;
-      const nextId = e.newValue;
-      if (nextId === lastIdRef.current) return;
-      if (!nextId) {
+      if (e.key !== SESSION_CHANGED_KEY && e.key !== AUTH_TOKEN_KEY) return;
+      const token = currentServerSessionToken();
+      if (!token) {
         lastIdRef.current = null;
         setUser(null);
         return;
       }
-      const u = api.users.get(nextId);
-      if (u && !accessBlockForUser(u)) {
-        lastIdRef.current = nextId;
-        setUser(u);
-      } else {
-        const serverUser = loadServerSessionUser();
-        if (serverUser && serverUser.id === nextId && !accessBlockForUser(serverUser)) {
-          lastIdRef.current = nextId;
-          setUser(serverUser);
+      establishServerCurrentSession().then((session) => {
+        if (!session.ok) {
+          if (isTransientSessionFailure(session.reason)) {
+            const cached = loadServerSessionUser();
+            if (cached && !accessBlockForUser(cached, { trustServerSession: true })) {
+              lastIdRef.current = cached.id;
+              setUser(cached);
+              return;
+            }
+          }
+          lastIdRef.current = null;
+          setUser(null);
+          return;
+        }
+        const resolved = resolveAnyServerUser(session.user);
+        if (resolved && !accessBlockForUser(resolved, { trustServerSession: true })) {
+          storeServerSessionUser(resolved);
+          lastIdRef.current = resolved.id;
+          setUser(resolved);
           return;
         }
         lastIdRef.current = null;
         setUser(null);
-        window.localStorage.removeItem(STORAGE_KEY);
-      }
+      });
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
-  const persist = useCallback((u: User | null) => {
-    lastIdRef.current = u ? u.id : null;
-    setUser(u);
-    if (typeof window === "undefined") return;
-    if (u) window.localStorage.setItem(STORAGE_KEY, u.id);
-    else {
-      window.localStorage.removeItem(STORAGE_KEY);
-      clearServerSessionToken();
-    }
-  }, []);
-
   useEffect(() => {
     if (!user) return;
+    if (hasServerSessionToken()) {
+      return subscribeToDbChanges(() => {
+        if (!user.tenantId) return;
+        const agency = api.agencies.get(user.tenantId);
+        if (agency && !agency.active) persist(null);
+      });
+    }
     return subscribeToDbChanges(() => {
       const fresh = api.users.get(user.id) ?? null;
       if (!fresh) {
         const serverUser = loadServerSessionUser();
-        if (serverUser && serverUser.id === user.id && !accessBlockForUser(serverUser)) {
+        if (serverUser && serverUser.id === user.id && !accessBlockForUser(serverUser, { trustServerSession: true })) {
           lastIdRef.current = serverUser.id;
           setUser(serverUser);
           return;
@@ -205,8 +256,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [persist, user?.id]);
 
   const persistIfAllowed = useCallback(
-    (u: User | null) => {
-      if (!u || accessBlockForUser(u)) {
+    (u: User | null, options: { trustServerSession?: boolean } = {}) => {
+      if (!u || accessBlockForUser(u, options)) {
         persist(null);
         return null;
       }
@@ -215,6 +266,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     },
     [persist]
   );
+
+  useEffect(() => {
+    if (!user || user.role !== "master_admin" || hasServerSessionToken() || !user.generatedPassword) return;
+    let cancelled = false;
+    establishServerMasterLocalPromotion(user, user.generatedPassword).then((session) => {
+      if (cancelled || !session.ok) return;
+      const serverUser = resolveServerMasterUser(session.user, user.email, user);
+      const signedIn = persistIfAllowed(serverUser);
+      if (signedIn) storeServerSessionUser(signedIn);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [persistIfAllowed, user]);
 
   const signInWithEmail = useCallback(
     (email: string) => {
@@ -226,20 +291,20 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const signInCustomer = useCallback(
-    (email: string, password: string, tenantId?: string | null) => {
+    async (email: string, password: string, tenantId?: string | null): Promise<AuthResult> => {
       const normalized = email.trim().toLowerCase();
-      const u = api
-        .users
-        .list(tenantId ?? undefined)
-        .find((row) => row.role === "customer" && row.email.toLowerCase() === normalized);
-      if (!u || u.role !== "customer") return null;
-      if (!u.active || accessBlockForUser(u)) return null;
-      if (!u.generatedPassword && !allowsPasswordlessLocalFallback()) return null;
-      if (u.generatedPassword && u.generatedPassword !== password) return null;
-      clearServerSessionToken();
-      return persistIfAllowed(u);
+      const serverSession = await establishCanonicalLogin("customer", normalized, password, tenantId);
+      if (!serverSession.ok) {
+        persist(null);
+        return { ok: false, reason: serverSession.reason };
+      }
+      const serverUser = resolveAnyServerUser(serverSession.user);
+      const signedIn = persistIfAllowed(serverUser, { trustServerSession: true });
+      if (!signedIn) return { ok: false, reason: "account_disabled" };
+      storeServerSessionUser(signedIn);
+      return { ok: true, user: signedIn };
     },
-    [persistIfAllowed]
+    [persist, persistIfAllowed]
   );
 
   const resetCustomerPassword = useCallback(
@@ -279,90 +344,104 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const signInStaff = useCallback(
-    async (identifier: string, password: string) => {
+    async (identifier: string, password: string): Promise<AuthResult> => {
       const normalizedIdentifier = identifier.trim();
-      const serverSession = await establishServerStaffSession(normalizedIdentifier, password);
-      if (serverSession.ok) {
-        syncServerSessionContext(serverSession);
-        const serverUser = resolveServerStaffUser(serverSession.user, normalizedIdentifier);
-        if (!serverUser) return null;
-        const signedIn = persistIfAllowed(serverUser);
-        if (signedIn) storeServerSessionUser(signedIn);
-        return signedIn;
+      const serverSession = await establishCanonicalLogin("staff", normalizedIdentifier, password);
+      if (!serverSession.ok) {
+        persist(null);
+        return { ok: false, reason: serverSession.reason };
       }
-
-      const legacyStaff = localStaffWithMatchingPassword(normalizedIdentifier, password);
-      if (legacyStaff) {
-        const promotedSession = await establishServerStaffLocalPromotion(legacyStaff, password);
-        if (promotedSession.ok) {
-          syncServerSessionContext(promotedSession);
-          const serverUser = resolveServerStaffUser(promotedSession.user, normalizedIdentifier);
-          if (!serverUser) return null;
-          const signedIn = persistIfAllowed(serverUser);
-          if (signedIn) {
-            api.users.update(legacyStaff.id, { generatedPassword: undefined });
-            storeServerSessionUser(signedIn);
-          }
-          return signedIn;
-        }
-      }
-
-      if (!serverSession.allowLocalFallback) return null;
-      const u = legacyStaff ?? api.users.byIdentifier(normalizedIdentifier);
-      if (!u || !isStaffRole(u.role)) return null;
-      const agency = u.tenantId ? api.agencies.get(u.tenantId) : undefined;
-      if (!agency || !agency.active) return null;
-      if (accessBlockForUser(u)) return null;
-      // If the account has a generated password on file, it must match.
-      // Legacy local fixture accounts only fall back to identifier-only
-      // sign-in when an explicit local env flag is enabled.
-      if (!u.generatedPassword && !allowsPasswordlessLocalFallback()) return null;
-      if (u.generatedPassword && u.generatedPassword !== password) return null;
-      clearServerSessionUser();
-      const signedIn = persistIfAllowed(u);
-      return signedIn;
+      syncServerSessionContext({ agency: serverSession.user.agency });
+      const serverUser = resolveServerStaffUser(serverSession.user, normalizedIdentifier);
+      if (!serverUser) return { ok: false, reason: "wrong_portal" };
+      const signedIn = persistIfAllowed(serverUser, { trustServerSession: true });
+      if (!signedIn) return { ok: false, reason: "account_disabled" };
+      storeServerSessionUser(signedIn);
+      return { ok: true, user: signedIn };
     },
-    [persistIfAllowed]
+    [persist, persistIfAllowed]
   );
 
   const signInMaster = useCallback(
-    (email: string, password: string) => {
-      const u = api.users.masterByEmail(email);
-      if (!u || !isLockingMasterAccount(u)) return null;
-      if (!u.generatedPassword && !allowsPasswordlessLocalFallback()) return null;
-      if (u.generatedPassword && u.generatedPassword !== password) return null;
-      clearServerSessionToken();
-      return persistIfAllowed(u);
+    async (email: string, password: string): Promise<AuthResult> => {
+      const normalizedEmail = email.trim().toLowerCase();
+      const directMasterSession = await establishServerMasterSession(normalizedEmail, password);
+      const serverSession = directMasterSession.ok
+        ? directMasterSession
+        : await establishCanonicalLogin("master", normalizedEmail, password);
+      if (!serverSession.ok) {
+        const localMaster = localMasterWithMatchingPassword(normalizedEmail, password);
+        if (localMaster) {
+          const promotedSession = await establishServerMasterLocalPromotion(localMaster, password);
+          if (promotedSession.ok) {
+            const promotedUser = resolveServerMasterUser(promotedSession.user, normalizedEmail, localMaster);
+            const promotedSignedIn = persistIfAllowed(promotedUser, { trustServerSession: true });
+            if (!promotedSignedIn) return { ok: false, reason: "account_disabled" };
+            storeServerSessionUser(promotedSignedIn);
+            return { ok: true, user: promotedSignedIn };
+          }
+        }
+        persist(null);
+        return { ok: false, reason: serverSession.reason };
+      }
+      const signedIn = persistIfAllowed(resolveServerMasterUser(serverSession.user, normalizedEmail), {
+        trustServerSession: true,
+      });
+      if (!signedIn) return { ok: false, reason: "account_disabled" };
+      storeServerSessionUser(signedIn);
+      return { ok: true, user: signedIn };
     },
-    [persistIfAllowed]
+    [persist, persistIfAllowed]
   );
 
   const createMasterAccount = useCallback(
-    (input: { name: string; email: string; password: string }) => {
-      if (api.users.masterAccountExists()) {
-        return { ok: false as const, reason: "exists" as const };
-      }
+    async (input: { name: string; email: string; password: string }) => {
       const name = input.name.trim();
       const email = input.email.trim().toLowerCase();
       if (!name) return { ok: false as const, reason: "missing_name" as const };
       if (!/^\S+@\S+\.\S+$/.test(email)) return { ok: false as const, reason: "invalid_email" as const };
       if (input.password.length < 12) return { ok: false as const, reason: "weak_password" as const };
-      try {
-        const user = api.users.create({
-          role: "master_admin",
-          tenantId: null,
-          email,
-          name,
-          generatedPassword: input.password,
-          passwordUpdatedAt: new Date().toISOString(),
-          profileCompleted: true,
-        });
-        clearServerSessionToken();
-        persistIfAllowed(user);
-        return { ok: true as const, user };
-      } catch {
-        return { ok: false as const, reason: "exists" as const };
+      const serverSession = await establishServerMasterCreate({ name, email, password: input.password });
+      if (!serverSession.ok && !serverSession.allowLocalFallback) {
+        return {
+          ok: false as const,
+          reason: serverSession.reason === "master_account_exists" ? "exists" as const : "server_unavailable" as const,
+        };
       }
+      const localUser =
+        api.users.masterByEmail(email) ??
+        (() => {
+          try {
+            return api.users.create({
+              role: "master_admin",
+              tenantId: null,
+              email,
+              name,
+              generatedPassword: undefined,
+              passwordUpdatedAt: new Date().toISOString(),
+              profileCompleted: true,
+            });
+          } catch {
+            return null;
+          }
+        })();
+      const serverUser = serverSession.ok
+        ? resolveServerMasterUser(serverSession.user, email, localUser)
+        : localUser ?? {
+            id: `master_${Date.now()}`,
+            role: "master_admin" as const,
+            tenantId: null,
+            email,
+            businessEmail: email,
+            name,
+            profileCompleted: true,
+            active: true,
+            createdAt: new Date().toISOString(),
+          };
+      const signedIn = persistIfAllowed(serverUser, { trustServerSession: serverSession.ok });
+      if (!signedIn) return { ok: false as const, reason: "server_unavailable" as const };
+      if (serverSession.ok) storeServerSessionUser(signedIn);
+      return { ok: true as const, user: signedIn };
     },
     [persistIfAllowed]
   );
@@ -387,7 +466,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const localUser = localResult.ok
           ? api.users.update(localResult.user.id, { generatedPassword: undefined }) ?? localResult.user
           : api.users.byIdentifier(input.businessEmail);
-        const signedIn = persistIfAllowed(localUser && isStaffRole(localUser.role)
+        const candidate = localUser && isStaffRole(localUser.role)
           ? {
               ...localUser,
               id: serverUser.id,
@@ -397,8 +476,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
               businessEmail: localUser.businessEmail ?? serverUser.email,
               name: serverUser.name || localUser.name,
               generatedPassword: undefined,
+              staffAccessStatus: "active" as const,
+              profileCompleted: true,
+              active: true,
             }
-          : serverUser);
+          : serverUser;
+        const signedIn = persistIfAllowed(candidate, { trustServerSession: true });
         if (!signedIn) return { ok: false as const, reason: "access_blocked" };
         storeServerSessionUser(signedIn);
         return { ok: true as const, user: signedIn, agencyId: signedIn.tenantId ?? serverUser.tenantId ?? "" };
@@ -414,7 +497,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [persistIfAllowed]
   );
 
-  const signOut = useCallback(() => persist(null), [persist]);
+  const signOut = useCallback(() => {
+    void fetchAuthRoute(`${apiBaseUrl()}/auth/logout`, {
+      method: "POST",
+      headers: currentServerSessionToken() ? { authorization: `Bearer ${currentServerSessionToken()}` } : undefined,
+    }).catch(() => undefined);
+    persist(null);
+  }, [persist]);
 
   const refreshUser = useCallback(() => {
     if (!user) return null;
@@ -470,6 +559,8 @@ type ServerSessionResult =
   | { ok: true; user: ServerSessionUser; agency?: ServerSessionAgency | null }
   | { ok: false; allowLocalFallback: boolean; reason: string };
 
+type CanonicalLoginScope = "customer" | "staff" | "master";
+
 type ServerSessionUser = {
   id: string;
   tenantId: string | null;
@@ -477,24 +568,7 @@ type ServerSessionUser = {
   role: string;
   email: string;
   name: string;
-};
-
-type ServerSessionAgency = {
-  id: string;
-  name: string;
-  contactEmail?: string | null;
-  phone?: string | null;
-  address?: string | null;
-  website?: string | null;
-  websiteSlug?: string | null;
-  websiteEnabled?: boolean | null;
-  tier?: string | null;
-  active?: boolean | null;
-  allowedUsers?: number | null;
-  allowedProspectsPerMonth?: number | null;
-  allowedAiMessagesPerMonth?: number | null;
-  allowedCarriers?: number | null;
-  agencyCodePreview?: string | null;
+  agency?: ServerSessionAgency;
 };
 
 type AuthRouteJson = {
@@ -506,11 +580,39 @@ type AuthRouteJson = {
   agency?: Partial<ServerSessionAgency> | null;
 };
 
+type ServerSessionAgency = {
+  id: string;
+  name: string;
+  contactEmail?: string | null;
+  phone?: string | null;
+  address?: string | null;
+  website?: string | null;
+  websiteSlug?: string | null;
+  websiteEnabled?: boolean | null;
+  serviceAreas?: unknown;
+  agencyCodePreview?: string | null;
+  tier?: string | null;
+  active?: boolean | null;
+  allowedUsers?: number | null;
+  allowedProspectsPerMonth?: number | null;
+  allowedAiMessagesPerMonth?: number | null;
+  allowedCarriers?: number | null;
+  createdAt?: string | null;
+};
+
 function localStaffWithMatchingPassword(identifier: string, password: string): User | null {
   const u = localStaffByIdentifier(identifier);
   if (!u || !isStaffRole(u.role)) return null;
   const agency = u.tenantId ? api.agencies.get(u.tenantId) : undefined;
   if (!agency || !agency.active) return null;
+  if (accessBlockForUser(u)) return null;
+  if (!u.generatedPassword || u.generatedPassword !== password) return null;
+  return u;
+}
+
+function localMasterWithMatchingPassword(email: string, password: string): User | null {
+  const u = api.users.masterByEmail(email);
+  if (!u || u.role !== "master_admin") return null;
   if (accessBlockForUser(u)) return null;
   if (!u.generatedPassword || u.generatedPassword !== password) return null;
   return u;
@@ -533,10 +635,11 @@ function localStaffByIdentifier(identifier: string, tenantId?: string | null): U
 }
 
 function serializeAgencyForStaffPromotion(agency: Agency) {
+  const contactEmail = agency.contactEmail?.trim();
   return {
     id: agency.id,
     name: agency.name,
-    contactEmail: agency.contactEmail,
+    contactEmail: contactEmail && /^\S+@\S+\.\S+$/.test(contactEmail) ? contactEmail : undefined,
     phone: agency.phone,
     address: agency.address,
     website: agency.website,
@@ -641,7 +744,7 @@ async function establishServerStaffSession(identifier: string, password: string)
   let sawReachableAuthRoute = false;
   for (const url of candidates) {
     try {
-      const response = await fetch(url, {
+      const response = await fetchAuthRoute(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: payload,
@@ -652,6 +755,161 @@ async function establishServerStaffSession(identifier: string, password: string)
       if (response.ok && json?.ok && typeof json.token === "string" && json.token.trim() && isServerStaffUser(json.user)) {
         storeServerSessionToken(json.token);
         return { ok: true, user: json.user, agency: isServerSessionAgency(json.agency) ? json.agency : null };
+      }
+      clearServerSessionToken();
+      clearServerSessionUser();
+      return {
+        ok: false,
+        allowLocalFallback: import.meta.env.DEV,
+        reason: json?.error || json?.reason || `auth_http_${response.status}`,
+      };
+    } catch {
+      continue;
+    }
+  }
+  clearServerSessionToken();
+  clearServerSessionUser();
+  return {
+    ok: false,
+    allowLocalFallback: import.meta.env.DEV && !sawReachableAuthRoute,
+    reason: "auth_route_unavailable",
+  };
+}
+
+async function establishCanonicalLogin(
+  scope: CanonicalLoginScope,
+  identifier: string,
+  password: string,
+  tenantId?: string | null
+): Promise<{ ok: true; user: ServerSessionUser } | { ok: false; reason: AuthFailReason }> {
+  if (typeof window === "undefined") return { ok: false, reason: "server_unreachable" };
+  try {
+    const response = await fetchAuthRoute(`${apiBaseUrl()}/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ scope, identifier, password, tenantId: tenantId || undefined }),
+    });
+    const json = await readAuthRouteJson(response);
+    if (
+      response.ok &&
+      json?.ok &&
+      typeof json.token === "string" &&
+      json.token.trim() &&
+      isServerAnyUser(json.user)
+    ) {
+      storeServerSessionToken(json.token);
+      return { ok: true, user: json.user };
+    }
+    clearServerSessionToken();
+    clearServerSessionUser();
+    return { ok: false, reason: normalizeAuthFailReason(json?.reason || json?.error, response.status) };
+  } catch {
+    clearServerSessionToken();
+    clearServerSessionUser();
+    return { ok: false, reason: "server_unreachable" };
+  }
+}
+
+async function establishServerMasterSession(email: string, password: string): Promise<ServerSessionResult> {
+  if (typeof window === "undefined") return { ok: false, allowLocalFallback: false, reason: "browser_unavailable" };
+  const payload = JSON.stringify({ email, password });
+  const candidates = uniqueAuthUrls([
+    `${apiBaseUrl()}/auth/master/login`,
+    "/api/auth/master/login",
+    "/api/app/api/auth/master/login",
+  ]);
+  return postMasterAuthRoute(candidates, payload);
+}
+
+async function establishServerMasterCreate(input: {
+  name: string;
+  email: string;
+  password: string;
+}): Promise<ServerSessionResult> {
+  if (typeof window === "undefined") return { ok: false, allowLocalFallback: false, reason: "browser_unavailable" };
+  const payload = JSON.stringify(input);
+  const candidates = uniqueAuthUrls([
+    `${apiBaseUrl()}/auth/master/create`,
+    "/api/auth/master/create",
+    "/api/app/api/auth/master/create",
+  ]);
+  return postMasterAuthRoute(candidates, payload);
+}
+
+async function establishServerCurrentSession(expectedToken?: string | null): Promise<ServerSessionResult> {
+  if (typeof window === "undefined") {
+    return { ok: false, allowLocalFallback: false, reason: "browser_unavailable" };
+  }
+  const token = expectedToken || currentServerSessionToken();
+  if (!token) {
+    return { ok: false, allowLocalFallback: true, reason: "missing_token" };
+  }
+  const candidates = uniqueAuthUrls([
+    `${apiBaseUrl()}/auth/session`,
+    "/api/auth/session",
+    "/api/app/api/auth/session",
+  ]);
+  for (const url of candidates) {
+    try {
+      const response = await fetchAuthRoute(url, {
+        method: "GET",
+        headers: { authorization: `Bearer ${token}` },
+      });
+      const json = await readAuthRouteJson(response);
+      if (isMissingAuthRoute(response, json)) continue;
+      if (response.ok && json?.ok && isServerAnyUser(json.user)) {
+        return { ok: true, user: json.user };
+      }
+      const reason = normalizeAuthFailReason(json?.reason || json?.error, response.status);
+      if ((response.status === 401 || response.status === 403) && currentServerSessionToken() === token) {
+        clearServerSessionToken();
+        clearServerSessionUser();
+      }
+      return { ok: false, allowLocalFallback: false, reason };
+    } catch {
+      continue;
+    }
+  }
+  return { ok: false, allowLocalFallback: false, reason: "server_unreachable" };
+}
+
+async function establishServerMasterLocalPromotion(localUser: User, password: string): Promise<ServerSessionResult> {
+  if (typeof window === "undefined") return { ok: false, allowLocalFallback: false, reason: "browser_unavailable" };
+  if (localUser.role !== "master_admin") return { ok: false, allowLocalFallback: false, reason: "missing_fields" };
+  const payload = JSON.stringify({
+    password,
+    user: {
+      id: localUser.id,
+      role: "master_admin",
+      email: localUser.email,
+      name: localUser.name || localUser.email,
+      active: localUser.active !== false,
+      staffAccessStatus: localUser.staffAccessStatus ?? "active",
+    },
+  });
+  const candidates = uniqueAuthUrls([
+    `${apiBaseUrl()}/auth/master/promote-local`,
+    "/api/auth/master/promote-local",
+    "/api/app/api/auth/master/promote-local",
+  ]);
+  return postMasterAuthRoute(candidates, payload);
+}
+
+async function postMasterAuthRoute(candidates: string[], payload: string): Promise<ServerSessionResult> {
+  let sawReachableAuthRoute = false;
+  for (const url of candidates) {
+    try {
+      const response = await fetchAuthRoute(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: payload,
+      });
+      const json = await readAuthRouteJson(response);
+      if (isMissingAuthRoute(response, json)) continue;
+      sawReachableAuthRoute = true;
+      if (response.ok && json?.ok && typeof json.token === "string" && json.token.trim() && isServerMasterUser(json.user)) {
+        storeServerSessionToken(json.token);
+        return { ok: true, user: json.user };
       }
       clearServerSessionToken();
       clearServerSessionUser();
@@ -702,7 +960,7 @@ async function establishServerStaffRegistration(input: {
   let sawReachableAuthRoute = false;
   for (const url of candidates) {
     try {
-      const response = await fetch(url, {
+      const response = await fetchAuthRoute(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: payload,
@@ -732,6 +990,63 @@ async function establishServerStaffRegistration(input: {
     allowLocalFallback: import.meta.env.DEV && !sawReachableAuthRoute,
     reason: "auth_route_unavailable",
   };
+}
+
+function positiveInteger(value: unknown, fallback: number): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function normalizeSessionAgencyTier(value: unknown, fallback?: Agency["tier"]): Agency["tier"] {
+  if (value === "minimum" || value === "mid" || value === "ultra") return value;
+  if (value === "starter" || value === "basic") return "minimum";
+  return fallback ?? "minimum";
+}
+
+function normalizeSessionServiceAreas(value: unknown, fallback: string[] = []): string[] {
+  if (!Array.isArray(value)) return fallback;
+  return value
+    .filter((area): area is string => typeof area === "string")
+    .map((area) => area.trim().toUpperCase())
+    .filter(Boolean);
+}
+
+function hydrateServerStaffAgency(serverUser: ServerSessionUser): Agency | undefined {
+  const snapshot = serverUser.agency;
+  if (!serverUser.tenantId || !snapshot || snapshot.id !== serverUser.tenantId || !snapshot.id || !snapshot.name) {
+    return undefined;
+  }
+  const existing = db.list("agencies").find((agency) => agency.id === snapshot.id);
+  const row: Agency = {
+    ...(existing ?? {}),
+    id: snapshot.id,
+    name: snapshot.name,
+    contactEmail: snapshot.contactEmail?.trim() || existing?.contactEmail || serverUser.email,
+    phone: snapshot.phone ?? existing?.phone,
+    address: snapshot.address ?? existing?.address,
+    website: snapshot.website ?? existing?.website,
+    websiteSlug: snapshot.websiteSlug ?? existing?.websiteSlug,
+    websiteEnabled: typeof snapshot.websiteEnabled === "boolean" ? snapshot.websiteEnabled : existing?.websiteEnabled,
+    serviceAreas: normalizeSessionServiceAreas(snapshot.serviceAreas, existing?.serviceAreas ?? []),
+    agencyCodeEncrypted: existing?.agencyCodeEncrypted ?? "",
+    agencyCodePreview: snapshot.agencyCodePreview ?? existing?.agencyCodePreview ?? "",
+    tier: normalizeSessionAgencyTier(snapshot.tier, existing?.tier),
+    active: snapshot.active !== false,
+    allowedUsers: positiveInteger(snapshot.allowedUsers, existing?.allowedUsers ?? 1),
+    allowedProspectsPerMonth: positiveInteger(
+      snapshot.allowedProspectsPerMonth,
+      existing?.allowedProspectsPerMonth ?? 100
+    ),
+    allowedAiMessagesPerMonth: positiveInteger(
+      snapshot.allowedAiMessagesPerMonth,
+      existing?.allowedAiMessagesPerMonth ?? 500
+    ),
+    allowedCarriers: positiveInteger(snapshot.allowedCarriers, existing?.allowedCarriers ?? 10),
+    softwareProduct: existing?.softwareProduct ?? "full_platform",
+    createdAt: snapshot.createdAt || existing?.createdAt || new Date().toISOString(),
+  };
+  if (existing) return db.update("agencies", existing.id, row) ?? row;
+  return db.insert("agencies", row);
 }
 
 async function establishServerStaffLocalPromotion(localUser: User, password: string): Promise<ServerSessionResult> {
@@ -768,13 +1083,11 @@ async function establishServerStaffLocalPromotion(localUser: User, password: str
     "/api/auth/employee/promote-local",
     "/api/app/api/auth/employee/promote-local",
   ]);
-  const stateToken = envValue("VITE_STATE_SYNC_TOKEN");
   const headers: Record<string, string> = { "content-type": "application/json" };
-  if (stateToken) headers["x-state-sync-token"] = stateToken;
   let sawReachableAuthRoute = false;
   for (const url of candidates) {
     try {
-      const response = await fetch(url, {
+      const response = await fetchAuthRoute(url, {
         method: "POST",
         headers,
         body: payload,
@@ -808,6 +1121,7 @@ async function establishServerStaffLocalPromotion(localUser: User, password: str
 
 function resolveServerStaffUser(serverUser: ServerSessionUser, identifier: string): User | null {
   if (!isStaffRole(serverUser.role as Role)) return null;
+  hydrateServerStaffAgency(serverUser);
   const local =
     api.users.get(serverUser.id) ??
     localStaffByIdentifier(serverUser.email, serverUser.tenantId) ??
@@ -815,12 +1129,16 @@ function resolveServerStaffUser(serverUser: ServerSessionUser, identifier: strin
   if (local && isStaffRole(local.role)) {
     return {
       ...local,
+      id: serverUser.id,
       tenantId: serverUser.tenantId,
       branchId: serverUser.branchId ?? local.branchId,
       email: serverUser.email,
       businessEmail: local.businessEmail ?? serverUser.email,
       name: serverUser.name || local.name,
-      active: local.active !== false,
+      generatedPassword: undefined,
+      staffAccessStatus: "active",
+      profileCompleted: true,
+      active: true,
     };
   }
   return {
@@ -836,6 +1154,68 @@ function resolveServerStaffUser(serverUser: ServerSessionUser, identifier: strin
     active: true,
     createdAt: new Date().toISOString(),
   };
+}
+
+function resolveServerMasterUser(serverUser: ServerSessionUser, identifier: string, localMaster?: User | null): User {
+  const local =
+    localMaster ??
+    api.users.get(serverUser.id) ??
+    api.users.masterByEmail(serverUser.email) ??
+    api.users.masterByEmail(identifier);
+  return {
+    ...(local ?? {}),
+    id: serverUser.id,
+    tenantId: null,
+    branchId: undefined,
+    role: "master_admin",
+    email: serverUser.email,
+    businessEmail: serverUser.email,
+    name: serverUser.name || local?.name || serverUser.email,
+    generatedPassword: undefined,
+    staffAccessStatus: "active",
+    profileCompleted: true,
+    active: true,
+    createdAt: local?.createdAt ?? new Date().toISOString(),
+  };
+}
+
+function resolveServerCustomerUser(serverUser: ServerSessionUser): User | null {
+  if (serverUser.role !== "customer") return null;
+  const local =
+    api.users.get(serverUser.id) ??
+    api.users
+      .list(serverUser.tenantId ?? undefined)
+      .find((candidate) => candidate.role === "customer" && candidate.email.toLowerCase() === serverUser.email.toLowerCase());
+  return {
+    ...(local ?? {}),
+    id: serverUser.id,
+    tenantId: serverUser.tenantId,
+    branchId: serverUser.branchId ?? local?.branchId,
+    role: "customer",
+    email: serverUser.email,
+    businessEmail: local?.businessEmail ?? serverUser.email,
+    name: serverUser.name || local?.name || serverUser.email,
+    generatedPassword: undefined,
+    profileCompleted: true,
+    active: true,
+    createdAt: local?.createdAt ?? new Date().toISOString(),
+  };
+}
+
+function resolveAnyServerUser(serverUser: ServerSessionUser, cachedUser?: User | null): User | null {
+  if (serverUser.role === "master_admin") {
+    const localMaster =
+      cachedUser?.role === "master_admin"
+        ? cachedUser
+        : api.users.masterByEmail(serverUser.email);
+    return resolveServerMasterUser(serverUser, serverUser.email, localMaster);
+  }
+  if (serverUser.role === "customer") return resolveServerCustomerUser(serverUser);
+  return resolveServerStaffUser(serverUser, serverUser.email);
+}
+
+function isServerAnyUser(value: unknown): value is ServerSessionUser {
+  return isServerMasterUser(value) || isServerStaffUser(value) || isServerCustomerUser(value);
 }
 
 function isServerStaffUser(value: unknown): value is ServerSessionUser {
@@ -859,43 +1239,95 @@ function isServerSessionAgency(value: unknown): value is ServerSessionAgency {
   );
 }
 
+function isServerCustomerUser(value: unknown): value is ServerSessionUser {
+  const user = value as Partial<ServerSessionUser> | null | undefined;
+  return Boolean(
+    user &&
+      typeof user.id === "string" &&
+      typeof user.email === "string" &&
+      typeof user.name === "string" &&
+      (user.tenantId === null || typeof user.tenantId === "string") &&
+      user.role === "customer"
+  );
+}
+
+function isServerMasterUser(value: unknown): value is ServerSessionUser {
+  const user = value as Partial<ServerSessionUser> | null | undefined;
+  return Boolean(
+    user &&
+      typeof user.id === "string" &&
+      typeof user.email === "string" &&
+      typeof user.name === "string" &&
+      user.tenantId === null &&
+      user.role === "master_admin"
+  );
+}
+
+function isPersistableServerUser(value: Partial<User>): value is Partial<User> & Pick<User, "id" | "email" | "name" | "role"> {
+  return Boolean(
+    typeof value.id === "string" &&
+      typeof value.email === "string" &&
+      typeof value.name === "string" &&
+      (isStaffRole(value.role as Role) || value.role === "master_admin" || value.role === "customer")
+  );
+}
+
 function storeServerSessionToken(token: string) {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(AUTH_TOKEN_KEY, token);
-  window.localStorage.setItem(LEGACY_AUTH_TOKEN_KEY, token);
+  if (!safeStorageSet(AUTH_TOKEN_KEY, token)) {
+    safeSessionStorageSet(AUTH_TOKEN_KEY, token);
+  }
+  safeStorageRemove(LEGACY_AUTH_TOKEN_KEY);
+  safeSessionStorageRemove(LEGACY_AUTH_TOKEN_KEY);
+}
+
+function currentServerSessionToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return (
+    safeStorageGet(AUTH_TOKEN_KEY) ||
+    safeSessionStorageGet(AUTH_TOKEN_KEY) ||
+    safeStorageGet(LEGACY_AUTH_TOKEN_KEY) ||
+    safeSessionStorageGet(LEGACY_AUTH_TOKEN_KEY)
+  );
+}
+
+function hasServerSessionToken(): boolean {
+  return Boolean(currentServerSessionToken());
 }
 
 function clearServerSessionToken() {
   if (typeof window === "undefined") return;
-  window.localStorage.removeItem(AUTH_TOKEN_KEY);
-  window.localStorage.removeItem(LEGACY_AUTH_TOKEN_KEY);
+  safeStorageRemove(AUTH_TOKEN_KEY);
+  safeStorageRemove(LEGACY_AUTH_TOKEN_KEY);
+  safeSessionStorageRemove(AUTH_TOKEN_KEY);
+  safeSessionStorageRemove(LEGACY_AUTH_TOKEN_KEY);
   clearServerSessionUser();
 }
 
 function storeServerSessionUser(user: User) {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(SERVER_AUTH_USER_KEY, JSON.stringify(user));
+  const payload = JSON.stringify(user);
+  if (safeStorageSet(SERVER_AUTH_USER_KEY, payload)) {
+    safeSessionStorageRemove(SERVER_AUTH_USER_KEY);
+    return;
+  }
+  safeSessionStorageSet(SERVER_AUTH_USER_KEY, payload);
 }
 
 function loadServerSessionUser(): User | null {
   if (typeof window === "undefined") return null;
-  if (!window.localStorage.getItem(AUTH_TOKEN_KEY) && !window.localStorage.getItem(LEGACY_AUTH_TOKEN_KEY)) {
+  if (!currentServerSessionToken()) {
     clearServerSessionUser();
     return null;
   }
-  const raw = window.localStorage.getItem(SERVER_AUTH_USER_KEY);
+  const raw = safeStorageGet(SERVER_AUTH_USER_KEY) || safeSessionStorageGet(SERVER_AUTH_USER_KEY);
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw) as Partial<User>;
-    if (
-      typeof parsed.id === "string" &&
-      typeof parsed.email === "string" &&
-      typeof parsed.name === "string" &&
-      isStaffRole(parsed.role)
-    ) {
+    if (isPersistableServerUser(parsed)) {
       return {
         id: parsed.id,
-        tenantId: typeof parsed.tenantId === "string" ? parsed.tenantId : null,
+        tenantId: parsed.role === "master_admin" ? null : typeof parsed.tenantId === "string" ? parsed.tenantId : null,
         branchId: typeof parsed.branchId === "string" ? parsed.branchId : undefined,
         role: parsed.role,
         email: parsed.email,
@@ -916,7 +1348,78 @@ function loadServerSessionUser(): User | null {
 
 function clearServerSessionUser() {
   if (typeof window === "undefined") return;
-  window.localStorage.removeItem(SERVER_AUTH_USER_KEY);
+  safeStorageRemove(SERVER_AUTH_USER_KEY);
+  safeSessionStorageRemove(SERVER_AUTH_USER_KEY);
+}
+
+function migrateLegacyAuthStorage() {
+  if (typeof window === "undefined") return;
+  const legacyToken = safeStorageGet(LEGACY_AUTH_TOKEN_KEY) || safeSessionStorageGet(LEGACY_AUTH_TOKEN_KEY);
+  if (!currentServerSessionToken() && legacyToken) {
+    storeServerSessionToken(legacyToken);
+  }
+  safeStorageRemove(LEGACY_AUTH_TOKEN_KEY);
+  safeSessionStorageRemove(LEGACY_AUTH_TOKEN_KEY);
+  safeStorageRemove(STORAGE_KEY);
+}
+
+function isTransientSessionFailure(reason: string | undefined): boolean {
+  return reason === "server_unreachable" || reason === "rate_limited";
+}
+
+function normalizeAuthFailReason(reason: unknown, status?: number): AuthFailReason {
+  if (
+    reason === "invalid_credentials" ||
+    reason === "account_not_found" ||
+    reason === "account_disabled" ||
+    reason === "agency_inactive" ||
+    reason === "password_not_set" ||
+    reason === "rate_limited" ||
+    reason === "server_unreachable" ||
+    reason === "wrong_portal" ||
+    reason === "no_session"
+  ) {
+    return reason;
+  }
+  if (status === 403) return "account_disabled";
+  if (status === 409) return "password_not_set";
+  if (status === 429) return "rate_limited";
+  if (status && status >= 500) return "server_unreachable";
+  return "invalid_credentials";
+}
+
+export function authFailureMessage(reason: AuthFailReason, portal?: "customer" | "staff" | "master"): string {
+  if (reason === "account_disabled") return "This account has been disabled. Contact your administrator.";
+  if (reason === "agency_inactive") return "Your agency's subscription is inactive.";
+  if (reason === "password_not_set") return "Your account doesn't have a password yet. Use Forgot password to set one.";
+  if (reason === "rate_limited") return "Too many attempts. Try again in a minute.";
+  if (reason === "server_unreachable") return "Can't reach the sign-in server. Check your connection and try again.";
+  if (reason === "wrong_portal") {
+    if (portal === "staff") return "This login belongs to a different portal. Use the customer or master sign-in.";
+    if (portal === "customer") return "This login belongs to a different portal. Use the agency staff or master sign-in.";
+    if (portal === "master") return "This login belongs to a different portal. Use the customer or agency staff sign-in.";
+    return "This login belongs to a different portal.";
+  }
+  return "Email or password is incorrect.";
+}
+
+function loadCachedBrowserUser(): User | null {
+  if (typeof window === "undefined") return null;
+  const id = safeStorageGet(STORAGE_KEY);
+  if (id) {
+    const localUser = api.users.get(id);
+    if (localUser && !accessBlockForUser(localUser)) return localUser;
+    const serverUser = loadServerSessionUser();
+    if (serverUser && serverUser.id === id && !accessBlockForUser(serverUser, { trustServerSession: true })) return serverUser;
+    safeStorageRemove(STORAGE_KEY);
+    clearServerSessionUser();
+    return null;
+  }
+
+  const serverUser = loadServerSessionUser();
+  if (serverUser && !accessBlockForUser(serverUser, { trustServerSession: true })) return serverUser;
+  clearServerSessionUser();
+  return null;
 }
 
 function uniqueAuthUrls(values: string[]): string[] {
@@ -933,6 +1436,75 @@ async function readAuthRouteJson(response: Response): Promise<AuthRouteJson | nu
   const contentType = response.headers.get("content-type") ?? "";
   if (!contentType.toLowerCase().includes("application/json")) return null;
   return (await response.json().catch(() => null)) as AuthRouteJson | null;
+}
+
+async function fetchAuthRoute(url: string, init: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), AUTH_REQUEST_TIMEOUT_MS);
+  const headers = new Headers(init.headers ?? {});
+  headers.set("cache-control", "no-store");
+  headers.set("pragma", "no-cache");
+  try {
+    return await fetch(url, { ...init, headers, cache: "no-store", signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+function safeStorageGet(key: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeStorageSet(key: string, value: string): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    window.localStorage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function safeStorageRemove(key: string) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    // Auth should never crash because browser storage is unavailable or full.
+  }
+}
+
+function safeSessionStorageGet(key: string): string | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeSessionStorageSet(key: string, value: string): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    window.sessionStorage.setItem(key, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function safeSessionStorageRemove(key: string) {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.removeItem(key);
+  } catch {
+    // Auth should never crash because browser storage is unavailable or full.
+  }
 }
 
 function isMissingAuthRoute(response: Response, json: AuthRouteJson | null): boolean {

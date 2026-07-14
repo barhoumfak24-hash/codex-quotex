@@ -7,21 +7,25 @@
   "devCommand": "pnpm dev",
   "trailingSlash": false,
   "crons": [
+    { "path": "/api/mailboxes/poll", "schedule": "7 8 * * *" },
     { "path": "/api/app/cron/disaster-recovery", "schedule": "17 8 * * *" }
   ],
   "functions": {
     "api/app.js": {
       "includeFiles": "server/dist/**",
-      "maxDuration": 60
+      "maxDuration": 300
     }
   },
   "rewrites": [
     { "source": "/api/app/:path*", "destination": "/api/app?path=:path*" },
     { "source": "/api/auth/:path*", "destination": "/api/app?path=api/auth/:path*" },
+    { "source": "/api/ai/:path*", "destination": "/api/app?path=api/ai/:path*" },
     { "source": "/api/website/:path*", "destination": "/api/app?path=api/website/:path*" },
     { "source": "/api/communications/:path*", "destination": "/api/app?path=api/communications/:path*" },
+    { "source": "/api/mailboxes/:path*", "destination": "/api/app?path=api/mailboxes/:path*" },
     { "source": "/api/signing-packets/:path*", "destination": "/api/app?path=api/signing-packets/:path*" },
     { "source": "/api/state/:path*", "destination": "/api/app?path=api/state/:path*" },
+    { "source": "/api/stripe/:path*", "destination": "/api/app?path=api/stripe/:path*" },
     { "source": "/((?!api/.*).*)", "destination": "/index.html" }
   ],
   "headers": [

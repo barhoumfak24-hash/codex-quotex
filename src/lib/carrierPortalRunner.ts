@@ -8,6 +8,7 @@ import type {
   QuotingSession,
 } from "@/types";
 import { evaluateAiProductionGate } from "./aiProductionGuards";
+import { carrierPortalRunnerStatus } from "./carrierPortalPlaybooks";
 
 type FieldSource = CarrierPortalFieldMapping["source"];
 
@@ -185,6 +186,10 @@ function validationChecks(input: {
   const checks: CarrierPortalRunnerCheck[] = [];
   const push = (check: CarrierPortalRunnerCheck) => checks.push(check);
   const hasHttpsPortal = !!input.entryUrl && /^https:\/\//i.test(input.entryUrl);
+  const runnerStatus = carrierPortalRunnerStatus(input.carrier);
+  const liveTestedOverride =
+    input.carrier.quotingAutomation?.status === "connected" &&
+    input.carrier.portalPlaybook?.status !== "unsupported";
 
   push({
     label: "Carrier agent portal",
@@ -192,6 +197,16 @@ function validationChecks(input: {
     detail: hasHttpsPortal
       ? `Runner entry point is ${input.entryUrl}.`
       : "A secure HTTPS carrier agent portal URL is required.",
+  });
+  push({
+    label: "Carrier playbook",
+    status: runnerStatus.canAttempt || liveTestedOverride ? "pass" : "block",
+    detail:
+      runnerStatus.canAttempt
+        ? runnerStatus.detail
+        : liveTestedOverride
+          ? "Carrier portal path has been marked connected after live testing for this agency."
+          : runnerStatus.detail,
   });
   push({
     label: "Signed-in browser session",
@@ -344,6 +359,9 @@ export function runCarrierPortalRunner(input: CarrierPortalRunnerInput): Carrier
   const queuedAt = new Date().toISOString();
   const auditEvents = [
     `Runner job ${jobId} prepared for ${input.carrier.name}.`,
+    input.carrier.portalPlaybook?.quotes.length
+      ? `Quote playbook loaded: ${input.carrier.portalPlaybook.quotes.slice(0, 3).join(" -> ")}.`
+      : "No quote playbook loaded; runner must remain manual.",
     `Mapped ${fieldMappings.length} Quotex field${fieldMappings.length === 1 ? "" : "s"} into carrier form fields.`,
     mode === "live_worker"
       ? "Live worker is configured; job requires the agent's existing signed-in browser session and will not use carrier credentials."

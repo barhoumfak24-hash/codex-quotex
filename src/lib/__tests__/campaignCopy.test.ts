@@ -124,6 +124,7 @@ describe("campaignCopy LLM drafting", () => {
   });
 
   it("falls back to the deterministic drafter if the model fails", async () => {
+    vi.stubEnv("VITE_ALLOW_BROWSER_AI_FALLBACKS", "true");
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {

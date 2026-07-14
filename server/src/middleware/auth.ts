@@ -116,7 +116,7 @@ export function assertRequestTenantMatchesAuth(
   return false;
 }
 
-function authenticateRequest(req: Request): AuthContext | null {
+export function authenticateRequest(req: Request): AuthContext | null {
   const token = bearerToken(req);
   if (token) return verifyJwt(token);
   if (process.env.NODE_ENV !== "production" && process.env.ALLOW_DEV_AUTH_HEADERS === "true") {

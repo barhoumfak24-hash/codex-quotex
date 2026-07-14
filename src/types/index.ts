@@ -13,6 +13,8 @@ export type Role =
 
 export type SubscriptionTier = "minimum" | "mid" | "ultra";
 
+export type SoftwareProduct = "full_platform";
+
 export type SoftwareSaleStatus =
   | "checkout_pending"
   | "paid"
@@ -63,6 +65,22 @@ export interface SoftwareSaleSignedAgreement {
   signerUserAgent?: string;
 }
 
+export interface SoftwareSaleRecurringInvoiceEmail {
+  stripeInvoiceId: string;
+  stripeInvoiceNumber?: string | null;
+  stripeInvoiceUrl?: string | null;
+  stripeInvoicePdf?: string | null;
+  stripeSubscriptionId?: string | null;
+  amountPaidUsd: number;
+  currency: string;
+  periodStart?: string | null;
+  periodEnd?: string | null;
+  status: "sent" | "failed";
+  provider: "sendgrid" | "resend" | "smtp" | "twilio" | "unconfigured";
+  sentAt?: string;
+  error?: string;
+}
+
 export interface SoftwareSale {
   id: string;
   agencyName: string;
@@ -70,6 +88,7 @@ export interface SoftwareSale {
   email: string;
   phone?: string;
   website?: string;
+  product?: SoftwareProduct;
   tier: SubscriptionTier;
   seats: number;
   estimatedMonthly: number;
@@ -97,10 +116,24 @@ export interface SoftwareSale {
   signedPacketSubmittedByName?: string;
   signedPacketSubmittedByEmail?: string;
   stripeCheckoutSessionId?: string;
+  stripeCustomerId?: string | null;
+  stripeSubscriptionId?: string | null;
+  stripePaymentStatus?: string | null;
+  stripePaidAt?: string;
+  stripePaymentIssueAt?: string;
+  stripeSubscriptionTermStartedAt?: string | null;
+  stripeSubscriptionTermEndsAt?: string | null;
+  stripeSubscriptionCancelAt?: string | null;
   invoiceEmailSentAt?: string;
   invoiceEmailStatus?: "sent" | "failed";
   invoiceEmailProvider?: "sendgrid" | "resend" | "smtp" | "twilio" | "unconfigured";
   invoiceEmailError?: string;
+  recurringInvoiceEmailLastStripeInvoiceId?: string;
+  recurringInvoiceEmailSentAt?: string;
+  recurringInvoiceEmailStatus?: "sent" | "failed";
+  recurringInvoiceEmailProvider?: "sendgrid" | "resend" | "smtp" | "twilio" | "unconfigured";
+  recurringInvoiceEmailError?: string;
+  recurringInvoiceEmailHistory?: SoftwareSaleRecurringInvoiceEmail[];
   createdAt: string;
   updatedAt: string;
 }
@@ -363,6 +396,12 @@ export interface WebsiteAuthRedirects {
   questionnaireReturn?: string;
 }
 
+export interface AgencyDeactivationSnapshot {
+  capturedAt: string;
+  values: Record<string, unknown>;
+  missingFields: string[];
+}
+
 // ---------------------------------------------------------------------
 // Tenants & users
 // ---------------------------------------------------------------------
@@ -453,6 +492,7 @@ export interface Agency {
   agencyCodePreview: string;
   tier: SubscriptionTier;
   active: boolean;
+  softwareProduct?: SoftwareProduct;
   allowedUsers: number;
   allowedProspectsPerMonth: number;
   allowedAiMessagesPerMonth: number;
@@ -473,6 +513,10 @@ export interface Agency {
   monthlyPriceOverrideUpdatedAt?: string;
   stripeCustomerId?: string;
   stripeSubscriptionId?: string;
+  stripeSubscriptionTermStartedAt?: string;
+  stripeSubscriptionTermEndsAt?: string;
+  stripeSubscriptionCancelAt?: string;
+  deactivationSnapshot?: AgencyDeactivationSnapshot;
   // Manager-configured agency-wide performance targets. The
   // Analytics page plots each goal's current value vs. target so
   // the team can see exactly where they sit relative to the bar
@@ -736,6 +780,9 @@ export interface MailboxOutboxJob {
   subject?: string;
   body: string;
   bodyFormat?: "plain" | "html";
+  replyToMessageIdHeader?: string;
+  references?: string[];
+  externalThreadId?: string;
   attachments?: CommunicationAttachment[];
   idempotencyKey: string;
   status: MailboxOutboxStatus;
@@ -2004,6 +2051,22 @@ export interface Communication {
   externalMessageId?: string;
   externalThreadId?: string;
   externalUrl?: string;
+  // Commercial quote-flow correlation. Carrier replies are linked
+  // back to the exact outbound application/supplemental submission
+  // before AI parses the reply.
+  carrierSubmissionId?: string;
+  bodyHtml?: string;
+  rawMimeRef?: string;
+  rfc822MessageId?: string;
+  messageIdHeader?: string;
+  inReplyToHeader?: string;
+  references?: string[];
+  to?: string[];
+  cc?: string[];
+  bcc?: string[];
+  snippet?: string;
+  isRead?: boolean;
+  mailboxLabels?: string[];
   attachments?: CommunicationAttachment[];
   body: string;
   // Customer-initiated inbound messages (policy edit requests,
@@ -2200,6 +2263,14 @@ export interface QuestionnaireResponseMeta {
   updatedById?: string;
   updatedByName: string;
   updatedByRole: QuestionnaireEditorRole;
+  sourceKind?: PublicDataFieldSourceKind;
+  sourceName?: string;
+  sourceLabel?: string;
+  sourceUrl?: string;
+  confidence?: number;
+  observedDate?: string;
+  verified?: boolean;
+  sourceNotes?: string;
 }
 
 export interface CarrierQuote {
@@ -2423,6 +2494,8 @@ export interface QuotingSession {
   // AI summary that surfaces above the quotes ranking ("These three
   // carriers fit best because…").
   aiSummary?: string;
+  aiProviderError?: string;
+  aiProviderErrorCode?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -2759,9 +2832,11 @@ export type PublicDataFieldSourceKind =
   | "client_intake"
   | "validated_address"
   | "public_geocoder"
+  | "web_search"
   | "public_web"
   | "government_api"
   | "commercial_provider"
+  | "imagery_vision"
   | "carrier_api"
   | "model_estimate"
   | "unknown";
@@ -2770,10 +2845,12 @@ export interface PublicDataFieldEvidence {
   fieldKey: string;
   sourceKind: PublicDataFieldSourceKind;
   sourceLabel: string;
+  sourceUrl?: string;
   confidence: number;
   verified: boolean;
   allowDocumentAutofill: boolean;
   collectedAt: string;
+  observedDate?: string;
   notes?: string;
 }
 
@@ -2812,6 +2889,30 @@ export interface AiExtractedContact {
   summary: string;
   confidence: number;
   sources: string[];
+  fieldEvidence?: Record<
+    string,
+    {
+      fieldKey: string;
+      value: string;
+      sourceKind: "document_text" | "document_vision" | "local_pattern";
+      evidence: string;
+      confidence: number;
+      verified: boolean;
+    }
+  >;
+  outcome?:
+    | "created_ready"
+    | "needs_confirm"
+    | "duplicate_found"
+    | "low_quality_retake"
+    | "password_required"
+    | "unsupported"
+    | "no_client_found"
+    | "error";
+  requiredFieldsPresent?: boolean;
+  autoCreateEligible?: boolean;
+  peopleDetected?: number;
+  extractionWarnings?: string[];
 }
 
 // Returned by the AI policy-document extractor: given an uploaded
