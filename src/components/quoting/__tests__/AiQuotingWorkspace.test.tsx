@@ -18,6 +18,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   if (typeof window !== "undefined" && window.localStorage) window.localStorage.clear();
 });
 
@@ -310,7 +311,22 @@ describe("AiQuotingWorkspace component", () => {
   });
 
   it("leaves ACORD review after sending the commercial application package", async () => {
-    const { api, customer, host, root } = await renderClientQuotingCard();
+    const sendFetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        ok: true,
+        result: {
+          provider: "google",
+          status: "sent",
+          externalMessageId: "provider-message-1",
+          externalThreadId: "provider-thread-1",
+        },
+      }),
+    });
+    vi.stubGlobal("fetch", sendFetch);
+    const { api, agency, customer, host, root } = await renderClientQuotingCard();
 
     await openAiWorkspace(host);
     await click(buttonByText(host, /Commercial lines/i));
@@ -337,11 +353,78 @@ describe("AiQuotingWorkspace component", () => {
     if (draftSendButton) {
       await click(draftSendButton as HTMLButtonElement);
     }
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
 
     const session = api.quoting.getForCustomer(customer.id);
     expect(session?.commercialApplicationSentAt).toBeTruthy();
+    expect(sendFetch).toHaveBeenCalled();
+    const messageIds = (session?.commercialCarrierSubmissions ?? []).flatMap(
+      (submission) => submission.applicationMessageIds ?? []
+    );
+    expect(messageIds.length).toBeGreaterThan(0);
+    const deliveredMessages = new Map(
+      api.communications
+        .listByTenant(agency.id)
+        .map((communication) => [communication.id, communication])
+    );
+    expect(
+      messageIds.every((messageId) => deliveredMessages.get(messageId)?.deliveryStatus === "sent")
+    ).toBe(true);
     expect(host.textContent).not.toContain("Review the ACORD and handle the remaining fields");
     expect(host.querySelector('[role="dialog"]')?.textContent).toContain("AI quoting workspace");
+
+    await act(async () => {
+      root.unmount();
+    });
+    host.remove();
+  });
+
+  it("keeps ACORD review open when the mailbox provider rejects the carrier email", async () => {
+    const sendFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+      statusText: "Service Unavailable",
+      json: async () => ({ ok: false, message: "Provider unavailable" }),
+    });
+    vi.stubGlobal("fetch", sendFetch);
+    const { api, agency, customer, host, root } = await renderClientQuotingCard();
+
+    await openAiWorkspace(host);
+    await click(buttonByText(host, /Commercial lines/i));
+    const acordButton = buttons(host).find((button) =>
+      /^ACORD\s+\d+/i.test((button.textContent ?? "").trim())
+    );
+    await click(acordButton as HTMLButtonElement);
+    await click(buttonByText(host, /Start quote flow/i));
+    await click(buttonByText(host, /^Next$/i));
+    await click(buttonByText(host, /^Next$/i));
+    await click(buttonByText(host, /Proceed anyway/i));
+    await click(buttonByText(host, /View email draft|Send selected carriers/i));
+    await click(buttonByText(host, /Send to selected carriers/i));
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+
+    const session = api.quoting.getForCustomer(customer.id);
+    const messageIds = (session?.commercialCarrierSubmissions ?? []).flatMap(
+      (submission) => submission.applicationMessageIds ?? []
+    );
+    const messages = new Map(
+      api.communications
+        .listByTenant(agency.id)
+        .map((communication) => [communication.id, communication])
+    );
+    expect(sendFetch).toHaveBeenCalled();
+    expect(messageIds.length).toBeGreaterThan(0);
+    expect(messageIds.some((messageId) => messages.get(messageId)?.deliveryStatus === "failed")).toBe(
+      true
+    );
+    expect(host.textContent).toContain("Review the ACORD and handle the remaining fields");
+    expect(host.textContent).toContain(
+      "The carrier email was not delivered. Check the connected mailbox and try again."
+    );
 
     await act(async () => {
       root.unmount();

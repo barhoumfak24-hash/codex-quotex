@@ -47,6 +47,7 @@ import {
 } from "@/lib/emailSignature";
 import { fmt } from "@/lib/format";
 import { fileToCommunicationAttachment, formatAttachmentSize } from "@/lib/messageAttachments";
+import { sendCommunicationThroughLiveMailbox } from "@/lib/liveMailbox";
 import { categoryQuotingQuestions } from "@/lib/categoryQuestionnaires";
 import { type AiGatewayFailureDetail } from "@/lib/aiGateway";
 import { carrierPortalRunnerStatus } from "@/lib/carrierPortalPlaybooks";
@@ -1245,8 +1246,24 @@ type CommercialFlowPage = {
 };
 
 function commercialApplicationSentAt(session: QuotingSession): string | undefined {
+  const submissions = session.commercialCarrierSubmissions ?? [];
+  const applicationMessageIds = Array.from(
+    new Set(submissions.flatMap((submission) => submission.applicationMessageIds ?? []))
+  );
+  if (applicationMessageIds.length > 0) {
+    const communications = new Map(
+      api.communications
+        .listByTenant(session.tenantId)
+        .map((communication) => [communication.id, communication])
+    );
+    const providerConfirmed = applicationMessageIds.every((messageId) => {
+      const status = communications.get(messageId)?.deliveryStatus;
+      return status === "sent" || status === "synced";
+    });
+    if (!providerConfirmed) return undefined;
+  }
   if (session.commercialApplicationSentAt) return session.commercialApplicationSentAt;
-  const applicationSubmission = (session.commercialCarrierSubmissions ?? []).find(
+  const applicationSubmission = submissions.find(
     (submission) =>
       (submission.applicationMessageIds?.length ?? 0) > 0 ||
       (submission.applicationDocumentIds?.length ?? 0) > 0 ||
@@ -1260,6 +1277,52 @@ function commercialApplicationSentAt(session: QuotingSession): string | undefine
       submission.status === "agent_review"
   );
   return applicationSubmission?.sentAt;
+}
+
+async function deliverCommercialCarrierEmails(input: {
+  session: QuotingSession;
+  userId: string;
+  kind: "application" | "supplemental";
+}): Promise<void> {
+  const sender = api.users.get(input.userId);
+  if (!sender || sender.tenantId !== input.session.tenantId) {
+    throw new Error("The sending staff mailbox could not be verified.");
+  }
+
+  const messageIds = Array.from(
+    new Set(
+      (input.session.commercialCarrierSubmissions ?? []).flatMap((submission) =>
+        input.kind === "application"
+          ? submission.applicationMessageIds ?? []
+          : submission.supplementalMessageIds ?? []
+      )
+    )
+  );
+  if (messageIds.length === 0) return;
+
+  const communications = new Map(
+    api.communications
+      .listByTenant(input.session.tenantId)
+      .map((communication) => [communication.id, communication])
+  );
+  const missingMessage = messageIds.find((messageId) => !communications.has(messageId));
+  if (missingMessage) {
+    throw new Error("The carrier email could not be prepared for delivery.");
+  }
+
+  const failures: string[] = [];
+  for (const messageId of messageIds) {
+    const communication = communications.get(messageId)!;
+    const result = await sendCommunicationThroughLiveMailbox({
+      tenantId: input.session.tenantId,
+      user: sender,
+      communication,
+    });
+    if (!result.ok) failures.push(result.message);
+  }
+  if (failures.length > 0) {
+    throw new Error("The connected mailbox did not confirm carrier email delivery.");
+  }
 }
 
 const COMMERCIAL_WORKFLOW_STEPS: WorkflowStepDefinition[] = [
@@ -2517,6 +2580,7 @@ function QuoteNextAction({
     selectedCarrierIds?: string[];
     drafts: CommercialEmailDraft[];
   } | null>(null);
+  const [carrierDeliveryError, setCarrierDeliveryError] = useState<string | null>(null);
   const editor = api.users.get(userId);
   const actor = {
     id: userId,
@@ -2666,6 +2730,7 @@ function QuoteNextAction({
         responses={responses}
         onClose={() => setCarrierSelectOpen(false)}
         onConfirm={(selectedCarrierIds) => {
+          setCarrierDeliveryError(null);
           const drafts = api.quoting.previewCommercialCarrierEmails(
             session.id,
             responses,
@@ -2681,17 +2746,27 @@ function QuoteNextAction({
             });
             return;
           }
-          preserveWindowScroll(() => {
+          void preserveWindowScroll(async () => {
             setBusy("next");
             try {
-              api.quoting.submitQuestionnaireResponses(session.id, responses, actor, {
+              const submitted = api.quoting.submitQuestionnaireResponses(session.id, responses, actor, {
                 selectedCommercialCarrierIds: selectedCarrierIds,
+                awaitLiveMailboxDelivery: true,
+              });
+              if (!submitted) throw new Error("The carrier email could not be prepared.");
+              await deliverCommercialCarrierEmails({
+                session: submitted,
+                userId,
+                kind: "application",
               });
               onChanged?.();
               setCarrierSelectOpen(false);
             } catch (error) {
+              setCarrierDeliveryError(
+                "The carrier email was not delivered. Check the connected mailbox and try again."
+              );
               onFailure?.(
-                quoteWorkspaceFailure("Carrier-send review could not be completed.", error)
+                quoteWorkspaceFailure("Carrier email could not be delivered.", error)
               );
             } finally {
               setBusy(null);
@@ -2706,6 +2781,7 @@ function QuoteNextAction({
         uploadedById={session.createdById}
         drafts={carrierDraftReview?.drafts ?? []}
         busy={busy === "next"}
+        deliveryError={carrierDeliveryError}
         onClose={() => {
           const shouldReturnToCarrierList =
             carrierDraftReview?.kind === "application" &&
@@ -2727,19 +2803,30 @@ function QuoteNextAction({
         }}
         onSubmit={() => {
           if (!carrierDraftReview) return;
-          preserveWindowScroll(() => {
+          setCarrierDeliveryError(null);
+          void preserveWindowScroll(async () => {
             setBusy("next");
             try {
-              api.quoting.submitQuestionnaireResponses(session.id, responses, actor, {
+              const submitted = api.quoting.submitQuestionnaireResponses(session.id, responses, actor, {
                 selectedCommercialCarrierIds: carrierDraftReview.selectedCarrierIds,
                 commercialCarrierEmailDrafts: carrierDraftReview.drafts,
+                awaitLiveMailboxDelivery: true,
+              });
+              if (!submitted) throw new Error("The carrier email could not be prepared.");
+              await deliverCommercialCarrierEmails({
+                session: submitted,
+                userId,
+                kind: carrierDraftReview.kind,
               });
               onChanged?.();
               setCarrierSelectOpen(false);
               setCarrierDraftReview(null);
             } catch (error) {
+              setCarrierDeliveryError(
+                "The carrier email was not delivered. Check the connected mailbox and try again."
+              );
               onFailure?.(
-                quoteWorkspaceFailure("Carrier-send review could not be completed.", error)
+                quoteWorkspaceFailure("Carrier email could not be delivered.", error)
               );
             } finally {
               setBusy(null);
@@ -2800,6 +2887,7 @@ function ManualQuestionnaireModal({
     selectedCarrierIds?: string[];
     drafts: CommercialEmailDraft[];
   } | null>(null);
+  const [carrierDeliveryError, setCarrierDeliveryError] = useState<string | null>(null);
   const editor = api.users.get(userId);
   const actor = {
     id: userId,
@@ -3078,6 +3166,7 @@ function ManualQuestionnaireModal({
       responses={responses}
       onClose={() => setCarrierSelectOpen(false)}
       onConfirm={(selectedCarrierIds) => {
+        setCarrierDeliveryError(null);
         const drafts = api.quoting.previewCommercialCarrierEmails(
           session.id,
           responses,
@@ -3093,15 +3182,26 @@ function ManualQuestionnaireModal({
             });
           return;
         }
-        preserveWindowScroll(() => {
+        void preserveWindowScroll(async () => {
           setBusy("submit");
           try {
-            api.quoting.submitQuestionnaireResponses(session.id, responses, actor, {
+            const submitted = api.quoting.submitQuestionnaireResponses(session.id, responses, actor, {
               selectedCommercialCarrierIds: selectedCarrierIds,
+              awaitLiveMailboxDelivery: true,
+            });
+            if (!submitted) throw new Error("The carrier email could not be prepared.");
+            await deliverCommercialCarrierEmails({
+              session: submitted,
+              userId,
+              kind: "application",
             });
             onChanged?.();
             setCarrierSelectOpen(false);
             onClose();
+          } catch {
+            setCarrierDeliveryError(
+              "The carrier email was not delivered. Check the connected mailbox and try again."
+            );
           } finally {
             setBusy(null);
           }
@@ -3115,6 +3215,7 @@ function ManualQuestionnaireModal({
       uploadedById={session.createdById}
       drafts={carrierDraftReview?.drafts ?? []}
       busy={busy === "submit"}
+      deliveryError={carrierDeliveryError}
       onClose={() => {
         const shouldReturnToCarrierList =
           carrierDraftReview?.kind === "application" &&
@@ -3136,17 +3237,29 @@ function ManualQuestionnaireModal({
       }}
       onSubmit={() => {
         if (!carrierDraftReview) return;
-        preserveWindowScroll(() => {
+        setCarrierDeliveryError(null);
+        void preserveWindowScroll(async () => {
           setBusy("submit");
           try {
-            api.quoting.submitQuestionnaireResponses(session.id, responses, actor, {
+            const submitted = api.quoting.submitQuestionnaireResponses(session.id, responses, actor, {
               selectedCommercialCarrierIds: carrierDraftReview.selectedCarrierIds,
               commercialCarrierEmailDrafts: carrierDraftReview.drafts,
+              awaitLiveMailboxDelivery: true,
+            });
+            if (!submitted) throw new Error("The carrier email could not be prepared.");
+            await deliverCommercialCarrierEmails({
+              session: submitted,
+              userId,
+              kind: carrierDraftReview.kind,
             });
             onChanged?.();
             setCarrierSelectOpen(false);
             setCarrierDraftReview(null);
             onClose();
+          } catch {
+            setCarrierDeliveryError(
+              "The carrier email was not delivered. Check the connected mailbox and try again."
+            );
           } finally {
             setBusy(null);
           }
@@ -3486,6 +3599,7 @@ function CommercialEmailDraftReviewModal({
   uploadedById,
   drafts,
   busy,
+  deliveryError,
   onClose,
   onChangeDraft,
   onSubmit,
@@ -3496,6 +3610,7 @@ function CommercialEmailDraftReviewModal({
   uploadedById?: string;
   drafts: CommercialEmailDraft[];
   busy: boolean;
+  deliveryError?: string | null;
   onClose: () => void;
   onChangeDraft: (
     index: number,
@@ -3701,6 +3816,15 @@ function CommercialEmailDraftReviewModal({
                 />
               </div>
             </div>
+          </div>
+        )}
+
+        {deliveryError && (
+          <div
+            role="alert"
+            className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-800"
+          >
+            {deliveryError}
           </div>
         )}
 

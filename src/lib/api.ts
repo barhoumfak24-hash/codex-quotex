@@ -4191,6 +4191,26 @@ function sortQuotingSessionsByWorkRecency(a: QuotingSession, b: QuotingSession):
 }
 
 function commercialApplicationSentAtForSession(session: QuotingSession): string | undefined {
+  const applicationMessageIds = Array.from(
+    new Set(
+      (session.commercialCarrierSubmissions ?? []).flatMap(
+        (submission) => submission.applicationMessageIds ?? []
+      )
+    )
+  );
+  if (applicationMessageIds.length > 0) {
+    const communications = new Map(
+      db
+        .list("communications")
+        .filter((communication) => communication.tenantId === session.tenantId)
+        .map((communication) => [communication.id, communication])
+    );
+    const providerConfirmed = applicationMessageIds.every((messageId) => {
+      const status = communications.get(messageId)?.deliveryStatus;
+      return status === "sent" || status === "synced";
+    });
+    if (!providerConfirmed) return undefined;
+  }
   if (session.commercialApplicationSentAt) return session.commercialApplicationSentAt;
   const submission = (session.commercialCarrierSubmissions ?? []).find(
     (item) =>
@@ -14721,6 +14741,7 @@ export const api = {
       options?: {
         selectedCommercialCarrierIds?: string[];
         commercialCarrierEmailDrafts?: CommercialUnderwriterEmailDraft[];
+        awaitLiveMailboxDelivery?: boolean;
       }
     ): QuotingSession | null {
       const session = this.get(sessionId);
@@ -14858,6 +14879,9 @@ export const api = {
             status: "quoting",
             updatedAt,
           });
+          if (options?.awaitLiveMailboxDelivery && underwriterEmailCount > 0) {
+            return submittedSession;
+          }
           return this.readCommercialCarrierResponses(sessionId) ?? submittedSession;
         }
         const carrierSubmissions = mergeCommercialSubmissionArtifacts(
