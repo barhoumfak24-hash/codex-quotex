@@ -117,6 +117,7 @@ export function DocumentTemplateFieldOverlay({
   title = "Detected fillable fields",
   fileUrl,
   sourceFileName,
+  renderPdfBackground = true,
   showOnlyFilled = false,
   highlightLabels = [],
   showOnlyHighlighted = false,
@@ -128,6 +129,7 @@ export function DocumentTemplateFieldOverlay({
   title?: string;
   fileUrl?: string;
   sourceFileName?: string;
+  renderPdfBackground?: boolean;
   showOnlyFilled?: boolean;
   highlightLabels?: string[];
   showOnlyHighlighted?: boolean;
@@ -171,7 +173,7 @@ export function DocumentTemplateFieldOverlay({
 
       <div className="mx-auto max-w-[46rem]">
         <div className="relative aspect-[8.5/11] overflow-hidden rounded-sm border border-ink-200 bg-white shadow-sm">
-          {fileUrl ? (
+          {fileUrl && renderPdfBackground ? (
             <object
               aria-label={sourceFileName ? `Original PDF ${sourceFileName}` : "Original PDF"}
               data={pdfViewerUrl(fileUrl)}

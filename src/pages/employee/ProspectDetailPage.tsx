@@ -423,7 +423,6 @@ export function ProspectDetailPage() {
             userId={user.id}
             prospect={prospect}
             onChanged={refresh}
-            variant="launcher"
           />
         </div>
 

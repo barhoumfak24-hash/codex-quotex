@@ -1,18 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { AlertTriangle, ArrowRight, Building2, Check, ClipboardList, Plus, Search, User, X } from "lucide-react";
+import { AlertTriangle, Building2, Check, Plus, Search, User, X } from "lucide-react";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { AddressAutocomplete } from "@/components/ui/AddressAutocomplete";
 import { AiQuotingWorkspace } from "@/components/quoting/AiQuotingWorkspace";
 import { api } from "@/lib/api";
+import { deriveAssetLabel } from "@/lib/assetLabels";
 import { categoryQuestionnaire } from "@/lib/categoryQuestionnaires";
 import { fmt } from "@/lib/format";
-import { deriveAssetLabel } from "@/lib/assetLabels";
 import { subscribeToDbChanges } from "@/lib/db";
 import {
   cleanQuoteAssetDetails,
   primaryQuoteAssetAddress,
 } from "@/lib/quoteAssetIntake";
+import { isVinInputField, normalizeVinFieldValue } from "@/lib/vinInput";
 import type {
   AssetType,
   CategoryQuestion,
@@ -125,13 +126,13 @@ export function ClientQuotingCard({
   userId,
   customer,
   onChanged,
-  variant = "workspace",
+  standalone = false,
 }: {
   tenantId: string;
   userId: string;
   customer: CustomerProfile;
   onChanged?: () => void;
-  variant?: "workspace" | "launcher";
+  standalone?: boolean;
 }) {
   return (
     <ContactQuotingCard
@@ -139,7 +140,7 @@ export function ClientQuotingCard({
       userId={userId}
       contact={{ kind: "client", record: customer }}
       onChanged={onChanged}
-      variant={variant}
+      standalone={standalone}
     />
   );
 }
@@ -149,13 +150,13 @@ export function ProspectQuotingCard({
   userId,
   prospect,
   onChanged,
-  variant = "workspace",
+  standalone = false,
 }: {
   tenantId: string;
   userId: string;
   prospect: Prospect;
   onChanged?: () => void;
-  variant?: "workspace" | "launcher";
+  standalone?: boolean;
 }) {
   return (
     <ContactQuotingCard
@@ -163,7 +164,7 @@ export function ProspectQuotingCard({
       userId={userId}
       contact={{ kind: "prospect", record: prospect }}
       onChanged={onChanged}
-      variant={variant}
+      standalone={standalone}
     />
   );
 }
@@ -173,7 +174,7 @@ function ContactQuotingCard({
   userId,
   contact,
   onChanged,
-  variant,
+  standalone,
 }: {
   tenantId: string;
   userId: string;
@@ -181,7 +182,7 @@ function ContactQuotingCard({
     | { kind: "client"; record: CustomerProfile }
     | { kind: "prospect"; record: Prospect };
   onChanged?: () => void;
-  variant: "workspace" | "launcher";
+  standalone: boolean;
 }) {
   const location = useLocation();
   const [, setRev] = useState(0);
@@ -252,25 +253,36 @@ function ContactQuotingCard({
     selectedNewCategoryId
       ? selectedLineCategoryOptions.find((option) => option.id === selectedNewCategoryId)
       : undefined;
+  const defaultCommercialAssetCategory =
+    selectedLineCategoryOptions.find((option) => option.assetType === "other") ??
+    selectedLineCategoryOptions[0] ??
+    FALLBACK_ASSET_CATEGORY_OPTIONS.find((option) => option.lineOfBusiness === "commercial") ??
+    FALLBACK_ASSET_CATEGORY_OPTIONS[FALLBACK_ASSET_CATEGORY_OPTIONS.length - 1];
+  const assetCreationCategory =
+    selectedNewCategory ??
+    (selectedLineOfBusiness === "commercial" ? defaultCommercialAssetCategory : undefined);
   const newAssetType: AssetType =
-    selectedNewCategory?.assetType ?? existing?.assetType ?? prospect?.assetType ?? defaultNewCategory.assetType;
+    assetCreationCategory?.assetType ?? existing?.assetType ?? prospect?.assetType ?? defaultNewCategory.assetType;
+  const allAvailableAssets = [...assets, ...prospectDraftAssets];
   const matchingAssets = selectedNewCategory
-    ? [...assets, ...prospectDraftAssets].filter((asset) => asset.type === selectedNewCategory.assetType)
+    ? allAvailableAssets.filter((asset) => asset.type === selectedNewCategory.assetType)
+    : selectedLineOfBusiness === "commercial"
+    ? allAvailableAssets
     : [];
 
   const selectedAssets = selectedAssetIds
-    .map((id) => [...assets, ...prospectDraftAssets].find((asset) => asset.id === id))
+    .map((id) => allAvailableAssets.find((asset) => asset.id === id))
     .filter((asset): asset is Asset => !!asset);
   const isNoAssetSelection = !existing && selectedAssetIds.length === 0;
-  const hasSelectedQuoteAsset = !!existing || (!!selectedNewCategory && selectedAssetIds.length > 0);
+  const hasSelectedQuoteAsset = !!existing || selectedAssetIds.length > 0;
   const pickedAsset = selectedAssets[0] ?? null;
   const assetType: AssetType = pickedAsset ? pickedAsset.type : selectedNewCategory ? newAssetType : "other";
   const newAssetDetailQuestions = useMemo(
-    () => (selectedNewCategory ? categoryQuestionnaire(selectedNewCategory) : []),
-    [selectedNewCategory?.id]
+    () => (assetCreationCategory ? categoryQuestionnaire(assetCreationCategory) : []),
+    [assetCreationCategory?.id]
   );
   const newAssetCategoryDetails =
-    showNewAssetForm && selectedNewCategory
+    showNewAssetForm && assetCreationCategory
       ? cleanCategoryQuestionAnswers(newAssetDetailQuestions, newAssetDetails)
       : {};
   const parsedNewAssetValue = Number(newAssetValue);
@@ -292,7 +304,7 @@ function ContactQuotingCard({
     primaryQuoteAssetAddress(assetType, assetDetails) ??
     prospectiveQuoteAddress ??
     customer?.mailingAddress;
-  const newAssetMissingQuestions = showNewAssetForm && selectedNewCategory
+  const newAssetMissingQuestions = showNewAssetForm && assetCreationCategory
     ? missingRequiredCategoryQuestions(newAssetDetailQuestions, newAssetDetails)
     : [];
   const newAssetMissingQuestionKeys = new Set(
@@ -319,11 +331,26 @@ function ContactQuotingCard({
     : selectedNewCategory
     ? "Required"
     : "Pending";
-  const isWaitingForRequiredCategory =
-    !existing && (!selectedLineOfBusiness || (selectedLineOfBusiness === "personal" && !selectedNewCategory));
 
   function setNewAssetDetail(key: string, value: string) {
-    setNewAssetDetails((current) => ({ ...current, [key]: value }));
+    const question = newAssetDetailQuestions.find((item) => item.key === key);
+    setNewAssetDetails((current) => ({
+      ...current,
+      [key]: normalizeVinFieldValue({ key, label: question?.label }, value),
+    }));
+  }
+
+  function handleSetupLineChange(line: QuotingLineOfBusiness) {
+    setSelectedLineOfBusiness((current) => {
+      if (current === line) return current;
+      setSelectedNewCategoryId(null);
+      setSelectedAssetIds([]);
+      setNewAssetDetails({});
+      setAssetCategorySearch("");
+      setAssetSearch("");
+      setShowNewAssetForm(false);
+      return line;
+    });
   }
 
   function toggleAsset(assetId: string) {
@@ -339,7 +366,7 @@ function ContactQuotingCard({
   }
 
   function createNewAsset() {
-    if (!selectedNewCategory || newAssetMissingQuestions.length > 0) return;
+    if (!assetCreationCategory || newAssetMissingQuestions.length > 0) return;
     const details = newAssetCategoryDetails;
     const parsedEstimatedValue = Number(newAssetValue);
     const estimatedAssetValue =
@@ -347,14 +374,14 @@ function ContactQuotingCard({
         ? parsedEstimatedValue
         : 0;
     const label =
-      deriveAssetLabel(selectedNewCategory.assetType, details) ||
-      `New ${selectedNewCategory.label}`;
+      deriveAssetLabel(assetCreationCategory.assetType, details) ||
+      `New ${assetCreationCategory.label}`;
     const customerIdForAsset = customer?.id ?? prospect?.customerId;
     const asset = customerIdForAsset
       ? api.assets.create({
           tenantId,
           customerId: customerIdForAsset,
-          type: selectedNewCategory.assetType,
+          type: assetCreationCategory.assetType,
           label,
           estimatedValue: estimatedAssetValue,
           details,
@@ -364,7 +391,7 @@ function ContactQuotingCard({
           id: `prospect_draft_asset_${Date.now()}`,
           tenantId,
           customerId: "",
-          type: selectedNewCategory.assetType,
+          type: assetCreationCategory.assetType,
           label,
           estimatedValue: estimatedAssetValue,
           details: {
@@ -377,7 +404,7 @@ function ContactQuotingCard({
         };
     if (!customerIdForAsset) {
       setProspectDraftAssets((current) => [asset, ...current.filter((row) => row.id !== asset.id)]);
-    } else if (selectedNewCategory.assetType === "luxury_vehicle") {
+    } else if (assetCreationCategory.assetType === "luxury_vehicle") {
       api.assets.upgradeVehicleLabelFromVin(asset.id, asset.label);
     }
     setSelectedAssetIds((current) => [asset.id, ...current.filter((id) => id !== asset.id)]);
@@ -387,6 +414,12 @@ function ContactQuotingCard({
     refresh();
   }
 
+  function cancelNewAsset() {
+    setShowNewAssetForm(false);
+    setNewAssetDetails({});
+    setNewAssetValue("");
+  }
+
   function resetImplementedQuote() {
     if (!existing) return;
     api.quoting.reset(existing.id);
@@ -394,54 +427,147 @@ function ContactQuotingCard({
     refresh();
   }
 
-  if (variant === "launcher") {
-    const quoteFlowPath =
-      contact.kind === "client"
-        ? `/employee/clients/${contactId}/quote-flow`
-        : `/employee/prospects/${contactId}/quote-flow`;
-    const lineLabel =
-      existing?.lineOfBusiness === "commercial"
-        ? "Commercial lines"
-        : existing?.lineOfBusiness === "personal"
-        ? "Personal lines"
-        : selectedLineOfBusiness === "commercial"
-        ? "Commercial lines"
-        : selectedLineOfBusiness === "personal"
-        ? "Personal lines"
-        : "Setup pending";
-    const actionLabel = existing ? "Continue quote flow" : "Start quote flow";
+  const setupDetailControls = selectedLineOfBusiness ? (
+    <div className="space-y-4">
+      <div>
+        <label className="label">
+          Category{selectedLineOfBusiness === "commercial" ? " (optional)" : ""}
+        </label>
+        <AssetCategorySearchPicker
+          options={selectedLineCategoryOptions}
+          selectedId={selectedNewCategory?.id}
+          search={assetCategorySearch}
+          onSearchChange={setAssetCategorySearch}
+          onSelect={(option) => {
+            if (option.id === selectedNewCategoryId) {
+              setSelectedNewCategoryId(null);
+              setSelectedAssetIds([]);
+              setNewAssetDetails({});
+              setAssetSearch("");
+              setShowNewAssetForm(false);
+              return;
+            }
+            setSelectedNewCategoryId(option.id);
+            setSelectedAssetIds([]);
+            setNewAssetDetails({});
+            setAssetSearch("");
+            setShowNewAssetForm(false);
+          }}
+        />
+      </div>
 
-    return (
-      <Card id="ai-quoting-workspace" className="relative">
-        <div className="flex items-start gap-4">
-          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md border border-gold-200 bg-gold-50 text-gold-700">
-            <ClipboardList className="h-6 w-6" />
-          </div>
-          <div className="min-w-0">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-gold-700">
-              AI quoting workspace
+      {selectedNewCategory || selectedLineOfBusiness === "commercial" ? (
+        <div>
+          <label className="label">
+            Asset{selectedLineOfBusiness === "commercial" ? " (optional)" : ""}
+          </label>
+          <AssetMultiSelectPicker
+            assets={matchingAssets}
+            selectedIds={selectedAssetIds}
+            search={assetSearch}
+            onSearchChange={setAssetSearch}
+            onToggle={toggleAsset}
+            onMakePrimary={makePrimaryAsset}
+            onCreateNew={() => setShowNewAssetForm((value) => !value)}
+            creatingNew={showNewAssetForm}
+          />
+          {matchingAssets.length === 0 && (
+            <div className="mt-2 rounded-md border border-ink-100 bg-white px-3 py-2 text-xs text-ink-500">
+              No matching assets.
             </div>
-            <h3 className="mt-1 text-lg font-semibold text-ink-900">AI Quoting Workspace</h3>
-            <p className="mt-1 text-sm text-ink-500">
-              {lineLabel} - {existing ? "Quote flow in progress" : "Ready to start"}
-            </p>
+          )}
+        </div>
+      ) : null}
+
+      {showNewAssetForm && assetCreationCategory && (
+        <div className="space-y-3">
+          <div>
+            <label className="label">Estimated value</label>
+            <input
+              type="number"
+              className="input"
+              value={newAssetValue}
+              onChange={(e) => setNewAssetValue(e.target.value)}
+            />
+          </div>
+
+          <div className="rounded-md border border-ink-100 bg-white p-3">
+            <div className="mb-3">
+              <div className="text-xs font-semibold uppercase tracking-wider text-ink-500">
+                Lookup details
+              </div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              {newAssetDetailQuestions.map((question) => (
+                <CategoryQuestionDetailField
+                  key={question.key}
+                  question={question}
+                  value={newAssetDetails[question.key] ?? ""}
+                  onChange={(value) => setNewAssetDetail(question.key, value)}
+                  missing={newAssetMissingQuestionKeys.has(question.key)}
+                />
+              ))}
+            </div>
+            {newAssetMissingQuestions.length > 0 && (
+              <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+                {newAssetMissingQuestions
+                  .map((question) => `${question.label} is required.`)
+                  .join(" ")}
+              </div>
+            )}
+            <div className="mt-3 flex justify-end gap-2">
+              <button
+                type="button"
+                className="btn-outline text-sm"
+                onClick={cancelNewAsset}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn-primary text-sm"
+                onClick={createNewAsset}
+                disabled={newAssetMissingQuestions.length > 0}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Add asset
+              </button>
+            </div>
           </div>
         </div>
-        <div className="mt-5 flex justify-end">
-          <Link to={quoteFlowPath} className="btn-primary text-sm inline-flex">
-            {actionLabel}
-            <ArrowRight className="h-3.5 w-3.5" />
-          </Link>
+      )}
+
+      {selectedNewCategory?.lineOfBusiness === "personal" && isNoAssetSelection && (
+        <div className="rounded-md border border-ink-100 bg-white px-3 py-2 text-xs text-ink-500">
+          Asset required.
         </div>
-      </Card>
-    );
-  }
+      )}
+
+      <div className="rounded-md border border-blue-100 bg-blue-50/60 px-3 py-2 text-xs text-blue-950">
+        <div className="font-semibold">Workflow setup summary</div>
+        <dl className="mt-2 grid gap-1 sm:grid-cols-3">
+          <div>
+            <dt className="text-blue-700">Line</dt>
+            <dd className="font-medium text-ink-900">{setupLineLabel}</dd>
+          </div>
+          <div>
+            <dt className="text-blue-700">Category</dt>
+            <dd className="font-medium text-ink-900">{setupCategoryLabel}</dd>
+          </div>
+          <div>
+            <dt className="text-blue-700">Asset</dt>
+            <dd className="font-medium text-ink-900">{setupAssetLabel}</dd>
+          </div>
+        </dl>
+      </div>
+    </div>
+  ) : null;
 
   return (
     <Card id="ai-quoting-workspace" className="relative">
       <CardHeader title="AI quoting workspace" />
 
-      {!existing && (
+      {false && !existing && (
         <div key="quote-setup" className="rounded-md border border-ink-100 bg-ink-50/40 p-3 mb-4 space-y-3">
           <div>
             <label className="label">Policy type / line</label>
@@ -478,34 +604,8 @@ function ContactQuotingCard({
             </div>
           </div>
 
-          {selectedLineOfBusiness ? (
-          <div>
-            <label className="label">
-              Category{selectedLineOfBusiness === "commercial" ? " (optional)" : ""}
-            </label>
-            <AssetCategorySearchPicker
-              options={selectedLineCategoryOptions}
-              selectedId={selectedNewCategory?.id}
-              search={assetCategorySearch}
-              onSearchChange={setAssetCategorySearch}
-              onSelect={(option) => {
-                if (option.id === selectedNewCategoryId) {
-                  setSelectedNewCategoryId(null);
-                  setSelectedAssetIds([]);
-                  setNewAssetDetails({});
-                  setAssetSearch("");
-                  setShowNewAssetForm(false);
-                  return;
-                }
-                setSelectedNewCategoryId(option.id);
-                setSelectedAssetIds([]);
-                setNewAssetDetails({});
-                setAssetSearch("");
-                setShowNewAssetForm(false);
-              }}
-            />
-          </div>
-          ) : null}
+          {false && (
+            <>
           {selectedNewCategory ? (
           <div>
             <label className="label">Asset</label>
@@ -611,6 +711,8 @@ function ContactQuotingCard({
               </dl>
             </div>
           )}
+            </>
+          )}
         </div>
       )}
 
@@ -664,8 +766,6 @@ function ContactQuotingCard({
             </div>
           </div>
         </div>
-      ) : isWaitingForRequiredCategory ? (
-        null
       ) : (
         <AiQuotingWorkspace
           key="ai-quoting-workspace"
@@ -685,11 +785,14 @@ function ContactQuotingCard({
             intakeWarnings,
             personalLinesAssetRequired: true,
             personalLinesAssetSelected: hasSelectedQuoteAsset,
-            lineOfBusiness: selectedLineOfBusiness ?? selectedNewCategory?.lineOfBusiness,
+            lineOfBusiness: existing?.lineOfBusiness,
           }}
           onChanged={refresh}
+          onSetupLineOfBusinessChange={handleSetupLineChange}
+          setupControls={setupDetailControls}
           deepLinkExpanded={shouldExpandFocusedQuoteWorkspace}
-          deepLinkFocusKey={quoteWorkspaceFocusKey}
+          deepLinkFocusKey={`${quoteWorkspaceFocusKey}:${selectedLineOfBusiness ?? "none"}`}
+          standalone={standalone}
         />
       )}
     </Card>
@@ -768,8 +871,12 @@ function CategoryQuestionDetailField({
             question.inputType === "number" || question.inputType === "currency" ? 0 : undefined
           }
           value={value}
-          onChange={(event) => onChange(event.target.value)}
+          onChange={(event) =>
+            onChange(normalizeVinFieldValue({ key: question.key, label: question.label }, event.target.value))
+          }
           placeholder={question.placeholder}
+          autoCapitalize={isVinInputField(question) ? "characters" : undefined}
+          spellCheck={isVinInputField(question) ? false : undefined}
         />
       )}
       {missing && (

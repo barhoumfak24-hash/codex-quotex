@@ -1013,7 +1013,6 @@ export function ClientDetailPage() {
             userId={user.id}
             customer={customer}
             onChanged={refresh}
-            variant="launcher"
           />
         </div>
 

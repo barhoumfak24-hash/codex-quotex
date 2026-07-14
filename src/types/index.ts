@@ -1194,10 +1194,30 @@ export interface Carrier {
     lastTestedAt?: string;
     notes?: string;
   };
+  portalPlaybook?: CarrierPortalPlaybook;
   status: "active" | "inactive";
   createdAt: string;
   importBatchId?: string;
   createdByImport?: boolean;
+}
+
+export type CarrierPortalPlaybookStatus =
+  | "configured"
+  | "needs_verification"
+  | "unsupported";
+
+export interface CarrierPortalPlaybook {
+  status: CarrierPortalPlaybookStatus;
+  agentPortalUrl?: string;
+  sourceUrls: string[];
+  documents: string[];
+  claims: string[];
+  quotes: string[];
+  stopConditions: string[];
+  forbiddenActions: string[];
+  notes?: string;
+  verifiedAt?: string;
+  verifiedBy?: string;
 }
 
 // Personal vs commercial line of business. Mirrors the Policy
@@ -2067,9 +2087,42 @@ export type CommercialCarrierSubmissionStatus =
   | "declined"
   | "needs_supplemental"
   | "supplemental_sent"
-  | "needs_client_info";
+  | "needs_client_info"
+  | "agent_review";
+
+export interface CommercialCarrierSubmissionQuote {
+  outcome:
+    | "accepted"
+    | "quoted"
+    | "declined"
+    | "pending"
+    | "more_info_required";
+  policyType?: string;
+  coverages?: {
+    label: string;
+    limit?: string;
+    premium?: string;
+    deductible?: string;
+    terms?: string;
+    sourceText?: string;
+  }[];
+  limits?: string[];
+  premiums?: string[];
+  deductibles?: string[];
+  terms?: string[];
+  carrierNotes?: string[];
+  conditions?: string[];
+  nextSteps?: string[];
+  requestedItems?: string[];
+  declineReason?: string;
+  supplementalAttachmentIds?: string[];
+  evidenceSnippets?: string[];
+  parsedAt: string;
+  confidence: number;
+}
 
 export interface CommercialCarrierSubmission {
+  submissionId?: string;
   carrierId: string;
   status: CommercialCarrierSubmissionStatus;
   sentAt: string;
@@ -2081,14 +2134,25 @@ export interface CommercialCarrierSubmission {
   underwriterContactIds?: string[];
   applicationDocumentIds?: string[];
   applicationMessageIds?: string[];
+  applicationThreadIds?: string[];
+  applicationExternalThreadIds?: string[];
   supplementalMessageIds?: string[];
   supplementalDocumentIds?: string[];
+  supplementalThreadIds?: string[];
+  supplementalExternalThreadIds?: string[];
+  replyCommunicationIds?: string[];
   submissionMethod?: "carrier_portal_automation" | "underwriter_email" | "manual_workflow";
   connectorLabel?: string;
   automationJobId?: string;
   automationTrace?: CarrierPortalRunnerTrace;
   missingFields?: string[];
   declinedReason?: string;
+  premiumEstimate?: number;
+  finalPremium?: number;
+  underwriterNotes?: string;
+  quote?: CommercialCarrierSubmissionQuote;
+  parseConfidence?: number;
+  agentReviewReason?: string;
 }
 
 export interface CommercialCarrierRecommendation {

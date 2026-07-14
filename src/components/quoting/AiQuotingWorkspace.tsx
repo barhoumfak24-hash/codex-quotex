@@ -1,4 +1,5 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -9,7 +10,6 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
-  ChevronUp,
   ClipboardList,
   ExternalLink,
   FileCheck2,
@@ -47,19 +47,22 @@ import {
 } from "@/lib/emailSignature";
 import { fmt } from "@/lib/format";
 import { fileToCommunicationAttachment, formatAttachmentSize } from "@/lib/messageAttachments";
-import type { AiGatewayFailureDetail } from "@/lib/aiGateway";
+import { categoryQuotingQuestions } from "@/lib/categoryQuestionnaires";
+import { type AiGatewayFailureDetail } from "@/lib/aiGateway";
+import { carrierPortalRunnerStatus } from "@/lib/carrierPortalPlaybooks";
 import {
   quoteMatchBadgeClass,
   quoteMatchCriteriaTitle,
   quoteMatchPercent,
 } from "@/lib/quoteMatch";
-import { scrollAnchorIntoView } from "@/lib/scrollAnchors";
+import { isVinInputField, normalizeVinFieldValue } from "@/lib/vinInput";
 import type {
   AssetType,
   CarrierQuote,
   CommunicationAttachment,
   CommercialCarrierRecommendation,
   Document,
+  InsuranceCategory,
   QuestionnaireResponseMeta,
   QuotingLineOfBusiness,
   QuotingQuestion,
@@ -88,8 +91,16 @@ function preserveWindowScroll<T>(action: () => T): T {
   const parentLeft = scrollParent?.scrollLeft;
   const left = window.scrollX;
   const top = window.scrollY;
+  let restoreAttempts = 0;
   const restore = () => {
-    if (document.querySelector('[role="dialog"]')) return;
+    if (typeof window === "undefined" || typeof document === "undefined") return;
+    if (document.querySelector('[role="dialog"]')) {
+      if (restoreAttempts < 4) {
+        restoreAttempts += 1;
+        window.setTimeout(restore, 60);
+      }
+      return;
+    }
     if (
       scrollParent &&
       typeof parentTop === "number" &&
@@ -145,6 +156,126 @@ function quoteWorkspaceFailure(message: string, error: unknown): AiGatewayFailur
 }
 
 type QuotingLineSelection = "none" | QuotingLineOfBusiness;
+type AiMappingProgressMode = "start" | "next";
+
+interface AiMappingProgress {
+  id: string;
+  mode: AiMappingProgressMode;
+}
+
+const MAX_MAPPING_PROGRESS_ITEMS = 48;
+const COMMERCIAL_START_MAPPING_LABELS = [
+  "agency information",
+  "insured contact information",
+  "business identity",
+  "policy and effective dates",
+  "selected ACORD fields",
+  "public records",
+  "remaining required fields",
+];
+const PERSONAL_FALLBACK_MAPPING_LABELS = [
+  "property address",
+  "occupancy",
+  "year built",
+  "square footage",
+  "roof material",
+  "public records",
+];
+
+function cleanMappingLabel(label: string | undefined): string {
+  return (label ?? "")
+    .replace(/[â€“â€”]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function humanizeMappingKey(key: string): string {
+  const cleaned = cleanMappingLabel(key)
+    .replace(/[_-]+/g, " ")
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .trim();
+  if (!cleaned) return "";
+  return cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+}
+
+function dedupeMappingLabels(labels: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  labels.forEach((label) => {
+    const cleaned = cleanMappingLabel(label);
+    const key = cleaned.toLowerCase();
+    if (!cleaned || seen.has(key)) return;
+    seen.add(key);
+    out.push(cleaned);
+  });
+  return out.slice(0, MAX_MAPPING_PROGRESS_ITEMS);
+}
+
+function mappingLabelsForTemplate(template: Document): string[] {
+  const layoutLabels = (template.templateFieldLayout ?? [])
+    .map((field) => field.label)
+    .filter((label) => !/^(source|generated|completed|template|file|download|storage)\b/i.test(label));
+  if (layoutLabels.length > 0) return layoutLabels;
+  return Object.keys(template.templateFields ?? {})
+    .filter((key) => !/^(source|generated|completed|template|file|download|storage)\b/i.test(key))
+    .map(humanizeMappingKey);
+}
+
+function mappingLabelsForStart(input: {
+  lineOfBusiness: QuotingLineSelection;
+  category?: InsuranceCategory;
+  selectedCommercialTemplates: Document[];
+  contact: {
+    assetDetails?: Record<string, string>;
+    address?: string;
+    estimatedValue?: number;
+  };
+}): string[] {
+  const categoryLabels =
+    input.category && input.category.lineOfBusiness === input.lineOfBusiness
+      ? categoryQuotingQuestions(input.category).map((question) => question.label)
+      : [];
+  const assetDetailLabels = Object.keys(input.contact.assetDetails ?? {}).map(humanizeMappingKey);
+  const contactLabels = [
+    input.contact.address ? "address" : "",
+    typeof input.contact.estimatedValue === "number" && input.contact.estimatedValue > 0
+      ? "estimated value"
+      : "",
+  ];
+  const commercialTemplateLabels = input.selectedCommercialTemplates.flatMap((template) => [
+    template.documentName || template.fileName,
+    ...mappingLabelsForTemplate(template),
+  ]);
+  return dedupeMappingLabels([
+    ...categoryLabels,
+    ...assetDetailLabels,
+    ...contactLabels,
+    ...(input.lineOfBusiness === "commercial"
+      ? [...COMMERCIAL_START_MAPPING_LABELS, ...commercialTemplateLabels]
+      : PERSONAL_FALLBACK_MAPPING_LABELS),
+  ]);
+}
+
+function mappingLabelsForSession(session: QuotingSession): string[] {
+  const visibleQuestions = visibleQuestionnaireQuestions(session);
+  const questions = visibleQuestions.length > 0 ? visibleQuestions : session.questionnaireQuestions ?? [];
+  const questionLabels = questions.map((question) => question.label);
+  const publicFieldLabels = Object.keys(session.publicFields ?? {}).map(humanizeMappingKey);
+  const assetDetailLabels = Object.keys(session.assetDetails ?? {}).map(humanizeMappingKey);
+  const commercialTemplateLabels = (session.commercialAcordTemplates ?? []).flatMap((template) => [
+    template.documentName || template.fileName,
+    template.formNumber ? `ACORD ${template.formNumber}` : "",
+  ]);
+  return dedupeMappingLabels([
+    ...questionLabels,
+    ...(session.missingFields ?? []),
+    ...assetDetailLabels,
+    ...publicFieldLabels,
+    ...(session.lineOfBusiness === "commercial"
+      ? [...COMMERCIAL_START_MAPPING_LABELS, ...commercialTemplateLabels]
+      : PERSONAL_FALLBACK_MAPPING_LABELS),
+  ]);
+}
 
 // =====================================================================
 // AI quoting workspace. Replaces the old "Quote data" card on the
@@ -163,8 +294,11 @@ export function AiQuotingWorkspace({
   contact,
   onChanged,
   onReset,
+  onSetupLineOfBusinessChange,
   deepLinkExpanded = false,
   deepLinkFocusKey,
+  setupControls,
+  standalone = false,
 }: {
   tenantId: string;
   userId: string;
@@ -187,11 +321,15 @@ export function AiQuotingWorkspace({
   };
   onChanged?: () => void;
   onReset?: () => void;
+  onSetupLineOfBusinessChange?: (line: QuotingLineOfBusiness) => void;
   deepLinkExpanded?: boolean;
   deepLinkFocusKey?: string;
+  setupControls?: ReactNode;
+  standalone?: boolean;
 }) {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [busy, setBusy] = useState<null | string>(null);
-  const [aiFailure, setAiFailure] = useState<AiGatewayFailureDetail | null>(null);
   const [, setDbRev] = useState(0);
   const lockedLineOfBusiness = contact.lineOfBusiness;
   const [lineOfBusiness, setLineOfBusiness] = useState<QuotingLineSelection>(
@@ -200,18 +338,61 @@ export function AiQuotingWorkspace({
   const [selectedAcordTemplateIds, setSelectedAcordTemplateIds] = useState<string[]>([]);
   const [highlightedCommercialMissingQuestions, setHighlightedCommercialMissingQuestions] =
     useState<QuotingQuestion[]>([]);
-  const [workspaceCollapsed, setWorkspaceCollapsed] = useState(!deepLinkExpanded);
+  const [workspaceOpen, setWorkspaceOpen] = useState(deepLinkExpanded);
+  const [mappingProgress, setMappingProgress] = useState<AiMappingProgress | null>(null);
+  const [setupMappingInFlight, setSetupMappingInFlight] = useState(false);
   const activeContactIdRef = useRef(contact.id);
+  const mappingClearTimerRef = useRef<number | null>(null);
+  const handleAiFailure = (failure: AiGatewayFailureDetail) => {
+    console.warn("[quotex-ai-quoting-workspace] AI diagnostic retained outside UI", failure);
+  };
+  const syncWorkspaceRoute = (expanded: boolean) => {
+    if (standalone) return;
+    const params = new URLSearchParams(location.search);
+    if (expanded) {
+      params.set("quoteWorkspace", "expanded");
+    } else {
+      params.delete("quoteWorkspace");
+    }
+    const search = params.toString();
+    const nextSearch = search ? `?${search}` : "";
+    if (nextSearch === location.search) return;
+    navigate(
+      {
+        pathname: location.pathname,
+        search: nextSearch,
+        hash: location.hash,
+      },
+      { replace: true }
+    );
+  };
+  const openWorkspace = () => {
+    setWorkspaceOpen(true);
+    syncWorkspaceRoute(true);
+  };
+  const closeWorkspace = () => {
+    preserveWindowScroll(() => {
+      setWorkspaceOpen(false);
+      syncWorkspaceRoute(false);
+    });
+  };
   useEffect(() => subscribeToDbChanges(() => setDbRev((r) => r + 1)), []);
+  useEffect(() => {
+    return () => {
+      if (mappingClearTimerRef.current !== null) {
+        window.clearTimeout(mappingClearTimerRef.current);
+      }
+    };
+  }, []);
   useEffect(() => {
     const onFailure = (event: Event) => {
       const detail = (event as CustomEvent<AiGatewayFailureDetail>).detail;
       if (!detail?.path) return;
       if (detail.path !== "/ai/acord-map" && detail.path !== "/ai/enrich-asset") return;
-      setAiFailure(detail);
+      handleAiFailure(detail);
     };
-    window.addEventListener("quotex:ai-gateway-failure", onFailure);
-    return () => window.removeEventListener("quotex:ai-gateway-failure", onFailure);
+    window.addEventListener("quotex-ai-gateway-failure", onFailure);
+    return () => window.removeEventListener("quotex-ai-gateway-failure", onFailure);
   }, []);
   const session =
     contact.kind === "prospect"
@@ -224,32 +405,16 @@ export function AiQuotingWorkspace({
   }, [lockedLineOfBusiness]);
   useEffect(() => {
     setHighlightedCommercialMissingQuestions([]);
-    setAiFailure(null);
   }, [session?.id]);
   useEffect(() => {
     if (activeContactIdRef.current !== contact.id) {
       activeContactIdRef.current = contact.id;
-      setWorkspaceCollapsed(!deepLinkExpanded);
+      setWorkspaceOpen(deepLinkExpanded);
     }
   }, [contact.id, deepLinkExpanded]);
   useEffect(() => {
     if (!deepLinkExpanded) return;
-    setWorkspaceCollapsed(false);
-
-    const centerWorkspace = () => {
-      scrollAnchorIntoView(document.getElementById("ai-quoting-workspace"), {
-        behavior: "smooth",
-        block: "center",
-      });
-    };
-    const first = window.setTimeout(centerWorkspace, 120);
-    const second = window.setTimeout(centerWorkspace, 360);
-    const third = window.setTimeout(centerWorkspace, 800);
-    return () => {
-      window.clearTimeout(first);
-      window.clearTimeout(second);
-      window.clearTimeout(third);
-    };
+    setWorkspaceOpen(true);
   }, [deepLinkExpanded, deepLinkFocusKey]);
   const activeHighlightedCommercialMissingQuestions = useMemo(() => {
     if (!session || session.lineOfBusiness !== "commercial") return [];
@@ -282,9 +447,59 @@ export function AiQuotingWorkspace({
     lineOfBusiness === "personal" &&
     contact.personalLinesAssetRequired &&
     !contact.personalLinesAssetSelected;
-  const selectedCommercialTemplateNames = commercialAcordTemplates
-    .filter((template) => selectedAcordTemplateIds.includes(template.id))
-    .map((template) => template.documentName || template.fileName);
+  const selectedCommercialTemplates = commercialAcordTemplates.filter((template) =>
+    selectedAcordTemplateIds.includes(template.id)
+  );
+  const selectedCommercialTemplateNames = selectedCommercialTemplates.map(
+    (template) => template.documentName || template.fileName
+  );
+  const startMappingLabels = useMemo(
+    () =>
+      mappingLabelsForStart({
+        lineOfBusiness,
+        category: contact.categoryId ? api.categories.get(contact.categoryId) : undefined,
+        selectedCommercialTemplates,
+        contact,
+      }),
+    [
+      lineOfBusiness,
+      contact.categoryId,
+      contact.address,
+      contact.estimatedValue,
+      contact.assetDetails,
+      selectedCommercialTemplates,
+    ]
+  );
+
+  function beginMappingProgress(_labels: string[], mode: AiMappingProgressMode): string {
+    if (mappingClearTimerRef.current !== null) {
+      window.clearTimeout(mappingClearTimerRef.current);
+      mappingClearTimerRef.current = null;
+    }
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    setMappingProgress({
+      id,
+      mode,
+    });
+    return id;
+  }
+
+  function finishMappingProgress(id: string) {
+    if (mappingClearTimerRef.current !== null) {
+      window.clearTimeout(mappingClearTimerRef.current);
+      mappingClearTimerRef.current = null;
+    }
+    setMappingProgress((current) => (current?.id === id ? null : current));
+  }
+
+  async function runAcordAiMappingWithProgress(activeSession: QuotingSession) {
+    const progressId = beginMappingProgress(mappingLabelsForSession(activeSession), "next");
+    try {
+      return await api.quoting.runAcordAiMapping(activeSession.id);
+    } finally {
+      finishMappingProgress(progressId);
+    }
+  }
 
   async function start() {
     if (
@@ -294,6 +509,9 @@ export function AiQuotingWorkspace({
       needsCommercialAcordSelection
     ) return;
     const selectedLine = lineOfBusiness as QuotingLineOfBusiness;
+    const progressId = beginMappingProgress(startMappingLabels, "start");
+    setSetupMappingInFlight(true);
+    openWorkspace();
     setBusy("start");
     try {
       await api.quoting.startSession({
@@ -313,17 +531,35 @@ export function AiQuotingWorkspace({
         selectedAcordTemplateIds:
           selectedLine === "commercial" ? selectedAcordTemplateIds : undefined,
       });
-      setWorkspaceCollapsed(false);
       onChanged?.();
     } catch (error) {
-      setAiFailure(quoteWorkspaceFailure("AI mapping could not start. Please try again.", error));
+      handleAiFailure(quoteWorkspaceFailure("AI mapping could not start. Please try again.", error));
     } finally {
+      finishMappingProgress(progressId);
+      setSetupMappingInFlight(false);
       setBusy(null);
     }
   }
 
-  if (!session) {
-    return (
+  const setupWorkspaceSteps = workflowStepsForLine(lineOfBusiness, standalone);
+  const setupWorkspaceSubtitle = [
+    lineOfBusiness === "commercial"
+      ? "Commercial lines"
+      : lineOfBusiness === "personal"
+      ? "Personal lines"
+      : "No line selected",
+    selectedCommercialTemplateNames.length > 0
+      ? `${selectedCommercialTemplateNames.length} ACORD ${
+          selectedCommercialTemplateNames.length === 1 ? "form" : "forms"
+        } selected`
+      : null,
+    needsPersonalAssetSelection || intakeWarnings.length > 0 || needsCommercialAcordSelection
+      ? "Setup pending"
+      : "Ready",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const setupWorkspaceBody = (
       <div className="space-y-3">
         {!lockedLineOfBusiness && (
           <div>
@@ -341,7 +577,10 @@ export function AiQuotingWorkspace({
                         ? "border-gold-400 bg-gold-50 text-ink-900 shadow-sm"
                         : "border-ink-200 bg-white text-ink-700 hover:border-gold-300"
                     }`}
-                    onClick={() => setLineOfBusiness(line)}
+                    onClick={() => {
+                      setLineOfBusiness(line);
+                      onSetupLineOfBusinessChange?.(line);
+                    }}
                   >
                     <span className="flex items-center gap-2 text-sm font-semibold">
                       <Icon className="h-4 w-4 text-gold-700" />
@@ -353,6 +592,7 @@ export function AiQuotingWorkspace({
             </div>
           </div>
         )}
+        {setupControls}
         {lineOfBusiness === "commercial" && (
           <CommercialAcordTemplatePicker
             templates={commercialAcordTemplates}
@@ -384,7 +624,6 @@ export function AiQuotingWorkspace({
             Asset required.
           </div>
         )}
-        {aiFailure && <AiFailureBanner failure={aiFailure} />}
         <div className="flex justify-end">
           <button
             type="button"
@@ -400,14 +639,8 @@ export function AiQuotingWorkspace({
               needsCommercialAcordSelection
             }
           >
-          {busy === "start" ? (
-            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-          ) : (
-            <Sparkles className="h-3.5 w-3.5" />
-          )}
-          {busy === "start"
-            ? "Pulling public records…"
-            : needsPolicyLineSelection
+          <Sparkles className="h-3.5 w-3.5" />
+          {needsPolicyLineSelection
             ? "Select policy line first"
             : needsPersonalAssetSelection
             ? "Select asset first"
@@ -415,16 +648,58 @@ export function AiQuotingWorkspace({
             ? "Complete asset details first"
             : needsCommercialAcordSelection
             ? "Select ACORD document first"
-            : "Start AI Mapping"}
+            : "Start quote flow"}
           </button>
         </div>
       </div>
     );
+
+  if (!session) {
+    const setupMappingPending = setupMappingInFlight || mappingProgress?.mode === "start";
+    const setupCurrentStep = setupMappingPending ? 2 : 1;
+    const setupFullscreenSubtitle = setupMappingPending
+      ? "Map known data for the selected asset"
+      : setupWorkspaceSubtitle;
+    return (
+      <>
+        {!workspaceOpen && (
+          <CollapsedWorkflowProgress
+            steps={setupWorkspaceSteps}
+            currentStep={setupCurrentStep}
+            totalSteps={setupWorkspaceSteps.length}
+            subtitle={setupFullscreenSubtitle}
+            actionLabel={setupMappingPending ? "Continue quote flow" : "Start quote flow"}
+            onExpand={openWorkspace}
+          />
+        )}
+        <AiWorkspaceFullScreen
+          open={workspaceOpen}
+          onClose={closeWorkspace}
+          steps={setupWorkspaceSteps}
+          currentStep={setupCurrentStep}
+          totalSteps={setupWorkspaceSteps.length}
+          title="AI Quoting Workspace"
+          subtitle={setupFullscreenSubtitle}
+        >
+          {setupMappingPending ? (
+            <SetupAiMappingPendingPanel
+              steps={setupWorkspaceSteps}
+              totalSteps={setupWorkspaceSteps.length}
+              progress={mappingProgress}
+            />
+          ) : (
+            setupWorkspaceBody
+          )}
+        </AiWorkspaceFullScreen>
+      </>
+    );
   }
 
+  const flowSteps = workflowStepsForLine(session.lineOfBusiness ?? lineOfBusiness, standalone);
   const showQuoteRanking =
-    session.status === "complete" ||
-    (session.lineOfBusiness === "commercial" && session.quotes.length > 0);
+    !standalone &&
+    (session.status === "complete" ||
+      (session.lineOfBusiness === "commercial" && session.quotes.length > 0));
   const shouldShowQuestionnaire =
     session.lineOfBusiness !== "commercial" ||
     visibleQuestionnaireQuestions(session).length > 0;
@@ -450,36 +725,10 @@ export function AiQuotingWorkspace({
   ) : null;
   const flowPage =
     session.lineOfBusiness === "commercial"
-      ? commercialFlowPage(session)
-      : personalFlowPage(session);
-  const flowSteps =
-    session.lineOfBusiness === "commercial"
-      ? COMMERCIAL_WORKFLOW_STEPS
-      : PERSONAL_WORKFLOW_STEPS;
-
-  if (workspaceCollapsed) {
-    return (
-      <CollapsedWorkflowProgress
-        steps={flowSteps}
-        currentStep={flowPage.step}
-        totalSteps={flowPage.total}
-        completedStepNumbers={workflowCompletedStepNumbers(session)}
-        onExpand={() => setWorkspaceCollapsed(false)}
-      />
-    );
-  }
-
-  return (
+      ? commercialFlowPage(session, standalone)
+      : personalFlowPage(session, standalone);
+  const activeWorkspaceBody = (
     <div className="space-y-4">
-      {aiFailure && <AiFailureBanner failure={aiFailure} />}
-      <button
-        type="button"
-        className="btn-outline absolute right-6 top-6 z-10 text-xs"
-        onClick={() => setWorkspaceCollapsed(true)}
-        title="Collapse AI quoting workspace"
-      >
-        <ChevronUp className="h-3.5 w-3.5" /> Collapse
-      </button>
       {session.lineOfBusiness === "commercial" ? (
         <CommercialFlowPanel
           session={session}
@@ -487,6 +736,9 @@ export function AiQuotingWorkspace({
           userId={userId}
           onChanged={onChanged}
           highlightMissingQuestions={activeHighlightedCommercialMissingQuestions}
+          mappingProgress={mappingProgress}
+          standalone={standalone}
+          steps={flowSteps}
         />
       ) : (
         <PersonalFlowPanel
@@ -495,6 +747,9 @@ export function AiQuotingWorkspace({
           userId={userId}
           onChanged={onChanged}
           showQuoteRanking={showQuoteRanking}
+          mappingProgress={mappingProgress}
+          standalone={standalone}
+          steps={flowSteps}
         />
       )}
       <div className="pt-3 border-t border-ink-100 flex items-center justify-between gap-3">
@@ -536,57 +791,108 @@ export function AiQuotingWorkspace({
             userId={userId}
             busy={busy}
             setBusy={setBusy}
-          onChanged={onChanged}
-          onCommercialMissingFieldsRevealed={setHighlightedCommercialMissingQuestions}
-          onFailure={setAiFailure}
+            onChanged={onChanged}
+            onCommercialMissingFieldsRevealed={setHighlightedCommercialMissingQuestions}
+            onFailure={handleAiFailure}
+            mappingProgress={mappingProgress}
+            runAcordAiMapping={runAcordAiMappingWithProgress}
+            standalone={standalone}
+          />
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <>
+      {!workspaceOpen && (
+        <CollapsedWorkflowProgress
+          steps={flowSteps}
+          currentStep={flowPage.step}
+          totalSteps={flowPage.total}
+          completedStepNumbers={workflowCompletedStepNumbers(session)}
+          subtitle={`${session.lineOfBusiness === "commercial" ? "Commercial lines" : "Personal lines"} - ${
+            flowPage.title
+          }`}
+          actionLabel="Continue quote flow"
+          onExpand={openWorkspace}
         />
-        </div>
-      </div>
-    </div>
+      )}
+      <AiWorkspaceFullScreen
+        open={workspaceOpen}
+        onClose={closeWorkspace}
+        steps={flowSteps}
+        currentStep={flowPage.step}
+        totalSteps={flowPage.total}
+        completedStepNumbers={workflowCompletedStepNumbers(session)}
+        title="AI Quoting Workspace"
+        subtitle={`${session.lineOfBusiness === "commercial" ? "Commercial lines" : "Personal lines"} · ${
+          flowPage.title
+        }`}
+      >
+        {activeWorkspaceBody}
+      </AiWorkspaceFullScreen>
+    </>
   );
 }
 
-function AiFailureBanner({ failure }: { failure: AiGatewayFailureDetail }) {
+function aiProviderFailureBlocksWorkflowForSession(session: QuotingSession): boolean {
+  void session;
+  return false;
+}
+
+function AiMappingProgressPanel({ progress }: { progress: AiMappingProgress | null }) {
+  if (!progress) return null;
+  const message =
+    progress.mode === "start"
+      ? "AI mapping is researching the selected line and building the workspace."
+      : "AI mapping is reviewing the saved questionnaire and document fields.";
   return (
-    <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs leading-5 text-rose-900">
-      <div className="flex items-start gap-2">
-        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-600" />
+    <div className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-900">
+      <div className="flex items-center gap-2">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
         <div>
-          <div className="font-semibold">AI mapping could not complete</div>
-          <div>{failure.message}</div>
-          {failure.status && <div className="text-rose-700">Status {failure.status}</div>}
+          <div className="font-semibold">AI mapping in progress</div>
+          <div className="mt-0.5 text-blue-800">{message}</div>
         </div>
       </div>
     </div>
   );
 }
 
-function SessionLineOfBusinessField({ session }: { session: QuotingSession }) {
-  const current = session.lineOfBusiness ?? "personal";
+function SetupAiMappingPendingPanel({
+  steps,
+  totalSteps,
+  progress,
+}: {
+  steps: WorkflowStepDefinition[];
+  totalSteps: number;
+  progress: AiMappingProgress | null;
+}) {
+  const activeProgress = progress ?? { id: "setup-ai-mapping", mode: "start" as const };
   return (
-    <div>
-      <label className="label">Policy type / line</label>
-      <div className="grid gap-2 sm:grid-cols-2">
-        {(["personal", "commercial"] as const).map((line) => {
-          const active = current === line;
-          const Icon = line === "personal" ? User : Building2;
-          return (
-            <div
-              key={line}
-              className={`rounded-md border px-3 py-3 text-left ${
-                active
-                  ? "border-gold-400 bg-gold-50 text-ink-900 shadow-sm"
-                  : "border-ink-100 bg-ink-50 text-ink-400"
-              }`}
-            >
-              <span className="flex items-center gap-2 text-sm font-semibold">
-                <Icon className={`h-4 w-4 ${active ? "text-gold-700" : "text-ink-300"}`} />
-                {line === "personal" ? "Personal lines" : "Commercial lines"}
-              </span>
-            </div>
-          );
-        })}
+    <div className="rounded-md border border-violet-100 bg-violet-50/40 p-3 space-y-4">
+      <div className="space-y-3">
+        <div>
+          <div className="text-[10px] uppercase tracking-wider text-violet-800 font-semibold">
+            AI mapping
+          </div>
+          <h3 className="mt-1 text-base font-semibold text-ink-950">
+            Map known data for the selected asset
+          </h3>
+        </div>
+        <div className="flex max-w-full flex-wrap items-center gap-2">
+          <WorkflowStepIcons
+            steps={steps}
+            currentStep={2}
+            totalSteps={totalSteps}
+            completedStepNumbers={[1]}
+          />
+          <Badge tone="info">Step 2 of {totalSteps}</Badge>
+        </div>
       </div>
+
+      <AiMappingProgressPanel progress={activeProgress} />
     </div>
   );
 }
@@ -738,12 +1044,28 @@ function CommercialAcordTemplatePicker({
                   </div>
                 )}
               </div>
-              {previewUrl ? (
-                <iframe
-                  title={previewTemplate.documentName || previewTemplate.fileName}
-                  src={`${previewUrl}#toolbar=1&navpanes=0`}
-                  className="mt-3 h-[520px] w-full rounded border border-ink-200 bg-white"
+              {previewTemplate.templateFieldLayout?.length ? (
+                <DocumentTemplateFieldOverlay
+                  layout={previewTemplate.templateFieldLayout}
+                  fields={{}}
+                  fileUrl={previewUrl ?? undefined}
+                  sourceFileName={previewTemplate.fileName}
+                  title="Selected ACORD form"
+                  renderPdfBackground={false}
                 />
+              ) : previewUrl ? (
+                <div className="mt-3 rounded-md border border-dashed border-ink-200 bg-white px-3 py-6 text-center text-xs text-ink-500">
+                  This ACORD file is attached, but the embedded browser preview could not be prepared.
+                  <a
+                    className="ml-1 font-semibold text-blue-700 underline"
+                    href={previewUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open the ACORD PDF
+                  </a>
+                  .
+                </div>
               ) : (
                 <div className="mt-3 rounded-md border border-dashed border-ink-200 bg-white px-3 py-6 text-center text-xs text-ink-500">
                   This selected template does not have a bundled PDF URL.
@@ -801,7 +1123,8 @@ function quoteStatusSteps(session: QuotingSession): StatusStep[] {
       s.status === "declined" ||
       s.status === "needs_client_info" ||
       s.status === "supplemental_sent" ||
-      s.status === "needs_supplemental"
+      s.status === "needs_supplemental" ||
+      s.status === "agent_review"
   );
   const secondRoundSent = !!session.commercialSecondRoundSentAt;
   const acceptedRankingVisible =
@@ -933,7 +1256,8 @@ function commercialApplicationSentAt(session: QuotingSession): string | undefine
       submission.status === "declined" ||
       submission.status === "needs_client_info" ||
       submission.status === "needs_supplemental" ||
-      submission.status === "supplemental_sent"
+      submission.status === "supplemental_sent" ||
+      submission.status === "agent_review"
   );
   return applicationSubmission?.sentAt;
 }
@@ -954,7 +1278,29 @@ const PERSONAL_WORKFLOW_STEPS: WorkflowStepDefinition[] = [
   { number: 4, label: "Carrier ranking", icon: Trophy },
 ];
 
-function commercialFlowPage(session: QuotingSession): CommercialFlowPage {
+const COMMERCIAL_STANDALONE_WORKFLOW_STEPS: WorkflowStepDefinition[] = [
+  { number: 1, label: "Setup", icon: ClipboardList },
+  { number: 2, label: "AI mapping", icon: WandSparkles },
+  { number: 3, label: "ACORD review", icon: FileCheck2 },
+];
+
+const PERSONAL_STANDALONE_WORKFLOW_STEPS: WorkflowStepDefinition[] = [
+  { number: 1, label: "Setup", icon: ClipboardList },
+  { number: 2, label: "AI mapping", icon: WandSparkles },
+  { number: 3, label: "Questionnaire", icon: FileQuestion },
+];
+
+function workflowStepsForLine(
+  lineOfBusiness: QuotingLineSelection | QuotingLineOfBusiness,
+  standalone: boolean
+): WorkflowStepDefinition[] {
+  if (lineOfBusiness === "commercial") {
+    return standalone ? COMMERCIAL_STANDALONE_WORKFLOW_STEPS : COMMERCIAL_WORKFLOW_STEPS;
+  }
+  return standalone ? PERSONAL_STANDALONE_WORKFLOW_STEPS : PERSONAL_WORKFLOW_STEPS;
+}
+
+function commercialFlowPage(session: QuotingSession, standalone = false): CommercialFlowPage {
   const submissions = session.commercialCarrierSubmissions ?? [];
   const applicationSentAt = commercialApplicationSentAt(session);
   const awaitingResponse = submissions.filter(
@@ -967,15 +1313,25 @@ function commercialFlowPage(session: QuotingSession): CommercialFlowPage {
       s.status === "declined" ||
       s.status === "needs_client_info" ||
       s.status === "supplemental_sent" ||
-      s.status === "needs_supplemental"
+      s.status === "needs_supplemental" ||
+      s.status === "agent_review"
   );
   if (!session.commercialQuestionnairePreparedAt && !applicationSentAt) {
     return {
       key: "ai_mapping",
       step: 2,
-      total: 6,
+      total: standalone ? 3 : 6,
       eyebrow: "AI mapping",
       title: "Map known data onto the selected ACORD document",
+    };
+  }
+  if (standalone) {
+    return {
+      key: "field_review",
+      step: 3,
+      total: 3,
+      eyebrow: "ACORD field review",
+      title: "Review the ACORD and questionnaire workspace",
     };
   }
   if (!applicationSentAt) {
@@ -1095,51 +1451,280 @@ function workflowCompletedStepNumbers(session: QuotingSession): number[] {
   return session.status === "complete" || session.quotes.length > 0 ? [4] : [];
 }
 
+function AiWorkspaceLogoMark() {
+  return (
+    <span className="relative inline-grid h-10 w-10 shrink-0 place-items-center rounded-md border border-gold-200 bg-gold-50 text-gold-700">
+      <FileText className="h-5 w-5" />
+      <span className="absolute right-0.5 top-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full bg-white text-gold-700 shadow-sm">
+        <Sparkles className="h-3 w-3" />
+      </span>
+    </span>
+  );
+}
+
 function CollapsedWorkflowProgress({
   steps,
   currentStep,
   totalSteps,
   completedStepNumbers,
+  subtitle,
+  actionLabel = "Start quote flow",
   onExpand,
 }: {
   steps: WorkflowStepDefinition[];
   currentStep: number;
   totalSteps: number;
   completedStepNumbers?: number[];
+  subtitle?: string;
+  actionLabel?: string;
   onExpand: () => void;
 }) {
   return (
+    <div className="rounded-md border border-ink-100 bg-white px-3 py-3">
+      <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-3">
+            <AiWorkspaceLogoMark />
+            <div className="min-w-0">
+              <div className="truncate text-base font-semibold text-ink-950">
+                AI Quoting Workspace
+              </div>
+              {subtitle && <div className="mt-0.5 truncate text-sm text-ink-500">{subtitle}</div>}
+            </div>
+          </div>
+          <div className="mt-3 overflow-x-auto pb-1">
+            <WorkflowStepIcons
+              steps={steps}
+              currentStep={currentStep}
+              totalSteps={totalSteps}
+              completedStepNumbers={completedStepNumbers}
+            />
+          </div>
+        </div>
+        <div className="flex items-center justify-end gap-2 lg:pl-4">
+          <Badge tone="info">
+            Step {currentStep} of {totalSteps}
+          </Badge>
+          <button
+            type="button"
+            className="btn-primary text-xs whitespace-nowrap"
+            onClick={(event) => {
+              event.stopPropagation();
+              onExpand();
+            }}
+          >
+            {actionLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AiWorkspaceFullScreen({
+  open,
+  onClose,
+  title,
+  subtitle,
+  steps,
+  currentStep,
+  totalSteps,
+  completedStepNumbers,
+  children,
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  subtitle?: string;
+  steps: WorkflowStepDefinition[];
+  currentStep: number;
+  totalSteps: number;
+  completedStepNumbers?: number[];
+  children: ReactNode;
+}) {
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  const closeRequestedRef = useRef(false);
+  const [shouldRender, setShouldRender] = useState(open);
+  const [closing, setClosing] = useState(false);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+  useEffect(() => {
+    if (open) {
+      closeRequestedRef.current = false;
+      setShouldRender(true);
+      setClosing(false);
+      return;
+    }
+    if (!shouldRender) return;
+    setClosing(true);
+    const timer = window.setTimeout(() => {
+      setShouldRender(false);
+      setClosing(false);
+    }, 160);
+    return () => window.clearTimeout(timer);
+  }, [open, shouldRender]);
+  useEffect(() => {
+    if (!shouldRender) return;
+    const previousOverflow = document.body.style.overflow;
+    const previousPaddingRight = document.body.style.paddingRight;
+    const scrollbarWidth = Math.max(0, window.innerWidth - document.documentElement.clientWidth);
+    document.body.style.overflow = "hidden";
+    if (scrollbarWidth > 0) document.body.style.paddingRight = `${scrollbarWidth}px`;
+    const focusTimer = open ? window.setTimeout(() => panelRef.current?.focus(), 0) : undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") requestClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      if (focusTimer) window.clearTimeout(focusTimer);
+      window.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+      document.body.style.paddingRight = previousPaddingRight;
+    };
+  }, [open, shouldRender]);
+
+  function requestClose() {
+    if (closeRequestedRef.current) return;
+    closeRequestedRef.current = true;
+    onCloseRef.current();
+  }
+
+  if (!shouldRender) return null;
+
+  return (
     <div
-      className="flex cursor-pointer items-center justify-between gap-3 rounded-md border border-ink-100 bg-white px-3 py-2 transition hover:border-gold-300 hover:shadow-sm"
-      onClick={onExpand}
-      title="Expand AI quoting workspace"
-      aria-label="Expand AI quoting workspace"
+      ref={panelRef}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="ai-workspace-fullscreen-title"
+      tabIndex={-1}
+      className={`fixed inset-0 z-[60] flex flex-col bg-white text-ink-900 transition-opacity duration-150 ease-out focus:outline-none ${
+        closing ? "opacity-0" : "opacity-100"
+      }`}
     >
-      <div className="min-w-0 flex-1">
-        <WorkflowStepIcons
-          steps={steps}
-          currentStep={currentStep}
-          totalSteps={totalSteps}
-          completedStepNumbers={completedStepNumbers}
-        />
+      <header className="shrink-0 border-b border-ink-100 bg-white px-4 py-3 shadow-sm sm:px-6">
+        <div className="relative flex min-h-[70px] flex-col justify-center gap-3 sm:block">
+          <button
+            type="button"
+            className="btn-outline z-10 shrink-0 text-sm sm:absolute sm:left-0 sm:top-1/2 sm:-translate-y-1/2"
+            onPointerDown={(event) => {
+              if (event.button !== 0) return;
+              event.preventDefault();
+              requestClose();
+            }}
+            onClick={requestClose}
+          >
+            <ArrowLeft className="h-4 w-4" />
+            Back to profile
+          </button>
+          <div className="flex min-w-0 justify-center sm:min-h-[70px] sm:items-center">
+            <div className="flex min-w-0 items-center justify-center gap-3">
+              <AiWorkspaceLogoMark />
+              <div className="min-w-0">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-gold-700">
+                  AI quoting workspace
+                </div>
+                <h2
+                  id="ai-workspace-fullscreen-title"
+                  className="truncate text-lg font-semibold text-ink-950"
+                >
+                  {title}
+                </h2>
+                {subtitle && (
+                  <div className="mt-0.5 truncate text-sm text-ink-500">{subtitle}</div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      </header>
+      <div className="grid min-h-0 flex-1 lg:grid-cols-[280px_minmax(0,1fr)]">
+        <aside className="hidden min-h-0 overflow-y-auto border-r border-ink-100 bg-ink-50/60 p-4 lg:block">
+          <WorkspaceSideRail
+            steps={steps}
+            currentStep={currentStep}
+            totalSteps={totalSteps}
+            completedStepNumbers={completedStepNumbers}
+          />
+        </aside>
+        <main className="min-h-0 min-w-0 overflow-y-auto bg-ink-50/30 px-4 py-4 sm:px-6">
+          <div className="mx-auto w-full max-w-[1320px] space-y-4">
+            <div className="rounded-md border border-ink-100 bg-white px-3 py-2 lg:hidden">
+              <WorkflowStepIcons
+                steps={steps}
+                currentStep={currentStep}
+                totalSteps={totalSteps}
+                completedStepNumbers={completedStepNumbers}
+              />
+            </div>
+            {children}
+          </div>
+        </main>
       </div>
-      <div className="flex shrink-0 items-center gap-2">
-        <Badge tone="info">
+    </div>
+  );
+}
+
+function WorkspaceSideRail({
+  steps,
+  currentStep,
+  totalSteps,
+  completedStepNumbers = [],
+}: {
+  steps: WorkflowStepDefinition[];
+  currentStep: number;
+  totalSteps: number;
+  completedStepNumbers?: number[];
+}) {
+  const visibleSteps = steps.slice(0, totalSteps);
+  const completed = new Set(completedStepNumbers);
+  return (
+    <div className="space-y-3">
+      <div>
+        <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-500">
+          Workflow
+        </div>
+        <div className="mt-1 text-sm font-semibold text-ink-900">
           Step {currentStep} of {totalSteps}
-        </Badge>
-        <button
-          type="button"
-          className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-ink-200 bg-white text-ink-600 transition hover:border-gold-300 hover:text-ink-900"
-          onClick={(event) => {
-            event.stopPropagation();
-            onExpand();
-          }}
-          title="Expand AI quoting workspace"
-          aria-label="Expand AI quoting workspace"
-        >
-          <ChevronDown className="h-4 w-4" />
-        </button>
+        </div>
       </div>
+      <ol className="space-y-2">
+        {visibleSteps.map((step) => {
+          const done = step.number < currentStep || completed.has(step.number);
+          const active = step.number === currentStep && !done;
+          const Icon = step.icon;
+          return (
+            <li
+              key={step.number}
+              className={`rounded-md border px-3 py-2 ${
+                done
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+                  : active
+                  ? "border-gold-300 bg-gold-50 text-gold-950"
+                  : "border-ink-100 bg-white text-ink-500"
+              }`}
+            >
+              <div className="flex items-center gap-2">
+                <span
+                  className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border ${
+                    done
+                      ? "border-emerald-300 bg-white text-emerald-700"
+                      : active
+                      ? "border-gold-300 bg-white text-gold-800"
+                      : "border-ink-200 bg-ink-50 text-ink-400"
+                  }`}
+                >
+                  <Icon className="h-3.5 w-3.5" />
+                </span>
+                <span className="min-w-0 flex-1 text-sm font-semibold">{step.label}</span>
+                {done && <Check className="h-3.5 w-3.5 shrink-0" />}
+              </div>
+            </li>
+          );
+        })}
+      </ol>
     </div>
   );
 }
@@ -1335,7 +1920,11 @@ function Questionnaire({
 // AI-identified missing field.
 function visibleQuestionnaireQuestions(session: QuotingSession): QuotingQuestion[] {
   const questions = session.questionnaireQuestions ?? [];
-  if (session.lineOfBusiness !== "commercial") return questions;
+  if (session.lineOfBusiness !== "commercial") {
+    return questions.map((question) =>
+      question.required ? question : { ...question, required: true }
+    );
+  }
   if (session.commercialSecondRoundSentAt && !session.commercialSupplementalsCompletedAt) {
     return questions.filter((q) => q.round === "second_round");
   }
@@ -1343,6 +1932,18 @@ function visibleQuestionnaireQuestions(session: QuotingSession): QuotingQuestion
     return questions.filter((q) => !q.carrierId && q.round !== "second_round");
   }
   return questions.filter((q) => q.round === "second_round");
+}
+
+function aiMappedQuestionAnswerCount(session: QuotingSession, questions: QuotingQuestion[]): number {
+  const responses = session.questionnaireResponses ?? {};
+  const meta = session.questionnaireResponseMeta ?? {};
+  return questions.filter((question) => {
+    if (meta[question.id]?.updatedByRole !== "ai") return false;
+    const value = (responses[question.id] ?? "").trim();
+    if (!value) return false;
+    return !/^(unknown|n\/a|none|not found|not public|not available|requires)\b/i.test(value) &&
+      !/\b(not found|not public|not publicly|no public|requires applicant|requires client|requires insured|unable to confirm|unable to determine|clue|loss runs?)\b/i.test(value);
+  }).length;
 }
 
 function questionnaireEditorLabel(meta: QuestionnaireResponseMeta): string {
@@ -1357,17 +1958,25 @@ function questionnaireEditorLabel(meta: QuestionnaireResponseMeta): string {
   return `${meta.updatedByName} (${role})`;
 }
 
-function QuestionEditMeta({ meta }: { meta?: QuestionnaireResponseMeta }) {
+function QuestionEditMeta({
+  meta,
+  needsManual,
+}: {
+  meta?: QuestionnaireResponseMeta;
+  needsManual?: boolean;
+}) {
   if (!meta) {
     return (
-      <div className="mt-1 text-[11px] text-ink-400">
-        Shared field - not edited yet.
+      <div className={`mt-1 text-[11px] ${needsManual ? "font-medium text-amber-900" : "text-ink-400"}`}>
+        {needsManual ? "Not found - enter manually." : "Shared field - not edited yet."}
       </div>
     );
   }
   return (
-    <div className="mt-1 text-[11px] text-ink-500">
-      Last edited by {questionnaireEditorLabel(meta)} - {fmt.dateTime(meta.updatedAt)}
+    <div className="mt-1 space-y-0.5 text-[11px] text-ink-500">
+      <div>
+        Last edited by {questionnaireEditorLabel(meta)} - {fmt.dateTime(meta.updatedAt)}
+      </div>
     </div>
   );
 }
@@ -1858,6 +2467,9 @@ function QuoteNextAction({
   onChanged,
   onCommercialMissingFieldsRevealed,
   onFailure,
+  mappingProgress,
+  runAcordAiMapping,
+  standalone,
 }: {
   session: QuotingSession;
   userId: string;
@@ -1866,6 +2478,9 @@ function QuoteNextAction({
   onChanged?: () => void;
   onCommercialMissingFieldsRevealed?: (questions: QuotingQuestion[]) => void;
   onFailure?: (failure: AiGatewayFailureDetail) => void;
+  mappingProgress?: AiMappingProgress | null;
+  runAcordAiMapping?: (session: QuotingSession) => Promise<QuotingSession | null>;
+  standalone?: boolean;
 }) {
   const responses = session.questionnaireResponses ?? {};
   const questions = visibleQuestionnaireQuestions(session);
@@ -1913,8 +2528,21 @@ function QuoteNextAction({
     !needsPersonalQuestionnaireReview &&
     requiredMissing.length > 0;
   const nextDisabled = !!busy;
+  const standaloneCommercialDone =
+    !!standalone &&
+    session.lineOfBusiness === "commercial" &&
+    !!session.commercialQuestionnairePreparedAt;
+  const standalonePersonalDone =
+    !!standalone &&
+    session.lineOfBusiness !== "commercial" &&
+    (session.status === "quoting" ||
+      session.quotes.length > 0 ||
+      !!session.personalQuestionnairePreparedAt ||
+      !!session.questionnaireSentAt);
 
   if (
+    standaloneCommercialDone ||
+    standalonePersonalDone ||
     session.status === "complete" ||
     (session.lineOfBusiness === "commercial" &&
       commercialFlowPage(session).key === "accepted_ranking")
@@ -1973,7 +2601,6 @@ function QuoteNextAction({
   async function next() {
     if (session.status === "complete") return;
     if (needsPersonalQuestionnaireReview) {
-      setBusy("next");
       try {
         api.quoting.preparePersonalQuestionnaire(session.id);
         onChanged?.();
@@ -1981,15 +2608,19 @@ function QuoteNextAction({
         onFailure?.(
           quoteWorkspaceFailure("Personal-lines questionnaire could not be prepared.", error)
         );
-      } finally {
-        setBusy(null);
       }
       return;
     }
     if (needsCommercialQuestionnaire) {
       setBusy("next");
       try {
-        await api.quoting.runAcordAiMapping(session.id);
+        const mapped = await (runAcordAiMapping ?? ((activeSession) => api.quoting.runAcordAiMapping(activeSession.id)))(
+          session
+        );
+        if (!mapped || aiProviderFailureBlocksWorkflowForSession(mapped)) {
+          onChanged?.();
+          return;
+        }
         api.quoting.prepareCommercialQuestionnaire(session.id);
         onChanged?.();
       } catch (error) {
@@ -2212,8 +2843,14 @@ function ManualQuestionnaireModal({
   const saveDraftLabel =
     busy === "save" ? "Saving..." : savedAt && !draftDirty ? "Saved" : "Save draft";
 
-  function setAnswer(id: string, value: string) {
-    setResponses((current) => ({ ...current, [id]: value }));
+  function setAnswer(question: QuotingQuestion, value: string) {
+    setResponses((current) => ({
+      ...current,
+      [question.id]: normalizeVinFieldValue(
+        { id: question.id, label: question.label },
+        value
+      ),
+    }));
     setDraftDirty(true);
     setSavedAt(null);
   }
@@ -2390,13 +3027,13 @@ function ManualQuestionnaireModal({
                       <textarea
                         className={`${fieldClass} min-h-[82px]`}
                         value={responses[q.id] ?? ""}
-                        onChange={(e) => setAnswer(q.id, e.target.value)}
+                        onChange={(e) => setAnswer(q, e.target.value)}
                       />
                     ) : q.kind === "select" ? (
                       <select
                         className={fieldClass}
                         value={responses[q.id] ?? ""}
-                        onChange={(e) => setAnswer(q.id, e.target.value)}
+                        onChange={(e) => setAnswer(q, e.target.value)}
                       >
                         <option value="">Pick one</option>
                         {(q.options ?? []).map((option) => (
@@ -2410,7 +3047,9 @@ function ManualQuestionnaireModal({
                         type={q.kind === "number" ? "number" : "text"}
                         className={fieldClass}
                         value={responses[q.id] ?? ""}
-                        onChange={(e) => setAnswer(q.id, e.target.value)}
+                        onChange={(e) => setAnswer(q, e.target.value)}
+                        autoCapitalize={isVinInputField({ id: q.id, label: q.label }) ? "characters" : undefined}
+                        spellCheck={isVinInputField({ id: q.id, label: q.label }) ? false : undefined}
                       />
                     )}
                     {isMissing && (
@@ -2419,7 +3058,10 @@ function ManualQuestionnaireModal({
                         Missing required field.
                       </div>
                     )}
-                    <QuestionEditMeta meta={session.questionnaireResponseMeta?.[q.id]} />
+                    <QuestionEditMeta
+                      meta={session.questionnaireResponseMeta?.[q.id]}
+                      needsManual={q.required && !(responses[q.id] ?? "").trim()}
+                    />
                   </div>
                   );
                 })}
@@ -3097,12 +3739,18 @@ function CommercialFlowPanel({
   userId,
   onChanged,
   highlightMissingQuestions = [],
+  mappingProgress,
+  standalone,
+  steps,
 }: {
   session: QuotingSession;
   questionnaireCard?: ReactNode;
   userId: string;
   onChanged?: () => void;
   highlightMissingQuestions?: QuotingQuestion[];
+  mappingProgress?: AiMappingProgress | null;
+  standalone: boolean;
+  steps: WorkflowStepDefinition[];
 }) {
   const submissions = session.commercialCarrierSubmissions ?? [];
   const applicationSentAt = commercialApplicationSentAt(session);
@@ -3110,10 +3758,11 @@ function CommercialFlowPanel({
     (s) => s.status === "accepted" || s.status === "supplemental_sent"
   );
   const waitingForClient = submissions.filter((s) => s.status === "needs_client_info");
+  const agentReview = submissions.filter((s) => s.status === "agent_review");
   const awaitingResponse = submissions.filter(
     (s) => s.status === "awaiting_response" || s.status === "application_sent"
   );
-  const page = commercialFlowPage(session);
+  const page = commercialFlowPage(session, standalone);
   const carrierAutomation = submissions.length > 0 && (
     <div className="space-y-3">
       <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -3137,7 +3786,7 @@ function CommercialFlowPanel({
         <Metric label="Sent" value={submissions.length} />
         <Metric label="Awaiting" value={awaitingResponse.length} />
         <Metric label="Accepted" value={accepted.length} />
-        <Metric label="Needs client" value={waitingForClient.length} />
+        <Metric label={agentReview.length > 0 ? "Review" : "Needs client"} value={agentReview.length > 0 ? agentReview.length : waitingForClient.length} />
       </div>
 
       <ol className="space-y-2">
@@ -3165,6 +3814,16 @@ function CommercialFlowPanel({
                 <Badge tone={badge.tone}>{badge.label}</Badge>
               </div>
               <p className="mt-2 text-ink-700">{submission.aiRationale}</p>
+              {submission.agentReviewReason && (
+                <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-amber-900">
+                  {submission.agentReviewReason}
+                </p>
+              )}
+              {submission.quote?.premiums?.length ? (
+                <p className="mt-2 text-ink-700">
+                  Premium captured: {submission.quote.premiums.join(", ")}
+                </p>
+              ) : null}
               {(submission.missingFields ?? []).length > 0 && (
                 <ul className="mt-2 list-disc pl-5 text-amber-800">
                   {submission.missingFields!.map((field) => (
@@ -3192,7 +3851,7 @@ function CommercialFlowPanel({
         </div>
         <div className="flex max-w-full flex-wrap items-center gap-2">
           <WorkflowStepIcons
-            steps={COMMERCIAL_WORKFLOW_STEPS}
+            steps={steps}
             currentStep={page.step}
             totalSteps={page.total}
             completedStepNumbers={workflowCompletedStepNumbers(session)}
@@ -3202,6 +3861,8 @@ function CommercialFlowPanel({
           </Badge>
         </div>
       </div>
+
+      {page.key === "ai_mapping" && <AiMappingProgressPanel progress={mappingProgress ?? null} />}
 
       {highlightMissingQuestions.length > 0 && (
         <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-950">
@@ -3259,14 +3920,33 @@ function CommercialFlowPanel({
   );
 }
 
-function personalFlowPage(session: QuotingSession): {
+function personalFlowPage(session: QuotingSession, standalone = false): {
   key: "ai_mapping" | "questionnaire" | "carrier_ranking";
   step: number;
   total: number;
   eyebrow: string;
   title: string;
 } {
-  const total = PERSONAL_WORKFLOW_STEPS.length;
+  const total = standalone
+    ? PERSONAL_STANDALONE_WORKFLOW_STEPS.length
+    : PERSONAL_WORKFLOW_STEPS.length;
+  if (
+    standalone &&
+    (session.status === "complete" ||
+      session.status === "quoting" ||
+      session.quotes.length > 0 ||
+      session.status === "awaiting_reply" ||
+      !!session.questionnaireSentAt ||
+      !!session.personalQuestionnairePreparedAt)
+  ) {
+    return {
+      key: "questionnaire",
+      step: 3,
+      total,
+      eyebrow: "Client questionnaire",
+      title: "Review the personal-lines questionnaire",
+    };
+  }
   if (session.status === "complete") {
     return {
       key: "carrier_ranking",
@@ -3313,14 +3993,20 @@ function PersonalFlowPanel({
   userId,
   onChanged,
   showQuoteRanking,
+  mappingProgress,
+  standalone,
+  steps,
 }: {
   session: QuotingSession;
   questionnaireCard?: ReactNode;
   userId: string;
   onChanged?: () => void;
   showQuoteRanking: boolean;
+  mappingProgress?: AiMappingProgress | null;
+  standalone: boolean;
+  steps: WorkflowStepDefinition[];
 }) {
-  const page = personalFlowPage(session);
+  const page = personalFlowPage(session, standalone);
 
   return (
     <div className="rounded-md border border-violet-100 bg-violet-50/40 p-3 space-y-4">
@@ -3335,8 +4021,9 @@ function PersonalFlowPanel({
         </div>
         <div className="flex max-w-full flex-wrap items-center gap-2">
           <WorkflowStepIcons
-            steps={PERSONAL_WORKFLOW_STEPS}
+            steps={steps}
             currentStep={page.step}
+            totalSteps={page.total}
             completedStepNumbers={workflowCompletedStepNumbers(session)}
           />
           <Badge tone="info">
@@ -3345,9 +4032,12 @@ function PersonalFlowPanel({
         </div>
       </div>
 
-      <SessionLineOfBusinessField session={session} />
+      {page.key === "ai_mapping" && <AiMappingProgressPanel progress={mappingProgress ?? null} />}
+
       <PublicFields session={session} />
-      {page.key === "ai_mapping" && <PersonalAiMappingSummary session={session} />}
+      {page.key === "ai_mapping" && !mappingProgress && (
+        <PersonalAiMappingSummary session={session} />
+      )}
       {page.key === "questionnaire" && questionnaireCard}
       {page.key === "carrier_ranking" && showQuoteRanking && (
         <QuotesTable session={session} userId={userId} onChanged={onChanged} />
@@ -3359,9 +4049,7 @@ function PersonalFlowPanel({
 function PersonalAiMappingSummary({ session }: { session: QuotingSession }) {
   const questions = visibleQuestionnaireQuestions(session);
   const responses = session.questionnaireResponses ?? {};
-  const mappedAnswerCount = questions.filter((question) =>
-    (responses[question.id] ?? "").trim()
-  ).length;
+  const mappedAnswerCount = aiMappedQuestionAnswerCount(session, questions);
   const requiredMissingCount = questions.filter(
     (question) => question.required && !(responses[question.id] ?? "").trim()
   ).length;
@@ -3376,9 +4064,7 @@ function PersonalAiMappingSummary({ session }: { session: QuotingSession }) {
           </div>
         </div>
         <Badge tone={requiredMissingCount > 0 ? "warn" : "success"}>
-          {requiredMissingCount > 0
-            ? `${requiredMissingCount} required left`
-            : "Ready for questionnaire"}
+          {requiredMissingCount > 0 ? `${requiredMissingCount} required left` : "Ready for questionnaire"}
         </Badge>
       </div>
       <div className="mt-3 grid gap-2 sm:grid-cols-3">
@@ -3727,15 +4413,32 @@ function CommercialAcordSummary({
                 fileUrl={previewUrl}
                 sourceFileName={previewTemplate.fileName}
                 title="Required missing ACORD fields"
+                renderPdfBackground={false}
                 highlightLabels={highlightedFieldLabels}
                 showOnlyHighlighted
               />
-            ) : previewUrl ? (
-              <iframe
-                title={previewTemplate.documentName || previewTemplate.fileName}
-                src={embeddedAcordViewerUrl(previewUrl)}
-                className="h-[520px] w-full rounded border border-ink-200 bg-white"
+            ) : previewUrl && sourcePreviewDocument?.templateFieldLayout?.length ? (
+              <DocumentTemplateFieldOverlay
+                layout={sourcePreviewDocument.templateFieldLayout}
+                fields={{}}
+                fileUrl={previewUrl}
+                sourceFileName={previewTemplate.fileName}
+                title="Selected ACORD form"
+                renderPdfBackground={false}
               />
+            ) : previewUrl ? (
+              <div className="rounded-md border border-dashed border-ink-200 bg-white px-3 py-6 text-center text-xs text-ink-500">
+                This ACORD file is attached, but the embedded browser preview could not be prepared.
+                <a
+                  href={previewUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="ml-1 font-semibold text-gold-900 underline"
+                >
+                  Open the ACORD PDF
+                </a>
+                .
+              </div>
             ) : (
               <div className="rounded-md border border-dashed border-ink-200 bg-white px-3 py-6 text-center text-xs text-ink-500">
                 The completed ACORD preview is not available yet.
@@ -3793,6 +4496,8 @@ function commercialSubmissionBadge(
       return { tone: "warn" as const, label: "Needs client info" };
     case "needs_supplemental":
       return { tone: "warn" as const, label: "Needs supplemental" };
+    case "agent_review":
+      return { tone: "warn" as const, label: "Agent review" };
     case "declined":
       return { tone: "neutral" as const, label: "Declined" };
     case "awaiting_response":
@@ -4894,6 +5599,7 @@ function QuickViewQuoteModal({
     );
   }
   const carrier = api.carriers.get(quote.carrierId);
+  const runnerStatus = carrierPortalRunnerStatus(carrier);
   const rankIndex = session.quotes.findIndex((q) => q.carrierId === quote.carrierId);
   // Legacy quoting sessions may pre-date the assetType / estimatedValue
   // snapshot fields. Defensive fallbacks so opening Quick view on a
@@ -4907,9 +5613,9 @@ function QuickViewQuoteModal({
     quote.providerTrace?.provider === "carrier_portal_automation" && quote.apiStatus === "connected"
       ? { tone: "success" as const, label: "Live AI carrier runner" }
     : quote.providerTrace?.runnerTrace?.mode === "configuration_trace"
-      ? { tone: "gold" as const, label: "Carrier configuration estimate" }
+      ? { tone: runnerStatus.tone, label: runnerStatus.label }
     : quote.providerTrace?.provider === "carrier_portal_automation"
-      ? { tone: "gold" as const, label: "AI carrier runner" }
+      ? { tone: runnerStatus.canAttempt ? ("gold" as const) : runnerStatus.tone, label: runnerStatus.label }
       : quote.apiStatus === "simulated"
       ? { tone: "info" as const, label: "Carrier portal test mode" }
       : { tone: "gold" as const, label: "Carrier portal runner pending" };
@@ -5128,6 +5834,10 @@ function QuickViewQuoteModal({
         <DetailGroup title="Carrier runner">
           <dl className="text-xs space-y-1">
             <Row
+              label="Playbook status"
+              value={<Badge tone={runnerStatus.tone}>{runnerStatus.label}</Badge>}
+            />
+            <Row
               label="Runner"
               value={quote.providerTrace?.providerLabel ?? "AI carrier portal runner"}
             />
@@ -5199,6 +5909,29 @@ function QuickViewQuoteModal({
               </>
             )}
           </dl>
+          {carrier?.portalPlaybook && (
+            <div className="mt-3 border-t border-ink-100 pt-2 text-[11px] text-ink-600">
+              <div className="font-semibold text-ink-700">Runner playbook</div>
+              <ul className="mt-1 space-y-1">
+                <li>
+                  <span className="font-semibold">Documents:</span>{" "}
+                  {carrier.portalPlaybook.documents.slice(0, 3).join(" -> ") || "Manual workflow only."}
+                </li>
+                <li>
+                  <span className="font-semibold">Claims:</span>{" "}
+                  {carrier.portalPlaybook.claims.slice(0, 3).join(" -> ") || "Manual workflow only."}
+                </li>
+                <li>
+                  <span className="font-semibold">Quotes:</span>{" "}
+                  {carrier.portalPlaybook.quotes.slice(0, 3).join(" -> ") || "Manual workflow only."}
+                </li>
+                <li>
+                  <span className="font-semibold">Stop if:</span>{" "}
+                  {carrier.portalPlaybook.stopConditions.slice(0, 3).join(" | ")}
+                </li>
+              </ul>
+            </div>
+          )}
           {quote.providerTrace?.messages.filter((message) => !isLegacyCarrierProviderMessage(message)).length ? (
             <ul className="mt-3 space-y-1 border-t border-ink-100 pt-2 text-[11px] text-ink-600">
               {quote.providerTrace.messages
