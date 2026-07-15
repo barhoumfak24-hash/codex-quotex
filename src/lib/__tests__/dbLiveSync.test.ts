@@ -157,6 +157,53 @@ describe("db live sync", () => {
     expect(db.syncStatus()).toMatchObject({ status: "saving" });
   });
 
+  it("retries cloud hydration after authentication becomes available", async () => {
+    const { SEED_CUSTOMERS } = await import("../seed");
+    const cloudCustomer = {
+      ...SEED_CUSTOMERS[0],
+      id: "customer_loaded_after_auth",
+      name: "Loaded After Auth",
+      email: "loaded-after-auth@example.com",
+    };
+    vi.stubEnv("VITE_STATE_SYNC_MODE", "supabase");
+    let authenticated = false;
+    const fetchMock = vi.fn(async () => {
+      if (!authenticated) {
+        return {
+          ok: false,
+          status: 401,
+          json: async () => ({ error: "unauthorized" }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          found: true,
+          scoped: true,
+          revision: 2,
+          snapshot: { customers: [cloudCustomer] },
+        }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    vi.resetModules();
+    const { db } = await import("../db");
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(db.syncStatus()).toMatchObject({ status: "error", reason: "unauthorized" });
+    });
+
+    authenticated = true;
+    expect(await db.hydrateNow()).toBe(true);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(db.snapshot().customers).toContainEqual(
+      expect.objectContaining({ id: cloudCustomer.id, tenantId: cloudCustomer.tenantId })
+    );
+  });
+
   it("retries cloud writes after a revision conflict and keeps both rows", async () => {
     const { SEED_CUSTOMERS } = await import("../seed");
     const remoteCustomer = {

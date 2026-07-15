@@ -154,7 +154,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     establishServerCurrentSession(tokenAtHydrationStart)
-      .then((session) => {
+      .then(async (session) => {
         if (cancelled) return;
         const currentToken = currentServerSessionToken();
         if (currentToken && currentToken !== tokenAtHydrationStart) return;
@@ -163,6 +163,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           if (resolved && !accessBlockForUser(resolved, { trustServerSession: true })) {
             storeServerSessionUser(resolved);
             persist(resolved);
+            await db.hydrateNow();
           } else {
             persist(null);
           }
@@ -196,7 +197,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         setUser(null);
         return;
       }
-      establishServerCurrentSession().then((session) => {
+      establishServerCurrentSession().then(async (session) => {
         if (!session.ok) {
           if (isTransientSessionFailure(session.reason)) {
             const cached = loadServerSessionUser();
@@ -213,6 +214,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const resolved = resolveAnyServerUser(session.user);
         if (resolved && !accessBlockForUser(resolved, { trustServerSession: true })) {
           storeServerSessionUser(resolved);
+          await db.hydrateNow();
           lastIdRef.current = resolved.id;
           setUser(resolved);
           return;
@@ -753,7 +755,7 @@ async function establishServerStaffSession(identifier: string, password: string)
       if (isMissingAuthRoute(response, json)) continue;
       sawReachableAuthRoute = true;
       if (response.ok && json?.ok && typeof json.token === "string" && json.token.trim() && isServerStaffUser(json.user)) {
-        storeServerSessionToken(json.token);
+        await storeServerSessionAndHydrate(json.token);
         return { ok: true, user: json.user, agency: isServerSessionAgency(json.agency) ? json.agency : null };
       }
       clearServerSessionToken();
@@ -797,7 +799,7 @@ async function establishCanonicalLogin(
       json.token.trim() &&
       isServerAnyUser(json.user)
     ) {
-      storeServerSessionToken(json.token);
+      await storeServerSessionAndHydrate(json.token);
       return { ok: true, user: json.user };
     }
     clearServerSessionToken();
@@ -908,7 +910,7 @@ async function postMasterAuthRoute(candidates: string[], payload: string): Promi
       if (isMissingAuthRoute(response, json)) continue;
       sawReachableAuthRoute = true;
       if (response.ok && json?.ok && typeof json.token === "string" && json.token.trim() && isServerMasterUser(json.user)) {
-        storeServerSessionToken(json.token);
+        await storeServerSessionAndHydrate(json.token);
         return { ok: true, user: json.user };
       }
       clearServerSessionToken();
@@ -969,7 +971,7 @@ async function establishServerStaffRegistration(input: {
       if (isMissingAuthRoute(response, json)) continue;
       sawReachableAuthRoute = true;
       if (response.ok && json?.ok && typeof json.token === "string" && json.token.trim() && isServerStaffUser(json.user)) {
-        storeServerSessionToken(json.token);
+        await storeServerSessionAndHydrate(json.token);
         return { ok: true, user: json.user, agency: isServerSessionAgency(json.agency) ? json.agency : null };
       }
       clearServerSessionToken();
@@ -1096,7 +1098,7 @@ async function establishServerStaffLocalPromotion(localUser: User, password: str
       if (isMissingAuthRoute(response, json)) continue;
       sawReachableAuthRoute = true;
       if (response.ok && json?.ok && typeof json.token === "string" && json.token.trim() && isServerStaffUser(json.user)) {
-        storeServerSessionToken(json.token);
+        await storeServerSessionAndHydrate(json.token);
         return { ok: true, user: json.user, agency: isServerSessionAgency(json.agency) ? json.agency : null };
       }
       clearServerSessionToken();
@@ -1279,6 +1281,11 @@ function storeServerSessionToken(token: string) {
   }
   safeStorageRemove(LEGACY_AUTH_TOKEN_KEY);
   safeSessionStorageRemove(LEGACY_AUTH_TOKEN_KEY);
+}
+
+async function storeServerSessionAndHydrate(token: string) {
+  storeServerSessionToken(token);
+  await db.hydrateNow();
 }
 
 function currentServerSessionToken(): string | null {

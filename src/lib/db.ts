@@ -1426,12 +1426,25 @@ function applyLocalStorageSnapshot(source: "storage" | "broadcast") {
 }
 
 async function hydrateFromRemote(options: { force?: boolean; merge?: boolean } = {}) {
+  if (remoteHydrating) {
+    await new Promise<void>((resolve) => {
+      const waitForCurrentHydration = () => {
+        if (!remoteHydrating) {
+          resolve();
+          return;
+        }
+        setTimeout(waitForCurrentHydration, 10);
+      };
+      waitForCurrentHydration();
+    });
+    if (options.force) return hydrateFromRemote(options);
+    return;
+  }
   if (
     !isActiveDbInstance() ||
     !remoteSyncEnabled() ||
     typeof window === "undefined" ||
-    (!options.force && remoteHydrated) ||
-    remoteHydrating
+    (!options.force && remoteHydrated)
   ) {
     if (!remoteSyncEnabled()) {
       setSyncStatus({
@@ -1920,6 +1933,11 @@ export const db = {
   },
   syncStatus(): SyncStatus {
     return syncStatus;
+  },
+  async hydrateNow(): Promise<boolean> {
+    if (!remoteSyncEnabled()) return false;
+    await hydrateFromRemote({ force: true, merge: true });
+    return remoteLoadedOk;
   },
   async syncNow(): Promise<boolean> {
     if (!remoteSyncEnabled()) return false;
