@@ -27,6 +27,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -63,6 +64,7 @@ button:disabled {
 }
 
 input,
+select,
 textarea {
   width: 100%;
   border: 1px solid var(--line);
@@ -82,6 +84,7 @@ textarea {
 }
 
 input:focus,
+select:focus,
 textarea:focus {
   border-color: var(--gold-light);
   box-shadow: 0 0 0 3px rgba(216, 194, 122, 0.18);
@@ -163,12 +166,25 @@ label {
   background: rgba(255, 255, 255, 0.08);
   font-size: 12px;
   font-weight: 800;
+  white-space: nowrap;
 }
 
 .status-pill.filled {
   color: #073b20;
   background: var(--success);
   border-color: var(--success);
+}
+
+.status-pill.launch-only {
+  color: #172554;
+  background: #bfdbfe;
+  border-color: #bfdbfe;
+}
+
+.status-pill.needs-login {
+  color: #3b2104;
+  background: #fed7aa;
+  border-color: #fed7aa;
 }
 
 .status-pill.error,
@@ -231,32 +247,130 @@ label {
   gap: 8px;
 }
 
-.search-input {
+.vault-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
   margin-bottom: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.vault-control span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.vault-control strong,
+.vault-control small {
+  display: block;
+}
+
+.vault-control small {
+  color: var(--muted);
+  line-height: 1.3;
+}
+
+.vault-control button {
+  flex: 0 0 auto;
+  padding-inline: 10px;
+}
+
+.vault-unlock {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.vault-unlock input {
+  min-width: 0;
+}
+
+.launcher-tools {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 128px;
+  gap: 8px;
+}
+
+.launcher-tools select {
+  min-width: 0;
+}
+
+.directory-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 8px 2px 10px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.directory-summary span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.launcher-message {
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+
+.empty-state {
+  padding: 24px 10px;
+  color: var(--muted);
+  text-align: center;
 }
 
 .carrier-grid {
   display: grid;
-  gap: 10px;
+  gap: 8px;
+  max-height: 410px;
+  overflow-y: auto;
+  padding-right: 3px;
 }
 
 .carrier-tile {
   display: grid;
-  grid-template-columns: 44px 1fr auto;
+  grid-template-columns: minmax(0, 1fr) 34px;
   align-items: center;
-  gap: 10px;
+  gap: 4px;
   border: 1px solid var(--line);
-  border-radius: 12px;
+  border-radius: 8px;
   background: var(--panel);
-  padding: 10px;
+  padding: 4px;
+}
+
+.carrier-tile:hover {
+  border-color: var(--gold-light);
+  background: rgba(216, 194, 122, 0.1);
+}
+
+.carrier-launch {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 5px;
+  border: 0;
+  background: transparent;
   text-align: left;
+}
+
+.carrier-launch:hover {
+  border-color: transparent;
+  background: transparent;
 }
 
 .carrier-logo {
   display: grid;
   place-items: center;
-  width: 44px;
-  height: 44px;
+  width: 40px;
+  height: 40px;
   border-radius: 8px;
   background: rgba(216, 194, 122, 0.14);
   color: var(--gold-light);
@@ -265,13 +379,50 @@ label {
 }
 
 .carrier-name {
+  display: block;
   font-weight: 850;
+  line-height: 1.2;
+}
+
+.carrier-copy {
+  display: block;
+  min-width: 0;
 }
 
 .carrier-meta {
+  display: block;
   margin-top: 3px;
   color: var(--muted);
   font-size: 12px;
+  line-height: 1.25;
+}
+
+.last-used {
+  display: inline-block;
+  margin-top: 4px;
+  color: var(--gold-light);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.favorite-button {
+  width: 34px;
+  min-height: 34px;
+  padding: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 21px;
+  line-height: 1;
+}
+
+.favorite-button.active {
+  color: var(--gold-light);
+}
+
+.favorite-button:hover {
+  border-color: var(--line);
 }
 
 .options-shell {

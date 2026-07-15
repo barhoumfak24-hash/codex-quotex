@@ -16,7 +16,11 @@ export interface RemoteStateRow {
 
 export type WriteRemoteStateResult =
   | { ok: true; row: RemoteStateRow }
-  | { ok: false; conflict: true; current: RemoteStateRow };
+  | { ok: false; conflict: true; current: RemoteStateRow | null };
+
+type InsertRemoteStateResult =
+  | { ok: true; row: RemoteStateRow }
+  | { ok: false; conflict: true };
 
 function env(name: string): string {
   return process.env[name]?.trim() ?? "";
@@ -74,13 +78,13 @@ export async function readRemoteState(id: string): Promise<RemoteStateRow | null
   return rows[0] ?? null;
 }
 
-async function insertRemoteState(id: string, snapshot: unknown, revision = 0): Promise<RemoteStateRow> {
+async function insertRemoteState(id: string, snapshot: unknown, revision = 0): Promise<InsertRemoteStateResult> {
   assertConfigured();
   const res = await fetch(stateUrl(), {
     method: "POST",
     headers: {
       ...headers(),
-      Prefer: "resolution=merge-duplicates,return=representation",
+      Prefer: "return=representation",
     },
     body: JSON.stringify({
       id,
@@ -89,12 +93,16 @@ async function insertRemoteState(id: string, snapshot: unknown, revision = 0): P
       updated_at: new Date().toISOString(),
     }),
   });
+  if (res.status === 409) return { ok: false, conflict: true };
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Supabase state write failed (${res.status}): ${text.slice(0, 300)}`);
   }
   const rows = (await res.json()) as RemoteStateRow[];
-  return rows[0] ?? { id, snapshot, revision, updated_at: new Date().toISOString() };
+  return {
+    ok: true,
+    row: rows[0] ?? { id, snapshot, revision, updated_at: new Date().toISOString() },
+  };
 }
 
 export async function writeRemoteState(
@@ -105,13 +113,15 @@ export async function writeRemoteState(
   assertConfigured();
   if (baseRevision === undefined) {
     const current = await readRemoteState(id);
-    return { ok: true, row: await insertRemoteState(id, snapshot, (current?.revision ?? -1) + 1) };
+    return writeRemoteState(id, snapshot, current?.revision ?? null);
   }
 
   if (baseRevision === null) {
     const current = await readRemoteState(id);
     if (current) return { ok: false, conflict: true, current };
-    return { ok: true, row: await insertRemoteState(id, snapshot, 0) };
+    const inserted = await insertRemoteState(id, snapshot, 0);
+    if (inserted.ok) return inserted;
+    return { ok: false, conflict: true, current: await readRemoteState(id) };
   }
 
   const nextRevision = baseRevision + 1;
@@ -136,5 +146,5 @@ export async function writeRemoteState(
 
   const current = await readRemoteState(id);
   if (current) return { ok: false, conflict: true, current };
-  return { ok: true, row: await insertRemoteState(id, snapshot, 0) };
+  return { ok: false, conflict: true, current: null };
 }

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { authenticateRequest, type AuthContext } from "../middleware/auth.js";
 import { readRemoteState, supabaseStateConfigured, writeRemoteState } from "../services/supabaseState.js";
 import {
+  canAccessAgencyStateForAuth,
   mergeStateSnapshotForAuth,
   scopeStateSnapshotForAuth,
   stateScopeForAuth,
@@ -21,6 +22,7 @@ stateRoutes.get("/:stateId", async (req, res, next) => {
     res.set("Cache-Control", "no-store, max-age=0");
     const access = stateAccess(req);
     if (!access) return res.status(401).json({ error: "unauthorized" });
+    if (!canAccessAgencyStateForAuth(access.auth)) return res.status(403).json({ error: "forbidden" });
     if (!supabaseStateConfigured()) return res.status(503).json({ found: false, error: "state_sync_not_configured" });
 
     const stateId = normalizeStateId(req.params.stateId);
@@ -47,6 +49,7 @@ stateRoutes.put("/:stateId", async (req, res, next) => {
     res.set("Cache-Control", "no-store, max-age=0");
     const access = stateAccess(req);
     if (!access) return res.status(401).json({ error: "unauthorized" });
+    if (!canAccessAgencyStateForAuth(access.auth)) return res.status(403).json({ error: "forbidden" });
     if (!supabaseStateConfigured()) return res.status(503).json({ ok: false, error: "state_sync_not_configured" });
 
     const stateId = normalizeStateId(req.params.stateId);
@@ -57,22 +60,36 @@ stateRoutes.put("/:stateId", async (req, res, next) => {
 
     const id = appStateId(stateId);
     const isTenantScoped = stateScopeForAuth(access.auth) === "tenant";
+    if (isTenantScoped && parsed.data.baseRevision === undefined) {
+      return res.status(400).json({ error: "base_revision_required" });
+    }
     const current = isTenantScoped ? await readRemoteState(id) : null;
-    const snapshot = isTenantScoped
-      ? mergeStateSnapshotForAuth(current?.snapshot ?? {}, parsed.data.snapshot, access.auth)
-      : parsed.data.snapshot;
-    const baseRevision = isTenantScoped ? current?.revision ?? null : parsed.data.baseRevision;
-
-    const result = await writeRemoteState(id, snapshot, baseRevision);
-    if (!result.ok) {
-      const scopedConflict = scopeStateSnapshotForAuth(result.current.snapshot, access.auth);
+    if (isTenantScoped && (current?.revision ?? null) !== parsed.data.baseRevision) {
+      const scopedConflict = scopeStateSnapshotForAuth(current?.snapshot ?? null, access.auth);
       return res.status(409).json({
         ok: false,
         error: "state_revision_conflict",
         scoped: scopedConflict.scoped,
         snapshot: scopedConflict.snapshot,
-        updatedAt: result.current.updated_at,
-        revision: result.current.revision,
+        updatedAt: current?.updated_at,
+        revision: current?.revision ?? null,
+      });
+    }
+    const snapshot = isTenantScoped
+      ? mergeStateSnapshotForAuth(current?.snapshot ?? {}, parsed.data.snapshot, access.auth)
+      : parsed.data.snapshot;
+    const baseRevision = parsed.data.baseRevision;
+
+    const result = await writeRemoteState(id, snapshot, baseRevision);
+    if (!result.ok) {
+      const scopedConflict = scopeStateSnapshotForAuth(result.current?.snapshot ?? null, access.auth);
+      return res.status(409).json({
+        ok: false,
+        error: "state_revision_conflict",
+        scoped: scopedConflict.scoped,
+        snapshot: scopedConflict.snapshot,
+        updatedAt: result.current?.updated_at,
+        revision: result.current?.revision ?? null,
       });
     }
     const scoped = scopeStateSnapshotForAuth(result.row.snapshot, access.auth);

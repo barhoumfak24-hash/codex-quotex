@@ -461,4 +461,60 @@ describe("agency deactivation auth guard", () => {
     });
     fetchSpy.mockRestore();
   });
+
+  it("fails closed instead of using a local plaintext password when the auth server is unreachable", async () => {
+    const agency = api.agencies.create({
+      name: "Server Required Agency",
+      contactEmail: "owner@server-required.example",
+      phone: "517-294-2671",
+      address: "",
+      website: "",
+      serviceAreas: [],
+      tier: "minimum",
+      allowedUsers: 10,
+      allowedProspectsPerMonth: 100,
+      allowedAiMessagesPerMonth: 500,
+      allowedCarriers: 10,
+    });
+    const manager = api.users.create({
+      tenantId: agency.id,
+      role: "manager",
+      email: "manager@server-required.example",
+      businessEmail: "manager@server-required.example",
+      name: "Server Required Manager",
+      generatedPassword: "local-plaintext-password",
+      profileCompleted: true,
+      staffAccessStatus: "active",
+    });
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("network unavailable"));
+
+    const harness = document.createElement("div");
+    document.body.appendChild(harness);
+    let root: Root | null = null;
+    let auth: ReturnType<typeof useAuth> | null = null;
+    function Probe() {
+      auth = useAuth();
+      return null;
+    }
+
+    await act(async () => {
+      root = createRoot(harness);
+      root.render(
+        <AuthProvider>
+          <Probe />
+        </AuthProvider>
+      );
+    });
+
+    await act(async () => {
+      const result = await auth!.signInStaff(manager.email, "local-plaintext-password");
+      expect(result).toEqual({ ok: false, reason: "server_unreachable" });
+    });
+    expect(auth!.user).toBeNull();
+
+    await act(async () => {
+      root?.unmount();
+    });
+    fetchSpy.mockRestore();
+  });
 });

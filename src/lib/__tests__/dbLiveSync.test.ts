@@ -99,7 +99,7 @@ describe("db live sync", () => {
     ).toBe(true);
   });
 
-  it("merges remote live-state hydration instead of replacing local client data", async () => {
+  it("merges tenant-scoped hydration instead of replacing local pending client data", async () => {
     const { SEED_CUSTOMERS } = await import("../seed");
     const preservedCustomer = {
       ...SEED_CUSTOMERS[0],
@@ -119,6 +119,8 @@ describe("db live sync", () => {
         ok: true,
         json: async () => ({
           found: true,
+          scoped: true,
+          revision: 1,
           snapshot: { customers: [SEED_CUSTOMERS[0]] },
         }),
       }))
@@ -230,6 +232,7 @@ describe("db live sync", () => {
           status: 409,
           json: async () => ({
             ok: false,
+            scoped: true,
             revision: 2,
             snapshot: { customers: [remoteCustomer] },
           }),
@@ -240,6 +243,7 @@ describe("db live sync", () => {
         status: 200,
         json: async () => ({
           ok: true,
+          scoped: true,
           revision: 3,
           snapshot: body.snapshot,
         }),

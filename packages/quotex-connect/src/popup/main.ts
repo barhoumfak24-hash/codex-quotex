@@ -1,9 +1,20 @@
 import "../styles/quotex-connect.css";
-import type { CarrierRecipe, PopupState, StatusRecord } from "../shared/types";
+import { recipeHasUsableSelectors } from "../shared/match";
+import type { CarrierRecipe, FillState, PopupState, StatusRecord } from "../shared/types";
+
+type LauncherFilter =
+  | "all"
+  | "favorites"
+  | "recent"
+  | "launch-only"
+  | "needs-login"
+  | "filled"
+  | "attention";
 
 const app = document.querySelector<HTMLDivElement>("#app")!;
 let state: PopupState | null = null;
 let query = "";
+let filter: LauncherFilter = "all";
 let transientMessage = "";
 
 void boot();
@@ -15,147 +26,213 @@ async function boot(): Promise<void> {
     return;
   }
   state = response.state;
-  render();
-}
-
-function render(): void {
-  if (!state) return;
-  if (!state.isSetup) {
-    renderSetup();
-    return;
-  }
-  if (state.locked) {
-    renderUnlock();
-    return;
-  }
   renderLauncher();
 }
 
-function renderSetup(): void {
-  app.innerHTML = `
-    <section class="stack">
-      ${brandHeader()}
-      <div class="panel stack">
-        <h2 class="panel-title">Create your local vault</h2>
-        <p class="muted">Credentials stay on this computer only, encrypted with your master passphrase.</p>
-        <label>Master passphrase <input id="passphrase" type="password" autocomplete="new-password" /></label>
-        <label>Confirm passphrase <input id="confirm" type="password" autocomplete="new-password" /></label>
-        ${messageHtml()}
-        <button class="primary" id="setup">Set passphrase</button>
-      </div>
-    </section>
-  `;
-  app.querySelector("#setup")?.addEventListener("click", setupPassphrase);
-}
-
-function renderUnlock(): void {
-  app.innerHTML = `
-    <section class="stack">
-      ${brandHeader()}
-      <div class="panel stack">
-        <h2 class="panel-title">Vault locked</h2>
-        <p class="muted">Unlock to launch a carrier. The key clears automatically after idle time or browser restart.</p>
-        <label>Master passphrase <input id="passphrase" type="password" autocomplete="current-password" /></label>
-        ${messageHtml()}
-        <button class="primary" id="unlock">Unlock</button>
-      </div>
-    </section>
-  `;
-  app.querySelector("#unlock")?.addEventListener("click", unlock);
-}
-
 function renderLauncher(): void {
+  if (!state) return;
   const recipes = filteredRecipes();
+  const lastUsed = state.recipes.find((recipe) => recipe.id === state?.activity.lastUsedCarrierId);
   app.innerHTML = `
     <section>
       <div class="popup-header">
         ${brandHeader()}
-        <div class="popup-actions">
-          <button id="open-options" title="Add carrier">Add</button>
-          <button id="lock" title="Lock vault">Lock</button>
-        </div>
+        <button id="open-options" title="Manage carrier logins">Logins</button>
       </div>
-      <input class="search-input" id="search" placeholder="Search carriers..." value="${escapeHtml(query)}" />
-      ${transientMessage ? `<div class="message">${escapeHtml(transientMessage)}</div>` : ""}
+      ${vaultControlHtml()}
+      <div class="launcher-tools">
+        <input class="search-input" id="search" type="search" aria-label="Search carriers" placeholder="Search carriers..." value="${escapeHtml(query)}" />
+        <select id="filter" aria-label="Filter carriers">
+          ${filterOption("all", "All carriers")}
+          ${filterOption("favorites", "Favorites")}
+          ${filterOption("recent", "Recent")}
+          ${filterOption("launch-only", "Launch only")}
+          ${filterOption("needs-login", "Needs login")}
+          ${filterOption("filled", "Filled")}
+          ${filterOption("attention", "Needs attention")}
+        </select>
+      </div>
+      <div class="directory-summary">
+        <span>${recipes.length} of ${state.recipes.length} carriers</span>
+        ${lastUsed ? `<span>Last used: ${escapeHtml(lastUsed.name)}</span>` : ""}
+      </div>
+      ${transientMessage ? `<div class="message launcher-message" role="status">${escapeHtml(transientMessage)}</div>` : ""}
+      ${recipes.length === 0 ? '<div class="empty-state">No carriers match this view.</div>' : ""}
       <div class="carrier-grid">
         ${recipes.map(carrierTile).join("")}
       </div>
     </section>
   `;
+
+  wireLauncherHandlers();
+}
+
+function wireLauncherHandlers(): void {
   app.querySelector<HTMLInputElement>("#search")?.addEventListener("input", (event) => {
     query = (event.target as HTMLInputElement).value;
     renderLauncher();
+    focusSearch();
+  });
+  app.querySelector<HTMLSelectElement>("#filter")?.addEventListener("change", (event) => {
+    filter = (event.target as HTMLSelectElement).value as LauncherFilter;
+    renderLauncher();
   });
   app.querySelector("#open-options")?.addEventListener("click", () => chrome.runtime.openOptionsPage());
+  app.querySelector("#setup-logins")?.addEventListener("click", () => chrome.runtime.openOptionsPage());
   app.querySelector("#lock")?.addEventListener("click", async () => {
     await send("quotex-connect.lock");
+    transientMessage = "Vault locked. Carrier links remain available.";
     await boot();
+  });
+  app.querySelector("#unlock")?.addEventListener("click", unlock);
+  app.querySelector<HTMLInputElement>("#unlock-passphrase")?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") void unlock();
   });
   app.querySelectorAll<HTMLButtonElement>("[data-launch]").forEach((button) => {
     button.addEventListener("click", () => launchCarrier(button.dataset.launch ?? ""));
   });
+  app.querySelectorAll<HTMLButtonElement>("[data-favorite]").forEach((button) => {
+    button.addEventListener("click", () => toggleCarrierFavorite(button.dataset.favorite ?? ""));
+  });
 }
 
 function filteredRecipes(): CarrierRecipe[] {
-  const recipes = state?.recipes ?? [];
+  if (!state) return [];
   const normalizedQuery = query.trim().toLowerCase();
-  if (!normalizedQuery) return recipes;
-  return recipes.filter((recipe) => recipe.name.toLowerCase().includes(normalizedQuery));
+  const favoriteIds = new Set(state.activity.favorites);
+  const recentIds = new Set(state.activity.recent);
+
+  return state.recipes
+    .filter((recipe) => !normalizedQuery || recipe.name.toLowerCase().includes(normalizedQuery))
+    .filter((recipe) => {
+      const status = displayStatus(recipe).state;
+      switch (filter) {
+        case "favorites":
+          return favoriteIds.has(recipe.id);
+        case "recent":
+          return recentIds.has(recipe.id);
+        case "launch-only":
+          return status === "launch-only";
+        case "needs-login":
+          return status === "needs-login";
+        case "filled":
+          return status === "filled";
+        case "attention":
+          return ["error", "login-page-not-detected", "locked", "needs-recipe"].includes(status);
+        default:
+          return true;
+      }
+    })
+    .sort((left, right) => compareRecipes(left, right, favoriteIds));
+}
+
+function compareRecipes(left: CarrierRecipe, right: CarrierRecipe, favoriteIds: Set<string>): number {
+  if (!state) return left.name.localeCompare(right.name);
+  const favoriteDifference = Number(favoriteIds.has(right.id)) - Number(favoriteIds.has(left.id));
+  if (favoriteDifference !== 0) return favoriteDifference;
+
+  const leftRecent = state.activity.recent.indexOf(left.id);
+  const rightRecent = state.activity.recent.indexOf(right.id);
+  if (leftRecent >= 0 || rightRecent >= 0) {
+    if (leftRecent < 0) return 1;
+    if (rightRecent < 0) return -1;
+    return leftRecent - rightRecent;
+  }
+  return left.name.localeCompare(right.name);
 }
 
 function carrierTile(recipe: CarrierRecipe): string {
-  const status = state?.statuses[recipe.id] ?? defaultStatus(recipe.id);
+  const status = displayStatus(recipe);
+  const favorite = state?.activity.favorites.includes(recipe.id) ?? false;
+  const lastUsed = state?.activity.lastUsedCarrierId === recipe.id;
   return `
-    <button class="carrier-tile" data-launch="${escapeHtml(recipe.id)}">
-      <span class="carrier-logo">${escapeHtml(recipe.name.slice(0, 1).toUpperCase())}</span>
-      <span>
-        <span class="carrier-name">${escapeHtml(recipe.name)}</span>
-        <span class="carrier-meta">${escapeHtml(status.message || "Never launched")}</span>
-      </span>
-      <span class="status-pill ${escapeHtml(status.state)}">${labelForStatus(status.state)}</span>
-    </button>
+    <div class="carrier-tile">
+      <button class="carrier-launch" data-launch="${escapeHtml(recipe.id)}" aria-label="Open ${escapeHtml(recipe.name)}">
+        <span class="carrier-logo">${escapeHtml(recipe.name.slice(0, 1).toUpperCase())}</span>
+        <span class="carrier-copy">
+          <span class="carrier-name">${escapeHtml(recipe.name)}</span>
+          <span class="carrier-meta">${escapeHtml(status.message || "Never launched")}</span>
+          ${lastUsed ? '<span class="last-used">Last used</span>' : ""}
+        </span>
+        <span class="status-pill ${escapeHtml(status.state)}">${labelForStatus(status.state)}</span>
+      </button>
+      <button class="favorite-button ${favorite ? "active" : ""}" data-favorite="${escapeHtml(recipe.id)}" aria-label="${favorite ? "Remove from" : "Add to"} favorites" title="${favorite ? "Remove from" : "Add to"} favorites">
+        ${favorite ? "&#9733;" : "&#9734;"}
+      </button>
+    </div>
   `;
 }
 
-async function setupPassphrase(): Promise<void> {
-  const passphrase = valueOf("#passphrase");
-  const confirm = valueOf("#confirm");
-  if (passphrase !== confirm) {
-    transientMessage = "Passphrases do not match.";
-    renderSetup();
-    return;
+function displayStatus(recipe: CarrierRecipe): StatusRecord {
+  const stored = state?.statuses[recipe.id] ?? defaultStatus(recipe.id);
+  if (!recipeHasUsableSelectors(recipe) && ["never", "needs-recipe"].includes(stored.state)) {
+    return {
+      carrierId: recipe.id,
+      state: "launch-only",
+      message: "Opens portal for manual sign-in",
+      updatedAt: stored.updatedAt
+    };
   }
-  const response = await send("quotex-connect.setup-passphrase", { passphrase });
-  handleStateResponse(response);
+  return stored;
+}
+
+function vaultControlHtml(): string {
+  if (!state) return "";
+  if (!state.isSetup) {
+    return `
+      <div class="vault-control">
+        <span><strong>Launch-only mode</strong><small>Set up the vault to save carrier logins.</small></span>
+        <button id="setup-logins">Set up</button>
+      </div>
+    `;
+  }
+  if (state.locked) {
+    return `
+      <div class="vault-control vault-unlock">
+        <label for="unlock-passphrase">Vault locked</label>
+        <input id="unlock-passphrase" type="password" autocomplete="current-password" placeholder="Master passphrase" />
+        <button id="unlock">Unlock</button>
+      </div>
+    `;
+  }
+  return `
+    <div class="vault-control">
+      <span><strong>Vault unlocked</strong><small>Saved logins can autofill where supported.</small></span>
+      <button id="lock">Lock</button>
+    </div>
+  `;
 }
 
 async function unlock(): Promise<void> {
-  const passphrase = valueOf("#passphrase");
-  const response = await send("quotex-connect.unlock", { passphrase });
-  handleStateResponse(response);
-}
-
-async function launchCarrier(carrierId: string): Promise<void> {
-  transientMessage = "Opening carrier...";
-  renderLauncher();
-  const response = await send("quotex-connect.launch-carrier", { carrierId });
+  const response = await send("quotex-connect.unlock", { passphrase: valueOf("#unlock-passphrase") });
   if (!response.ok) {
-    transientMessage = response.error ?? "Carrier could not be launched.";
-  } else {
-    transientMessage = response.result?.message ?? "Carrier action finished.";
-  }
-  await boot();
-}
-
-function handleStateResponse(response: any): void {
-  if (!response.ok) {
-    transientMessage = response.error ?? "Action failed.";
-    render();
+    transientMessage = response.error ?? "Unlock failed.";
+    renderLauncher();
     return;
   }
   state = response.state;
-  transientMessage = "";
-  render();
+  transientMessage = "Vault unlocked.";
+  renderLauncher();
+}
+
+async function launchCarrier(carrierId: string): Promise<void> {
+  transientMessage = "Opening carrier portal...";
+  renderLauncher();
+  const response = await send("quotex-connect.launch-carrier", { carrierId });
+  transientMessage = response.ok
+    ? response.result?.message ?? "Carrier portal opened."
+    : response.error ?? "Carrier portal could not be opened.";
+  await boot();
+}
+
+async function toggleCarrierFavorite(carrierId: string): Promise<void> {
+  const response = await send("quotex-connect.toggle-favorite", { carrierId });
+  if (!response.ok) {
+    transientMessage = response.error ?? "Favorite could not be updated.";
+  } else {
+    state = response.state;
+  }
+  renderLauncher();
 }
 
 function brandHeader(): string {
@@ -170,10 +247,6 @@ function brandHeader(): string {
   `;
 }
 
-function messageHtml(): string {
-  return transientMessage ? `<div class="message error">${escapeHtml(transientMessage)}</div>` : "";
-}
-
 function defaultStatus(carrierId: string): StatusRecord {
   return {
     carrierId,
@@ -183,12 +256,16 @@ function defaultStatus(carrierId: string): StatusRecord {
   };
 }
 
-function labelForStatus(status: string): string {
+function labelForStatus(status: FillState): string {
   switch (status) {
     case "filled":
       return "filled";
+    case "launch-only":
+      return "launch only";
+    case "needs-login":
+      return "needs login";
     case "needs-recipe":
-      return "needs recipe";
+      return "setup needed";
     case "login-page-not-detected":
       return "not detected";
     case "locked":
@@ -198,6 +275,16 @@ function labelForStatus(status: string): string {
     default:
       return "never";
   }
+}
+
+function filterOption(value: LauncherFilter, label: string): string {
+  return `<option value="${value}" ${filter === value ? "selected" : ""}>${label}</option>`;
+}
+
+function focusSearch(): void {
+  const search = app.querySelector<HTMLInputElement>("#search");
+  search?.focus();
+  search?.setSelectionRange(search.value.length, search.value.length);
 }
 
 function valueOf(selector: string): string {
@@ -213,7 +300,7 @@ function renderError(message: string): void {
 }
 
 function escapeHtml(value: string): string {
-  return value
+  return String(value)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")

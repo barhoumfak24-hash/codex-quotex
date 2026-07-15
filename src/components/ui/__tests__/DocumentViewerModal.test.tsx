@@ -4,7 +4,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createRoot, type Root } from "react-dom/client";
 import { act } from "react";
 import type { Document } from "@/types";
-import { DocumentViewerModal } from "../DocumentViewerModal";
+import {
+  DocumentViewerModal,
+  FilledAcordDocumentPreview,
+} from "../DocumentViewerModal";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -109,5 +112,70 @@ describe("DocumentViewerModal completed ACORD preview", () => {
     expect(container.textContent).not.toContain("Template fields");
     expect(container.textContent).not.toContain("Completed field count");
     expect(container.textContent).not.toContain("Source ACORD template ID");
+  });
+});
+
+const previewDocument: Document = {
+  id: "completed_acord_preview",
+  tenantId: "agency_test",
+  uploadedById: "agent_test",
+  fileName: "source-packet.pdf",
+  fileType: "application/pdf",
+  documentName: "Source packet",
+  type: "completed_packet",
+  visibility: "employee_only",
+  status: "approved",
+  storagePath: "",
+  downloadUrl: "/acord/source-packet.pdf",
+  uploadedAt: "2026-07-15T12:00:00.000Z",
+};
+
+describe("FilledAcordDocumentPreview missing-field overlays", () => {
+  it("renders missing-field coordinates through DocumentTemplateFieldOverlay", () => {
+    act(() => {
+      root.render(
+        <FilledAcordDocumentPreview
+          document={{
+            ...previewDocument,
+            templateFieldLayout: [
+              {
+                label: "Named insured",
+                page: 1,
+                x: 10,
+                y: 14,
+                width: 38,
+                height: 5,
+                kind: "text",
+                source: "detected",
+                required: true,
+              },
+            ],
+          }}
+          fields={{ "Named insured": "" }}
+          filledAcroPdf={{ status: "no_fields" }}
+          highlightFieldLabels={["Named insured"]}
+        />
+      );
+    });
+
+    expect(container.textContent).toContain("Required missing ACORD fields");
+    expect(container.querySelector('object[aria-label^="Original PDF"]')).toBeTruthy();
+    expect(container.querySelector('[aria-label="Named insured: "]')).toBeTruthy();
+  });
+
+  it("shows the original PDF when field coordinates are unavailable", () => {
+    act(() => {
+      root.render(
+        <FilledAcordDocumentPreview
+          document={{ ...previewDocument, templateFieldLayout: [] }}
+          fields={{ "Named insured": "" }}
+          filledAcroPdf={{ status: "no_fields" }}
+          highlightFieldLabels={["Named insured"]}
+        />
+      );
+    });
+
+    expect(container.textContent).toContain("does not include detected field positions");
+    expect(container.querySelector('iframe[title^="Selected source-packet.pdf"]')).toBeTruthy();
   });
 });

@@ -4010,11 +4010,12 @@ function comprehensiveClientHistory(customerId: string): StatusEvent[] {
       }
       (session.commercialCarrierSubmissions ?? []).forEach((submission) => {
         const linkedMessageId = commercialSubmissionMessageId(submission);
+        const awaitingDelivery = submission.status === "application_sent" && !submission.sentAt;
         push(
           makeHistoryEvent(`history:commercial-submission:${session.id}:${submission.carrierId}`, {
             tenantId: session.tenantId,
             source: "ai",
-            message: `Commercial application sent to ${carrierName(
+            message: `Commercial application ${awaitingDelivery ? "prepared for" : "sent to"} ${carrierName(
               submission.carrierId
             )}. Current carrier response: ${fmt.titleCase(
               submission.status.replace(/_/g, " ")
@@ -4025,7 +4026,7 @@ function comprehensiveClientHistory(customerId: string): StatusEvent[] {
             assetId: session.assetId,
             communicationId: linkedMessageId,
             documentId: commercialSubmissionDocumentId(submission),
-            createdAt: submission.responseAt ?? submission.sentAt,
+            createdAt: submission.responseAt ?? submission.sentAt ?? session.updatedAt ?? session.createdAt,
             createdById: linkedMessageId ? session.createdById : "ai",
           })
         );
@@ -6575,7 +6576,7 @@ function logCommercialCarrierEmailStatus(input: {
     id: uid("se"),
     tenantId: input.session.tenantId,
     source: "agent",
-    message: `${packageLabel} emailed to ${input.underwriter.name} at ${input.carrierName} with ${attachmentLabel}.`,
+    message: `${packageLabel} prepared for delivery to ${input.underwriter.name} at ${input.carrierName} with ${attachmentLabel}.`,
     visibility: "internal",
     customerId: input.session.customerId,
     prospectId: input.session.prospectId,
@@ -16463,6 +16464,140 @@ export const api = {
       }
       return updatedSession;
     },
+    confirmCommercialCarrierDelivery(
+      sessionId: string,
+      kind: "application" | "supplemental"
+    ): QuotingSession | null {
+      const session = this.get(sessionId);
+      if (!session || session.lineOfBusiness !== "commercial") return session ?? null;
+      const submissions = session.commercialCarrierSubmissions ?? [];
+      const messageIds = uniqueStrings(
+        submissions.flatMap((submission) =>
+          kind === "application"
+            ? submission.applicationMessageIds ?? []
+            : submission.supplementalMessageIds ?? []
+        )
+      );
+      if (messageIds.length === 0) return session;
+      const communications = new Map(
+        db
+          .list("communications")
+          .filter((communication) => communication.tenantId === session.tenantId)
+          .map((communication) => [communication.id, communication])
+      );
+      const providerConfirmed = messageIds.every((messageId) => {
+        const status = communications.get(messageId)?.deliveryStatus;
+        return status === "sent" || status === "synced";
+      });
+      if (!providerConfirmed) return null;
+
+      const confirmedAt = nowIso();
+      const confirmedSubmissions = submissions.map((submission) => {
+        const submissionMessageIds =
+          kind === "application"
+            ? submission.applicationMessageIds ?? []
+            : submission.supplementalMessageIds ?? [];
+        if (!submissionMessageIds.some((messageId) => messageIds.includes(messageId))) {
+          return submission;
+        }
+        const externalThreadIds = uniqueStrings(
+          submissionMessageIds.map((messageId) => communications.get(messageId)?.externalThreadId)
+        );
+        return {
+          ...submission,
+          status: kind === "application" ? "awaiting_response" : "supplemental_sent",
+          sentAt: confirmedAt,
+          deliveryFailureReason: undefined,
+          ...(kind === "application"
+            ? {
+                applicationExternalThreadIds: uniqueStrings([
+                  ...(submission.applicationExternalThreadIds ?? []),
+                  ...externalThreadIds,
+                ]),
+              }
+            : {
+                supplementalExternalThreadIds: uniqueStrings([
+                  ...(submission.supplementalExternalThreadIds ?? []),
+                  ...externalThreadIds,
+                ]),
+              }),
+        } satisfies CommercialCarrierSubmission;
+      });
+      const updated = db.update("quotingSessions", sessionId, {
+        commercialCarrierSubmissions: confirmedSubmissions,
+        ...(kind === "application"
+          ? { commercialApplicationSentAt: confirmedAt }
+          : { commercialSupplementalsCompletedAt: confirmedAt }),
+        status: "quoting",
+        aiSummary:
+          kind === "application"
+            ? "The connected mailbox confirmed delivery of the carrier application packet. Quotex is awaiting carrier replies."
+            : "The connected mailbox confirmed delivery of the carrier supplemental packet. Quotex is awaiting carrier replies.",
+        updatedAt: confirmedAt,
+      });
+      if (updated) {
+        logQuotingWorkflowProgress(updated, {
+          message:
+            kind === "application"
+              ? "Carrier application delivery confirmed."
+              : "Carrier supplemental delivery confirmed.",
+          detail: `${messageIds.length} email${messageIds.length === 1 ? "" : "s"} confirmed by the connected mailbox provider.`,
+          createdAt: confirmedAt,
+          createdById: session.createdById,
+          communicationId: messageIds[0],
+        });
+      }
+      return updated ?? session;
+    },
+    markCommercialCarrierDeliveryFailed(
+      sessionId: string,
+      kind: "application" | "supplemental",
+      reason?: string
+    ): QuotingSession | null {
+      const session = this.get(sessionId);
+      if (!session || session.lineOfBusiness !== "commercial") return session ?? null;
+      const failedAt = nowIso();
+      const friendlyReason =
+        reason?.trim() || "The connected mailbox did not confirm delivery. Review the mailbox connection and retry.";
+      const failedSubmissions = (session.commercialCarrierSubmissions ?? []).map((submission) => {
+        const messageIds =
+          kind === "application"
+            ? submission.applicationMessageIds ?? []
+            : submission.supplementalMessageIds ?? [];
+        if (messageIds.length === 0) return submission;
+        const delivered = messageIds.every((messageId) => {
+          const status = db.list("communications").find((row) => row.id === messageId)?.deliveryStatus;
+          return status === "sent" || status === "synced";
+        });
+        if (delivered) return submission;
+        return {
+          ...submission,
+          status: "send_failed",
+          deliveryFailureReason: friendlyReason,
+          responseAt: undefined,
+          acceptedAt: undefined,
+          aiRationale: "Carrier delivery was not confirmed. The packet remains available for retry.",
+        } satisfies CommercialCarrierSubmission;
+      });
+      const updated = db.update("quotingSessions", sessionId, {
+        commercialCarrierSubmissions: failedSubmissions,
+        ...(kind === "application"
+          ? { commercialApplicationSentAt: undefined }
+          : { commercialSupplementalsCompletedAt: undefined }),
+        status: kind === "application" ? "gathering_info" : "awaiting_reply",
+        aiSummary: "Carrier delivery was not confirmed. No carrier response is recorded; the packet is ready to retry.",
+        updatedAt: failedAt,
+      });
+      if (updated) {
+        logQuotingWorkflowProgress(updated, {
+          message: "Carrier email delivery needs attention.",
+          detail: "The provider did not confirm delivery. The workflow was returned to a retryable state.",
+          createdAt: failedAt,
+          createdById: session.createdById,
+        });
+      }
+      return updated ?? session;
+    },
     // Commercial flow: client submits structured answers from the
     // portal questionnaire. Stamps the responses, marks reply
     // received and runs the quotes. runQuotes() creates the Activity
@@ -16559,9 +16694,18 @@ export const api = {
           forceUnderwriterEmailForSelected
         );
         if (!applicationSentAt) {
-          const awaitingSubmissions = markCommercialSubmissionsAwaitingResponse(
-            pipeline.submissions
-          );
+          const awaitingSubmissions = options?.awaitLiveMailboxDelivery
+            ? pipeline.submissions.map((submission) => ({
+                ...submission,
+                status: "application_sent" as const,
+                sentAt: undefined,
+                deliveryFailureReason: undefined,
+                responseAt: undefined,
+                acceptedAt: undefined,
+                aiRationale:
+                  "The application packet is prepared and waiting for confirmation from the connected mailbox provider.",
+              }))
+            : markCommercialSubmissionsAwaitingResponse(pipeline.submissions);
           const carrierSubmissions = attachCommercialUnderwriterMessages(
             session,
             awaitingSubmissions,
@@ -16581,9 +16725,15 @@ export const api = {
             commercialSubmissionMessageId(submission)
           );
           logQuotingWorkflowProgress(session, {
-            message: `Commercial application packet sent to ${pipeline.submittedCarrierCount} carrier${
+            message: `Commercial application packet ${
+              options?.awaitLiveMailboxDelivery ? "prepared for" : "sent to"
+            } ${pipeline.submittedCarrierCount} carrier${
               pipeline.submittedCarrierCount === 1 ? "" : "s"
-            }; awaiting carrier responses.`,
+            }${
+              options?.awaitLiveMailboxDelivery
+                ? "; waiting for mailbox delivery confirmation."
+                : "; awaiting carrier responses."
+            }`,
             detail: `${portalAutomationCount} portal automation job${
               portalAutomationCount === 1 ? "" : "s"
             } queued. ${underwriterEmailCount} underwriter email${
@@ -16604,11 +16754,17 @@ export const api = {
             commercialAcordTemplates:
               syncedAcordTemplates ?? session.commercialAcordTemplates,
             commercialCarrierSubmissions: carrierSubmissions,
-            commercialApplicationSentAt: updatedAt,
+            commercialApplicationSentAt: options?.awaitLiveMailboxDelivery
+              ? undefined
+              : updatedAt,
             missingFields: [],
-            aiSummary: `AI sent the completed ACORD application packet to ${pipeline.submittedCarrierCount} appetite-matched carrier${
-              pipeline.submittedCarrierCount === 1 ? "" : "s"
-            }. The workflow is awaiting real inbound carrier replies before any market is accepted, declined, or sent to review.`,
+            aiSummary: options?.awaitLiveMailboxDelivery
+              ? `The completed ACORD application packet is prepared for ${pipeline.submittedCarrierCount} appetite-matched carrier${
+                  pipeline.submittedCarrierCount === 1 ? "" : "s"
+                }. The workflow will advance only after the connected mailbox confirms delivery.`
+              : `AI sent the completed ACORD application packet to ${pipeline.submittedCarrierCount} appetite-matched carrier${
+                  pipeline.submittedCarrierCount === 1 ? "" : "s"
+                }. The workflow is awaiting real inbound carrier replies before any market is accepted, declined, or sent to review.`,
             status: "quoting",
             updatedAt,
           });
@@ -16769,14 +16925,22 @@ export const api = {
           : carrierSubmissions;
         const awaitingSupplementalResponses = completedCarrierSubmissions.map((submission) =>
           supplementalCarrierIds.has(submission.carrierId)
-            ? {
-                ...submission,
-                status: "supplemental_sent" as const,
-                missingFields: undefined,
-                acceptedAt: undefined,
-                aiRationale:
-                  "Carrier supplemental package was sent. Awaiting the carrier's inbound response before AI classifies this market.",
-              }
+            ? options?.awaitLiveMailboxDelivery
+              ? {
+                  ...submission,
+                  sentAt: undefined,
+                  deliveryFailureReason: undefined,
+                  aiRationale:
+                    "The carrier supplemental package is prepared and waiting for confirmation from the connected mailbox provider.",
+                }
+              : {
+                  ...submission,
+                  status: "supplemental_sent" as const,
+                  missingFields: undefined,
+                  acceptedAt: undefined,
+                  aiRationale:
+                    "Carrier supplemental package was sent. Awaiting the carrier's inbound response before AI classifies this market.",
+                }
             : submission
         );
         const supplementalSession = db.update("quotingSessions", sessionId, {
@@ -16789,19 +16953,25 @@ export const api = {
           commercialCarrierSubmissions: awaitingSupplementalResponses,
           commercialApplicationSentAt:
             applicationSentAt ?? updatedAt,
-          commercialSupplementalsCompletedAt: updatedAt,
+          commercialSupplementalsCompletedAt: options?.awaitLiveMailboxDelivery
+            ? undefined
+            : updatedAt,
           missingFields: [],
-          aiSummary:
-            "AI sent the carrier-requested supplemental package. The workflow is awaiting matched inbound carrier replies before ranking any market.",
+          aiSummary: options?.awaitLiveMailboxDelivery
+            ? "The carrier-requested supplemental package is prepared. The workflow will advance only after the connected mailbox confirms delivery."
+            : "AI sent the carrier-requested supplemental package. The workflow is awaiting matched inbound carrier replies before ranking any market.",
           updatedAt,
         });
         const firstCompletedCarrierMessageSubmission = awaitingSupplementalResponses.find((submission) =>
           commercialSubmissionMessageId(submission)
         );
         logQuotingWorkflowProgress(session, {
-          message: `${commercialContact?.name ?? "Client"} completed commercial supplemental details; AI sent the package back to carriers.`,
-          detail:
-            "Carrier responses will be classified only after a matched inbound reply is received.",
+          message: `${commercialContact?.name ?? "Client"} completed commercial supplemental details; the carrier package was ${
+            options?.awaitLiveMailboxDelivery ? "prepared for delivery" : "sent"
+          }.`,
+          detail: options?.awaitLiveMailboxDelivery
+            ? "The workflow is waiting for mailbox delivery confirmation."
+            : "Carrier responses will be classified only after a matched inbound reply is received.",
           createdAt: updatedAt,
           communicationId: firstCompletedCarrierMessageSubmission
             ? commercialSubmissionMessageId(firstCompletedCarrierMessageSubmission)

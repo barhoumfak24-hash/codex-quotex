@@ -99,4 +99,5 @@ execute function public.backup_quotex_app_state();
 -- this bucket; the Express server uploads and reads with SUPABASE_SERVICE_ROLE_KEY.
 insert into storage.buckets (id, name, public)
 values ('quotex-app-blobs', 'quotex-app-blobs', false)
-on conflict (id) do nothing;
+on conflict (id) do update
+set public = excluded.public;

@@ -25,6 +25,7 @@
     { "source": "/api/mailboxes/:path*", "destination": "/api/app?path=api/mailboxes/:path*" },
     { "source": "/api/signing-packets/:path*", "destination": "/api/app?path=api/signing-packets/:path*" },
     { "source": "/api/state/:path*", "destination": "/api/app?path=api/state/:path*" },
+    { "source": "/api/state-blobs/:path*", "destination": "/api/app?path=api/state-blobs/:path*" },
     { "source": "/api/stripe/:path*", "destination": "/api/app?path=api/stripe/:path*" },
     { "source": "/((?!api/.*).*)", "destination": "/index.html" }
   ],

@@ -161,6 +161,10 @@ type ResolvedContact =
       externalRecipientRole: string;
     };
 
+type AdvisoryLockTransaction = {
+  $queryRaw<T>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T>;
+};
+
 export async function syncMailboxMessages(input: MailboxSyncInput): Promise<{
   connectionId: string;
   mailboxAccount: string;
@@ -178,11 +182,11 @@ export async function syncMailboxMessages(input: MailboxSyncInput): Promise<{
       maxResults,
       token.syncCursor?.gmailHistoryId
     );
-    if (result.nextHistoryId) {
-      await writeMailboxSyncCursor(connection, token, { gmailHistoryId: result.nextHistoryId });
-    }
     const messages = result.messages;
     const importSummary = await persistSyncedMailboxMessages(connection, messages);
+    if (result.nextHistoryId && importSummary.failed === 0) {
+      await writeMailboxSyncCursor(connection, token, { gmailHistoryId: result.nextHistoryId });
+    }
     await markConnectionSynced(connection.id);
     return { connectionId: connection.id, mailboxAccount: connection.address, provider: "gmail", messages, importSummary };
   }
@@ -193,11 +197,11 @@ export async function syncMailboxMessages(input: MailboxSyncInput): Promise<{
     maxResults,
     token.syncCursor?.graphDeltaLink
   );
-  if (result.nextDeltaLink) {
-    await writeMailboxSyncCursor(connection, token, { graphDeltaLink: result.nextDeltaLink });
-  }
   const messages = result.messages;
   const importSummary = await persistSyncedMailboxMessages(connection, messages);
+  if (result.nextDeltaLink && importSummary.failed === 0) {
+    await writeMailboxSyncCursor(connection, token, { graphDeltaLink: result.nextDeltaLink });
+  }
   await markConnectionSynced(connection.id);
   return { connectionId: connection.id, mailboxAccount: connection.address, provider: "outlook", messages, importSummary };
 }
@@ -300,24 +304,24 @@ export async function syncDueMailboxConnections(input: { maxConnections?: number
 }
 
 export async function pollDueMailboxConnections(input: { maxConnections?: number; maxResults?: number } = {}) {
-  const locked = await tryAcquireMailboxSyncLock();
-  if (!locked) {
-    return {
-      checked: 0,
-      imported: 0,
-      updated: 0,
-      deduped: 0,
-      failed: 0,
-      skipped: true,
-      reason: "mailbox_poll_already_running",
-      results: [],
-    };
-  }
-  try {
+  return prisma.$transaction(async (tx: AdvisoryLockTransaction) => {
+    const rows = await tx.$queryRaw<Array<{ locked: boolean }>>`
+      SELECT pg_try_advisory_xact_lock(hashtext('quotex-mailbox-poll')) AS locked
+    `;
+    if (rows[0]?.locked !== true) {
+      return {
+        checked: 0,
+        imported: 0,
+        updated: 0,
+        deduped: 0,
+        failed: 0,
+        skipped: true,
+        reason: "mailbox_poll_already_running",
+        results: [],
+      };
+    }
     return await syncDueMailboxConnections(input);
-  } finally {
-    await releaseMailboxSyncLock();
-  }
+  }, { timeout: 10 * 60_000 });
 }
 
 export async function listMailboxSyncStatus(input: { tenantId: string; limit?: number }) {
@@ -390,7 +394,6 @@ export async function listMailboxDiagnostics(input: { tenantId: string; userId?:
 
   return Promise.all(
     rows.map(async (row) => {
-      const connectionScopes = normalizeScopeList(row.scopes);
       let tokenStatus: "valid" | "needs_reauth" = "valid";
       let tokenScopes: string[] = [];
       let cursorPresent = false;
@@ -420,7 +423,6 @@ export async function listMailboxDiagnostics(input: { tenantId: string; userId?:
         }
       }
 
-      const allScopes = Array.from(new Set([...connectionScopes, ...tokenScopes]));
       const lastPollRows = await prisma.$queryRaw<
         Array<{ action: string; metadata: unknown; created_at: Date }>
       >`
@@ -453,9 +455,9 @@ export async function listMailboxDiagnostics(input: { tenantId: string; userId?:
         address: row.address,
         displayName: row.display_name,
         status: row.status,
-        grantedScopes: allScopes,
-        hasReadScope: hasReadScope(allScopes),
-        hasSendScope: hasSendScope(allScopes),
+        grantedScopes: tokenScopes,
+        hasReadScope: hasReadScope(tokenScopes),
+        hasSendScope: hasSendScope(tokenScopes),
         tokenStatus,
         cursorPresent,
         cursorKind,
@@ -490,25 +492,41 @@ async function syncGmailMessages(
 ): Promise<{ messages: SyncedMailboxMessage[]; nextHistoryId?: string }> {
   if (historyId) {
     try {
-      const historyUrl = new URL("https://gmail.googleapis.com/gmail/v1/users/me/history");
-      historyUrl.searchParams.set("startHistoryId", historyId);
-      historyUrl.searchParams.set("historyTypes", "messageAdded");
-      historyUrl.searchParams.set("maxResults", String(maxResults));
-      const history = await providerJson<GmailHistoryResponse>(historyUrl.toString(), accessToken);
-      const ids = uniqueGmailHistoryMessageIds(history).slice(0, maxResults);
+      const ids = new Set<string>();
+      const seenPageTokens = new Set<string>();
+      let pageToken: string | undefined;
+      let nextHistoryId: string | undefined;
+      do {
+        const historyUrl = new URL("https://gmail.googleapis.com/gmail/v1/users/me/history");
+        historyUrl.searchParams.set("startHistoryId", historyId);
+        historyUrl.searchParams.set("historyTypes", "messageAdded");
+        historyUrl.searchParams.set("maxResults", String(maxResults));
+        if (pageToken) historyUrl.searchParams.set("pageToken", pageToken);
+        const history = await providerJson<GmailHistoryResponse>(historyUrl.toString(), accessToken);
+        uniqueGmailHistoryMessageIds(history).forEach((id) => ids.add(id));
+        nextHistoryId = history.historyId ?? nextHistoryId;
+        pageToken = history.nextPageToken;
+        if (pageToken && seenPageTokens.has(pageToken)) {
+          throw new Error("Gmail history returned a repeated continuation token.");
+        }
+        if (pageToken) seenPageTokens.add(pageToken);
+      } while (pageToken);
+
       const messages = await readGmailMessagesById(ids, accessToken);
       return {
         messages: messages
           .filter((message) => !message.error)
           .map((message) => normalizeGmailMessage(connectionId, mailboxAccount, message)),
-        nextHistoryId: history.historyId ?? (await readGmailProfileHistoryId(accessToken)),
+        nextHistoryId,
       };
-    } catch {
+    } catch (error) {
+      if (!isExpiredGmailHistoryError(error)) throw error;
       // Gmail history IDs expire. Fall back to a bounded recent scan and reset
       // the cursor to the account's current historyId.
     }
   }
 
+  const nextHistoryId = await readGmailProfileHistoryId(accessToken);
   const listUrl = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
   listUrl.searchParams.set("maxResults", String(maxResults));
   listUrl.searchParams.set("q", "newer_than:1d");
@@ -519,13 +537,13 @@ async function syncGmailMessages(
     messages: messages
       .filter((message) => !message.error)
       .map((message) => normalizeGmailMessage(connectionId, mailboxAccount, message)),
-    nextHistoryId: await readGmailProfileHistoryId(accessToken),
+    nextHistoryId,
   };
 }
 
-async function readGmailMessagesById(ids: string[], accessToken: string): Promise<GmailMessage[]> {
+async function readGmailMessagesById(ids: Iterable<string>, accessToken: string): Promise<GmailMessage[]> {
   return Promise.all(
-    Array.from(new Set(ids.filter(Boolean))).map(async (id) => {
+    Array.from(new Set(Array.from(ids).filter(Boolean))).map(async (id) => {
       const url = new URL(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}`);
       url.searchParams.set("format", "full");
       return providerJson<GmailMessage>(url.toString(), accessToken);
@@ -604,23 +622,36 @@ async function syncMicrosoftMessages(
   maxResults: number,
   deltaLink?: string
 ): Promise<{ messages: SyncedMailboxMessage[]; nextDeltaLink?: string }> {
-  const url = deltaLink
+  const initialUrl = deltaLink
     ? new URL(deltaLink)
     : new URL("https://graph.microsoft.com/v1.0/me/mailFolders/inbox/messages/delta");
   if (!deltaLink) {
-    url.searchParams.set("$top", String(maxResults));
-    url.searchParams.set(
+    initialUrl.searchParams.set("$top", String(maxResults));
+    initialUrl.searchParams.set(
       "$select",
       "id,conversationId,webLink,from,toRecipients,ccRecipients,bccRecipients,subject,body,bodyPreview,receivedDateTime,sentDateTime,isRead,parentFolderId,internetMessageId,internetMessageHeaders,hasAttachments"
     );
   }
-  const list = await providerJson<GraphMessageList>(url.toString(), accessToken);
-  const messages = (list.value ?? []).slice(0, maxResults);
+  const messages: GraphMessage[] = [];
+  const seenLinks = new Set<string>();
+  let nextLink: string | undefined = initialUrl.toString();
+  let nextDeltaLink: string | undefined;
+  while (nextLink) {
+    if (seenLinks.has(nextLink)) throw new Error("Microsoft Graph delta returned a repeated continuation link.");
+    seenLinks.add(nextLink);
+    const list: GraphMessageList = await providerJson<GraphMessageList>(nextLink, accessToken);
+    messages.push(...(list.value ?? []));
+    nextDeltaLink = list["@odata.deltaLink"] ?? nextDeltaLink;
+    nextLink = list["@odata.nextLink"];
+  }
+  if (!nextDeltaLink) {
+    throw new Error("Microsoft Graph delta did not return a terminal delta link.");
+  }
   return {
     messages: await Promise.all(
       messages.map((message) => normalizeGraphMessage(connectionId, mailboxAccount, accessToken, message))
     ),
-    nextDeltaLink: list["@odata.deltaLink"] ?? deltaLink,
+    nextDeltaLink,
   };
 }
 
@@ -688,8 +719,24 @@ async function providerJson<T>(url: string, accessToken: string): Promise<T> {
     headers: { authorization: `Bearer ${accessToken}` },
   });
   const json = (await res.json().catch(() => null)) as T & { error?: { message?: string } };
-  if (!res.ok) throw new Error(json?.error?.message ?? `Mailbox sync failed with ${res.status}.`);
+  if (!res.ok) {
+    throw new MailboxProviderHttpError(
+      json?.error?.message ?? `Mailbox sync failed with ${res.status}.`,
+      res.status
+    );
+  }
   return json;
+}
+
+class MailboxProviderHttpError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "MailboxProviderHttpError";
+  }
+}
+
+function isExpiredGmailHistoryError(error: unknown): boolean {
+  return error instanceof MailboxProviderHttpError && error.status === 404;
 }
 
 function findGmailBody(part: GmailPart | undefined, mimeType: string): string {
@@ -1110,11 +1157,6 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
-function normalizeScopeList(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
-}
-
 function normalizeTokenScopes(token: TokenPayload): string[] {
   return (token.scope ?? "")
     .split(/[,\s]+/)
@@ -1153,19 +1195,6 @@ function hasSendScope(scopes: string[]): boolean {
 function numberFromMetadata(metadata: Record<string, unknown>, primary: string, fallback?: string): number {
   const value = metadata[primary] ?? (fallback ? metadata[fallback] : undefined);
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-async function tryAcquireMailboxSyncLock(): Promise<boolean> {
-  const rows = await prisma.$queryRaw<Array<{ locked: boolean }>>`
-    SELECT pg_try_advisory_lock(hashtext('quotex-mailbox-poll')) AS locked
-  `;
-  return rows[0]?.locked === true;
-}
-
-async function releaseMailboxSyncLock(): Promise<void> {
-  await prisma.$queryRaw`
-    SELECT pg_advisory_unlock(hashtext('quotex-mailbox-poll'))
-  `;
 }
 
 function gmailExactMessageUrl(mailboxAccount: string, messageIdHeader?: string): string | undefined {

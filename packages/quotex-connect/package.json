@@ -6,6 +6,7 @@
   "description": "Quotex Connect Manifest V3 carrier portal launcher extension.",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
+    "test": "vitest run --config vitest.config.ts",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview"
   },

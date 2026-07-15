@@ -542,7 +542,7 @@ export function AiQuotingWorkspace({
     }
   }
 
-  const setupWorkspaceSteps = workflowStepsForLine(lineOfBusiness, standalone);
+  const setupWorkspaceSteps = workflowStepsForLine(lineOfBusiness);
   const setupWorkspaceSubtitle = [
     lineOfBusiness === "commercial"
       ? "Commercial lines"
@@ -661,6 +661,25 @@ export function AiQuotingWorkspace({
     const setupFullscreenSubtitle = setupMappingPending
       ? "Map known data for the selected asset"
       : setupWorkspaceSubtitle;
+    if (standalone) {
+      return (
+        <StandaloneWorkflowLayout
+          steps={setupWorkspaceSteps}
+          currentStep={setupCurrentStep}
+          completedStepNumbers={setupMappingPending ? [1] : []}
+        >
+          {setupMappingPending ? (
+            <SetupAiMappingPendingPanel
+              steps={setupWorkspaceSteps}
+              totalSteps={setupWorkspaceSteps.length}
+              progress={mappingProgress}
+            />
+          ) : (
+            setupWorkspaceBody
+          )}
+        </StandaloneWorkflowLayout>
+      );
+    }
     return (
       <>
         {!workspaceOpen && (
@@ -696,11 +715,10 @@ export function AiQuotingWorkspace({
     );
   }
 
-  const flowSteps = workflowStepsForLine(session.lineOfBusiness ?? lineOfBusiness, standalone);
+  const flowSteps = workflowStepsForLine(session.lineOfBusiness ?? lineOfBusiness);
   const showQuoteRanking =
-    !standalone &&
-    (session.status === "complete" ||
-      (session.lineOfBusiness === "commercial" && session.quotes.length > 0));
+    session.status === "complete" ||
+    (session.lineOfBusiness === "commercial" && session.quotes.length > 0);
   const shouldShowQuestionnaire =
     session.lineOfBusiness !== "commercial" ||
     visibleQuestionnaireQuestions(session).length > 0;
@@ -726,8 +744,8 @@ export function AiQuotingWorkspace({
   ) : null;
   const flowPage =
     session.lineOfBusiness === "commercial"
-      ? commercialFlowPage(session, standalone)
-      : personalFlowPage(session, standalone);
+      ? commercialFlowPage(session)
+      : personalFlowPage(session);
   const activeWorkspaceBody = (
     <div className="space-y-4">
       {session.lineOfBusiness === "commercial" ? (
@@ -738,7 +756,6 @@ export function AiQuotingWorkspace({
           onChanged={onChanged}
           highlightMissingQuestions={activeHighlightedCommercialMissingQuestions}
           mappingProgress={mappingProgress}
-          standalone={standalone}
           steps={flowSteps}
         />
       ) : (
@@ -749,7 +766,6 @@ export function AiQuotingWorkspace({
           onChanged={onChanged}
           showQuoteRanking={showQuoteRanking}
           mappingProgress={mappingProgress}
-          standalone={standalone}
           steps={flowSteps}
         />
       )}
@@ -797,12 +813,23 @@ export function AiQuotingWorkspace({
             onFailure={handleAiFailure}
             mappingProgress={mappingProgress}
             runAcordAiMapping={runAcordAiMappingWithProgress}
-            standalone={standalone}
           />
         </div>
       </div>
     </div>
   );
+
+  if (standalone) {
+    return (
+      <StandaloneWorkflowLayout
+        steps={flowSteps}
+        currentStep={flowPage.step}
+        completedStepNumbers={workflowCompletedStepNumbers(session)}
+      >
+        {activeWorkspaceBody}
+      </StandaloneWorkflowLayout>
+    );
+  }
 
   return (
     <>
@@ -1045,12 +1072,28 @@ function CommercialAcordTemplatePicker({
                   </div>
                 )}
               </div>
-              {previewUrl ? (
-                <iframe
-                  title={`Selected ACORD ${previewTemplate.fileName}`}
-                  src={embeddedAcordViewerUrl(previewUrl)}
-                  className="mt-3 h-[520px] w-full rounded border border-ink-200 bg-white"
+              {previewTemplate.templateFieldLayout?.length ? (
+                <DocumentTemplateFieldOverlay
+                  layout={previewTemplate.templateFieldLayout}
+                  fields={previewTemplate.templateFields}
+                  fileUrl={previewUrl ?? undefined}
+                  sourceFileName={previewTemplate.fileName}
+                  title="Selected ACORD form"
+                  renderPdfBackground={false}
                 />
+              ) : previewUrl ? (
+                <div className="mt-3 rounded-md border border-dashed border-ink-200 bg-white px-3 py-6 text-center text-xs text-ink-500">
+                  The detected field overlay is unavailable for this ACORD file.
+                  <a
+                    className="ml-1 font-semibold text-blue-700 underline"
+                    href={previewUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Open the source PDF
+                  </a>
+                  .
+                </div>
               ) : (
                 <div className="mt-3 rounded-md border border-dashed border-ink-200 bg-white px-3 py-6 text-center text-xs text-ink-500">
                   This selected template does not have a bundled PDF URL.
@@ -1268,44 +1311,60 @@ async function deliverCommercialCarrierEmails(input: {
   userId: string;
   kind: "application" | "supplemental";
 }): Promise<void> {
-  const sender = api.users.get(input.userId);
-  if (!sender || sender.tenantId !== input.session.tenantId) {
-    throw new Error("The sending staff mailbox could not be verified.");
-  }
+  try {
+    const sender = api.users.get(input.userId);
+    if (!sender || sender.tenantId !== input.session.tenantId) {
+      throw new Error("The sending staff mailbox could not be verified.");
+    }
 
-  const messageIds = Array.from(
-    new Set(
-      (input.session.commercialCarrierSubmissions ?? []).flatMap((submission) =>
-        input.kind === "application"
-          ? submission.applicationMessageIds ?? []
-          : submission.supplementalMessageIds ?? []
+    const messageIds = Array.from(
+      new Set(
+        (input.session.commercialCarrierSubmissions ?? []).flatMap((submission) =>
+          input.kind === "application"
+            ? submission.applicationMessageIds ?? []
+            : submission.supplementalMessageIds ?? []
+        )
       )
-    )
-  );
-  if (messageIds.length === 0) return;
+    );
+    if (messageIds.length === 0) {
+      throw new Error("The carrier email could not be prepared for delivery.");
+    }
 
-  const communications = new Map(
-    api.communications
-      .listByTenant(input.session.tenantId)
-      .map((communication) => [communication.id, communication])
-  );
-  const missingMessage = messageIds.find((messageId) => !communications.has(messageId));
-  if (missingMessage) {
-    throw new Error("The carrier email could not be prepared for delivery.");
-  }
+    const communications = new Map(
+      api.communications
+        .listByTenant(input.session.tenantId)
+        .map((communication) => [communication.id, communication])
+    );
+    const missingMessage = messageIds.find((messageId) => !communications.has(messageId));
+    if (missingMessage) {
+      throw new Error("The carrier email could not be prepared for delivery.");
+    }
 
-  const failures: string[] = [];
-  for (const messageId of messageIds) {
-    const communication = communications.get(messageId)!;
-    const result = await sendCommunicationThroughLiveMailbox({
-      tenantId: input.session.tenantId,
-      user: sender,
-      communication,
-    });
-    if (!result.ok) failures.push(result.message);
-  }
-  if (failures.length > 0) {
-    throw new Error("The connected mailbox did not confirm carrier email delivery.");
+    const failures: string[] = [];
+    for (const messageId of messageIds) {
+      const communication = communications.get(messageId)!;
+      const result = await sendCommunicationThroughLiveMailbox({
+        tenantId: input.session.tenantId,
+        user: sender,
+        communication,
+      });
+      if (!result.ok) failures.push(result.message);
+    }
+    if (failures.length > 0) {
+      throw new Error("The connected mailbox did not confirm carrier email delivery.");
+    }
+
+    const confirmed = api.quoting.confirmCommercialCarrierDelivery(
+      input.session.id,
+      input.kind
+    );
+    if (!confirmed) {
+      throw new Error("The carrier delivery confirmation could not be saved.");
+    }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "Carrier email delivery failed.";
+    api.quoting.markCommercialCarrierDeliveryFailed(input.session.id, input.kind, reason);
+    throw error;
   }
 }
 
@@ -1325,29 +1384,16 @@ const PERSONAL_WORKFLOW_STEPS: WorkflowStepDefinition[] = [
   { number: 4, label: "Carrier ranking", icon: Trophy },
 ];
 
-const COMMERCIAL_STANDALONE_WORKFLOW_STEPS: WorkflowStepDefinition[] = [
-  { number: 1, label: "Setup", icon: ClipboardList },
-  { number: 2, label: "AI mapping", icon: WandSparkles },
-  { number: 3, label: "ACORD review", icon: FileCheck2 },
-];
-
-const PERSONAL_STANDALONE_WORKFLOW_STEPS: WorkflowStepDefinition[] = [
-  { number: 1, label: "Setup", icon: ClipboardList },
-  { number: 2, label: "AI mapping", icon: WandSparkles },
-  { number: 3, label: "Questionnaire", icon: FileQuestion },
-];
-
 function workflowStepsForLine(
-  lineOfBusiness: QuotingLineSelection | QuotingLineOfBusiness,
-  standalone: boolean
+  lineOfBusiness: QuotingLineSelection | QuotingLineOfBusiness
 ): WorkflowStepDefinition[] {
   if (lineOfBusiness === "commercial") {
-    return standalone ? COMMERCIAL_STANDALONE_WORKFLOW_STEPS : COMMERCIAL_WORKFLOW_STEPS;
+    return COMMERCIAL_WORKFLOW_STEPS;
   }
-  return standalone ? PERSONAL_STANDALONE_WORKFLOW_STEPS : PERSONAL_WORKFLOW_STEPS;
+  return PERSONAL_WORKFLOW_STEPS;
 }
 
-function commercialFlowPage(session: QuotingSession, standalone = false): CommercialFlowPage {
+function commercialFlowPage(session: QuotingSession): CommercialFlowPage {
   const submissions = session.commercialCarrierSubmissions ?? [];
   const applicationSentAt = commercialApplicationSentAt(session);
   const awaitingResponse = submissions.filter(
@@ -1367,18 +1413,9 @@ function commercialFlowPage(session: QuotingSession, standalone = false): Commer
     return {
       key: "ai_mapping",
       step: 2,
-      total: standalone ? 3 : 6,
+      total: 6,
       eyebrow: "AI mapping",
       title: "Map known data onto the selected ACORD document",
-    };
-  }
-  if (standalone) {
-    return {
-      key: "field_review",
-      step: 3,
-      total: 3,
-      eyebrow: "ACORD field review",
-      title: "Review the ACORD and questionnaire workspace",
     };
   }
   if (!applicationSentAt) {
@@ -1477,6 +1514,100 @@ function WorkflowStepIcons({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function StandaloneWorkflowLayout({
+  steps,
+  currentStep,
+  completedStepNumbers = [],
+  children,
+}: {
+  steps: WorkflowStepDefinition[];
+  currentStep: number;
+  completedStepNumbers?: number[];
+  children: ReactNode;
+}) {
+  const completed = new Set(completedStepNumbers);
+
+  return (
+    <div className="grid items-start gap-6 xl:grid-cols-[250px_minmax(0,1fr)]">
+      <aside
+        className="rounded-md border border-ink-100 bg-ink-50/70 p-4 xl:sticky xl:top-6"
+        aria-label={`Quote workflow steps: step ${currentStep} of ${steps.length}`}
+      >
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-gold-200 bg-gold-50 text-gold-700">
+            <ClipboardList className="h-5 w-5" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-500">
+              Workflow
+            </div>
+            <div className="text-sm font-semibold text-ink-900">Full-page quote flow</div>
+          </div>
+        </div>
+
+        <ol className="mt-5 space-y-1">
+          {steps.map((step, index) => {
+            const done = step.number < currentStep || completed.has(step.number);
+            const active = step.number === currentStep && !done;
+            const Icon = step.icon;
+            return (
+              <li
+                key={step.number}
+                className="relative pb-3 last:pb-0"
+                aria-current={active ? "step" : undefined}
+              >
+                {index < steps.length - 1 && (
+                  <span
+                    className={`absolute left-[15px] top-8 h-[calc(100%-1.25rem)] w-px ${
+                      done ? "bg-emerald-300" : "bg-ink-200"
+                    }`}
+                    aria-hidden="true"
+                  />
+                )}
+                <div
+                  className={`relative flex min-h-9 items-center gap-3 rounded-md px-2 py-1.5 ${
+                    active ? "bg-white shadow-sm ring-1 ring-gold-300" : ""
+                  }`}
+                >
+                  <span
+                    className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-xs font-semibold ${
+                      done
+                        ? "border-emerald-500 bg-emerald-500 text-white"
+                        : active
+                        ? "border-gold-500 bg-gold-50 text-gold-900"
+                        : "border-ink-200 bg-white text-ink-400"
+                    }`}
+                  >
+                    {done ? <Check className="h-3.5 w-3.5" /> : step.number}
+                  </span>
+                  <Icon
+                    className={`h-4 w-4 shrink-0 ${
+                      done
+                        ? "text-emerald-700"
+                        : active
+                        ? "text-gold-700"
+                        : "text-ink-400"
+                    }`}
+                  />
+                  <span
+                    className={`min-w-0 text-sm font-medium ${
+                      done || active ? "text-ink-900" : "text-ink-500"
+                    }`}
+                  >
+                    {step.label}
+                  </span>
+                </div>
+              </li>
+            );
+          })}
+        </ol>
+      </aside>
+
+      <div className="min-w-0">{children}</div>
     </div>
   );
 }
@@ -2516,7 +2647,6 @@ function QuoteNextAction({
   onFailure,
   mappingProgress,
   runAcordAiMapping,
-  standalone,
 }: {
   session: QuotingSession;
   userId: string;
@@ -2527,7 +2657,6 @@ function QuoteNextAction({
   onFailure?: (failure: AiGatewayFailureDetail) => void;
   mappingProgress?: AiMappingProgress | null;
   runAcordAiMapping?: (session: QuotingSession) => Promise<QuotingSession | null>;
-  standalone?: boolean;
 }) {
   const responses = session.questionnaireResponses ?? {};
   const questions = visibleQuestionnaireQuestions(session);
@@ -2576,21 +2705,8 @@ function QuoteNextAction({
     !needsPersonalQuestionnaireReview &&
     requiredMissing.length > 0;
   const nextDisabled = !!busy;
-  const standaloneCommercialDone =
-    !!standalone &&
-    session.lineOfBusiness === "commercial" &&
-    !!session.commercialQuestionnairePreparedAt;
-  const standalonePersonalDone =
-    !!standalone &&
-    session.lineOfBusiness !== "commercial" &&
-    (session.status === "quoting" ||
-      session.quotes.length > 0 ||
-      !!session.personalQuestionnairePreparedAt ||
-      !!session.questionnaireSentAt);
 
   if (
-    standaloneCommercialDone ||
-    standalonePersonalDone ||
     session.status === "complete" ||
     (session.lineOfBusiness === "commercial" &&
       commercialFlowPage(session).key === "accepted_ranking")
@@ -3848,7 +3964,6 @@ function CommercialFlowPanel({
   onChanged,
   highlightMissingQuestions = [],
   mappingProgress,
-  standalone,
   steps,
 }: {
   session: QuotingSession;
@@ -3857,7 +3972,6 @@ function CommercialFlowPanel({
   onChanged?: () => void;
   highlightMissingQuestions?: QuotingQuestion[];
   mappingProgress?: AiMappingProgress | null;
-  standalone: boolean;
   steps: WorkflowStepDefinition[];
 }) {
   const submissions = session.commercialCarrierSubmissions ?? [];
@@ -3870,7 +3984,7 @@ function CommercialFlowPanel({
   const awaitingResponse = submissions.filter(
     (s) => s.status === "awaiting_response" || s.status === "application_sent"
   );
-  const page = commercialFlowPage(session, standalone);
+  const page = commercialFlowPage(session);
   const carrierAutomation = submissions.length > 0 && (
     <div className="space-y-3">
       <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -4028,33 +4142,14 @@ function CommercialFlowPanel({
   );
 }
 
-function personalFlowPage(session: QuotingSession, standalone = false): {
+function personalFlowPage(session: QuotingSession): {
   key: "ai_mapping" | "questionnaire" | "carrier_ranking";
   step: number;
   total: number;
   eyebrow: string;
   title: string;
 } {
-  const total = standalone
-    ? PERSONAL_STANDALONE_WORKFLOW_STEPS.length
-    : PERSONAL_WORKFLOW_STEPS.length;
-  if (
-    standalone &&
-    (session.status === "complete" ||
-      session.status === "quoting" ||
-      session.quotes.length > 0 ||
-      session.status === "awaiting_reply" ||
-      !!session.questionnaireSentAt ||
-      !!session.personalQuestionnairePreparedAt)
-  ) {
-    return {
-      key: "questionnaire",
-      step: 3,
-      total,
-      eyebrow: "Client questionnaire",
-      title: "Review the personal-lines questionnaire",
-    };
-  }
+  const total = PERSONAL_WORKFLOW_STEPS.length;
   if (session.status === "complete") {
     return {
       key: "carrier_ranking",
@@ -4102,7 +4197,6 @@ function PersonalFlowPanel({
   onChanged,
   showQuoteRanking,
   mappingProgress,
-  standalone,
   steps,
 }: {
   session: QuotingSession;
@@ -4111,10 +4205,9 @@ function PersonalFlowPanel({
   onChanged?: () => void;
   showQuoteRanking: boolean;
   mappingProgress?: AiMappingProgress | null;
-  standalone: boolean;
   steps: WorkflowStepDefinition[];
 }) {
-  const page = personalFlowPage(session, standalone);
+  const page = personalFlowPage(session);
 
   return (
     <div className="rounded-md border border-violet-100 bg-violet-50/40 p-3 space-y-4">
@@ -4514,12 +4607,39 @@ function CommercialAcordSummary({
                 viewerUrl={embeddedAcordViewerUrl}
                 highlightFieldLabels={highlightedFieldLabels}
               />
-            ) : previewUrl ? (
-              <iframe
-                title={`Selected ACORD ${previewTemplate.fileName}`}
-                src={embeddedAcordViewerUrl(previewUrl)}
-                className="h-[520px] w-full rounded border border-ink-200 bg-white"
+            ) : previewUrl && highlightedFieldLabels.length > 0 && sourcePreviewDocument?.templateFieldLayout?.length ? (
+              <DocumentTemplateFieldOverlay
+                layout={sourcePreviewDocument.templateFieldLayout}
+                fields={sourcePreviewDocument.templateFields}
+                fileUrl={previewUrl}
+                sourceFileName={previewTemplate.fileName}
+                title="Required missing ACORD fields"
+                renderPdfBackground={false}
+                highlightLabels={highlightedFieldLabels}
+                showOnlyHighlighted
               />
+            ) : previewUrl && sourcePreviewDocument?.templateFieldLayout?.length ? (
+              <DocumentTemplateFieldOverlay
+                layout={sourcePreviewDocument.templateFieldLayout}
+                fields={sourcePreviewDocument.templateFields}
+                fileUrl={previewUrl}
+                sourceFileName={previewTemplate.fileName}
+                title="Selected ACORD form"
+                renderPdfBackground={false}
+              />
+            ) : previewUrl ? (
+              <div className="rounded-md border border-dashed border-ink-200 bg-white px-3 py-6 text-center text-xs text-ink-500">
+                The detected field overlay is unavailable for this ACORD file.
+                <a
+                  href={previewUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="ml-1 font-semibold text-gold-900 underline"
+                >
+                  Open the source PDF
+                </a>
+                .
+              </div>
             ) : (
               <div className="rounded-md border border-dashed border-ink-200 bg-white px-3 py-6 text-center text-xs text-ink-500">
                 The completed ACORD preview is not available yet.
@@ -4579,12 +4699,14 @@ function commercialSubmissionBadge(
       return { tone: "warn" as const, label: "Needs supplemental" };
     case "agent_review":
       return { tone: "warn" as const, label: "Agent review" };
+    case "send_failed":
+      return { tone: "warn" as const, label: "Delivery failed" };
     case "declined":
       return { tone: "neutral" as const, label: "Declined" };
     case "awaiting_response":
       return { tone: "info" as const, label: "Awaiting response" };
     case "application_sent":
-      return { tone: "info" as const, label: "Awaiting response" };
+      return { tone: "info" as const, label: "Prepared" };
   }
 }
 

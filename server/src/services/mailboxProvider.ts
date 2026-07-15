@@ -82,6 +82,16 @@ type MailboxConnectionLookupInput = {
   connectionId?: string;
 };
 
+type MicrosoftMessageMetadata = {
+  id?: string;
+  conversationId?: string;
+  webLink?: string;
+  internetMessageId?: string;
+  isDraft?: boolean;
+};
+
+const MICROSOFT_IMMUTABLE_ID_PREFERENCE = 'IdType="ImmutableId"';
+
 export async function sendMailboxEmail(input: MailboxSendInput): Promise<MailboxSendResult> {
   if (input.to.length === 0) throw new Error("At least one recipient is required.");
   const connection = await resolveMailboxConnection(input);
@@ -301,6 +311,7 @@ async function sendMicrosoftMail(
     headers: {
       authorization: `Bearer ${token.accessToken}`,
       "content-type": "application/json",
+      Prefer: MICROSOFT_IMMUTABLE_ID_PREFERENCE,
     },
     body: JSON.stringify({
       subject: input.subject || "Message from your agent",
@@ -316,13 +327,7 @@ async function sendMicrosoftMail(
     }),
   });
   const created = (await safeJson(createRes)) as
-    | {
-        id?: string;
-        conversationId?: string;
-        webLink?: string;
-        internetMessageId?: string;
-        error?: { message?: string };
-      }
+    | (MicrosoftMessageMetadata & { error?: { message?: string } })
     | null;
   if (!createRes.ok || !created?.id) {
     const message = created?.error?.message ?? `Microsoft draft creation failed with ${createRes.status}.`;
@@ -332,7 +337,10 @@ async function sendMicrosoftMail(
 
   const sendRes = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(created.id)}/send`, {
     method: "POST",
-    headers: { authorization: `Bearer ${token.accessToken}` },
+    headers: {
+      authorization: `Bearer ${token.accessToken}`,
+      Prefer: MICROSOFT_IMMUTABLE_ID_PREFERENCE,
+    },
   });
   if (!sendRes.ok) {
     const json = (await safeJson(sendRes)) as { error?: { message?: string } } | null;
@@ -341,16 +349,38 @@ async function sendMicrosoftMail(
     throw new Error(message);
   }
 
+  const sent = await readMicrosoftSentMessage(created.id, token.accessToken).catch(() => null);
   await markConnectionSent(connection.id);
   return {
     provider: "microsoft",
     status: "sent",
-    externalMessageId: created.id,
-    externalThreadId: created.conversationId,
-    externalUrl: created.webLink,
-    rfc822MessageId: created.internetMessageId,
-    messageIdHeader: created.internetMessageId,
+    externalMessageId: sent?.id ?? created.id,
+    externalThreadId: sent?.conversationId ?? created.conversationId,
+    externalUrl: sent?.webLink ?? created.webLink,
+    rfc822MessageId: sent?.internetMessageId ?? created.internetMessageId,
+    messageIdHeader: sent?.internetMessageId ?? created.internetMessageId,
   };
+}
+
+async function readMicrosoftSentMessage(
+  messageId: string,
+  accessToken: string
+): Promise<MicrosoftMessageMetadata | null> {
+  const url = new URL(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}`);
+  url.searchParams.set("$select", "id,conversationId,webLink,internetMessageId,isDraft");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const res = await fetch(url.toString(), {
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        Prefer: MICROSOFT_IMMUTABLE_ID_PREFERENCE,
+      },
+    });
+    const message = (await safeJson(res)) as MicrosoftMessageMetadata | null;
+    if (res.ok && message?.id && message.isDraft !== true) return message;
+    if (res.status !== 404 && !(res.ok && message?.isDraft === true)) return null;
+    if (attempt < 2) await delay(100 * (attempt + 1));
+  }
+  return null;
 }
 
 async function readGmailMessageMetadata(
@@ -391,6 +421,10 @@ function gmailExactMessageUrl(mailboxAccount: string, messageIdHeader?: string):
 
 function normalizeRfc822MessageId(value?: string): string {
   return (value ?? "").trim().replace(/^<+/, "").replace(/>+$/, "");
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function providerConfig(provider: "google" | "microsoft"): ProviderConfig {

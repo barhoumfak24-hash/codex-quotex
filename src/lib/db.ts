@@ -1477,7 +1477,7 @@ async function hydrateFromRemote(options: { force?: boolean; merge?: boolean } =
       scheduleRemotePersist(50, { skipStatus: true });
       return;
     }
-    const next = options.merge === false || payload.scoped === true ? remote : mergeDbShapes(cache, remote);
+    const next = options.merge === false ? remote : mergeDbShapes(cache, remote);
     const changed = JSON.stringify(next) !== JSON.stringify(cache);
     cache = next;
     if (changed) {
@@ -1724,7 +1724,7 @@ async function persistRemoteInner(options: { keepalive?: boolean; attempt?: numb
       const remote = normalizeRemoteSnapshot(payload?.snapshot);
       if (remote) {
         if (typeof payload?.revision === "number") remoteRevision = payload.revision;
-        cache = payload?.scoped === true ? remote : mergeDbShapes(cache, remote);
+        cache = mergeDbShapes(cache, remote);
         persistLocalOnly();
         notify();
       }
@@ -1749,7 +1749,7 @@ async function persistRemoteInner(options: { keepalive?: boolean; attempt?: numb
     if (typeof payload?.revision === "number") remoteRevision = payload.revision;
     const remote = normalizeRemoteSnapshot(payload?.snapshot);
     if (remote) {
-      cache = payload?.scoped === true ? remote : mergeDbShapes(cache, remote);
+      cache = mergeDbShapes(cache, remote);
       persistLocalOnly();
     }
     clearRemoteRetry();

@@ -87,7 +87,7 @@ export async function writeSigningPacket(packetId: string, packet: SigningPacket
     try {
       const result = await writeRemoteState(signingPacketStateId(packetId), packet);
       const row = result.ok ? result.row : result.current;
-      const parsed = signingPacketSchema.safeParse(row.snapshot);
+      const parsed = signingPacketSchema.safeParse(row?.snapshot);
       if (parsed.success) return parsed.data;
     } catch (error) {
       console.warn("Signing packet Supabase write failed; using in-memory fallback.", error);

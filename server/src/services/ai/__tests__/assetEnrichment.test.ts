@@ -457,8 +457,8 @@ describe("server aiEnrichAsset public-data guardrails", () => {
       sourceKind: "imagery_vision",
       verified: false,
       allowDocumentAutofill: false,
-      observedDate: "2024-05",
     });
+    expect(out.evidence?.["imagery.pool"]?.observedDate).toBeUndefined();
     expect(out.evidence?.detachedStructuresAndRecreation).toBeUndefined();
     expect(out.evidence?.["imagery.pool"]?.sourceUrl).toContain("key=redacted");
     expect(out.unavailableFields).toEqual(expect.arrayContaining(["imagery.pool", "imagery.roof-material"]));

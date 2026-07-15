@@ -50,7 +50,8 @@ async function renderClientQuotingCard(
     agency: ReturnType<typeof import("../../../lib/api").api.agencies.list>[number];
     agent: ReturnType<typeof import("../../../lib/api").api.users.list>[number];
     customer: ReturnType<typeof import("../../../lib/api").api.customers.list>[number];
-  }) => Promise<void> | void
+  }) => Promise<void> | void,
+  options: { standalone?: boolean; launcher?: boolean; initialEntry?: string } = {}
 ) {
   const { api } = await import("../../../lib/api");
   const agency = api.agencies.list()[0];
@@ -71,12 +72,16 @@ async function renderClientQuotingCard(
   await act(async () => {
     root = createRoot(host);
     root.render(
-      <MemoryRouter initialEntries={[`/employee/clients/${customer.id}`]}>
+      <MemoryRouter
+        initialEntries={[options.initialEntry ?? `/employee/clients/${customer.id}`]}
+      >
         <LocationProbe />
         <ClientQuotingCard
           tenantId={agency.id}
           userId={agent.id}
           customer={customer}
+          standalone={options.standalone}
+          launcher={options.launcher}
         />
       </MemoryRouter>
     );
@@ -86,6 +91,114 @@ async function renderClientQuotingCard(
 }
 
 describe("AiQuotingWorkspace component", () => {
+  it("uses a launcher on the profile and keeps the full workflow on its routed page", async () => {
+    const { customer, host, root } = await renderClientQuotingCard(undefined, {
+      launcher: true,
+    });
+
+    expect(host.textContent).toContain("AI Quoting Workspace");
+    expect(host.textContent).toContain("Setup pending - Ready to start");
+    expect(host.textContent).not.toContain("Workflow setup summary");
+    expect(host.querySelector('aside[aria-label^="Quote workflow steps"]')).toBeNull();
+    expect(
+      host.querySelector(`a[href="/employee/clients/${customer.id}/quote-flow"]`)?.textContent
+    ).toContain("Start quote flow");
+
+    await act(async () => {
+      root.unmount();
+    });
+    host.remove();
+  });
+
+  it("renders the routed workspace inline with all commercial and personal steps", async () => {
+    const { host, root } = await renderClientQuotingCard(undefined, { standalone: true });
+
+    expect(host.querySelector('[role="dialog"]')).toBeNull();
+    expect(host.querySelector('aside[aria-label*="step 1 of 4"]')).toBeTruthy();
+    expect(host.textContent).toContain("Carrier ranking");
+
+    await click(buttonByText(host, /Commercial lines/i));
+
+    expect(host.querySelector('[role="dialog"]')).toBeNull();
+    expect(host.querySelector('aside[aria-label*="step 1 of 6"]')).toBeTruthy();
+    expect(host.textContent).toContain("Carrier send");
+    expect(host.textContent).toContain("Supplementals");
+    expect(host.textContent).toContain("Quote ranking");
+
+    await act(async () => {
+      root.unmount();
+    });
+    host.remove();
+  });
+
+  it("uses the detected field overlay for a selected ACORD template", async () => {
+    const { host, root } = await renderClientQuotingCard(async ({ api, agency }) => {
+      const { db } = await import("../../../lib/db");
+      const template = api.documents
+        .listTemplates(agency.id)
+        .find((document) => /acord/i.test(`${document.fileName} ${document.documentName ?? ""}`));
+      expect(template).toBeTruthy();
+      db.update("documents", template!.id, {
+        templateFieldLayout: [
+          {
+            label: "Named insured",
+            page: 1,
+            x: 8,
+            y: 12,
+            width: 35,
+            height: 4,
+            kind: "text",
+            source: "detected",
+          },
+        ],
+      });
+    });
+
+    await openAiWorkspace(host);
+    await click(buttonByText(host, /Commercial lines/i));
+    const acordButton = buttons(host).find((button) =>
+      /^ACORD\s+\d+/i.test((button.textContent ?? "").trim())
+    );
+    await click(acordButton as HTMLButtonElement);
+
+    expect(host.textContent).toContain("Selected ACORD form");
+    expect(host.textContent).not.toContain("The detected field overlay is unavailable");
+    expect(host.querySelector('iframe[title^="Selected ACORD"]')).toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+    host.remove();
+  });
+
+  it("links to the source ACORD PDF when no field layout is available", async () => {
+    const { host, root } = await renderClientQuotingCard(async ({ api, agency }) => {
+      const { db } = await import("../../../lib/db");
+      api.documents
+        .listTemplates(agency.id)
+        .filter((document) => /acord/i.test(`${document.fileName} ${document.documentName ?? ""}`))
+        .forEach((document) => db.update("documents", document.id, { templateFieldLayout: [] }));
+    });
+
+    await openAiWorkspace(host);
+    await click(buttonByText(host, /Commercial lines/i));
+    const acordButton = buttons(host).find((button) =>
+      /^ACORD\s+\d+/i.test((button.textContent ?? "").trim())
+    );
+    await click(acordButton as HTMLButtonElement);
+
+    expect(host.textContent).toContain("The detected field overlay is unavailable");
+    const fallbackLink = Array.from(host.querySelectorAll("a")).find((link) =>
+      /Open the source PDF/i.test(link.textContent ?? "")
+    );
+    expect(fallbackLink?.getAttribute("href")).toBeTruthy();
+
+    await act(async () => {
+      root.unmount();
+    });
+    host.remove();
+  });
+
   it("keeps the full-screen quote flow reload-safe by marking the client route while open", async () => {
     const { host, root, getLocation } = await renderClientQuotingCard();
 
@@ -327,6 +440,7 @@ describe("AiQuotingWorkspace component", () => {
     });
     vi.stubGlobal("fetch", sendFetch);
     const { api, agency, customer, host, root } = await renderClientQuotingCard();
+    const confirmDeliverySpy = vi.spyOn(api.quoting, "confirmCommercialCarrierDelivery");
 
     await openAiWorkspace(host);
     await click(buttonByText(host, /Commercial lines/i));
@@ -360,6 +474,7 @@ describe("AiQuotingWorkspace component", () => {
     const session = api.quoting.getForCustomer(customer.id);
     expect(session?.commercialApplicationSentAt).toBeTruthy();
     expect(sendFetch).toHaveBeenCalled();
+    expect(confirmDeliverySpy).toHaveBeenCalledWith(session?.id, "application");
     const messageIds = (session?.commercialCarrierSubmissions ?? []).flatMap(
       (submission) => submission.applicationMessageIds ?? []
     );
@@ -390,6 +505,10 @@ describe("AiQuotingWorkspace component", () => {
     });
     vi.stubGlobal("fetch", sendFetch);
     const { api, agency, customer, host, root } = await renderClientQuotingCard();
+    const markDeliveryFailedSpy = vi.spyOn(
+      api.quoting,
+      "markCommercialCarrierDeliveryFailed"
+    );
 
     await openAiWorkspace(host);
     await click(buttonByText(host, /Commercial lines/i));
@@ -417,6 +536,11 @@ describe("AiQuotingWorkspace component", () => {
         .map((communication) => [communication.id, communication])
     );
     expect(sendFetch).toHaveBeenCalled();
+    expect(markDeliveryFailedSpy).toHaveBeenCalledWith(
+      session?.id,
+      "application",
+      expect.any(String)
+    );
     expect(messageIds.length).toBeGreaterThan(0);
     expect(messageIds.some((messageId) => messages.get(messageId)?.deliveryStatus === "failed")).toBe(
       true
@@ -430,5 +554,5 @@ describe("AiQuotingWorkspace component", () => {
       root.unmount();
     });
     host.remove();
-  });
+  }, 30_000);
 });

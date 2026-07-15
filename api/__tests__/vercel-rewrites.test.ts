@@ -25,6 +25,17 @@ describe("Vercel production rewrites", () => {
     });
   });
 
+  it("routes state blob calls to the bundled server app", () => {
+    const config = JSON.parse(readFileSync(join(process.cwd(), "vercel.json"), "utf8")) as {
+      rewrites?: Array<{ source?: string; destination?: string }>;
+    };
+
+    expect(config.rewrites).toContainEqual({
+      source: "/api/state-blobs/:path*",
+      destination: "/api/app?path=api/state-blobs/:path*",
+    });
+  });
+
   it("proxies live mailbox calls during local Vite development", () => {
     const viteConfig = readFileSync(join(process.cwd(), "vite.config.ts"), "utf8");
 

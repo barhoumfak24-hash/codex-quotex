@@ -1,6 +1,8 @@
 export type FillState =
   | "never"
   | "filled"
+  | "launch-only"
+  | "needs-login"
   | "needs-recipe"
   | "login-page-not-detected"
   | "locked"
@@ -57,11 +59,18 @@ export type StatusRecord = {
   updatedAt: number;
 };
 
+export type LauncherActivity = {
+  favorites: string[];
+  recent: string[];
+  lastUsedCarrierId: string;
+};
+
 export type PopupState = {
   isSetup: boolean;
   locked: boolean;
   recipes: CarrierRecipe[];
   statuses: Record<string, StatusRecord>;
+  activity: LauncherActivity;
 };
 
 export type OptionsState = PopupState & {

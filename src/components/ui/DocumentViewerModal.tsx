@@ -435,10 +435,27 @@ export function FilledAcordDocumentPreview({
 
   return (
     <div className={showStatus ? "space-y-3" : ""}>
-      {highlightedLabels.length > 0 && source ? (
+      {highlightedLabels.length > 0 && source?.layout.length ? (
         <div className={showStatus ? "space-y-3" : ""}>
           <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-950">
-            Required missing ACORD fields triggered the incomplete-send warning: {highlightedLabels.join(", ")}.
+            Required missing ACORD fields are highlighted below. These are the fields that triggered
+            the incomplete-send warning.
+          </div>
+          <DocumentTemplateFieldOverlay
+            layout={source.layout}
+            fields={source.overlayFields}
+            fileUrl={source.fileUrl}
+            sourceFileName={source.sourceFileName}
+            title="Required missing ACORD fields"
+            highlightLabels={highlightedLabels}
+            showOnlyHighlighted
+          />
+        </div>
+      ) : highlightedLabels.length > 0 && source ? (
+        <div className={showStatus ? "space-y-3" : ""}>
+          <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-950">
+            The source PDF does not include detected field positions, so the required fields could not
+            be highlighted. The original ACORD PDF is shown below.
           </div>
           <iframe
             title={`Selected ${source.sourceFileName}`}

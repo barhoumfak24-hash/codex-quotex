@@ -46,15 +46,6 @@ function questionnaireEditorLabel(meta: QuestionnaireResponseMeta): string {
   return `${meta.updatedByName} (${role})`;
 }
 
-function aiQuestionSourceLabel(meta: QuestionnaireResponseMeta): string {
-  const parts = [
-    meta.sourceLabel || meta.sourceName,
-    typeof meta.confidence === "number" ? `${Math.round(meta.confidence * 100)}% confidence` : "",
-    meta.observedDate ? `observed ${fmt.date(meta.observedDate)}` : "",
-  ].filter(Boolean);
-  return parts.join(" - ");
-}
-
 function QuestionEditMeta({
   meta,
   needsManual,
@@ -69,13 +60,9 @@ function QuestionEditMeta({
       </div>
     );
   }
-  const aiSource = meta.updatedByRole === "ai" ? aiQuestionSourceLabel(meta) : "";
   return (
-    <div className="mt-1 space-y-0.5 text-[11px] text-ink-500">
-      <div>
-        Last edited by {questionnaireEditorLabel(meta)} - {fmt.dateTime(meta.updatedAt)}
-      </div>
-      {aiSource && <div className="text-emerald-700">Source: {aiSource}</div>}
+    <div className="mt-1 text-[11px] text-ink-500">
+      Last edited by {questionnaireEditorLabel(meta)} - {fmt.dateTime(meta.updatedAt)}
     </div>
   );
 }

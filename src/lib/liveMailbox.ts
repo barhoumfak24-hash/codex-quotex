@@ -27,7 +27,9 @@ export async function sendCommunicationThroughLiveMailbox(input: {
     : undefined;
   if (!job) return { ok: true, skipped: "no_outbox" };
   if (job.status === "sent") return { ok: true, skipped: "already_sent" };
-  if (job.status === "sending") return { ok: true, skipped: "already_sending" };
+  if (job.status === "sending") {
+    return waitForExistingDelivery(job.id);
+  }
   if (job.to.length === 0) {
     const message = job.lastError ?? "No recipient email address was available.";
     api.mailboxOutbox.markFailed(job.id, message);
@@ -61,6 +63,30 @@ export async function sendCommunicationThroughLiveMailbox(input: {
     api.mailboxOutbox.markFailed(job.id, message);
     return { ok: false, message };
   }
+}
+
+async function waitForExistingDelivery(jobId: string): Promise<LiveMailboxSendResult> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const current = api.mailboxOutbox.get(jobId);
+    if (!current) {
+      return { ok: false, message: "The email delivery record could not be found." };
+    }
+    if (current.status === "sent") {
+      return { ok: true, skipped: "already_sent" };
+    }
+    if (current.status === "failed" || current.status === "cancelled") {
+      return {
+        ok: false,
+        message: current.lastError ?? "The connected mailbox did not confirm delivery.",
+      };
+    }
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 100));
+  }
+  return {
+    ok: false,
+    message: "The connected mailbox did not confirm delivery before the request timed out.",
+  };
 }
 
 export async function syncCommunicationsFromLiveMailbox(input: {

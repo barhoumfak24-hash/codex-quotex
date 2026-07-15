@@ -1126,7 +1126,7 @@ describe("commercial quoting session", () => {
     const carrierEmailTimelineEvents = api
       .customers
       .fullHistory(customer.id)
-      .filter((event) => /ACORD application packet emailed/i.test(event.message));
+      .filter((event) => /ACORD application packet prepared for delivery/i.test(event.message));
     expect(carrierEmailTimelineEvents.length).toBe(applicationMessageIds.length);
     expect(
       carrierEmailTimelineEvents.every(
@@ -1373,7 +1373,7 @@ describe("commercial quoting session", () => {
     const supplementalTimelineEvents = api
       .customers
       .fullHistory(customer.id)
-      .filter((event) => /ACORD supplemental packet emailed/i.test(event.message));
+      .filter((event) => /ACORD supplemental packet prepared for delivery/i.test(event.message));
     expect(supplementalTimelineEvents.length).toBe(supplementalMessageIds.length);
     expect(
       supplementalTimelineEvents.every(

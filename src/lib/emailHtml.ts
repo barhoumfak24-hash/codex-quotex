@@ -13,7 +13,9 @@ const BLOCKED_TAGS = new Set([
   "select",
 ]);
 
-const URI_ATTRIBUTES = new Set(["href", "src", "background", "xlink:href"]);
+const URI_ATTRIBUTES = new Set(["href", "src", "background", "poster", "xlink:href"]);
+const RESOURCE_ATTRIBUTES = new Set(["src", "background", "poster", "xlink:href"]);
+const NAVIGATION_TAGS = new Set(["a", "area"]);
 
 export function plainTextToEmailHtml(value: string): string {
   const clean = value.trim() || "Please see attached.";
@@ -41,13 +43,16 @@ export function stripEmailHtml(value: string): string {
 
 export function sanitizeEmailHtml(input: string, options: { allowRemoteImages: boolean }): string {
   if (typeof window === "undefined" || typeof DOMParser === "undefined") {
-    return emailFrameDocument(`<pre>${escapeHtml(stripEmailHtml(input))}</pre>`);
+    return emailFrameDocument(`<pre>${escapeHtml(stripEmailHtml(input))}</pre>`, options.allowRemoteImages);
   }
 
   const parser = new DOMParser();
   const parsed = parser.parseFromString(input || "", "text/html");
   for (const tag of BLOCKED_TAGS) {
     parsed.querySelectorAll(tag).forEach((node) => node.remove());
+  }
+  if (!options.allowRemoteImages) {
+    parsed.querySelectorAll("style").forEach((node) => node.remove());
   }
 
   const walker = parsed.createTreeWalker(parsed.body, NodeFilter.SHOW_ELEMENT);
@@ -62,37 +67,53 @@ export function sanitizeEmailHtml(input: string, options: { allowRemoteImages: b
         element.removeAttribute(attribute.name);
         return;
       }
+      if (name === "srcset") {
+        if (!options.allowRemoteImages || !isSafeSrcSet(value)) {
+          element.removeAttribute(attribute.name);
+        }
+        return;
+      }
       if (URI_ATTRIBUTES.has(name) && !isSafeEmailUrl(value)) {
         element.removeAttribute(attribute.name);
         return;
       }
+      if (
+        !options.allowRemoteImages &&
+        isLoadableResourceAttribute(element, name) &&
+        !isEmbeddedEmailResource(value)
+      ) {
+        if (element.tagName.toLowerCase() === "img" && name === "src") {
+          element.setAttribute("data-quotex-blocked-src", value);
+        }
+        element.removeAttribute(attribute.name);
+        return;
+      }
       if (name === "style") {
-        const safeStyle = sanitizeStyle(value);
+        const safeStyle = sanitizeStyle(value, options.allowRemoteImages);
         if (safeStyle) element.setAttribute(attribute.name, safeStyle);
         else element.removeAttribute(attribute.name);
       }
     });
 
     if (element.tagName.toLowerCase() === "img") {
-      const src = element.getAttribute("src") ?? "";
-      const remote = /^https?:\/\//i.test(src);
-      if (remote && !options.allowRemoteImages) {
-        element.setAttribute("data-quotex-blocked-src", src);
-        element.removeAttribute("src");
+      const blockedSrc = element.getAttribute("data-quotex-blocked-src");
+      if (blockedSrc && !options.allowRemoteImages) {
         element.setAttribute("alt", element.getAttribute("alt") || "Remote image blocked");
         element.setAttribute("style", mergeStyles(element.getAttribute("style"), "display:inline-block;border:1px solid #ddd;background:#f7f7f7;color:#555;padding:8px;min-width:120px;min-height:32px;"));
       }
     }
   });
 
-  return emailFrameDocument(parsed.body.innerHTML);
+  return emailFrameDocument(parsed.body.innerHTML, options.allowRemoteImages);
 }
 
-function emailFrameDocument(bodyHtml: string): string {
+function emailFrameDocument(bodyHtml: string, allowRemoteImages: boolean): string {
+  const imagePolicy = allowRemoteImages ? "img-src http: https: data: cid:;" : "img-src data: cid:;";
   return `<!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; ${imagePolicy} style-src 'unsafe-inline'; font-src data:; base-uri 'none'; form-action 'none';" />
     <base target="_blank" />
     <style>
       :root { color-scheme: light; }
@@ -111,15 +132,33 @@ function emailFrameDocument(bodyHtml: string): string {
 
 function isSafeEmailUrl(value: string): boolean {
   if (!value) return true;
-  return /^(https?:|mailto:|tel:|cid:|data:image\/(?:png|gif|jpeg|jpg|webp);base64,|\/)/i.test(value);
+  return /^(https?:|mailto:|tel:|cid:|data:image\/(?:png|gif|jpeg|jpg|webp);base64,|\/|#)/i.test(value);
 }
 
-function sanitizeStyle(value: string): string {
+function isSafeSrcSet(value: string): boolean {
+  return value
+    .split(",")
+    .map((candidate) => candidate.trim().split(/\s+/)[0])
+    .filter(Boolean)
+    .every(isSafeEmailUrl);
+}
+
+function isLoadableResourceAttribute(element: Element, name: string): boolean {
+  if (RESOURCE_ATTRIBUTES.has(name)) return true;
+  return name === "href" && !NAVIGATION_TAGS.has(element.tagName.toLowerCase());
+}
+
+function isEmbeddedEmailResource(value: string): boolean {
+  return /^(cid:|data:image\/(?:png|gif|jpeg|jpg|webp);base64,|#)/i.test(value);
+}
+
+function sanitizeStyle(value: string, allowRemoteResources = true): string {
   return value
     .split(";")
     .map((declaration) => declaration.trim())
     .filter(Boolean)
     .filter((declaration) => !/expression\s*\(|javascript:|behavior\s*:|-moz-binding|url\s*\(\s*['"]?\s*javascript:/i.test(declaration))
+    .filter((declaration) => allowRemoteResources || !/(?:url|image-set|cross-fade)\s*\(|@import/i.test(declaration))
     .join("; ");
 }
 

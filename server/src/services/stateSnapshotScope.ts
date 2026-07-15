@@ -28,7 +28,9 @@ type ScopeSetName =
 type TenantScope = Record<ScopeSetName, Set<string>>;
 
 const PLATFORM_ROLES = new Set(["platform_owner", "platform_admin", "master_admin"]);
+const CUSTOMER_ROLES = new Set(["customer"]);
 const GLOBAL_CATALOG_TABLES = new Set(["carriers", "categories"]);
+const SHARED_CATALOG_BUCKETS = new Set<ScopeSetName>(["carrierIds", "categoryIds"]);
 const PLATFORM_ONLY_TABLES = new Set([
   "audit",
   "demoLeads",
@@ -96,20 +98,29 @@ export interface ScopedStateResult {
   snapshot: unknown;
 }
 
-export function stateScopeForAuth(auth: AuthContext | null): "platform" | "tenant" | "token" {
+export function stateScopeForAuth(auth: AuthContext | null): "platform" | "tenant" | "customer" | "token" {
   if (!auth) return "token";
+  if (CUSTOMER_ROLES.has(auth.role)) return "customer";
   return auth.tenantId && !PLATFORM_ROLES.has(auth.role) ? "tenant" : "platform";
 }
 
+export function canAccessAgencyStateForAuth(auth: AuthContext | null): boolean {
+  return stateScopeForAuth(auth) !== "customer";
+}
+
 export function scopeStateSnapshotForAuth(snapshot: unknown, auth: AuthContext | null): ScopedStateResult {
-  if (stateScopeForAuth(auth) !== "tenant" || !auth?.tenantId) {
+  const scope = stateScopeForAuth(auth);
+  if (scope === "customer") return { scoped: true, snapshot: null };
+  if (scope !== "tenant" || !auth?.tenantId) {
     return { scoped: false, snapshot };
   }
   return { scoped: true, snapshot: scopeSnapshotToTenant(snapshot, auth.tenantId) };
 }
 
 export function mergeStateSnapshotForAuth(currentSnapshot: unknown, incomingSnapshot: unknown, auth: AuthContext | null): unknown {
-  if (stateScopeForAuth(auth) !== "tenant" || !auth?.tenantId) {
+  const scope = stateScopeForAuth(auth);
+  if (scope === "customer") return currentSnapshot;
+  if (scope !== "tenant" || !auth?.tenantId) {
     return incomingSnapshot;
   }
   return mergeTenantSnapshotIntoPlatform(currentSnapshot, incomingSnapshot, auth.tenantId);
@@ -200,9 +211,13 @@ function rowBelongsToTenant(
   if (PLATFORM_ONLY_TABLES.has(table)) return false;
   if (table === "agencies") return stringValue(row.id) === tenantId;
   if (GLOBAL_CATALOG_TABLES.has(table)) return !options.collectMode;
-  if (stringValue(row.tenantId) === tenantId || stringValue(row.agencyId) === tenantId) return true;
+  const explicitTenantIds = [stringValue(row.tenantId), stringValue(row.agencyId)].filter(Boolean);
+  if (explicitTenantIds.length > 0) {
+    return explicitTenantIds.every((value) => value === tenantId);
+  }
 
   for (const [field, bucket] of Object.entries(REFERENCE_BUCKETS)) {
+    if (SHARED_CATALOG_BUCKETS.has(bucket)) continue;
     const value = stringValue(row[field]);
     if (value && scope[bucket].has(value)) return true;
   }

@@ -1,6 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
-import { AlertTriangle, Building2, Check, Plus, Search, User, X } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  Building2,
+  Check,
+  ClipboardList,
+  Plus,
+  Search,
+  User,
+  X,
+} from "lucide-react";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { AddressAutocomplete } from "@/components/ui/AddressAutocomplete";
 import { AiQuotingWorkspace } from "@/components/quoting/AiQuotingWorkspace";
@@ -131,12 +141,14 @@ export function ClientQuotingCard({
   customer,
   onChanged,
   standalone = false,
+  launcher = false,
 }: {
   tenantId: string;
   userId: string;
   customer: CustomerProfile;
   onChanged?: () => void;
   standalone?: boolean;
+  launcher?: boolean;
 }) {
   return (
     <ContactQuotingCard
@@ -145,6 +157,7 @@ export function ClientQuotingCard({
       contact={{ kind: "client", record: customer }}
       onChanged={onChanged}
       standalone={standalone}
+      launcher={launcher}
     />
   );
 }
@@ -155,12 +168,14 @@ export function ProspectQuotingCard({
   prospect,
   onChanged,
   standalone = false,
+  launcher = false,
 }: {
   tenantId: string;
   userId: string;
   prospect: Prospect;
   onChanged?: () => void;
   standalone?: boolean;
+  launcher?: boolean;
 }) {
   return (
     <ContactQuotingCard
@@ -169,6 +184,7 @@ export function ProspectQuotingCard({
       contact={{ kind: "prospect", record: prospect }}
       onChanged={onChanged}
       standalone={standalone}
+      launcher={launcher}
     />
   );
 }
@@ -179,6 +195,7 @@ function ContactQuotingCard({
   contact,
   onChanged,
   standalone,
+  launcher,
 }: {
   tenantId: string;
   userId: string;
@@ -187,6 +204,7 @@ function ContactQuotingCard({
     | { kind: "prospect"; record: Prospect };
   onChanged?: () => void;
   standalone: boolean;
+  launcher: boolean;
 }) {
   const location = useLocation();
   const [, setRev] = useState(0);
@@ -429,6 +447,44 @@ function ContactQuotingCard({
     api.quoting.reset(existing.id);
     setShowImplementedQuoteAudit(false);
     refresh();
+  }
+
+  if (launcher) {
+    const quoteFlowPath =
+      contact.kind === "client"
+        ? `/employee/clients/${contactId}/quote-flow`
+        : `/employee/prospects/${contactId}/quote-flow`;
+    const lineLabel =
+      existing?.lineOfBusiness === "commercial"
+        ? "Commercial lines"
+        : existing?.lineOfBusiness === "personal"
+        ? "Personal lines"
+        : "Setup pending";
+
+    return (
+      <Card id="ai-quoting-workspace" className="relative">
+        <div className="flex items-start gap-4">
+          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md border border-gold-200 bg-gold-50 text-gold-700">
+            <ClipboardList className="h-6 w-6" aria-hidden="true" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-gold-700">
+              AI quoting workspace
+            </div>
+            <h3 className="mt-1 text-lg font-semibold text-ink-900">AI Quoting Workspace</h3>
+            <p className="mt-1 text-sm text-ink-500">
+              {lineLabel} - {existing ? "Quote flow in progress" : "Ready to start"}
+            </p>
+          </div>
+        </div>
+        <div className="mt-5 flex justify-end">
+          <Link to={quoteFlowPath} className="btn-primary inline-flex text-sm">
+            {existing ? "Continue quote flow" : "Start quote flow"}
+            <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+          </Link>
+        </div>
+      </Card>
+    );
   }
 
   const setupDetailControls = selectedLineOfBusiness ? (

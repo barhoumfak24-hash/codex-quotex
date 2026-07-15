@@ -267,7 +267,8 @@ describe("Codex ACORD mapping guardrails", () => {
       intent: "questionnaire_prefill",
     });
 
-    const requestBody = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as {
+    const [, requestInit] = fetchMock.mock.calls[0] as unknown as [unknown, RequestInit];
+    const requestBody = JSON.parse(String(requestInit?.body)) as {
       tools?: unknown;
       tool_choice?: unknown;
       max_output_tokens?: unknown;
@@ -613,5 +614,318 @@ describe("Codex ACORD mapping guardrails", () => {
       value: "901 McDonald Dr, Northville, MI 48167",
     });
     expect(result.missingFields).toContain("Remarks");
+  });
+
+  it("uses model-detected universal fields that were not supplied by the caller", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          output_text: JSON.stringify({
+            detectedFields: [
+              {
+                id: "DetectedAddress1",
+                label: "Property address",
+                type: "text",
+                page: 1,
+                rect: { x: 80, y: 140, width: 260, height: 24 },
+                confidence: 0.94,
+              },
+            ],
+            mappings: [
+              {
+                targetId: "DetectedAddress1",
+                targetField: "Property address",
+                value: "901 McDonald Dr, Northville, MI 48167",
+                sourceLabel: "Quotex dossier",
+                sourceUrl: "",
+                sourceKind: "client_intake",
+                confidence: 0.93,
+                verified: true,
+                rationale: "Exact address in dossier.",
+              },
+            ],
+            missingFields: [],
+            webSources: [],
+            summary: "Detected and mapped one field.",
+            confidence: 0.93,
+          }),
+        }),
+        { status: 200 }
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { aiMapUniversalDocumentFields } = await import("../services/ai/index.js");
+    const result = await aiMapUniversalDocumentFields({
+      document: { fileName: "unflattened-form.pdf", fileType: "application/pdf" },
+      fields: [],
+      dossier: { asset: { address: "901 McDonald Dr, Northville, MI 48167" } },
+      attachments: [
+        {
+          fileName: "unflattened-form.pdf",
+          mimeType: "application/pdf",
+          dataUrl: "data:application/pdf;base64,Zm9ybQ==",
+        },
+      ],
+    });
+
+    expect(result.detectedFields).toEqual([
+      expect.objectContaining({
+        id: "DetectedAddress1",
+        label: "Property address",
+        page: 1,
+        confidence: 0.94,
+      }),
+    ]);
+    expect(result.mappings).toEqual([
+      expect.objectContaining({
+        targetId: "DetectedAddress1",
+        targetField: "Property address",
+        value: "901 McDonald Dr, Northville, MI 48167",
+      }),
+    ]);
+  });
+
+  it("returns no policy facts when no readable document evidence is supplied", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { aiExtractPolicyFromFile } = await import("../services/ai/index.js");
+    const result = await aiExtractPolicyFromFile({
+      fileName: "Chubb-Dec-Page.pdf",
+      fileType: "application/pdf",
+      carrierNames: ["Chubb"],
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      policyNumber: "",
+      confidence: 0,
+    });
+    expect(result.carrierName).toBeUndefined();
+    expect(result.finalPremium).toBeUndefined();
+    expect(result.effectiveDate).toBeUndefined();
+  });
+
+  it("keeps only policy values with matching field-level document evidence", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          output_text: JSON.stringify({
+            policyNumber: "CH-12345",
+            carrierName: "Chubb",
+            premiumEstimate: 99_999,
+            finalPremium: 1_250,
+            effectiveDate: "2026-01-01",
+            renewalDate: "2027-01-01",
+            assetHint: "Coastal home",
+            summary: "Model summary is not trusted as evidence.",
+            confidence: 0.96,
+            sources: ["Model assertion"],
+            fieldEvidence: [
+              {
+                fieldKey: "policyNumber",
+                value: "CH-12345",
+                sourceKind: "document_text",
+                evidence: "Policy Number: CH-12345",
+                confidence: 0.96,
+              },
+              {
+                fieldKey: "carrierName",
+                value: "Chubb",
+                sourceKind: "document_text",
+                evidence: "Carrier: Chubb",
+                confidence: 0.95,
+              },
+              {
+                fieldKey: "premiumEstimate",
+                value: "99999",
+                sourceKind: "document_text",
+                evidence: "Estimated premium: $99,999",
+                confidence: 0.99,
+              },
+              {
+                fieldKey: "finalPremium",
+                value: "$1,250",
+                sourceKind: "document_text",
+                evidence: "Annual Premium: $1,250",
+                confidence: 0.94,
+              },
+              {
+                fieldKey: "effectiveDate",
+                value: "01/01/2026",
+                sourceKind: "document_text",
+                evidence: "Effective Date: 01/01/2026",
+                confidence: 0.93,
+              },
+            ],
+          }),
+        }),
+        { status: 200 }
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { aiExtractPolicyFromFile } = await import("../services/ai/index.js");
+    const result = await aiExtractPolicyFromFile({
+      fileName: "declarations.pdf",
+      fileType: "application/pdf",
+      text: [
+        "Carrier: Chubb",
+        "Policy Number: CH-12345",
+        "Annual Premium: $1,250",
+        "Effective Date: 01/01/2026",
+      ].join("\n"),
+    });
+
+    expect(result).toMatchObject({
+      policyNumber: "CH-12345",
+      carrierName: "Chubb",
+      finalPremium: 1_250,
+      effectiveDate: "2026-01-01",
+    });
+    expect(result.premiumEstimate).toBeUndefined();
+    expect(result.renewalDate).toBeUndefined();
+    expect(result.assetHint).toBeUndefined();
+    expect(result.sources).not.toContain("Model assertion");
+  });
+
+  it("does not use browser-exposed VITE Google keys on the server", async () => {
+    vi.stubEnv("GOOGLE_GEOCODING_API_KEY", "");
+    vi.stubEnv("GOOGLE_MAPS_API_KEY", "");
+    vi.stubEnv("GOOGLE_PLACES_API_KEY", "");
+    vi.stubEnv("VITE_GOOGLE_MAPS_API_KEY", "browser-key");
+    vi.stubEnv("VITE_GOOGLE_PLACES_API_KEY", "browser-places-key");
+    const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("maps.googleapis.com")) {
+        throw new Error("Browser-exposed Google key reached a server request.");
+      }
+      if (url.includes("geocoding.geo.census.gov")) {
+        return new Response(JSON.stringify({ result: { addressMatches: [] } }), { status: 200 });
+      }
+      if (url.includes("api.openai.com")) {
+        return new Response(
+          JSON.stringify({
+            output_text: JSON.stringify({
+              fieldEntries: [],
+              unavailableFields: [],
+              sources: [],
+              notes: "No source-backed public fields found.",
+            }),
+          }),
+          { status: 200 }
+        );
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { aiEnrichAsset } = await import("../services/ai/index.js");
+    await aiEnrichAsset({
+      assetType: "coastal_home",
+      seed: { address: "901 McDonald Dr, Northville, MI 48167" },
+    });
+
+    const urls = fetchMock.mock.calls.map(([input]) => String(input));
+    expect(urls.some((url) => url.includes("maps.googleapis.com"))).toBe(false);
+    expect(urls.some((url) => url.includes("geocoding.geo.census.gov"))).toBe(true);
+  });
+
+  it("keeps visible pool, trampoline, and roof observations advisory with honest image dates", async () => {
+    vi.stubEnv("GOOGLE_MAPS_API_KEY", "server-maps-key");
+    const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/streetview/metadata")) {
+        return new Response(
+          JSON.stringify({
+            status: "OK",
+            date: "2024-05",
+            location: { lat: 42.4, lng: -83.5 },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        );
+      }
+      if (url.includes("maps.googleapis.com/maps/api/streetview") || url.includes("/staticmap")) {
+        return new Response(new Uint8Array([1, 2, 3]), {
+          status: 200,
+          headers: { "content-type": "image/jpeg" },
+        });
+      }
+      if (url.includes("api.openai.com")) {
+        return new Response(
+          JSON.stringify({
+            output_text: JSON.stringify({
+              findings: [
+                {
+                  feature: "pool",
+                  value: "Rectangular in-ground pool visible in rear yard",
+                  confidence: 0.91,
+                  sourceImage: "aerial",
+                  captureDate: "2099-01",
+                  notDeterminable: false,
+                  rationale: "Clearly visible water-filled rectangle.",
+                },
+                {
+                  feature: "roof covering",
+                  value: "Dark segmented roof covering visible",
+                  confidence: 0.78,
+                  sourceImage: "aerial",
+                  captureDate: "2099-01",
+                  notDeterminable: false,
+                  rationale: "Visible from above; material is not confirmed.",
+                },
+                {
+                  feature: "trampoline",
+                  value: "Round trampoline visible beside the house",
+                  confidence: 0.88,
+                  sourceImage: "ground",
+                  captureDate: "2099-01",
+                  notDeterminable: false,
+                  rationale: "Visible at the side of the property.",
+                },
+              ],
+              summary: "Advisory visible observations only.",
+            }),
+          }),
+          { status: 200 }
+        );
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { aiAnalyzePropertyImagery } = await import("../services/ai/index.js");
+    const result = await aiAnalyzePropertyImagery({
+      address: "901 McDonald Dr, Northville, MI 48167",
+      lat: 42.4,
+      lon: -83.5,
+      displayName: "901 McDonald Dr, Northville, MI 48167",
+      provider: "google",
+    });
+
+    const findings = result.fields.imageryFindings as Array<{
+      feature: string;
+      sourceImage: string;
+      captureDate: string;
+      confidence: number;
+    }>;
+    expect(findings.find((finding) => finding.feature === "pool")?.captureDate).toBe("");
+    expect(findings.find((finding) => finding.feature === "pool")?.confidence).toBe(0.75);
+    expect(findings.find((finding) => finding.feature === "trampoline")?.captureDate).toBe("2024-05");
+    expect(result.fields.detachedStructuresAndRecreation).toBeUndefined();
+    expect(result.evidence?.["imagery.pool"]).toMatchObject({
+      sourceKind: "imagery_vision",
+      verified: false,
+      allowDocumentAutofill: false,
+    });
+    expect(result.evidence?.["imagery.pool"].observedDate).toBeUndefined();
+    expect(result.evidence?.["imagery.trampoline"].observedDate).toBe("2024-05");
+
+    const openAiCall = fetchMock.mock.calls.find(([input]) => String(input).includes("api.openai.com"));
+    const requestBody = JSON.parse(String(openAiCall?.[1]?.body)) as { input?: Array<{ content?: unknown }> };
+    const prompt = JSON.stringify(requestBody.input?.[1]?.content ?? "");
+    expect(prompt).toContain("visible pools or trampolines");
+    expect(prompt).toContain("Never invent a date");
   });
 });

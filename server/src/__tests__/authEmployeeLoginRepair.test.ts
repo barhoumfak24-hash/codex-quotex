@@ -121,15 +121,13 @@ describe("employee login repair", () => {
     expect((prisma.user.update as any).mock.calls[0][0].data).toMatchObject({ status: "active" });
   });
 
-  it("lets original staff credentials sign in after an inactive server row is restored from the synced app state", async () => {
+  it("does not let a stale snapshot password reactivate staff while the agency is inactive", async () => {
     vi.resetModules();
     vi.stubEnv("DATABASE_URL", "postgresql://test");
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("JWT_SECRET", "test-jwt-secret-with-more-than-32-characters");
     vi.stubEnv("JWT_ISSUER", "");
     vi.stubEnv("JWT_AUDIENCE", "");
-    vi.stubEnv("STATE_SYNC_ID", "default");
-
     const password = "same-password-123";
     const agencyId = "agency_reactivated";
     const email = "manager@reactivated.example";
@@ -162,7 +160,7 @@ describe("employee login repair", () => {
       phone: null,
       role: "manager",
       status: "inactive",
-      passwordHash: "stale-hash",
+      passwordHash: testScryptHash("current-server-password"),
       passwordChangedAt: new Date(),
       mfaEnabled: false,
       profile: {},
@@ -173,57 +171,11 @@ describe("employee login repair", () => {
       agency: { ...agencyRow, active: false },
     };
 
-    vi.doMock("../services/supabaseState.js", () => ({
-      supabaseStateConfigured: () => true,
-      readRemoteState: vi.fn(async () => ({
-        id: "app_state:default",
-        updated_at: new Date().toISOString(),
-        snapshot: {
-          agencies: [
-            {
-              id: agencyId,
-              name: agencyRow.name,
-              contactEmail: agencyRow.contactEmail,
-              active: true,
-              tier: "starter",
-              allowedUsers: 3,
-            },
-          ],
-          users: [
-            {
-              id: inactiveUser.id,
-              tenantId: agencyId,
-              branchId: null,
-              name: inactiveUser.name,
-              email,
-              businessEmail: email,
-              role: "manager",
-              active: true,
-              staffAccessStatus: "active",
-              generatedPassword: password,
-              firstName: "Reactivated",
-              lastName: "Manager",
-            },
-          ],
-          branches: [],
-        },
-      })),
-      writeRemoteState: vi.fn(),
-    }));
-
-    const { authRoutes, verifyPasswordHashForLogin } = await import("../routes/auth.js");
+    const { authRoutes } = await import("../routes/auth.js");
     const { prisma } = await import("../services/prisma.js");
 
-    vi.spyOn(prisma.agency, "upsert").mockResolvedValue(agencyRow as any);
-    vi.spyOn(prisma.user, "findFirst")
-      .mockResolvedValueOnce(inactiveUser as any)
-      .mockResolvedValueOnce(inactiveUser as any);
-    vi.spyOn(prisma.user, "update").mockImplementation(async ({ data }: any) => ({
-      ...inactiveUser,
-      ...data,
-      status: data.status ?? "active",
-      agency: agencyRow,
-    }));
+    vi.spyOn(prisma.user, "findFirst").mockResolvedValueOnce(inactiveUser as any);
+    const updateSpy = vi.spyOn(prisma.user, "update");
 
     const layer = (authRoutes as any).stack.find((candidate: any) => candidate.route?.path === "/employee/login");
     const handler = layer?.route?.stack?.[0]?.handle;
@@ -234,13 +186,9 @@ describe("employee login repair", () => {
 
     await handler(req as Request, res as unknown as Response);
 
-    expect(res.state.status).toBe(200);
-    const body = res.state.json as { ok?: boolean; token?: string; user?: { email?: string; tenantId?: string } };
-    expect(body.ok).toBe(true);
-    expect(body.user).toMatchObject({ email, tenantId: agencyId });
-    expect(typeof body.token).toBe("string");
-    const repairedPasswordHash = (prisma.user.update as any).mock.calls[0][0].data.passwordHash;
-    expect(verifyPasswordHashForLogin(password, repairedPasswordHash)).toBe(true);
+    expect(res.state.status).toBe(403);
+    expect(res.state.json).toMatchObject({ ok: false, reason: "agency_inactive" });
+    expect(updateSpy).not.toHaveBeenCalled();
   });
 
   it("creates a staff account when the hidden agency snapshot has no contact email", async () => {

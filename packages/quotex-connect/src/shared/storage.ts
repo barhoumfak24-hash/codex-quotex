@@ -1,8 +1,22 @@
 import { DEFAULT_RECIPES } from "./defaultRecipes";
-import type { CarrierRecipe, ExtensionConfig, StatusRecord, VaultEntry } from "./types";
+import type {
+  CarrierRecipe,
+  ExtensionConfig,
+  LauncherActivity,
+  StatusRecord,
+  VaultEntry
+} from "./types";
 
 const CONFIG_KEY = "quotexConnectConfig";
 const STATUS_KEY = "quotexConnectStatuses";
+const ACTIVITY_KEY = "quotexConnectLauncherActivity";
+const RECENT_LIMIT = 8;
+
+export const DEFAULT_LAUNCHER_ACTIVITY: LauncherActivity = {
+  favorites: [],
+  recent: [],
+  lastUsedCarrierId: ""
+};
 
 export const DEFAULT_CONFIG: ExtensionConfig = {
   idleLockMinutes: 15,
@@ -41,6 +55,40 @@ export async function saveStatus(status: StatusRecord): Promise<void> {
   const statuses = await loadStatuses();
   statuses[status.carrierId] = status;
   await chrome.storage.local.set({ [STATUS_KEY]: statuses });
+}
+
+export async function loadLauncherActivity(): Promise<LauncherActivity> {
+  const data = await chrome.storage.local.get(ACTIVITY_KEY);
+  const existing = data?.[ACTIVITY_KEY] as Partial<LauncherActivity> | undefined;
+  return {
+    favorites: uniqueStrings(existing?.favorites),
+    recent: uniqueStrings(existing?.recent).slice(0, RECENT_LIMIT),
+    lastUsedCarrierId: String(existing?.lastUsedCarrierId ?? "")
+  };
+}
+
+export async function recordCarrierLaunch(carrierId: string): Promise<LauncherActivity> {
+  const activity = await loadLauncherActivity();
+  const nextActivity = {
+    ...activity,
+    recent: [carrierId, ...activity.recent.filter((id) => id !== carrierId)].slice(0, RECENT_LIMIT),
+    lastUsedCarrierId: carrierId
+  };
+  await chrome.storage.local.set({ [ACTIVITY_KEY]: nextActivity });
+  return nextActivity;
+}
+
+export async function toggleFavorite(carrierId: string): Promise<LauncherActivity> {
+  const activity = await loadLauncherActivity();
+  const isFavorite = activity.favorites.includes(carrierId);
+  const nextActivity = {
+    ...activity,
+    favorites: isFavorite
+      ? activity.favorites.filter((id) => id !== carrierId)
+      : [...activity.favorites, carrierId]
+  };
+  await chrome.storage.local.set({ [ACTIVITY_KEY]: nextActivity });
+  return nextActivity;
 }
 
 export function isConfigured(config: ExtensionConfig): boolean {
@@ -94,4 +142,9 @@ function normalizeLegacyCarrierId(carrierId: string): string {
     cincinnati: "carrier_cincinnati_home"
   };
   return legacyIds[carrierId] ?? carrierId;
+}
+
+function uniqueStrings(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((item) => String(item)).filter(Boolean))];
 }

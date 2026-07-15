@@ -164,6 +164,7 @@ export async function completeMailboxOAuth(input: {
     typeof token.expires_in === "number" && Number.isFinite(token.expires_in)
       ? new Date(now.getTime() + token.expires_in * 1000).toISOString()
       : undefined;
+  const grantedScopes = normalizeGrantedScopes(token.scope);
   const encryptedPayload = encryptTokenPayload({
     provider: input.provider,
     accessToken: token.access_token,
@@ -206,7 +207,7 @@ export async function completeMailboxOAuth(input: {
         ${profile.displayName ?? profile.email},
         ${"connected"},
         ${"oauth"},
-        ${JSON.stringify(config.scopes)}::jsonb,
+        ${JSON.stringify(grantedScopes)}::jsonb,
         ${tokenVaultRef},
         ${profile.externalAccountId ?? null},
         ${now},
@@ -275,7 +276,7 @@ export async function completeMailboxOAuth(input: {
       displayName: profile.displayName ?? profile.email,
       status: "connected",
       authMode: "oauth",
-      scopes: config.scopes,
+      scopes: grantedScopes,
       tokenVaultRef,
       externalAccountId: profile.externalAccountId,
     },
@@ -446,6 +447,17 @@ function missingProviderConfig(provider: MailboxOAuthProvider): string[] {
       ? ["GOOGLE_MAILBOX_CLIENT_ID", "GOOGLE_MAILBOX_CLIENT_SECRET"]
       : ["MICROSOFT_MAILBOX_CLIENT_ID", "MICROSOFT_MAILBOX_CLIENT_SECRET"];
   return keys.filter((key) => !env(key));
+}
+
+function normalizeGrantedScopes(value?: string): string[] {
+  return Array.from(
+    new Set(
+      (value ?? "")
+        .split(/[,\s]+/)
+        .map((scope) => scope.trim())
+        .filter(Boolean)
+    )
+  );
 }
 
 function redirectUri(provider: MailboxOAuthProvider, envKey: string): string {

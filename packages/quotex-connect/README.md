@@ -18,6 +18,8 @@ The starter package includes the carrier portal set used by Quotex's carrier lib
 - Injects a content script on allowed carrier domains and fills only the configured username/password/submit selectors.
 - Stops after submitting username/password. It does not automate MFA, 2FA, push approvals, or one-time codes.
 - Presents one complete carrier list and one simple credential form for the selected carrier.
+- Keeps all 42 carrier links available before setup and while the credential vault is locked.
+- Supports carrier search, status filters, favorites, recent launches, and a last-used marker.
 
 ## What it does not do
 
@@ -25,7 +27,7 @@ The starter package includes the carrier portal set used by Quotex's carrier lib
 - It does not store plaintext credentials.
 - It does not send carrier credentials over the network.
 - It does not scrape or invent real carrier login selectors.
-- It does not retry blindly. Each launch resolves to `filled`, `needs-recipe`, `login-page-not-detected`, `locked`, or `error`.
+- It does not retry blindly. Each launch resolves to an honest status such as `filled`, `launch-only`, `needs-login`, `login-page-not-detected`, or `error`.
 
 ## Build
 
@@ -48,6 +50,12 @@ The built extension is written to:
 packages/quotex-connect/dist
 ```
 
+Run the extension regression tests with:
+
+```powershell
+pnpm --dir packages/quotex-connect run test
+```
+
 ## Load Unpacked For Development
 
 1. Open `chrome://extensions` or `edge://extensions`.
@@ -58,17 +66,19 @@ packages/quotex-connect/dist
 
 ## First Run
 
-1. Open the extension popup.
-2. Set a master passphrase with at least 12 characters.
-3. Open the options page.
-4. Pick a carrier.
-5. Enter the carrier username and password.
-6. Click **Save**.
-7. Repeat for any other carrier, then return to the popup and launch one.
+1. Open the extension popup. All 42 carrier links are immediately available.
+2. Click a carrier to open its configured portal. No vault setup is required for launching.
+3. To save logins, click **Logins** and set a master passphrase with at least 12 characters.
+4. Pick a carrier and enter its username and password.
+5. Click **Save**, then return to the popup.
+
+Blank selectors produce `launch-only`: the portal opens and the agent signs in manually. Verified selectors with no usable saved login produce `needs-login`: the portal still opens and the agent can sign in manually. Selectors control autofill only; they never control navigation.
 
 ## Maintaining A Carrier Recipe
 
 Carrier recipes are maintained by developers in `src/shared/defaultRecipes.ts`; agents do not edit selectors in the extension interface. This keeps the setup experience limited to carrier selection, username, and password.
+
+`src/shared/defaultRecipes.ts` is the carrier directory source. `tests/directory.test.ts` enforces the 42-carrier count and verifies that manifest host permissions and content-script matches stay synchronized with every unique directory domain.
 
 For each carrier:
 
@@ -130,12 +140,13 @@ Before publishing:
 2. Inspect `chrome.storage.local`; confirm only salt, verifier, IVs, and ciphertext are stored.
 3. Confirm no plaintext username/password appears in console logs.
 4. Confirm no password appears in DevTools Network requests.
-5. Launch a carrier with blank selectors; it must return `needs-recipe`.
-6. Launch a carrier on a page that does not match `domainMatch`; it must return `login-page-not-detected`.
-7. Launch a configured carrier test page; it must fill username/password and click submit.
-8. Confirm MFA pages are left to the agent and no one-time code is filled.
-9. Wait beyond the idle-lock window; launching must return `locked` until the passphrase is entered again.
-10. Run the same recipe twice and confirm deterministic fill behavior.
+5. Launch a carrier with blank selectors; its portal must open and return `launch-only`.
+6. Launch a carrier with selectors but no saved credentials; its portal must open and return `needs-login`.
+7. Lock the vault and launch a carrier with saved credentials; its portal must open and return `needs-login`.
+8. Launch a carrier on a page that does not match `domainMatch`; it must return `login-page-not-detected` after navigation.
+9. Launch a configured carrier test page; it must fill username/password and click submit.
+10. Confirm MFA pages are left to the agent and no one-time code is filled.
+11. Run the same recipe twice and confirm deterministic fill behavior.
 
 ## Chrome Web Store Notes
 

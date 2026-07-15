@@ -8,7 +8,16 @@ import {
   verifyPassphrase
 } from "./shared/crypto";
 import { recipeHasUsableSelectors, urlMatchesPattern } from "./shared/match";
-import { isConfigured, loadConfig, loadStatuses, saveConfig, saveStatus } from "./shared/storage";
+import {
+  isConfigured,
+  loadConfig,
+  loadLauncherActivity,
+  loadStatuses,
+  recordCarrierLaunch,
+  saveConfig,
+  saveStatus,
+  toggleFavorite
+} from "./shared/storage";
 import type {
   CarrierRecipe,
   ExtensionConfig,
@@ -56,6 +65,8 @@ async function handleMessage(message: any, sender: any): Promise<any> {
       return { ok: true };
     case "quotex-connect.launch-carrier":
       return launchCarrier(String(message.carrierId ?? ""));
+    case "quotex-connect.toggle-favorite":
+      return toggleCarrierFavorite(String(message.carrierId ?? ""));
     case "quotex-connect.save-carrier":
       return saveCarrier(message.recipe, String(message.username ?? ""), String(message.password ?? ""));
     case "quotex-connect.bulk-save-credentials":
@@ -80,22 +91,26 @@ async function handleMessage(message: any, sender: any): Promise<any> {
 async function getPopupState(): Promise<PopupState> {
   const config = await loadConfig();
   const statuses = await loadStatuses();
+  const activity = await loadLauncherActivity();
   return {
     isSetup: isConfigured(config),
     locked: !hasUsableSession(config),
     recipes: config.recipes,
-    statuses
+    statuses,
+    activity
   };
 }
 
 async function getOptionsState(): Promise<OptionsState> {
   const config = await loadConfig();
   const statuses = await loadStatuses();
+  const activity = await loadLauncherActivity();
   return {
     isSetup: isConfigured(config),
     locked: !hasUsableSession(config),
     recipes: config.recipes,
     statuses,
+    activity,
     config
   };
 }
@@ -187,16 +202,23 @@ async function launchCarrier(carrierId: string): Promise<any> {
     return { ok: false, error: "Carrier recipe was not found." };
   }
 
-  const key = await requireUnlocked(config);
-  if (!key) {
-    await setCarrierStatus(recipe.id, "locked", "Vault is locked. Unlock before launching.");
-    return { ok: true, result: { state: "locked", message: "Vault is locked." } satisfies FillResult };
+  let tab: any;
+  try {
+    tab = await chrome.tabs.create({ url: recipe.loginUrl, active: true });
+  } catch (error) {
+    const result = {
+      state: "error",
+      message: error instanceof Error && error.message ? error.message : "Carrier portal could not be opened."
+    } satisfies FillResult;
+    await setCarrierStatus(recipe.id, result.state, result.message);
+    return { ok: true, result };
   }
+  await recordCarrierLaunch(recipe.id).catch(() => undefined);
 
   if (!recipeHasUsableSelectors(recipe)) {
     const result = {
-      state: "needs-recipe",
-      message: "Recipe selectors are not configured yet."
+      state: "launch-only",
+      message: "Portal opened. Autofill is not available for this carrier; sign in manually."
     } satisfies FillResult;
     await setCarrierStatus(recipe.id, result.state, result.message);
     return { ok: true, result };
@@ -205,8 +227,18 @@ async function launchCarrier(carrierId: string): Promise<any> {
   const entry = config.vault.find((item) => item.carrierId === recipe.id);
   if (!entry) {
     const result = {
-      state: "needs-recipe",
-      message: "Credentials are not saved for this carrier."
+      state: "needs-login",
+      message: "Portal opened. Sign in manually or save credentials for autofill."
+    } satisfies FillResult;
+    await setCarrierStatus(recipe.id, result.state, result.message);
+    return { ok: true, result };
+  }
+
+  const key = await requireUnlocked(config);
+  if (!key) {
+    const result = {
+      state: "needs-login",
+      message: "Portal opened. Unlock Quotex Connect to autofill, or sign in manually."
     } satisfies FillResult;
     await setCarrierStatus(recipe.id, result.state, result.message);
     return { ok: true, result };
@@ -215,7 +247,19 @@ async function launchCarrier(carrierId: string): Promise<any> {
   let password = "";
   try {
     password = await decryptString(key, entry.ciphertext, entry.iv);
-    const tab = await chrome.tabs.create({ url: recipe.loginUrl, active: true });
+  } catch {
+    const result = {
+      state: "error",
+      message: "Portal opened, but the saved login could not be decrypted. Sign in manually."
+    } satisfies FillResult;
+    await setCarrierStatus(recipe.id, result.state, result.message);
+    return { ok: true, result };
+  }
+
+  try {
+    if (typeof tab?.id !== "number") {
+      throw new Error("Carrier portal opened, but the new tab could not be inspected for autofill.");
+    }
     await waitForTabComplete(tab.id, 15_000);
     const currentTab = await chrome.tabs.get(tab.id);
 
@@ -252,6 +296,15 @@ async function launchCarrier(carrierId: string): Promise<any> {
     await setCarrierStatus(recipe.id, result.state, result.message);
     return { ok: true, result };
   }
+}
+
+async function toggleCarrierFavorite(carrierId: string): Promise<any> {
+  const config = await loadConfig();
+  if (!config.recipes.some((recipe) => recipe.id === carrierId)) {
+    return { ok: false, error: "Carrier recipe was not found." };
+  }
+  await toggleFavorite(carrierId);
+  return { ok: true, state: await getPopupState() };
 }
 
 function waitForTabComplete(tabId: number, timeoutMs: number): Promise<void> {

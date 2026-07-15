@@ -2146,6 +2146,7 @@ export type QuotingLineOfBusiness = "personal" | "commercial";
 export type CommercialCarrierSubmissionStatus =
   | "application_sent"
   | "awaiting_response"
+  | "send_failed"
   | "accepted"
   | "declined"
   | "needs_supplemental"
@@ -2188,7 +2189,7 @@ export interface CommercialCarrierSubmission {
   submissionId?: string;
   carrierId: string;
   status: CommercialCarrierSubmissionStatus;
-  sentAt: string;
+  sentAt?: string;
   responseAt?: string;
   acceptedAt?: string;
   score: number;
@@ -2216,6 +2217,7 @@ export interface CommercialCarrierSubmission {
   quote?: CommercialCarrierSubmissionQuote;
   parseConfidence?: number;
   agentReviewReason?: string;
+  deliveryFailureReason?: string;
 }
 
 export interface CommercialCarrierRecommendation {

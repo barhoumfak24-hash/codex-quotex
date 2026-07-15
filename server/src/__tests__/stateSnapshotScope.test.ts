@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  canAccessAgencyStateForAuth,
   mergeTenantSnapshotIntoPlatform,
   scopeSnapshotToTenant,
+  stateScopeForAuth,
 } from "../services/stateSnapshotScope.js";
 
 describe("state snapshot tenant scoping", () => {
@@ -9,7 +11,7 @@ describe("state snapshot tenant scoping", () => {
     const scoped = scopeSnapshotToTenant(platformSnapshot(), "agency_a") as any;
 
     expect(scoped.agencies.map((row: any) => row.id)).toEqual(["agency_a"]);
-    expect(scoped.users.map((row: any) => row.id)).toEqual(["user_a"]);
+    expect(scoped.users.map((row: any) => row.id)).toEqual(["user_a", "user_a_unreferenced"]);
     expect(scoped.customers.map((row: any) => row.id)).toEqual(["customer_a"]);
     expect(scoped.assets.map((row: any) => row.id)).toEqual(["asset_a"]);
     expect(scoped.policies.map((row: any) => row.id)).toEqual(["policy_a"]);
@@ -19,6 +21,27 @@ describe("state snapshot tenant scoping", () => {
     expect(scoped.categories.map((row: any) => row.id)).toEqual(["category_1"]);
     expect(scoped.softwareSales).toEqual([]);
     expect(scoped.masterAgencyActivities).toEqual([]);
+  });
+
+  it("does not traverse shared catalog references into another agency", () => {
+    const snapshot = platformSnapshot();
+
+    const scoped = scopeSnapshotToTenant(snapshot, "agency_a") as any;
+
+    expect(scoped.customers.map((row: any) => row.id)).toEqual(["customer_a"]);
+    expect(scoped.users.map((row: any) => row.id)).toEqual(["user_a", "user_a_unreferenced"]);
+  });
+
+  it("denies customer roles access to agency snapshots", () => {
+    const customerAuth = {
+      userId: "customer_user_a",
+      role: "customer",
+      tenantId: "agency_a",
+      permissions: [],
+    };
+
+    expect(stateScopeForAuth(customerAuth)).toBe("customer");
+    expect(canAccessAgencyStateForAuth(customerAuth)).toBe(false);
   });
 
   it("merges tenant writes without deleting or modifying another agency", () => {
@@ -37,7 +60,7 @@ describe("state snapshot tenant scoping", () => {
     ) as any;
 
     expect(merged.customers).toEqual([
-      { id: "customer_b", tenantId: "agency_b", name: "Customer B" },
+      { id: "customer_b", tenantId: "agency_b", categoryId: "category_1", name: "Customer B" },
       { id: "customer_a_new", tenantId: "agency_a", name: "New A" },
     ]);
     expect(merged.assets).toEqual([
@@ -57,12 +80,13 @@ function platformSnapshot() {
     ],
     users: [
       { id: "user_a", tenantId: "agency_a", email: "a@example.test" },
+      { id: "user_a_unreferenced", tenantId: "agency_a", email: "a2@example.test" },
       { id: "user_b", tenantId: "agency_b", email: "b@example.test" },
       { id: "master", tenantId: null, email: "master@example.test" },
     ],
     customers: [
-      { id: "customer_a", tenantId: "agency_a", name: "Customer A" },
-      { id: "customer_b", tenantId: "agency_b", name: "Customer B" },
+      { id: "customer_a", tenantId: "agency_a", categoryId: "category_1", name: "Customer A" },
+      { id: "customer_b", tenantId: "agency_b", categoryId: "category_1", name: "Customer B" },
     ],
     assets: [
       { id: "asset_a", tenantId: "agency_a", customerId: "customer_a", label: "A asset" },

@@ -1097,55 +1097,245 @@ export async function aiExtractContactFromFile(input: {
   return merged;
 }
 
+const POLICY_EXTRACTION_FIELD_KEYS = [
+  "policyNumber",
+  "carrierName",
+  "premiumEstimate",
+  "finalPremium",
+  "effectiveDate",
+  "renewalDate",
+  "assetHint",
+] as const;
+
+type PolicyExtractionFieldKey = (typeof POLICY_EXTRACTION_FIELD_KEYS)[number];
+
+interface PolicyExtractionEvidence {
+  fieldKey: PolicyExtractionFieldKey;
+  value: string;
+  sourceKind: "document_text" | "document_vision";
+  evidence: string;
+  confidence: number;
+}
+
+function emptyPolicyExtraction(input: { fileName: string }, reason: string) {
+  return {
+    policyNumber: "",
+    carrierName: undefined,
+    premiumEstimate: undefined,
+    finalPremium: undefined,
+    effectiveDate: undefined,
+    renewalDate: undefined,
+    assetHint: undefined,
+    summary: reason,
+    confidence: 0,
+    sources: [`Document: ${input.fileName}`, "No fabricated policy facts"],
+  };
+}
+
+function policyNumberValue(value: unknown): number | undefined {
+  const parsed = Number(String(value ?? "").replace(/[$,\s]/g, ""));
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+}
+
+function policyDateValue(value: unknown): string | undefined {
+  const raw = asString(value);
+  if (!raw) return undefined;
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString().slice(0, 10) : undefined;
+}
+
+function policyEvidenceValueMatches(
+  fieldKey: PolicyExtractionFieldKey,
+  value: unknown,
+  evidenceValue: string
+): boolean {
+  if (fieldKey === "premiumEstimate" || fieldKey === "finalPremium") {
+    const actual = policyNumberValue(value);
+    const supported = policyNumberValue(evidenceValue);
+    return actual !== undefined && supported !== undefined && actual === supported;
+  }
+  if (fieldKey === "effectiveDate" || fieldKey === "renewalDate") {
+    const actual = policyDateValue(value);
+    const supported = policyDateValue(evidenceValue);
+    return Boolean(actual && supported && actual === supported);
+  }
+  const actual = normalizeEvidenceText(asString(value)).replace(/\s+/g, "");
+  const supported = normalizeEvidenceText(evidenceValue).replace(/\s+/g, "");
+  return actual.length >= 3 && actual === supported;
+}
+
+function policyEvidenceMap(
+  record: Record<string, unknown>,
+  input: { text?: string; dataUrl?: string }
+): Partial<Record<PolicyExtractionFieldKey, PolicyExtractionEvidence>> {
+  const sourceText = input.text ?? "";
+  return Object.fromEntries(
+    asObjectArray(record.fieldEvidence)
+      .map((row): PolicyExtractionEvidence | undefined => {
+        const rawFieldKey = asString(row.fieldKey);
+        if (!POLICY_EXTRACTION_FIELD_KEYS.includes(rawFieldKey as PolicyExtractionFieldKey)) return undefined;
+        const sourceKind = asString(row.sourceKind);
+        if (sourceKind !== "document_text" && sourceKind !== "document_vision") return undefined;
+        const evidence = asString(row.evidence);
+        const value = asString(row.value);
+        const confidence = clamp(asNumber(row.confidence, 0), 0, 1);
+        const sourceIsAvailable =
+          sourceKind === "document_vision"
+            ? Boolean(input.dataUrl && evidence)
+            : evidenceAppearsInText(evidence, sourceText);
+        if (!value || !evidence || confidence < 0.75 || !sourceIsAvailable) return undefined;
+        return {
+          fieldKey: rawFieldKey as PolicyExtractionFieldKey,
+          value,
+          sourceKind,
+          evidence,
+          confidence,
+        };
+      })
+      .filter((entry): entry is PolicyExtractionEvidence => Boolean(entry))
+      .map((entry) => [entry.fieldKey, entry])
+  );
+}
+
 export async function aiExtractPolicyFromFile(input: {
   fileName: string;
   fileType?: string;
   text?: string;
+  dataUrl?: string;
   carrierNames?: string[];
 }) {
+  if (!(input.text ?? "").trim() && !input.dataUrl) {
+    return emptyPolicyExtraction(
+      input,
+      `No readable policy evidence was supplied for "${input.fileName}". Enter only details verified from the document.`
+    );
+  }
   const system = domainSystem(
-    "Extract policy fields from insurance declarations pages or carrier PDFs for staff review."
+    "Extract policy fields from insurance declarations pages or carrier PDFs for staff review. Every returned fact must have exact document evidence; leave unsupported fields blank."
   );
   const user = `File name: ${input.fileName}
 File type: ${input.fileType ?? "unknown"}
-Known carriers: ${(input.carrierNames ?? []).join(", ") || "none"}
+Known carrier spellings (matching aid only, never evidence): ${(input.carrierNames ?? []).join(", ") || "none"}
 OCR/Text:
-"""${(input.text ?? "").slice(0, 14_000)}"""
+"""${input.text ?? "(No embedded text; use the attached document image.)"}"""
 
-Extract policy number, carrier, premiums, effective date, renewal date, and asset hint.`;
-  const json = await codexAgentCompleteJson({
-    task: "client_document_upload",
-    agent: "policy_upload_extraction",
-    system,
-    user,
-    schemaName: "policy_extraction",
-    schema: objectSchema({
-      policyNumber: { type: "string" },
-      carrierName: { type: "string" },
-      premiumEstimate: { type: "number" },
-      finalPremium: { type: "number" },
-      effectiveDate: { type: "string" },
-      renewalDate: { type: "string" },
-      assetHint: { type: "string" },
-      summary: { type: "string" },
-      confidence: { type: "number" },
-      sources: STRING_ARRAY_SCHEMA,
-    }),
-    quality: "maximum",
-    maxOutputTokens: 1_500,
-  });
+Extract only values explicitly visible in the OCR text or attached document.
+Rules:
+- The filename and known-carrier list are context only and cannot support any field.
+- Include one fieldEvidence row for every non-empty field, with the exact short document snippet and correct sourceKind.
+- Use premiumEstimate only when the document explicitly labels an estimate. Use finalPremium only for an explicitly stated policy/annual/total premium. Never copy one inferred premium into both fields.
+- Normalize supported dates to YYYY-MM-DD, but preserve their exact printed snippet in evidence.
+- Leave missing or ambiguous fields blank. Do not infer policy numbers, carriers, premiums, dates, or assets from common formats or industry norms.`;
+  let json: unknown;
+  try {
+    json = await codexAgentCompleteJson({
+      task: "client_document_upload",
+      agent: "policy_upload_extraction",
+      system,
+      user,
+      attachments: input.dataUrl
+        ? [{ fileName: input.fileName, mimeType: input.fileType, dataUrl: input.dataUrl }]
+        : undefined,
+      schemaName: "policy_extraction",
+      schema: objectSchema({
+        policyNumber: { type: "string" },
+        carrierName: { type: "string" },
+        premiumEstimate: { type: "number" },
+        finalPremium: { type: "number" },
+        effectiveDate: { type: "string" },
+        renewalDate: { type: "string" },
+        assetHint: { type: "string" },
+        summary: { type: "string" },
+        confidence: { type: "number" },
+        sources: STRING_ARRAY_SCHEMA,
+        fieldEvidence: {
+          type: "array",
+          items: objectSchema({
+            fieldKey: { type: "string", enum: [...POLICY_EXTRACTION_FIELD_KEYS] },
+            value: { type: "string" },
+            sourceKind: { type: "string", enum: ["document_text", "document_vision"] },
+            evidence: { type: "string" },
+            confidence: { type: "number" },
+          }),
+        },
+      }),
+      quality: "maximum",
+      maxOutputTokens: 2_000,
+    });
+  } catch {
+    return emptyPolicyExtraction(
+      input,
+      `Policy extraction could not complete for "${input.fileName}". No policy facts were generated.`
+    );
+  }
   const record = isRecord(json) ? json : {};
+  const evidenceByField = policyEvidenceMap(record, input);
+  const supportedString = (fieldKey: PolicyExtractionFieldKey): string | undefined => {
+    const value = asString(record[fieldKey]);
+    const evidence = evidenceByField[fieldKey];
+    return value && evidence && policyEvidenceValueMatches(fieldKey, value, evidence.value) ? value : undefined;
+  };
+  const supportedNumber = (fieldKey: "premiumEstimate" | "finalPremium"): number | undefined => {
+    const value = policyNumberValue(record[fieldKey]);
+    const evidence = evidenceByField[fieldKey];
+    return value !== undefined && evidence && policyEvidenceValueMatches(fieldKey, value, evidence.value)
+      ? Math.round(value)
+      : undefined;
+  };
+  const supportedDate = (fieldKey: "effectiveDate" | "renewalDate"): string | undefined => {
+    const value = policyDateValue(record[fieldKey]);
+    const evidence = evidenceByField[fieldKey];
+    return value && evidence && policyEvidenceValueMatches(fieldKey, value, evidence.value) ? value : undefined;
+  };
+  const policyNumber = supportedString("policyNumber") ?? "";
+  const carrierName = supportedString("carrierName");
+  const premiumEstimate = supportedNumber("premiumEstimate");
+  const finalPremium = supportedNumber("finalPremium");
+  const effectiveDate = supportedDate("effectiveDate");
+  const renewalDate = supportedDate("renewalDate");
+  const assetHint = supportedString("assetHint");
+  const supportedByKey: Partial<Record<PolicyExtractionFieldKey, unknown>> = {
+    policyNumber,
+    carrierName,
+    premiumEstimate,
+    finalPremium,
+    effectiveDate,
+    renewalDate,
+    assetHint,
+  };
+  const supportedFieldKeys = POLICY_EXTRACTION_FIELD_KEYS.filter((fieldKey) => {
+    const value = supportedByKey[fieldKey];
+    return value !== undefined && value !== "";
+  });
+  if (supportedFieldKeys.length === 0) {
+    return emptyPolicyExtraction(
+      input,
+      `No policy fields in "${input.fileName}" had sufficient document evidence. Enter verified details manually.`
+    );
+  }
+  const usedEvidence = supportedFieldKeys
+    .map((fieldKey) => evidenceByField[fieldKey])
+    .filter((entry): entry is PolicyExtractionEvidence => Boolean(entry));
+  const evidenceConfidence =
+    usedEvidence.reduce((sum, entry) => sum + entry.confidence, 0) / Math.max(usedEvidence.length, 1);
   return {
-    policyNumber: asString(record.policyNumber),
-    carrierName: asString(record.carrierName) || undefined,
-    premiumEstimate: Math.max(0, Math.round(asNumber(record.premiumEstimate, 0))) || undefined,
-    finalPremium: Math.max(0, Math.round(asNumber(record.finalPremium, 0))) || undefined,
-    effectiveDate: asString(record.effectiveDate) || undefined,
-    renewalDate: asString(record.renewalDate) || undefined,
-    assetHint: asString(record.assetHint) || undefined,
-    summary: asString(record.summary, `Extracted from "${input.fileName}". Confirm before saving.`),
-    confidence: clamp(asNumber(record.confidence, 0.55), 0, 0.98),
-    sources: asStringArray(record.sources).length ? asStringArray(record.sources) : [`Document: ${input.fileName}`],
+    policyNumber,
+    carrierName,
+    premiumEstimate,
+    finalPremium,
+    effectiveDate,
+    renewalDate,
+    assetHint,
+    summary: `Extracted ${supportedFieldKeys.length} evidence-backed policy field${supportedFieldKeys.length === 1 ? "" : "s"} from "${input.fileName}". Confirm before saving.`,
+    confidence: Math.min(clamp(asNumber(record.confidence, evidenceConfidence), 0, 0.98), evidenceConfidence),
+    sources: Array.from(
+      new Set([
+        `Document: ${input.fileName}`,
+        ...usedEvidence.map((entry) =>
+          entry.sourceKind === "document_vision" ? "Document vision evidence" : "Document text evidence"
+        ),
+      ])
+    ),
   };
 }
 
@@ -2087,31 +2277,102 @@ interface UniversalDocumentAttachment {
 interface UniversalDocumentField extends AcordMapField {
   type?: string;
   rect?: { x?: number; y?: number; width?: number; height?: number };
+  confidence?: number;
 }
 
 function normalizedUniversalField(field: UniversalDocumentField): UniversalDocumentField {
+  const kind = asString(field.kind || field.type || "text");
   return {
     id: asString(field.id),
     label: asString(field.label),
     acordFieldKey: asString(field.acordFieldKey) || undefined,
     acordFieldLabels: asStringArray(field.acordFieldLabels).slice(0, 12),
     required: field.required === true,
-    kind: asString(field.kind || field.type || "text"),
-    page: Math.max(0, Math.round(asNumber(field.page, 0))),
+    kind,
+    type: kind,
+    page: clamp(Math.round(asNumber(field.page, 0)), 0, 10_000),
     rect: isRecord(field.rect)
       ? {
-          x: asNumber(field.rect.x, 0),
-          y: asNumber(field.rect.y, 0),
-          width: asNumber(field.rect.width, 0),
-          height: asNumber(field.rect.height, 0),
+          x: clamp(asNumber(field.rect.x, 0), 0, 100_000),
+          y: clamp(asNumber(field.rect.y, 0), 0, 100_000),
+          width: clamp(asNumber(field.rect.width, 0), 0, 100_000),
+          height: clamp(asNumber(field.rect.height, 0), 0, 100_000),
         }
       : undefined,
+    confidence:
+      typeof field.confidence === "number" ? clamp(asNumber(field.confidence, 0), 0, 1) : undefined,
   };
+}
+
+function modelDetectedUniversalFields(record: Record<string, unknown>): UniversalDocumentField[] {
+  return asObjectArray(record.detectedFields)
+    .map((row) =>
+      normalizedUniversalField({
+        id: asString(row.id),
+        label: asString(row.label),
+        type: asString(row.type || row.kind || "text"),
+        page: asNumber(row.page, 0),
+        rect: isRecord(row.rect)
+          ? {
+              x: asNumber(row.rect.x, 0),
+              y: asNumber(row.rect.y, 0),
+              width: asNumber(row.rect.width, 0),
+              height: asNumber(row.rect.height, 0),
+            }
+          : undefined,
+        confidence: asNumber(row.confidence, 0),
+      })
+    )
+    .filter((field) => field.label && (field.confidence ?? 0) >= 0.6)
+    .slice(0, 300);
+}
+
+function mergeUniversalDocumentFields(
+  suppliedFields: UniversalDocumentField[],
+  detectedFields: UniversalDocumentField[]
+): UniversalDocumentField[] {
+  const merged = [...suppliedFields];
+  const knownIds = new Map<string, number>();
+  const knownLabels = new Map<string, number>();
+  const knownLabelsWithoutId = new Map<string, number>();
+  merged.forEach((field, index) => {
+    const id = normalizeQuestionnaireFieldKey(field.id);
+    const label = normalizeQuestionnaireFieldKey(field.label);
+    if (id) knownIds.set(id, index);
+    if (label && !knownLabels.has(label)) knownLabels.set(label, index);
+    if (label && !id && !knownLabelsWithoutId.has(label)) knownLabelsWithoutId.set(label, index);
+  });
+
+  for (const detected of detectedFields) {
+    const id = normalizeQuestionnaireFieldKey(detected.id);
+    const label = normalizeQuestionnaireFieldKey(detected.label);
+    const matchedIndex = id
+      ? knownIds.get(id) ?? knownLabelsWithoutId.get(label)
+      : knownLabels.get(label);
+    if (matchedIndex !== undefined) {
+      const supplied = merged[matchedIndex];
+      merged[matchedIndex] = {
+        ...detected,
+        ...supplied,
+        rect: supplied.rect ?? detected.rect,
+        confidence: detected.confidence,
+      };
+      continue;
+    }
+    const nextIndex = merged.length;
+    merged.push(detected);
+    if (id) knownIds.set(id, nextIndex);
+    if (label && !knownLabels.has(label)) knownLabels.set(label, nextIndex);
+    if (label && !id && !knownLabelsWithoutId.has(label)) knownLabelsWithoutId.set(label, nextIndex);
+    if (merged.length >= 300) break;
+  }
+  return merged;
 }
 
 function parseUniversalDocumentMappings(
   record: Record<string, unknown>,
-  fields: UniversalDocumentField[]
+  fields: UniversalDocumentField[],
+  acceptModelDetectedFields: boolean
 ): {
   detectedFields: UniversalDocumentField[];
   mappings: AcordMapping[];
@@ -2120,8 +2381,12 @@ function parseUniversalDocumentMappings(
   summary: string;
   confidence: number;
 } {
+  const detectedFields = mergeUniversalDocumentFields(
+    fields,
+    acceptModelDetectedFields ? modelDetectedUniversalFields(record) : []
+  );
   const knownByIdOrLabel = new Map<string, UniversalDocumentField>();
-  for (const field of fields) {
+  for (const field of detectedFields) {
     [field.id, field.label].forEach((key) => {
       const normalized = normalizeQuestionnaireFieldKey(key);
       if (normalized) knownByIdOrLabel.set(normalized, field);
@@ -2135,7 +2400,7 @@ function parseUniversalDocumentMappings(
       const matched =
         knownByIdOrLabel.get(normalizeQuestionnaireFieldKey(targetId)) ||
         knownByIdOrLabel.get(normalizeQuestionnaireFieldKey(targetField)) ||
-        matchAcordAiField(targetId || targetField, fields);
+        matchAcordAiField(targetId || targetField, detectedFields);
       const finalTargetField = matched?.label || targetField;
       const value = cleanAcordAiValue(row.value);
       const confidence = clamp(asNumber(row.confidence, 0), 0, 1);
@@ -2167,7 +2432,7 @@ function parseUniversalDocumentMappings(
       normalizeQuestionnaireFieldKey(mapping.targetField),
     ])
   );
-  const inferredMissing = fields
+  const inferredMissing = detectedFields
     .filter((field) => {
       const idKey = normalizeQuestionnaireFieldKey(field.id);
       const labelKey = normalizeQuestionnaireFieldKey(field.label);
@@ -2175,11 +2440,21 @@ function parseUniversalDocumentMappings(
     })
     .map((field) => field.label)
     .filter(Boolean);
+  const detectedMissingLabels = new Map<string, string>();
+  detectedFields.forEach((field) => {
+    [field.id, field.label].forEach((key) => {
+      const normalized = normalizeQuestionnaireFieldKey(key);
+      if (normalized) detectedMissingLabels.set(normalized, field.label);
+    });
+  });
+  const reportedMissing = asStringArray(record.missingFields)
+    .map((field) => detectedMissingLabels.get(normalizeQuestionnaireFieldKey(field)))
+    .filter((field): field is string => Boolean(field));
 
   return {
-    detectedFields: fields,
+    detectedFields,
     mappings,
-    missingFields: Array.from(new Set([...asStringArray(record.missingFields), ...inferredMissing])),
+    missingFields: Array.from(new Set([...reportedMissing, ...inferredMissing])),
     webSources: asObjectArray(record.webSources)
       .map((row) => ({
         title: asString(row.title),
@@ -2204,7 +2479,8 @@ export async function aiMapUniversalDocumentFields(input: {
     .slice(0, 300)
     .map(normalizedUniversalField);
   const safeFields = preparedFields.filter((field) => !isUnsafeAcordAiTarget(field.label));
-  if (safeFields.length === 0) {
+  const attachments = input.attachments?.filter((attachment) => attachment.dataUrl).slice(0, 8) ?? [];
+  if (safeFields.length === 0 && attachments.length === 0) {
     return {
       detectedFields: preparedFields,
       mappings: [],
@@ -2274,20 +2550,22 @@ export async function aiMapUniversalDocumentFields(input: {
       ),
       user: `Document: ${documentLabel}
 
-Detected fields and labels:
+Known fields and labels (may be empty or incomplete):
 ${JSON.stringify(safeFields).slice(0, 28_000)}
 
 Quotex dossier:
 ${JSON.stringify(input.dossier).slice(0, 45_000)}
 
 Rules:
+- Inspect the attached document and return its visible fillable fields in detectedFields, including fields missing from the known-field list. Use the document's actual field id when visible; never invent a field that is not present.
+- A detected field needs a clear nearby label and confidence >= 0.60. Preserve its page and rectangle when they are visible.
 - Map by field label, nearby context, page, and position. Never map by generic field name alone.
 - Every returned value must have a sourceLabel and sourceKind.
 - Public or commercial source mappings must include sourceUrl.
 - Verified document-autofill mappings require confidence >= 0.84 and semantic compatibility.
 - Do not fill claims, violations, losses, FEIN/SSN, fax, secondary contacts, remarks, yes/no explanation boxes, or conditional question fields without direct explicit source evidence.
 - If unsure, omit the mapping and include the field in missingFields.`,
-      attachments: input.attachments?.filter((attachment) => attachment.dataUrl).slice(0, 8),
+      attachments,
       schemaName: "universal_document_field_mapping",
       schema,
       quality: "maximum",
@@ -2308,7 +2586,7 @@ Rules:
       providerErrorCode: error instanceof Error ? providerErrorCode(error.message) : "provider_unavailable",
     };
   }
-  return parseUniversalDocumentMappings(isRecord(raw) ? raw : {}, preparedFields);
+  return parseUniversalDocumentMappings(isRecord(raw) ? raw : {}, preparedFields, attachments.length > 0);
 }
 
 function addQuestionnaireFallbackMappings(
@@ -3114,8 +3392,6 @@ function googleGeocodeKey(): string {
     process.env.GOOGLE_GEOCODING_API_KEY ??
     process.env.GOOGLE_MAPS_API_KEY ??
     process.env.GOOGLE_PLACES_API_KEY ??
-    process.env.VITE_GOOGLE_MAPS_API_KEY ??
-    process.env.VITE_GOOGLE_PLACES_API_KEY ??
     ""
   );
 }
@@ -3407,7 +3683,7 @@ async function fetchPropertyImageryInsights(
   const aerialImage = await fetchImageDataUrl(aerialUrl);
   if (aerialImage) {
     attachments.push({ fileName: "satellite-aerial.jpg", mimeType: aerialImage.mimeType, dataUrl: aerialImage.dataUrl });
-    imageSources.push({ kind: "aerial", url: redactedGoogleUrl(aerialUrl), captureDate: pano?.date ?? "" });
+    imageSources.push({ kind: "aerial", url: redactedGoogleUrl(aerialUrl), captureDate: "" });
   }
 
   if (attachments.length === 0) {
@@ -3436,11 +3712,13 @@ ${JSON.stringify(imageSources)}
 
 Return only facts clearly visible in the supplied images. Do not guess. If a feature is not clearly visible, set notDeterminable true. Every finding is advisory review context only and is never binding-document autofill.
 
-Street View may report only these visible street-facing observations: number of stories, exterior/cladding material, attached garage or carport, detached garage visible from the street, chimney, apparent exterior condition/upkeep, fencing or gate, driveway, visible alarm/camera signage, and obvious curb-level hazards or vacancy signs.
+Street View may report clearly visible street-facing observations, including number of stories, exterior/cladding, garage or carport, chimney, apparent exterior condition, fencing, driveway, alarm/camera signage, obvious curb-level hazards, and a pool, trampoline, or roof feature only when it is genuinely visible from that image.
 
-Satellite/aerial may report only low-confidence advisory context such as roof shape/footprint or yard context. It must not fill quote questionnaire answers for roof material, roof age, square footage, lot dimensions, ownership, occupancy, claims/losses, or backyard recreational features.
+Satellite/aerial may report low-confidence advisory observations that are genuinely visible, including roof shape, apparent roof covering or visible roof condition, and visible pools or trampolines. These observations must remain advisory and must not fill quote questionnaires or binding documents. Never infer roof age, square footage, lot dimensions, ownership, occupancy, or claims/losses.
 
-Return one finding per visible feature. Do not infer interiors, private facts, roof material, roof age, losses, ownership, utilities, occupancy, square footage, lot size, or backyard conditions from imagery.`,
+For each finding, sourceImage must identify the exact supplied image where the feature is visible. Set captureDate to the exact date in that image's manifest entry; use an empty string when the manifest has no date. Never invent a date or reuse the Street View date for aerial imagery.
+
+Return one finding per visible feature. Do not infer interiors, private facts, roof age, losses, ownership, utilities, occupancy, square footage, lot size, or non-visible backyard conditions from imagery.`,
       attachments,
       schemaName: "property_imagery_insights",
       schema: objectSchema({
@@ -3484,14 +3762,22 @@ Return one finding per visible feature. Do not infer interiors, private facts, r
       return {
         feature: asString(finding.feature),
         value: asString(finding.value),
-        confidence: clamp(asNumber(finding.confidence, 0), 0, 1),
+        confidence: clamp(asNumber(finding.confidence, 0), 0, sourceImage === "aerial" ? 0.75 : 0.95),
         sourceImage,
-        captureDate: asString(finding.captureDate) || imageSource?.captureDate || "",
+        captureDate: imageSource?.captureDate ?? "",
         notDeterminable: finding.notDeterminable === true,
         rationale: asString(finding.rationale),
+        sourceAvailable: Boolean(imageSource),
       };
     })
-    .filter((finding) => finding.feature && finding.value && (finding.notDeterminable || finding.confidence >= 0.6));
+    .filter(
+      (finding) =>
+        finding.sourceAvailable &&
+        finding.feature &&
+        finding.value &&
+        (finding.notDeterminable || finding.confidence >= 0.6)
+    )
+    .map(({ sourceAvailable: _sourceAvailable, ...finding }) => finding);
 
   const determinateFindings = findings.filter((finding) => !finding.notDeterminable && finding.confidence >= 0.6);
   for (const finding of determinateFindings) {
@@ -3509,7 +3795,7 @@ Return one finding per visible feature. Do not infer interiors, private facts, r
       verified: false,
       allowDocumentAutofill: false,
       sourceUrl: imageSource?.url,
-      observedDate: finding.captureDate || imageSource?.captureDate,
+      observedDate: finding.captureDate || imageSource?.captureDate || undefined,
       notes,
     });
     const questionnaireKey = propertyImageryQuestionnaireKey(finding.feature);
@@ -3520,7 +3806,7 @@ Return one finding per visible feature. Do not infer interiors, private facts, r
         verified: false,
         allowDocumentAutofill: false,
         sourceUrl: imageSource?.url,
-        observedDate: finding.captureDate || imageSource?.captureDate,
+        observedDate: finding.captureDate || imageSource?.captureDate || undefined,
         notes,
       });
     }

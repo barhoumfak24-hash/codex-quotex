@@ -269,22 +269,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [persist]
   );
 
-  useEffect(() => {
-    if (!user || user.role !== "master_admin" || hasServerSessionToken() || !user.generatedPassword) return;
-    let cancelled = false;
-    establishServerMasterLocalPromotion(user, user.generatedPassword).then((session) => {
-      if (cancelled || !session.ok) return;
-      const serverUser = resolveServerMasterUser(session.user, user.email, user);
-      const signedIn = persistIfAllowed(serverUser);
-      if (signedIn) storeServerSessionUser(signedIn);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [persistIfAllowed, user]);
-
   const signInWithEmail = useCallback(
     (email: string) => {
+      if (!allowsPasswordlessLocalFallback()) return null;
       const u = api.users.byEmail(email);
       if (!u) return null;
       return persistIfAllowed(u);
@@ -311,6 +298,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const resetCustomerPassword = useCallback(
     (email: string, tenantId?: string | null) => {
+      if (!allowsPasswordlessLocalFallback()) return null;
       const normalized = email.trim().toLowerCase();
       const u = api
         .users
@@ -329,6 +317,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     (currentPassword: string, newPassword: string) => {
       if (!user)
         return { ok: false as const, reason: "Not signed in." };
+      if (!allowsPasswordlessLocalFallback()) {
+        return {
+          ok: false as const,
+          reason: "Password changes must be completed through the secure server.",
+        };
+      }
       if (newPassword.length < 8)
         return {
           ok: false as const,
@@ -372,17 +366,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         ? directMasterSession
         : await establishCanonicalLogin("master", normalizedEmail, password);
       if (!serverSession.ok) {
-        const localMaster = localMasterWithMatchingPassword(normalizedEmail, password);
-        if (localMaster) {
-          const promotedSession = await establishServerMasterLocalPromotion(localMaster, password);
-          if (promotedSession.ok) {
-            const promotedUser = resolveServerMasterUser(promotedSession.user, normalizedEmail, localMaster);
-            const promotedSignedIn = persistIfAllowed(promotedUser, { trustServerSession: true });
-            if (!promotedSignedIn) return { ok: false, reason: "account_disabled" };
-            storeServerSessionUser(promotedSignedIn);
-            return { ok: true, user: promotedSignedIn };
-          }
-        }
         persist(null);
         return { ok: false, reason: serverSession.reason };
       }

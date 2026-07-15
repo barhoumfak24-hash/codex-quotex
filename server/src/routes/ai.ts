@@ -201,19 +201,26 @@ aiRoutes.post("/extract-contact", async (req, res) => {
 
 aiRoutes.post("/extract-policy", async (req, res) => {
   try {
-    const { fileName, fileType, text, carrierNames } = req.body ?? {};
+    const { fileName, fileType, text, dataUrl, carrierNames } = req.body ?? {};
     if (typeof fileName !== "string" || fileName.trim().length === 0) return badRequest(res, "fileName is required");
     const out = await aiExtractPolicyFromFile({
       fileName,
       fileType: typeof fileType === "string" ? fileType : undefined,
       text: typeof text === "string" ? text : undefined,
+      dataUrl: typeof dataUrl === "string" ? dataUrl : undefined,
       carrierNames: Array.isArray(carrierNames)
         ? carrierNames.filter((item): item is string => typeof item === "string")
         : undefined,
     });
     res.json(out);
   } catch {
-    res.status(500).json({ error: "ai_failed" });
+    const fileName = typeof req.body?.fileName === "string" ? req.body.fileName : "uploaded document";
+    res.json({
+      policyNumber: "",
+      summary: `Policy extraction could not complete for "${fileName}". No policy facts were generated.`,
+      confidence: 0,
+      sources: [`Document: ${fileName}`, "No fabricated policy facts"],
+    });
   }
 });
 
@@ -297,9 +304,9 @@ aiRoutes.post("/parse-carrier-reply", async (req, res) => {
 aiRoutes.post("/document-map", async (req, res) => {
   try {
     const { document, fields, dossier, attachments } = req.body ?? {};
-    if (!Array.isArray(fields)) return badRequest(res, "fields must be an array");
+    if (fields !== undefined && !Array.isArray(fields)) return badRequest(res, "fields must be an array");
     if (!isRecord(dossier)) return badRequest(res, "dossier must be an object");
-    const cleanFields = fields
+    const cleanFields = (Array.isArray(fields) ? fields : [])
       .filter(isRecord)
       .map((field) => ({
         id: typeof field.id === "string" ? field.id : undefined,
@@ -321,7 +328,6 @@ aiRoutes.post("/document-map", async (req, res) => {
           : undefined,
       }))
       .filter((field) => field.label.trim().length > 0);
-    if (cleanFields.length === 0) return badRequest(res, "at least one field label is required");
     const cleanAttachments = Array.isArray(attachments)
       ? attachments
           .filter(isRecord)
@@ -332,6 +338,9 @@ aiRoutes.post("/document-map", async (req, res) => {
           }))
           .filter((attachment) => attachment.dataUrl)
       : undefined;
+    if (cleanFields.length === 0 && !cleanAttachments?.length) {
+      return badRequest(res, "at least one field label or document attachment is required");
+    }
     const out = await aiMapUniversalDocumentFields({
       document: isRecord(document)
         ? {
