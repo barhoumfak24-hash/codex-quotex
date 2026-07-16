@@ -1529,85 +1529,32 @@ function StandaloneWorkflowLayout({
   completedStepNumbers?: number[];
   children: ReactNode;
 }) {
-  const completed = new Set(completedStepNumbers);
-
   return (
-    <div className="grid items-start gap-6 xl:grid-cols-[250px_minmax(0,1fr)]">
+    <div className="grid h-full min-h-0 lg:grid-cols-[280px_minmax(0,1fr)]">
       <aside
-        className="rounded-md border border-ink-100 bg-ink-50/70 p-4 xl:sticky xl:top-6"
+        className="hidden min-h-0 overflow-y-auto border-r border-ink-100 bg-ink-50/60 p-4 lg:block"
         aria-label={`Quote workflow steps: step ${currentStep} of ${steps.length}`}
       >
-        <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md border border-gold-200 bg-gold-50 text-gold-700">
-            <ClipboardList className="h-5 w-5" />
-          </div>
-          <div className="min-w-0">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-ink-500">
-              Workflow
-            </div>
-            <div className="text-sm font-semibold text-ink-900">Full-page quote flow</div>
-          </div>
-        </div>
-
-        <ol className="mt-5 space-y-1">
-          {steps.map((step, index) => {
-            const done = step.number < currentStep || completed.has(step.number);
-            const active = step.number === currentStep && !done;
-            const Icon = step.icon;
-            return (
-              <li
-                key={step.number}
-                className="relative pb-3 last:pb-0"
-                aria-current={active ? "step" : undefined}
-              >
-                {index < steps.length - 1 && (
-                  <span
-                    className={`absolute left-[15px] top-8 h-[calc(100%-1.25rem)] w-px ${
-                      done ? "bg-emerald-300" : "bg-ink-200"
-                    }`}
-                    aria-hidden="true"
-                  />
-                )}
-                <div
-                  className={`relative flex min-h-9 items-center gap-3 rounded-md px-2 py-1.5 ${
-                    active ? "bg-white shadow-sm ring-1 ring-gold-300" : ""
-                  }`}
-                >
-                  <span
-                    className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border text-xs font-semibold ${
-                      done
-                        ? "border-emerald-500 bg-emerald-500 text-white"
-                        : active
-                        ? "border-gold-500 bg-gold-50 text-gold-900"
-                        : "border-ink-200 bg-white text-ink-400"
-                    }`}
-                  >
-                    {done ? <Check className="h-3.5 w-3.5" /> : step.number}
-                  </span>
-                  <Icon
-                    className={`h-4 w-4 shrink-0 ${
-                      done
-                        ? "text-emerald-700"
-                        : active
-                        ? "text-gold-700"
-                        : "text-ink-400"
-                    }`}
-                  />
-                  <span
-                    className={`min-w-0 text-sm font-medium ${
-                      done || active ? "text-ink-900" : "text-ink-500"
-                    }`}
-                  >
-                    {step.label}
-                  </span>
-                </div>
-              </li>
-            );
-          })}
-        </ol>
+        <WorkspaceSideRail
+          steps={steps}
+          currentStep={currentStep}
+          totalSteps={steps.length}
+          completedStepNumbers={completedStepNumbers}
+        />
       </aside>
-
-      <div className="min-w-0">{children}</div>
+      <main className="min-h-0 min-w-0 overflow-y-auto bg-ink-50/30 px-4 py-4 sm:px-6">
+        <div className="mx-auto w-full max-w-[1320px] space-y-4">
+          <div className="rounded-md border border-ink-100 bg-white px-3 py-2 lg:hidden">
+            <WorkflowStepIcons
+              steps={steps}
+              currentStep={currentStep}
+              totalSteps={steps.length}
+              completedStepNumbers={completedStepNumbers}
+            />
+          </div>
+          {children}
+        </div>
+      </main>
     </div>
   );
 }

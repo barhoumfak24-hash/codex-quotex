@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ArrowLeft } from "lucide-react";
+import { ArrowLeft, FileText, Sparkles } from "lucide-react";
 import { Link, Navigate, useParams } from "react-router-dom";
 import {
   ClientQuotingCard,
@@ -65,39 +65,57 @@ export function EmployeeQuoteFlowWorkspacePage() {
   const refresh = () => setRevision((revision) => revision + 1);
 
   return (
-    <div className="min-h-[calc(100vh-2rem)] space-y-6 pb-8">
-      <header className="grid items-start gap-4 border-b border-ink-100 bg-white/90 pb-5 md:grid-cols-[auto_minmax(0,1fr)_auto]">
-        <Link to={backPath} className="btn-outline inline-flex text-sm md:justify-self-start">
-          <ArrowLeft className="h-4 w-4" />
-          Back to profile
-        </Link>
-        <div className="min-w-0 text-center md:pt-0.5">
-          <div className="text-[10px] font-semibold uppercase tracking-wider text-gold-700">
-            AI quoting workspace
+    <div className="fixed inset-0 z-[60] flex min-w-[320px] flex-col overflow-hidden bg-white text-ink-900">
+      <header className="shrink-0 border-b border-ink-100 bg-white px-4 py-3 shadow-sm sm:px-6">
+        <div className="relative flex min-h-[70px] flex-col justify-center gap-3 sm:block">
+          <Link
+            to={backPath}
+            className="btn-outline z-10 inline-flex shrink-0 text-sm sm:absolute sm:left-0 sm:top-1/2 sm:-translate-y-1/2"
+          >
+            <ArrowLeft className="h-4 w-4" />
+            Back to profile
+          </Link>
+          <div className="flex min-w-0 justify-center sm:min-h-[70px] sm:items-center">
+            <div className="flex min-w-0 items-center justify-center gap-3">
+              <span className="relative inline-grid h-10 w-10 shrink-0 place-items-center rounded-md border border-gold-200 bg-gold-50 text-gold-700">
+                <FileText className="h-5 w-5" />
+                <span className="absolute right-0.5 top-0.5 inline-flex h-4 w-4 items-center justify-center rounded-full bg-white text-gold-700 shadow-sm">
+                  <Sparkles className="h-3 w-3" />
+                </span>
+              </span>
+              <div className="min-w-0">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-gold-700">
+                  AI quoting workspace
+                </div>
+                <h1 className="truncate text-lg font-semibold text-ink-950">
+                  AI Quoting Workspace
+                </h1>
+                <p className="mt-0.5 truncate text-sm text-ink-500">{contactName}</p>
+              </div>
+            </div>
           </div>
-          <h1 className="mt-1 text-2xl font-semibold text-ink-950">AI Quoting Workspace</h1>
-          <p className="mt-1 text-sm text-ink-500">{contactName}</p>
         </div>
-        <div className="hidden md:block" />
       </header>
 
-      {customer ? (
-        <ClientQuotingCard
-          tenantId={agency.id}
-          userId={user.id}
-          customer={customer}
-          onChanged={refresh}
-          standalone
-        />
-      ) : prospect ? (
-        <ProspectQuotingCard
-          tenantId={agency.id}
-          userId={user.id}
-          prospect={prospect}
-          onChanged={refresh}
-          standalone
-        />
-      ) : null}
+      <div className="min-h-0 flex-1">
+        {customer ? (
+          <ClientQuotingCard
+            tenantId={agency.id}
+            userId={user.id}
+            customer={customer}
+            onChanged={refresh}
+            standalone
+          />
+        ) : prospect ? (
+          <ProspectQuotingCard
+            tenantId={agency.id}
+            userId={user.id}
+            prospect={prospect}
+            onChanged={refresh}
+            standalone
+          />
+        ) : null}
+      </div>
     </div>
   );
 }
