@@ -1502,8 +1502,8 @@ export function ClientDetailPage() {
                 variant="outline"
                 className="whitespace-nowrap"
                 onClick={handleCarrierPolicyRetrieve}
-                disabled={policyRetrieveBusy || activePolicies.length === 0}
-                title={activePolicies.length === 0 ? "Add an active policy before retrieving carrier policy data" : "Retrieve current policy data from carrier portals"}
+                disabled={policyRetrieveBusy}
+                title="Retrieve or discover policy data from linked carrier portals"
                 icon={policyRetrieveBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
               >
                 Retrieve policy

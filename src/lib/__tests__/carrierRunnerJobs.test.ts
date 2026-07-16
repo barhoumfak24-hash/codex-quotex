@@ -145,6 +145,37 @@ describe("carrier runner jobs", () => {
     ).toBe(true);
   });
 
+  it("searches linked carriers when the client has no policy on file", async () => {
+    const { api } = await import("../api");
+
+    const customer = api.customers.create({
+      tenantId: "agency_palmcoast",
+      userId: "user_policy_discovery_test",
+      name: "Policy Discovery Client",
+      email: "policy.discovery@example.com",
+      lineOfBusiness: "personal",
+      marketingOptInEmail: false,
+      marketingOptInSms: false,
+      skipAutoRoute: true,
+    });
+    const out = api.policies.retrieveFromCarrier({
+      tenantId: "agency_palmcoast",
+      customerId: customer.id,
+      createdById: "user_manager_pc",
+    });
+
+    expect(api.policies.listByCustomer(customer.id)).toHaveLength(0);
+    expect(out.checked).toBeGreaterThan(0);
+    expect(out.updated).toBe(0);
+    expect(out.summary).toContain("Started policy retrieval");
+    const jobs = api
+      .carrierRunnerJobs
+      .listByTenant("agency_palmcoast")
+      .filter((job) => job.customerId === customer.id && job.trigger === "policy_check");
+    expect(jobs).toHaveLength(out.checked);
+    expect(jobs.every((job) => job.status === "queued" && !job.policyId)).toBe(true);
+  });
+
   it("moves closed policies into previous policies with timeline and remark records", async () => {
     const { api } = await import("../api");
 

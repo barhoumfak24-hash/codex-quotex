@@ -3363,6 +3363,7 @@ function createCarrierRunnerJobOnce(input: {
   tenantId: string;
   trigger: CarrierRunnerJobTrigger;
   reason: string;
+  title?: string;
   scheduledFor?: string;
   createdById?: string;
   policy?: Policy;
@@ -3375,9 +3376,12 @@ function createCarrierRunnerJobOnce(input: {
   if (policy && !policyAllowedForCarrierRunner(policy)) return null;
   const carrierId = input.carrierId ?? policy?.carrierId;
   if (!carrierId) return null;
+  const customerId = input.customerId ?? policy?.customerId;
   const existing = db.list("carrierRunnerJobs").find((job) => {
     if (job.tenantId !== input.tenantId) return false;
     if (job.trigger !== input.trigger) return false;
+    if (job.carrierId !== carrierId) return false;
+    if ((job.customerId ?? "") !== (customerId ?? "")) return false;
     if (job.policyId !== policy?.id) return false;
     if ((job.renewalId ?? "") !== (input.renewal?.id ?? "")) return false;
     return !RUNNER_TERMINAL_STATUSES.includes(job.status);
@@ -3388,13 +3392,13 @@ function createCarrierRunnerJobOnce(input: {
     id: uid("runner_job"),
     tenantId: input.tenantId,
     carrierId,
-    customerId: input.customerId ?? policy?.customerId,
+    customerId,
     assetId: input.assetId ?? policy?.assetId,
     policyId: policy?.id,
     renewalId: input.renewal?.id,
     trigger: input.trigger,
     status: "queued",
-    title: carrierRunnerJobTitle(input.trigger, policy, input.renewal),
+    title: input.title ?? carrierRunnerJobTitle(input.trigger, policy, input.renewal),
     reason: input.reason,
     scheduledFor: input.scheduledFor ?? nowIso(),
     createdAt: nowIso(),
@@ -9724,8 +9728,20 @@ export const api = {
       createdById?: string;
       policyIds?: string[];
     }): { checked: number; updated: number; jobIds: string[]; summary: string } {
+      const customer = db
+        .list("customers")
+        .find((row) => row.id === input.customerId && row.tenantId === input.tenantId);
+      if (!customer) {
+        return {
+          checked: 0,
+          updated: 0,
+          jobIds: [],
+          summary: "Client record could not be found.",
+        };
+      }
       const allow = new Set(input.policyIds ?? []);
-      const targetPolicies = this.listActiveByCustomer(input.customerId).filter(
+      const activeCustomerPolicies = this.listActiveByCustomer(input.customerId);
+      const targetPolicies = activeCustomerPolicies.filter(
         (policy) =>
           policy.tenantId === input.tenantId &&
           (allow.size === 0 || allow.has(policy.id)) &&
@@ -9734,6 +9750,41 @@ export const api = {
       let checked = 0;
       let updated = 0;
       const jobIds: string[] = [];
+      if (activeCustomerPolicies.length === 0) {
+        if (!carrierRunnerEnabledForTenant(input.tenantId)) {
+          return {
+            checked,
+            updated,
+            jobIds,
+            summary: "Carrier policy retrieval is not configured for this agency.",
+          };
+        }
+        const linkedCarrierIds = activeCarrierIdsForTenant(input.tenantId);
+        linkedCarrierIds.forEach((carrierId) => {
+          const carrierLabel = carrierName(carrierId);
+          const job = createCarrierRunnerJobOnce({
+            tenantId: input.tenantId,
+            trigger: "policy_check",
+            carrierId,
+            customerId: customer.id,
+            createdById: input.createdById ?? "ai",
+            title: `Policy search: ${customer.name} at ${carrierLabel}`,
+            reason: `Search ${carrierLabel} for policy records matching ${customer.name}. Import only carrier-verified policy data tied to this client.`,
+          });
+          if (!job) return;
+          checked += 1;
+          jobIds.push(job.id);
+        });
+        return {
+          checked,
+          updated,
+          jobIds,
+          summary:
+            checked === 0
+              ? "No linked carrier portals are available for policy retrieval."
+              : `Started policy retrieval across ${checked} linked carrier portal${checked === 1 ? "" : "s"}. Any verified policies found will be added to this client.`,
+        };
+      }
       targetPolicies.forEach((policy) => {
         const job = createCarrierRunnerJobOnce({
           tenantId: input.tenantId,
