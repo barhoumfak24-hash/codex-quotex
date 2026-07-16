@@ -13,11 +13,7 @@ export function envValue(key: string): string {
 }
 
 export function isProductionBuild(): boolean {
-  try {
-    return Boolean((import.meta as { env?: { PROD?: boolean } })?.env?.PROD);
-  } catch {
-    return false;
-  }
+  return import.meta.env.PROD;
 }
 
 export function cloudStateSyncEnabled(): boolean {
