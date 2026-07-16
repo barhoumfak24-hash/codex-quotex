@@ -113,6 +113,10 @@ interface Props {
   // Turn this off for production intake so failed real providers do
   // not generate demo suggestions that look like real addresses.
   allowMockFallback?: boolean;
+  // Existing saved addresses should not be searched as soon as an
+  // edit form mounts. When false, autocomplete starts after the first
+  // user change instead.
+  searchOnMount?: boolean;
 }
 
 export function AddressAutocomplete({
@@ -128,6 +132,7 @@ export function AddressAutocomplete({
   minQueryLength = 2,
   disableModeToggle = false,
   allowMockFallback = false,
+  searchOnMount = true,
 }: Props) {
   // Per-browser persisted preference. When the user clicks "Type
   // address manually" they're switched to the structured form for
@@ -142,6 +147,7 @@ export function AddressAutocomplete({
   const [locationBias, setLocationBias] = useState<LocationBias | null>(() => loadLocationBias());
   const [activeIndex, setActiveIndex] = useState(-1);
   const [statusMessage, setStatusMessage] = useState("");
+  const [hasUserChangedValue, setHasUserChangedValue] = useState(searchOnMount);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const lastQueryRef = useRef<string>("");
   const requestSeqRef = useRef(0);
@@ -206,6 +212,14 @@ export function AddressAutocomplete({
   // Each render's effect creates an AbortController so the previous
   // in-flight request is cancelled when the user types another key.
   useEffect(() => {
+    if (!hasUserChangedValue) {
+      requestSeqRef.current += 1;
+      lastQueryRef.current = "";
+      setPredictions([]);
+      setOpen(false);
+      setLoading(false);
+      return;
+    }
     if (justSelectedRef.current) {
       justSelectedRef.current = false;
       return;
@@ -262,7 +276,7 @@ export function AddressAutocomplete({
       window.clearTimeout(handle);
       controller.abort();
     };
-  }, [value, mode, minQueryLength, allowMockFallback, locationBias]);
+  }, [value, mode, minQueryLength, allowMockFallback, locationBias, hasUserChangedValue]);
 
   function warmLocationBias() {
     if (mode !== "address" || locationBias || locationPromptedRef.current) return;
@@ -407,6 +421,7 @@ export function AddressAutocomplete({
           onChange={(e) => {
             const nextValue = e.target.value;
             setStatusMessage("");
+            setHasUserChangedValue(true);
             onChange(nextValue);
           }}
           onFocus={() => {

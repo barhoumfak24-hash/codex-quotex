@@ -48,7 +48,7 @@ import {
 } from "@/lib/lossRuns";
 import { normalizeVinFieldValue, uppercaseVinInput } from "@/lib/vinInput";
 import type { AddressParts } from "@/lib/addressSearch";
-import type { AiAssetEnrichment, Asset, AssetType, CategoryQuestion, Document, InsuranceCategory, MarketingCampaign, MarketingMessage, NoteAttachment, Policy, PolicyParty, TemplateFieldMap } from "@/types";
+import type { AiAssetEnrichment, Asset, AssetType, CategoryQuestion, Document, InsuranceCategory, MarketingCampaign, MarketingMessage, NoteAttachment, Policy, PolicyParty, TemplateFieldMap, User } from "@/types";
 
 type RenewalAiField = "policyId" | "renewalDate";
 type ClaimStatus = "opened" | "in_review" | "closed";
@@ -71,6 +71,24 @@ const FALLBACK_ASSET_CATEGORY_OPTIONS: AssetCategoryOption[] = [
 
 function uniqueStaffIds(ids: Array<string | undefined>): string[] {
   return Array.from(new Set(ids.filter((id): id is string => !!id)));
+}
+
+function assignmentAgentOptions(users: User[], currentUser: User, tenantId: string): User[] {
+  const byId = new Map<string, User>();
+  for (const candidate of [currentUser, ...users]) {
+    const hasAgencyAccess =
+      candidate.tenantId === tenantId &&
+      candidate.active !== false &&
+      candidate.staffAccessStatus !== "banned" &&
+      candidate.staffAccessStatus !== "deleted";
+    if (hasAgencyAccess && (candidate.role === "manager" || candidate.role === "agent")) {
+      byId.set(candidate.id, candidate);
+    }
+  }
+  return Array.from(byId.values()).sort((left, right) => {
+    if (left.role !== right.role) return left.role === "manager" ? -1 : 1;
+    return left.name.localeCompare(right.name);
+  });
 }
 
 function profileValue(value?: string | null): string {
@@ -472,9 +490,9 @@ export function ClientDetailPage() {
   const activeCustomer = customer;
   const canManageRouting = isRoutingManagerRole(user.role);
   const canViewEncryptedInfo = canManageRouting;
-  const agentOptions = api.users
-    .list(agency.id)
-    .filter((u) => u.role === "agent" || u.role === "manager");
+  const agentOptions = assignmentAgentOptions(api.users.list(agency.id), user, agency.id);
+  const managerOptions = agentOptions.filter((candidate) => candidate.role === "manager");
+  const producerOptions = agentOptions.filter((candidate) => candidate.role === "agent");
   const csrOptions = api.users.list(agency.id).filter((u) => u.role === "csr");
   const assignedAgentNames = assignedAgentIds
     .map((id) => api.users.get(id)?.name)
@@ -1046,6 +1064,7 @@ export function ClientDetailPage() {
                 <AddressAutocomplete
                   value={mailingAddress}
                   onChange={setMailingAddress}
+                  searchOnMount={false}
                 />
               ) : (
                 <MapLink address={mailingAddress} variant="field" />
@@ -1079,11 +1098,24 @@ export function ClientDetailPage() {
                   aria-readonly={!editingProfile}
                 >
                   <option value="">— Unassigned —</option>
-                  {agentOptions.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.name}
-                    </option>
-                  ))}
+                  {managerOptions.length > 0 && (
+                    <optgroup label="Managers">
+                      {managerOptions.map((manager) => (
+                        <option key={manager.id} value={manager.id}>
+                          {manager.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {producerOptions.length > 0 && (
+                    <optgroup label="Agents">
+                      {producerOptions.map((agent) => (
+                        <option key={agent.id} value={agent.id}>
+                          {agent.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
                 </select>
               ) : (
                 // Disabled <select> — visibly a form control but truly
@@ -1103,11 +1135,24 @@ export function ClientDetailPage() {
                   aria-readonly="true"
                 >
                   <option value="">Unassigned</option>
-                  {agentOptions.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.name}
-                    </option>
-                  ))}
+                  {managerOptions.length > 0 && (
+                    <optgroup label="Managers">
+                      {managerOptions.map((manager) => (
+                        <option key={manager.id} value={manager.id}>
+                          {manager.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {producerOptions.length > 0 && (
+                    <optgroup label="Agents">
+                      {producerOptions.map((agent) => (
+                        <option key={agent.id} value={agent.id}>
+                          {agent.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
                 </select>
               )}
             </div>
