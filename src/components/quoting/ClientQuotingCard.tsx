@@ -568,8 +568,16 @@ function ContactQuotingCard({
   ) : null;
 
   return (
-    <Card id="ai-quoting-workspace" className="relative">
-      <CardHeader title="AI quoting workspace" />
+    <Card
+      id="ai-quoting-workspace"
+      padded={!standalone}
+      className={
+        standalone
+          ? "h-full min-h-0 !rounded-none !border-0 !bg-transparent !shadow-none"
+          : "relative"
+      }
+    >
+      {!standalone && <CardHeader title="AI quoting workspace" />}
 
       {false && !existing && (
         <div key="quote-setup" className="rounded-md border border-ink-100 bg-ink-50/40 p-3 mb-4 space-y-3">

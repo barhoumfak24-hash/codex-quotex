@@ -661,6 +661,24 @@ export function AiQuotingWorkspace({
     const setupFullscreenSubtitle = setupMappingPending
       ? "Map known data for the selected asset"
       : setupWorkspaceSubtitle;
+    if (standalone) {
+      return (
+        <StandaloneWorkflowLayout
+          steps={setupWorkspaceSteps}
+          currentStep={setupCurrentStep}
+        >
+          {setupMappingPending ? (
+            <SetupAiMappingPendingPanel
+              steps={setupWorkspaceSteps}
+              totalSteps={setupWorkspaceSteps.length}
+              progress={mappingProgress}
+            />
+          ) : (
+            setupWorkspaceBody
+          )}
+        </StandaloneWorkflowLayout>
+      );
+    }
     return (
       <>
         {!workspaceOpen && (
@@ -803,6 +821,18 @@ export function AiQuotingWorkspace({
       </div>
     </div>
   );
+
+  if (standalone) {
+    return (
+      <StandaloneWorkflowLayout
+        steps={flowSteps}
+        currentStep={flowPage.step}
+        completedStepNumbers={workflowCompletedStepNumbers(session)}
+      >
+        {activeWorkspaceBody}
+      </StandaloneWorkflowLayout>
+    );
+  }
 
   return (
     <>
@@ -1477,6 +1507,47 @@ function WorkflowStepIcons({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function StandaloneWorkflowLayout({
+  steps,
+  currentStep,
+  completedStepNumbers = [],
+  children,
+}: {
+  steps: WorkflowStepDefinition[];
+  currentStep: number;
+  completedStepNumbers?: number[];
+  children: ReactNode;
+}) {
+  return (
+    <div className="grid h-full min-h-0 lg:grid-cols-[280px_minmax(0,1fr)]">
+      <aside
+        className="hidden min-h-0 overflow-y-auto border-r border-ink-100 bg-ink-50/60 p-4 lg:block"
+        aria-label={`Quote workflow steps: step ${currentStep} of ${steps.length}`}
+      >
+        <WorkspaceSideRail
+          steps={steps}
+          currentStep={currentStep}
+          totalSteps={steps.length}
+          completedStepNumbers={completedStepNumbers}
+        />
+      </aside>
+      <main className="min-h-0 min-w-0 overflow-y-auto bg-ink-50/30 px-4 py-4 sm:px-6">
+        <div className="mx-auto w-full max-w-[1320px] space-y-4">
+          <div className="rounded-md border border-ink-100 bg-white px-3 py-2 lg:hidden">
+            <WorkflowStepIcons
+              steps={steps}
+              currentStep={currentStep}
+              totalSteps={steps.length}
+              completedStepNumbers={completedStepNumbers}
+            />
+          </div>
+          {children}
+        </div>
+      </main>
     </div>
   );
 }
