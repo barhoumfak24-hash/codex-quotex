@@ -4,6 +4,11 @@ import { api } from "./api";
 import { apiBaseUrl, envValue } from "./apiBase";
 import { db, subscribeToDbChanges } from "./db";
 import { isStaffRole, type StaffRole } from "./roles";
+import {
+  currentServerSessionToken as readServerSessionToken,
+  forgetServerSessionToken,
+  rememberServerSessionToken,
+} from "./serverSession";
 
 export type AuthFailReason =
   | "invalid_credentials"
@@ -161,9 +166,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (session.ok) {
           const resolved = resolveAnyServerUser(session.user);
           if (resolved && !accessBlockForUser(resolved, { trustServerSession: true })) {
+            const hydrated = await hydrateAuthenticatedWorkspace();
+            if (!hydrated) {
+              persist(null);
+              return;
+            }
             storeServerSessionUser(resolved);
             persist(resolved);
-            await db.hydrateNow();
           } else {
             persist(null);
           }
@@ -213,8 +222,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
         const resolved = resolveAnyServerUser(session.user);
         if (resolved && !accessBlockForUser(resolved, { trustServerSession: true })) {
+          const hydrated = await hydrateAuthenticatedWorkspace();
+          if (!hydrated) {
+            clearServerSessionToken();
+            lastIdRef.current = null;
+            setUser(null);
+            return;
+          }
           storeServerSessionUser(resolved);
-          await db.hydrateNow();
           lastIdRef.current = resolved.id;
           setUser(resolved);
           return;
@@ -1259,6 +1274,7 @@ function isPersistableServerUser(value: Partial<User>): value is Partial<User> &
 
 function storeServerSessionToken(token: string) {
   if (typeof window === "undefined") return;
+  rememberServerSessionToken(token);
   if (!safeStorageSet(AUTH_TOKEN_KEY, token)) {
     safeSessionStorageSet(AUTH_TOKEN_KEY, token);
   }
@@ -1268,17 +1284,19 @@ function storeServerSessionToken(token: string) {
 
 async function storeServerSessionAndHydrate(token: string) {
   storeServerSessionToken(token);
-  await db.hydrateNow();
+  if (!(await hydrateAuthenticatedWorkspace())) {
+    clearServerSessionToken();
+    throw new Error("Authenticated workspace could not be loaded.");
+  }
+}
+
+async function hydrateAuthenticatedWorkspace(): Promise<boolean> {
+  const hydrated = await db.hydrateNow();
+  return envValue("VITE_STATE_SYNC_MODE") !== "supabase" || hydrated;
 }
 
 function currentServerSessionToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return (
-    safeStorageGet(AUTH_TOKEN_KEY) ||
-    safeSessionStorageGet(AUTH_TOKEN_KEY) ||
-    safeStorageGet(LEGACY_AUTH_TOKEN_KEY) ||
-    safeSessionStorageGet(LEGACY_AUTH_TOKEN_KEY)
-  );
+  return readServerSessionToken();
 }
 
 function hasServerSessionToken(): boolean {
@@ -1287,6 +1305,7 @@ function hasServerSessionToken(): boolean {
 
 function clearServerSessionToken() {
   if (typeof window === "undefined") return;
+  forgetServerSessionToken();
   safeStorageRemove(AUTH_TOKEN_KEY);
   safeStorageRemove(LEGACY_AUTH_TOKEN_KEY);
   safeSessionStorageRemove(AUTH_TOKEN_KEY);

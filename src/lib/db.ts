@@ -6,7 +6,7 @@
 
 import * as seed from "./seed";
 import { apiBaseUrl, envValue } from "./apiBase";
-import { serverSessionHeaders } from "./serverSession";
+import { currentServerSessionToken, serverSessionHeaders } from "./serverSession";
 import { isLargeInlineDataUrl, storeStateBlob } from "./stateBlobs";
 import {
   generateAgencyCode,
@@ -1477,6 +1477,16 @@ async function hydrateFromRemote(options: { force?: boolean; merge?: boolean } =
         message: "Cloud backup is not connected in this environment.",
       });
     }
+    return;
+  }
+  if (!currentServerSessionToken()) {
+    remoteLoadedOk = false;
+    remoteHydrated = false;
+    setSyncStatus({
+      status: "saving",
+      reason: "unauthorized",
+      message: "Waiting for a secure session before loading cloud data.",
+    });
     return;
   }
   remoteHydrating = true;

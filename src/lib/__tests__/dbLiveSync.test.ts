@@ -5,6 +5,7 @@ beforeEach(() => {
   vi.resetModules();
   window.localStorage.clear();
   window.sessionStorage.clear();
+  window.sessionStorage.setItem("quotex.authToken", "test-session-token");
 });
 
 afterEach(() => {
@@ -273,6 +274,26 @@ describe("db live sync", () => {
       fetchMock.mock.calls.filter((call) => fetchMethod(call) === "PUT")
     ).toHaveLength(2);
     expect(db.syncStatus()).toMatchObject({ status: "synced" });
+  });
+
+  it("does not attempt cloud hydration before a secure session exists", async () => {
+    window.sessionStorage.removeItem("quotex.authToken");
+    vi.stubEnv("VITE_STATE_SYNC_MODE", "supabase");
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ found: false, revision: null, snapshot: null }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    vi.resetModules();
+    const { db } = await import("../db");
+    await wait(50);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    window.sessionStorage.setItem("quotex.authToken", "new-session-token");
+    expect(await db.hydrateNow()).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("recovers when the cloud state row disappears between hydrate and save", async () => {

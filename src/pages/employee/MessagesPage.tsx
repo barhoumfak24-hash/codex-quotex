@@ -289,7 +289,6 @@ export function MessagesPage() {
     id: user.id,
     role: user.role,
   });
-  const visibleCustomerIds = new Set(customers.map((c) => c.id));
   const prospects = api.prospects.listByTenant(agency.id);
   const allComms = api.communications.listByTenant(agency.id);
   const allOutbound = api.marketing.listMessages(agency.id);
@@ -328,15 +327,15 @@ export function MessagesPage() {
       | null {
       if (c.customerId) {
         const customer = customerById.get(c.customerId);
-        if (!customer || customer.archived) return null;
+        if (customer?.archived) return null;
         return {
-          key: `client:${customer.id}`,
+          key: `client:${customer?.id ?? c.customerId}`,
           base: {
             kind: "client",
-            id: customer.id,
-            name: customer.name,
-            email: customer.email,
-            phone: customer.phone,
+            id: customer?.id ?? c.customerId,
+            name: customer?.name ?? c.externalRecipientName?.trim() ?? c.externalRecipientEmail?.trim() ?? "Client message",
+            email: customer?.email ?? c.externalRecipientEmail,
+            phone: customer?.phone,
           },
         };
       }
@@ -386,9 +385,7 @@ export function MessagesPage() {
           hasUnreadInbound: false,
         });
       });
-    emailComms
-      .filter((c) => !c.customerId || visibleCustomerIds.has(c.customerId))
-      .forEach((c) => {
+    emailComms.forEach((c) => {
         const contact = knownContactBase(c);
         if (!contact) return;
         upsert(contact.key, map.get(contact.key) ?? contact.base, {
@@ -397,9 +394,7 @@ export function MessagesPage() {
           isUnreadInbound: c.direction === "inbound" && !c.resolvedAt,
         });
       });
-    emailOutbound
-      .filter((m) => !m.customerId || visibleCustomerIds.has(m.customerId))
-      .forEach((m) => {
+    emailOutbound.forEach((m) => {
         const customer = m.customerId ? customerById.get(m.customerId) : undefined;
         const prospect = m.prospectId ? prospectById.get(m.prospectId) : undefined;
         const key = customer ? `client:${customer.id}` : prospect ? `prospect:${prospect.id}` : null;
@@ -455,7 +450,7 @@ export function MessagesPage() {
     return Array.from(map.values())
       .filter((t) => t.lastBody !== "" || t.hasUnreadInbound)
       .sort((a, b) => (a.lastAt < b.lastAt ? 1 : -1));
-  }, [customers, prospects, emailComms, emailOutbound, visibleCustomerIds]);
+  }, [customers, prospects, emailComms, emailOutbound]);
 
   const carrierThreads: ContactThread[] = useMemo(() => {
     const map = new Map<string, ContactThread>();
