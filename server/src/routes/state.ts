@@ -59,12 +59,11 @@ stateRoutes.put("/:stateId", async (req, res, next) => {
     if (!parsed.success) return res.status(400).json({ error: "invalid_state", details: parsed.error.flatten() });
 
     const id = appStateId(stateId);
-    const isTenantScoped = stateScopeForAuth(access.auth) === "tenant";
-    if (isTenantScoped && parsed.data.baseRevision === undefined) {
+    if (parsed.data.baseRevision === undefined) {
       return res.status(400).json({ error: "base_revision_required" });
     }
-    const current = isTenantScoped ? await readRemoteState(id) : null;
-    if (isTenantScoped && (current?.revision ?? null) !== parsed.data.baseRevision) {
+    const current = await readRemoteState(id);
+    if ((current?.revision ?? null) !== parsed.data.baseRevision) {
       const scopedConflict = scopeStateSnapshotForAuth(current?.snapshot ?? null, access.auth);
       return res.status(409).json({
         ok: false,
@@ -75,9 +74,11 @@ stateRoutes.put("/:stateId", async (req, res, next) => {
         revision: current?.revision ?? null,
       });
     }
-    const snapshot = isTenantScoped
-      ? mergeStateSnapshotForAuth(current?.snapshot ?? {}, parsed.data.snapshot, access.auth)
-      : parsed.data.snapshot;
+    const snapshot = mergeStateSnapshotForAuth(
+      current?.snapshot ?? {},
+      parsed.data.snapshot,
+      access.auth
+    );
     const baseRevision = parsed.data.baseRevision;
 
     const result = await writeRemoteState(id, snapshot, baseRevision);

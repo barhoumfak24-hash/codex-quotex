@@ -83,6 +83,8 @@ import type {
 const STORAGE_KEY = "quotex.db.v32";
 const CRITICAL_STORAGE_KEY = `${STORAGE_KEY}.critical`;
 const QUOTE_WORKFLOW_STORAGE_KEY = `${STORAGE_KEY}.quote-workflows`;
+const LOCAL_HISTORY_PREFIX = `${STORAGE_KEY}.history`;
+const LOCAL_HISTORY_LIMIT = 5;
 const LEGACY_KEYS = ["quotex.db.v1", "quotex.db.v2", "quotex.db.v3", "quotex.db.v4", "quotex.db.v5", "quotex.db.v6", "quotex.db.v7", "quotex.db.v8", "quotex.db.v9", "quotex.db.v10", "quotex.db.v11", "quotex.db.v12", "quotex.db.v13", "quotex.db.v14", "quotex.db.v15", "quotex.db.v16", "quotex.db.v17", "quotex.db.v18", "quotex.db.v19", "quotex.db.v20", "quotex.db.v21", "quotex.db.v22", "quotex.db.v23", "quotex.db.v24", "quotex.db.v25", "quotex.db.v26", "quotex.db.v27", "quotex.db.v28", "quotex.db.v29", "quotex.db.v30", "quotex.db.v31"];
 // Every table that can contain agency-entered or workflow-generated data is
 // treated as recoverable. Refreshing, deploying a new bundle, or bumping the
@@ -130,6 +132,16 @@ const CRITICAL_TABLES: (keyof DbShape)[] = [
   "timesheets",
   "hrSubmissions",
   "calendarEvents",
+  "audit",
+  "marketingConfigs",
+  "reminders",
+  "internalThreads",
+  "internalMessages",
+  "messagePins",
+  "messageMutes",
+  "messageReports",
+  "messageBlocks",
+  "demoLeads",
   "deletedRows",
 ];
 
@@ -138,6 +150,10 @@ interface DeletedRow {
   table: string;
   rowId: string;
   deletedAt: string;
+  tenantId?: string;
+  actorId?: string;
+  reason?: string;
+  operationId?: string;
 }
 
 export type SyncStatusKind = "synced" | "saving" | "error" | "local-only";
@@ -1017,18 +1033,28 @@ function withDefaultMigrations(data: DbShape): DbShape {
   );
 }
 
-function latestLegacySnapshotRaw(): string | null {
-  if (typeof window === "undefined") return null;
-  for (let i = LEGACY_KEYS.length - 1; i >= 0; i -= 1) {
-    const raw = window.localStorage.getItem(LEGACY_KEYS[i]);
-    if (raw) return raw;
+function storedSnapshotRaws(): string[] {
+  if (typeof window === "undefined") return [];
+  const keys = [
+    ...LEGACY_KEYS,
+    ...Array.from({ length: LOCAL_HISTORY_LIMIT }, (_, index) => `${LOCAL_HISTORY_PREFIX}.${index + 1}`),
+    STORAGE_KEY,
+  ];
+  const raws: string[] = [];
+  for (const key of keys) {
+    const raw = window.localStorage.getItem(key);
+    if (raw) raws.push(raw);
   }
-  return null;
+  return raws;
 }
 
-function removeLegacySnapshots() {
-  if (typeof window === "undefined") return;
-  for (const key of LEGACY_KEYS) window.localStorage.removeItem(key);
+function mergeStoredSnapshots(raws: string[]): DbShape {
+  let merged = withDefaultMigrations(freshSeed());
+  for (const raw of raws) {
+    const snapshot = normalizeLocalSnapshot(raw);
+    if (snapshot) merged = mergeDbShapes(snapshot, merged);
+  }
+  return merged;
 }
 
 function load(): DbShape {
@@ -1036,34 +1062,33 @@ function load(): DbShape {
     return withDefaultMigrations(freshSeed());
   }
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY) ?? latestLegacySnapshotRaw();
+    const storedSnapshots = storedSnapshotRaws();
     const critical =
       normalizeCriticalSnapshot(window.sessionStorage.getItem(CRITICAL_STORAGE_KEY)) ??
       normalizeCriticalSnapshot(window.localStorage.getItem(CRITICAL_STORAGE_KEY));
     const quoteWorkflows =
       normalizeQuoteWorkflowSnapshot(window.sessionStorage.getItem(QUOTE_WORKFLOW_STORAGE_KEY)) ??
       normalizeQuoteWorkflowSnapshot(window.localStorage.getItem(QUOTE_WORKFLOW_STORAGE_KEY));
-    if (!raw) {
+    if (storedSnapshots.length === 0) {
       const fresh = mergeQuoteWorkflowSnapshot(
         mergeCriticalSnapshot(withDefaultMigrations(freshSeed()), critical),
         quoteWorkflows
       );
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(fresh));
-      removeLegacySnapshots();
       return fresh;
     }
-    const parsed = JSON.parse(raw) as Partial<DbShape>;
-    // Fill in any tables added since the cache was written.
-    const fresh = freshSeed();
+    // Every surviving schema version and local history slot participates in
+    // recovery. An update may add data, but it must never make an older record
+    // disappear merely because the new bundle did not include it.
+    const recovered = mergeStoredSnapshots(storedSnapshots);
     const migrated = mergeQuoteWorkflowSnapshot(
       mergeCriticalSnapshot(
-        withDefaultMigrations({ ...fresh, ...parsed } as DbShape),
+        recovered,
         critical
       ),
       quoteWorkflows
     );
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(migrated));
-    removeLegacySnapshots();
     return migrated;
   } catch {
     const critical =
@@ -1104,7 +1129,6 @@ const REMOTE_WRITE_DEBOUNCE_MS = 300;
 const REMOTE_RETRY_DELAYS_MS = [1000, 2000, 5000, 15000, 60000];
 const REMOTE_SNAPSHOT_WARN_BYTES = 1.5 * 1024 * 1024;
 const LOCAL_CACHE_INLINE_DATA_URL_WARN_BYTES = 150_000;
-const TOMBSTONE_TTL_MS = 60 * 24 * 60 * 60 * 1000;
 
 function activateDbInstance() {
   if (typeof window === "undefined") return;
@@ -1308,11 +1332,10 @@ function tombstoneId(table: string, id: string) {
   return `${table}:${id}`;
 }
 
-function purgeOldTombstones(rows: DeletedRow[], now = Date.now()) {
-  return rows.filter((row) => {
-    const deletedAt = Date.parse(row.deletedAt);
-    return Number.isNaN(deletedAt) || now - deletedAt < TOMBSTONE_TTL_MS;
-  });
+function retainTombstones(rows: DeletedRow[]) {
+  // Deletions are durable operations. Expiring them without confirmation from
+  // every replica allows stale tabs or devices to resurrect removed records.
+  return rows;
 }
 
 function mergeRows<T extends { id?: string }>(localRows: T[], remoteRows: T[]): T[] {
@@ -1338,7 +1361,7 @@ function mergeRows<T extends { id?: string }>(localRows: T[], remoteRows: T[]): 
 }
 
 function mergeTombstones(localRows: DeletedRow[] = [], remoteRows: DeletedRow[] = []): DeletedRow[] {
-  return purgeOldTombstones(mergeRows(localRows, remoteRows));
+  return retainTombstones(mergeRows(localRows, remoteRows));
 }
 
 function applyTombstones(data: DbShape): DbShape {
@@ -1362,16 +1385,14 @@ function applyTombstones(data: DbShape): DbShape {
       retainedTombstones.push(tombstone);
       continue;
     }
-    const row = (rows as unknown[])[rowIndex];
-    const rowStamp = rowSyncStamp(row);
-    if (rowStamp && rowStamp > tombstone.deletedAt) {
-      continue;
-    }
+    // A tombstone represents an explicit user deletion. Stale tabs and
+    // delayed writes must never recreate that row merely because they carry a
+    // later local timestamp.
     (rows as unknown[]).splice(rowIndex, 1);
     retainedTombstones.push(tombstone);
   }
 
-  next.deletedRows = purgeOldTombstones(retainedTombstones);
+  next.deletedRows = retainTombstones(retainedTombstones);
   return next;
 }
 
@@ -1408,7 +1429,10 @@ function broadcastDbChange(source: "local" | "remote") {
 }
 
 function applyIncomingSnapshot(next: DbShape, source: "storage" | "broadcast" | "remote") {
-  const merged = source === "remote" ? mergeDbShapes(cache, next) : next;
+  // Storage and BroadcastChannel events can originate from a stale tab. They
+  // are never authoritative replacements; all sources merge by record ID and
+  // explicit tombstones are the only deletion mechanism.
+  const merged = mergeDbShapes(cache, next);
   const before = JSON.stringify(cache);
   const after = JSON.stringify(merged);
   if (before === after) return false;
@@ -1717,13 +1741,15 @@ async function persistRemoteInner(options: { keepalive?: boolean; attempt?: numb
       keepalive: options.keepalive,
     });
     const payload = (await res.json().catch(() => null)) as
-      | { ok?: boolean; scoped?: boolean; snapshot?: unknown; revision?: number; error?: string }
+      | { ok?: boolean; scoped?: boolean; snapshot?: unknown; revision?: number | null; error?: string }
       | null;
     if (!isActiveDbInstance()) return false;
     if (res.status === 409) {
+      if (payload && Object.prototype.hasOwnProperty.call(payload, "revision")) {
+        remoteRevision = typeof payload.revision === "number" ? payload.revision : null;
+      }
       const remote = normalizeRemoteSnapshot(payload?.snapshot);
       if (remote) {
-        if (typeof payload?.revision === "number") remoteRevision = payload.revision;
         cache = mergeDbShapes(cache, remote);
         persistLocalOnly();
         notify();
@@ -1779,7 +1805,20 @@ function persistLocalOnly() {
     /* quota - ignore */
   }
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(cache));
+    const serialized = JSON.stringify(cache);
+    const previous = window.localStorage.getItem(STORAGE_KEY);
+    if (previous && previous !== serialized) {
+      try {
+        for (let index = LOCAL_HISTORY_LIMIT; index > 1; index -= 1) {
+          const prior = window.localStorage.getItem(`${LOCAL_HISTORY_PREFIX}.${index - 1}`);
+          if (prior) window.localStorage.setItem(`${LOCAL_HISTORY_PREFIX}.${index}`, prior);
+        }
+        window.localStorage.setItem(`${LOCAL_HISTORY_PREFIX}.1`, previous);
+      } catch {
+        /* main and critical snapshots remain the persistence priority */
+      }
+    }
+    window.localStorage.setItem(STORAGE_KEY, serialized);
     try {
       window.localStorage.setItem(QUOTE_WORKFLOW_STORAGE_KEY, quoteWorkflows);
     } catch {
@@ -1976,14 +2015,29 @@ export const db = {
     const arr = cache[table] as unknown as { id: string }[];
     const idx = arr.findIndex((r) => r.id === id);
     if (idx === -1) return false;
+    const removedRow = arr[idx] as Record<string, unknown>;
     arr.splice(idx, 1);
     if (table !== "deletedRows") {
       const deletedAt = nowIso();
+      const actorId =
+        typeof window === "undefined"
+          ? undefined
+          : window.localStorage.getItem("quotex.auth.userId.v1") ?? undefined;
+      const tenantId =
+        typeof removedRow.tenantId === "string"
+          ? removedRow.tenantId
+          : typeof removedRow.agencyId === "string"
+            ? removedRow.agencyId
+            : undefined;
       const row: DeletedRow = {
         id: tombstoneId(String(table), id),
         table: String(table),
         rowId: id,
         deletedAt,
+        tenantId,
+        actorId,
+        reason: "explicit_user_action",
+        operationId: `delete_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
       };
       const existing = cache.deletedRows.findIndex((deleted) => deleted.id === row.id);
       if (existing === -1) cache.deletedRows.push(row);

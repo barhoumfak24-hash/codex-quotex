@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   canAccessAgencyStateForAuth,
+  mergeStateSnapshotForAuth,
   mergeTenantSnapshotIntoPlatform,
   scopeSnapshotToTenant,
   stateScopeForAuth,
@@ -44,11 +45,10 @@ describe("state snapshot tenant scoping", () => {
     expect(canAccessAgencyStateForAuth(customerAuth)).toBe(false);
   });
 
-  it("merges tenant writes without deleting or modifying another agency", () => {
+  it("preserves omitted tenant rows while upserting authorized rows", () => {
     const merged = mergeTenantSnapshotIntoPlatform(
       platformSnapshot(),
       {
-        ...platformSnapshot(),
         customers: [
           { id: "customer_a_new", tenantId: "agency_a", name: "New A" },
           { id: "customer_b", tenantId: "agency_b", name: "Malicious overwrite" },
@@ -60,15 +60,124 @@ describe("state snapshot tenant scoping", () => {
     ) as any;
 
     expect(merged.customers).toEqual([
+      { id: "customer_a", tenantId: "agency_a", categoryId: "category_1", name: "Customer A" },
       { id: "customer_b", tenantId: "agency_b", categoryId: "category_1", name: "Customer B" },
       { id: "customer_a_new", tenantId: "agency_a", name: "New A" },
     ]);
     expect(merged.assets).toEqual([
+      { id: "asset_a", tenantId: "agency_a", customerId: "customer_a", label: "A asset" },
       { id: "asset_b", tenantId: "agency_b", customerId: "customer_b", label: "B asset" },
       { id: "asset_a_new", tenantId: "agency_a", customerId: "customer_a_new", label: "New A asset" },
     ]);
     expect(merged.categories).toEqual([{ id: "category_1", label: "Global category" }]);
     expect(merged.softwareSales).toEqual([{ id: "sale_1", agencyName: "Platform-only" }]);
+  });
+
+  it("preserves omitted customers and communications", () => {
+    const merged = mergeTenantSnapshotIntoPlatform(
+      platformSnapshot(),
+      { tasks: [{ id: "task_a", tenantId: "agency_a", title: "Updated task" }] },
+      "agency_a"
+    ) as any;
+
+    expect(merged.customers).toEqual(platformSnapshot().customers);
+    expect(merged.communications).toEqual(platformSnapshot().communications);
+  });
+
+  it("deletes a tenant row only with an explicit matching tombstone", () => {
+    const merged = mergeTenantSnapshotIntoPlatform(
+      platformSnapshot(),
+      {
+        deletedRows: [
+          {
+            id: "delete_customer_a",
+            tenantId: "agency_a",
+            table: "customers",
+            rowId: "customer_a",
+            deletedAt: "2026-07-16T12:00:00.000Z",
+          },
+        ],
+      },
+      "agency_a"
+    ) as any;
+
+    expect(merged.customers.map((row: any) => row.id)).toEqual(["customer_b"]);
+    expect(merged.deletedRows).toContainEqual(
+      expect.objectContaining({ tenantId: "agency_a", table: "customers", rowId: "customer_a" })
+    );
+  });
+
+  it("rejects a tombstone for a different tenant", () => {
+    const merged = mergeTenantSnapshotIntoPlatform(
+      platformSnapshot(),
+      {
+        deletedRows: [
+          {
+            id: "delete_customer_b",
+            tenantId: "agency_b",
+            table: "customers",
+            rowId: "customer_b",
+            deletedAt: "2026-07-16T12:00:00.000Z",
+          },
+        ],
+      },
+      "agency_a"
+    ) as any;
+
+    expect(merged.customers).toEqual(platformSnapshot().customers);
+    expect(merged.deletedRows ?? []).toEqual([]);
+  });
+
+  it("rejects a cross-tenant id collision", () => {
+    const merged = mergeTenantSnapshotIntoPlatform(
+      platformSnapshot(),
+      {
+        customers: [{ id: "customer_b", tenantId: "agency_a", name: "Collision" }],
+      },
+      "agency_a"
+    ) as any;
+
+    expect(merged.customers).toEqual(platformSnapshot().customers);
+  });
+
+  it("rejects a tenant communication that references another tenant's customer", () => {
+    const merged = mergeTenantSnapshotIntoPlatform(
+      platformSnapshot(),
+      {
+        communications: [
+          {
+            id: "communication_cross_tenant",
+            tenantId: "agency_a",
+            customerId: "customer_b",
+            body: "Must not cross agency boundaries",
+          },
+        ],
+      },
+      "agency_a"
+    ) as any;
+
+    expect(merged.communications).toEqual(platformSnapshot().communications);
+  });
+
+  it("merges platform writes non-destructively", () => {
+    const merged = mergeStateSnapshotForAuth(
+      platformSnapshot(),
+      {
+        customers: [{ id: "customer_a", tenantId: "agency_a", name: "Updated A" }],
+      },
+      {
+        userId: "master",
+        role: "platform_admin",
+        tenantId: null,
+        permissions: [],
+      }
+    ) as any;
+
+    expect(merged.customers).toEqual([
+      { id: "customer_a", tenantId: "agency_a", categoryId: "category_1", name: "Updated A" },
+      { id: "customer_b", tenantId: "agency_b", categoryId: "category_1", name: "Customer B" },
+    ]);
+    expect(merged.communications).toEqual(platformSnapshot().communications);
   });
 });
 

@@ -50,7 +50,7 @@ describe("db live sync", () => {
     expect(db.snapshot().customers.some((customer) => customer.id === preservedCustomer.id)).toBe(
       true
     );
-    expect(window.localStorage.getItem("quotex.db.v30")).toBeNull();
+    expect(window.localStorage.getItem("quotex.db.v30")).not.toBeNull();
     expect(dbStorageKey()).toMatch(/^quotex\.db\.v\d+$/);
   });
 
@@ -71,8 +71,8 @@ describe("db live sync", () => {
     expect(db.snapshot().customers.some((customer) => customer.id === preservedCustomer.id)).toBe(
       true
     );
-    expect(window.localStorage.getItem("quotex.db.v31")).toBeNull();
-    expect(dbStorageKey()).toBe("quotex.db.v32");
+    expect(window.localStorage.getItem("quotex.db.v31")).not.toBeNull();
+    expect(window.localStorage.getItem("quotex.db.v32")).not.toBeNull();
   });
 
   it("restores client records from the safety snapshot if the main cache is missing", async () => {
@@ -275,6 +275,89 @@ describe("db live sync", () => {
     expect(db.syncStatus()).toMatchObject({ status: "synced" });
   });
 
+  it("recovers when the cloud state row disappears between hydrate and save", async () => {
+    vi.stubEnv("VITE_STATE_SYNC_MODE", "supabase");
+    const putBodies: Array<{ baseRevision: number | null }> = [];
+    let putCount = 0;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "GET") {
+        return {
+          ok: true,
+          json: async () => ({ found: true, revision: 4, snapshot: {} }),
+        };
+      }
+      const body = JSON.parse(String(init?.body));
+      putBodies.push(body);
+      putCount += 1;
+      if (putCount === 1) {
+        return {
+          ok: false,
+          status: 409,
+          json: async () => ({ ok: false, revision: null, snapshot: null }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, revision: 0, snapshot: body.snapshot }),
+      };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { db } = await import("../db");
+    await wait(250);
+    fetchMock.mockClear();
+    putBodies.length = 0;
+    putCount = 0;
+    db.insert("customers", {
+      ...db.snapshot().customers[0],
+      id: "customer_cloud_row_recreated",
+      name: "Cloud Row Recreated",
+      email: "cloud-row-recreated@example.com",
+    });
+
+    await wait(650);
+
+    expect(putBodies).toHaveLength(2);
+    expect(typeof putBodies[0].baseRevision).toBe("number");
+    expect(putBodies[1].baseRevision).toBeNull();
+    expect(db.syncStatus()).toMatchObject({ status: "synced" });
+  });
+
+  it("keeps explicit deletion authoritative over a newer stale row", async () => {
+    const { SEED_CUSTOMERS } = await import("../seed");
+    const customer = {
+      ...SEED_CUSTOMERS[0],
+      id: "customer_explicit_delete_wins",
+      tenantId: "agency_palmcoast",
+      updatedAt: "2099-01-01T00:00:00.000Z",
+    };
+    window.localStorage.setItem(
+      "quotex.db.v31",
+      JSON.stringify({
+        customers: [customer],
+        deletedRows: [
+          {
+            id: `customers:${customer.id}`,
+            table: "customers",
+            rowId: customer.id,
+            tenantId: "agency_palmcoast",
+            deletedAt: "2026-07-16T12:00:00.000Z",
+            reason: "explicit_user_action",
+          },
+        ],
+      })
+    );
+
+    vi.resetModules();
+    const { db } = await import("../db");
+
+    expect(db.snapshot().customers.some((row) => row.id === customer.id)).toBe(false);
+    expect(db.snapshot().deletedRows).toContainEqual(
+      expect.objectContaining({ table: "customers", rowId: customer.id })
+    );
+  });
+
   it("adds updatedAt centrally and tombstones deleted rows", async () => {
     const { db } = await import("../db");
     db.reset();
@@ -433,7 +516,8 @@ describe("db live sync", () => {
     next.customers[0] = {
       ...next.customers[0],
       name: "Live Sync Customer",
-    };
+      updatedAt: "2099-01-01T00:00:00.000Z",
+    } as typeof next.customers[number];
 
     let ticks = 0;
     const unsubscribe = subscribeToDbChanges(() => {
@@ -451,5 +535,53 @@ describe("db live sync", () => {
     unsubscribe();
     expect(db.snapshot().customers[0].name).toBe("Live Sync Customer");
     expect(ticks).toBeGreaterThan(0);
+  });
+
+  it("does not let a stale tab erase a client or message by omission", async () => {
+    const { db } = await import("../db");
+    db.reset();
+    const customer = {
+      ...db.snapshot().customers[0],
+      id: "customer_stale_tab_preserved",
+      name: "Stale Tab Preserved",
+      email: "stale-preserved@example.com",
+    };
+    db.insert("customers", customer);
+    db.insert("communications", {
+      ...db.snapshot().communications[0],
+      id: "communication_stale_tab_preserved",
+      customerId: customer.id,
+      body: "This message must survive.",
+    } as never);
+
+    const key = dbStorageKey();
+    const stale = structuredClone(db.snapshot());
+    stale.customers = stale.customers.filter((row) => row.id !== customer.id);
+    stale.communications = stale.communications.filter(
+      (row) => row.id !== "communication_stale_tab_preserved"
+    );
+    window.localStorage.setItem(key, JSON.stringify(stale));
+    window.dispatchEvent(new StorageEvent("storage", { key, newValue: JSON.stringify(stale) }));
+
+    expect(db.snapshot().customers.some((row) => row.id === customer.id)).toBe(true);
+    expect(
+      db.snapshot().communications.some((row) => row.id === "communication_stale_tab_preserved")
+    ).toBe(true);
+  });
+
+  it("unions surviving legacy snapshots instead of choosing and deleting one", async () => {
+    const { SEED_CUSTOMERS } = await import("../seed");
+    const first = { ...SEED_CUSTOMERS[0], id: "customer_legacy_first", name: "Legacy First" };
+    const second = { ...SEED_CUSTOMERS[0], id: "customer_legacy_second", name: "Legacy Second" };
+    window.localStorage.setItem("quotex.db.v29", JSON.stringify({ customers: [first] }));
+    window.localStorage.setItem("quotex.db.v31", JSON.stringify({ customers: [second] }));
+
+    vi.resetModules();
+    const { db } = await import("../db");
+
+    expect(db.snapshot().customers.some((row) => row.id === first.id)).toBe(true);
+    expect(db.snapshot().customers.some((row) => row.id === second.id)).toBe(true);
+    expect(window.localStorage.getItem("quotex.db.v29")).not.toBeNull();
+    expect(window.localStorage.getItem("quotex.db.v31")).not.toBeNull();
   });
 });

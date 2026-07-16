@@ -112,8 +112,8 @@ describe("state persistence routes", () => {
     expect(String(patchCall?.[0])).toContain("revision=eq.7");
     const patchBody = JSON.parse(String(patchCall?.[1]?.body));
     expect(patchBody.snapshot.customers).toEqual([
-      { id: "customer_b", tenantId: "agency_b", name: "Customer B" },
       { id: "customer_a", tenantId: "agency_a", name: "Updated A" },
+      { id: "customer_b", tenantId: "agency_b", name: "Customer B" },
     ]);
   });
 });
