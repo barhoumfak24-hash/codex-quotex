@@ -35,8 +35,6 @@ export interface ComposedMessage {
   subject?: string;
   threadId?: string;
   replyToId?: string;
-  cc?: string[];
-  bcc?: string[];
   externalThreadId?: string;
   replyToMessageIdHeader?: string;
   references?: string[];
@@ -62,8 +60,6 @@ export function MessageComposer({
 }) {
   const [body, setBody] = useState("");
   const [subject, setSubject] = useState("");
-  const [cc, setCc] = useState("");
-  const [bcc, setBcc] = useState("");
   const [attachments, setAttachments] = useState<CommunicationAttachment[]>([]);
   const [attaching, setAttaching] = useState(false);
   const [suggesting, setSuggesting] = useState(false);
@@ -135,15 +131,11 @@ export function MessageComposer({
         bodyHtml,
         subject: subject.trim() || (attachments.length > 0 ? "Files from your agent" : "A message from your agent"),
         threadId: newThreadId(),
-        cc: parseEmailList(cc),
-        bcc: parseEmailList(bcc),
         attachments,
       });
     }
     setBody("");
     setSubject("");
-    setCc("");
-    setBcc("");
     setAttachments([]);
   }
 
@@ -224,24 +216,6 @@ export function MessageComposer({
               )}
               AI subject
             </button>
-          </div>
-          <div className="grid gap-2 sm:grid-cols-2">
-            <input
-              className="input text-xs"
-              placeholder="Cc"
-              value={cc}
-              spellCheck={false}
-              autoCapitalize="none"
-              onChange={(e) => setCc(e.target.value)}
-            />
-            <input
-              className="input text-xs"
-              placeholder="Bcc"
-              value={bcc}
-              spellCheck={false}
-              autoCapitalize="none"
-              onChange={(e) => setBcc(e.target.value)}
-            />
           </div>
         </div>
       )}
@@ -330,13 +304,4 @@ export function MessageComposer({
       </div>
     </div>
   );
-}
-
-function parseEmailList(value: string): string[] | undefined {
-  const emails = value
-    .split(/[,\s;]+/)
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .filter((item) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(item));
-  return emails.length > 0 ? emails : undefined;
 }

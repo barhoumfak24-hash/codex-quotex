@@ -338,8 +338,6 @@ export function ContactMessageThread({
         threadId: msg.threadId,
         replyToId: msg.replyToId,
         bodyHtml: msg.bodyHtml,
-        cc: msg.cc,
-        bcc: msg.bcc,
         externalThreadId: msg.externalThreadId,
         inReplyToHeader: msg.replyToMessageIdHeader,
         references: msg.references,

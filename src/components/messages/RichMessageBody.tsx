@@ -27,8 +27,6 @@ type RenderableCommunication = Pick<
   | "mailboxAccount"
   | "subject"
   | "to"
-  | "cc"
-  | "bcc"
   | "createdAt"
   | "snippet"
   | "mailboxLabels"
@@ -90,7 +88,6 @@ function ProviderEmailMessage({
       ? message.externalRecipientName || message.externalRecipientEmail || "External sender"
       : message.mailboxAccount || "You";
   const to = (message.to && message.to.length > 0 ? message.to : message.externalRecipientEmail ? [message.externalRecipientEmail] : []).join(", ");
-  const cc = (message.cc ?? []).join(", ");
   return (
     <div className="overflow-hidden rounded-md border border-ink-200 bg-white text-ink-950">
       <div className="border-b border-ink-100 bg-ink-50/70 px-3 py-2 text-[11px] text-ink-600">
@@ -101,12 +98,6 @@ function ProviderEmailMessage({
             <>
               <span className="font-semibold uppercase tracking-wider text-ink-400">To</span>
               <span className="min-w-0 break-words">{to}</span>
-            </>
-          )}
-          {cc && (
-            <>
-              <span className="font-semibold uppercase tracking-wider text-ink-400">Cc</span>
-              <span className="min-w-0 break-words">{cc}</span>
             </>
           )}
           {message.subject && (
