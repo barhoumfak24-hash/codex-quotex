@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { useLocation } from "react-router-dom";
 import {
   Archive,
@@ -28,7 +28,6 @@ import { ErrorBoundary } from "@/components/ui/ErrorBoundary";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
-import { subscribeToDbChanges } from "@/lib/db";
 import {
   isRoutingManagerRole,
   isStaffRole,
@@ -232,54 +231,12 @@ export function EmployeeLayout() {
   const { agency } = useTenant();
   const { user } = useAuth();
   const location = useLocation();
-  // Tick this whenever ANY db mutation happens so the sidebar
-  // badges recompute in lockstep. Without this the layout only
-  // re-renders on route changes, leaving stale counts behind after
-  // an in-place archive / approval / status change on a child page.
-  const [, setRev] = useState(0);
-  useEffect(() => subscribeToDbChanges(() => setRev((r) => r + 1)), []);
   useEffect(() => {
     if (!agency?.id) return;
     api.assets.backfillLabels(agency.id);
   }, [agency?.id]);
 
   const role = isStaffRole(user?.role) ? user.role : undefined;
-  const viewer = role && user ? { id: user.id, role } : undefined;
-  const badges =
-    agency
-      ? (() => {
-          try {
-            return computeEmployeeBadges(agency.id, viewer);
-          } catch (err) {
-            console.error("[quotex] Employee badge calculation failed", err);
-            return {
-              prospects: 0,
-              clients: 0,
-              policies: 0,
-              renewals: 0,
-              documents: 0,
-              marketing: 0,
-              tasks: 0,
-              messages: 0,
-              calendar: 0,
-              accounting: 0,
-              hr: 0,
-            };
-          }
-        })()
-      : {
-        prospects: 0,
-        clients: 0,
-        policies: 0,
-        renewals: 0,
-        documents: 0,
-        marketing: 0,
-        tasks: 0,
-        messages: 0,
-        calendar: 0,
-        accounting: 0,
-        hr: 0,
-      };
 
   const rawNavItems: Array<{
     to: string;
@@ -297,7 +254,6 @@ export function EmployeeLayout() {
       to: "/employee/tasks",
       label: "Activity Center",
       icon: <CheckSquare />,
-      badge: badges.tasks,
       allowedRoles: ["agent", "manager", "csr"],
     },
     { to: "/employee/calendar", label: "Calendar", icon: <CalendarDays /> },

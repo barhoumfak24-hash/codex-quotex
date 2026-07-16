@@ -120,8 +120,7 @@ interface QuotingWorkflowRow {
 }
 
 function quoteWorkspaceDeepLink(path: string): string {
-  const separator = path.includes("?") ? "&" : "?";
-  return `${path}${separator}quoteWorkspace=expanded`;
+  return `${path.replace(/\/$/, "")}/quote-flow`;
 }
 
 export function TasksPage() {
