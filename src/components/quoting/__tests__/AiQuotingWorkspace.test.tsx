@@ -110,6 +110,44 @@ describe("AiQuotingWorkspace component", () => {
     host.remove();
   });
 
+  it("shows the live workflow steps and aligned continue action on an active quote launcher", async () => {
+    const { api, customer, host, root } = await renderClientQuotingCard(
+      async ({ api, agency, agent, customer }) => {
+        const asset = api.assets
+          .listByCustomer(customer.id)
+          .find((item) => item.type === "coastal_home");
+        const session = await api.quoting.startSession({
+          tenantId: agency.id,
+          customerId: customer.id,
+          assetId: asset?.id,
+          createdById: agent.id,
+          assetType: asset?.type ?? "coastal_home",
+          contactName: customer.name,
+          estimatedValue: asset?.estimatedValue ?? 1_500_000,
+          address: customer.mailingAddress,
+          lineOfBusiness: "personal",
+        });
+        api.quoting.preparePersonalQuestionnaire(session.id);
+      },
+      { launcher: true }
+    );
+
+    expect(host.textContent).toContain("Setup");
+    expect(host.textContent).toContain("AI mapping");
+    expect(host.textContent).toContain("Questionnaire");
+    expect(host.textContent).toContain("Carrier ranking");
+    expect(host.textContent).toContain("Step 3 of 4");
+    expect(host.querySelector('[aria-label="Questionnaire: current"]')).toBeTruthy();
+    expect(
+      host.querySelector(`a[href="/employee/clients/${customer.id}/quote-flow"]`)?.textContent
+    ).toContain("Continue quote flow");
+
+    await act(async () => {
+      root.unmount();
+    });
+    host.remove();
+  });
+
   it("renders the routed workspace inline with all commercial and personal steps", async () => {
     const { host, root } = await renderClientQuotingCard(undefined, { standalone: true });
 

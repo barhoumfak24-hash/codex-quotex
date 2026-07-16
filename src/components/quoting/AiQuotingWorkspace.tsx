@@ -1576,6 +1576,28 @@ function workflowCompletedStepNumbers(session: QuotingSession): number[] {
   return session.status === "complete" || session.quotes.length > 0 ? [4] : [];
 }
 
+export function QuoteWorkflowProgress({ session }: { session: QuotingSession }) {
+  const steps = workflowStepsForLine(session.lineOfBusiness ?? "personal");
+  const page =
+    session.lineOfBusiness === "commercial"
+      ? commercialFlowPage(session)
+      : personalFlowPage(session);
+
+  return (
+    <div className="flex max-w-full flex-wrap items-center gap-2">
+      <WorkflowStepIcons
+        steps={steps}
+        currentStep={page.step}
+        totalSteps={page.total}
+        completedStepNumbers={workflowCompletedStepNumbers(session)}
+      />
+      <Badge tone="info">
+        Step {page.step} of {page.total}
+      </Badge>
+    </div>
+  );
+}
+
 function AiWorkspaceLogoMark() {
   return (
     <span className="relative inline-grid h-10 w-10 shrink-0 place-items-center rounded-md border border-gold-200 bg-gold-50 text-gold-700">

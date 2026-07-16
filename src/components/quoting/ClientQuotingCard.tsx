@@ -13,7 +13,10 @@ import {
 } from "lucide-react";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { AddressAutocomplete } from "@/components/ui/AddressAutocomplete";
-import { AiQuotingWorkspace } from "@/components/quoting/AiQuotingWorkspace";
+import {
+  AiQuotingWorkspace,
+  QuoteWorkflowProgress,
+} from "@/components/quoting/AiQuotingWorkspace";
 import { api } from "@/lib/api";
 import { deriveAssetLabel } from "@/lib/assetLabels";
 import {
@@ -477,7 +480,10 @@ function ContactQuotingCard({
             </p>
           </div>
         </div>
-        <div className="mt-5 flex justify-end">
+        <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            {existing ? <QuoteWorkflowProgress session={existing} /> : null}
+          </div>
           <Link to={quoteFlowPath} className="btn-primary inline-flex text-sm">
             {existing ? "Continue quote flow" : "Start quote flow"}
             <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
