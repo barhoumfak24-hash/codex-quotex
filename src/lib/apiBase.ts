@@ -12,12 +12,19 @@ export function envValue(key: string): string {
   }
 }
 
-function isProductionBuild(): boolean {
+export function isProductionBuild(): boolean {
   try {
     return Boolean((import.meta as { env?: { PROD?: boolean } })?.env?.PROD);
   } catch {
     return false;
   }
+}
+
+export function cloudStateSyncEnabled(): boolean {
+  const configured = envValue("VITE_STATE_SYNC_MODE").toLowerCase();
+  if (["off", "local", "disabled"].includes(configured)) return false;
+  if (configured === "supabase") return true;
+  return isProductionBuild();
 }
 
 function stripTrailingSlash(value: string): string {

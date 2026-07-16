@@ -5,7 +5,7 @@
 // =====================================================================
 
 import * as seed from "./seed";
-import { apiBaseUrl, envValue } from "./apiBase";
+import { apiBaseUrl, cloudStateSyncEnabled, envValue } from "./apiBase";
 import { currentServerSessionToken, serverSessionHeaders } from "./serverSession";
 import { isLargeInlineDataUrl, storeStateBlob } from "./stateBlobs";
 import {
@@ -1157,7 +1157,7 @@ type SyncStatusListener = (status: SyncStatus) => void;
 const syncStatusListeners = new Set<SyncStatusListener>();
 
 function remoteSyncEnabled(): boolean {
-  return envValue("VITE_STATE_SYNC_MODE") === "supabase";
+  return cloudStateSyncEnabled();
 }
 
 function remoteApiBase(): string {

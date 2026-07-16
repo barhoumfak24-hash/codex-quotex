@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { Agency, Branch, Role, User } from "@/types";
 import { api } from "./api";
-import { apiBaseUrl, envValue } from "./apiBase";
+import { apiBaseUrl, cloudStateSyncEnabled } from "./apiBase";
 import { db, subscribeToDbChanges } from "./db";
 import { isStaffRole, type StaffRole } from "./roles";
 import {
@@ -166,11 +166,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (session.ok) {
           const resolved = resolveAnyServerUser(session.user);
           if (resolved && !accessBlockForUser(resolved, { trustServerSession: true })) {
-            const hydrated = await hydrateAuthenticatedWorkspace();
-            if (!hydrated) {
-              persist(null);
-              return;
-            }
+            await hydrateAuthenticatedWorkspace();
             storeServerSessionUser(resolved);
             persist(resolved);
           } else {
@@ -200,6 +196,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     if (typeof window === "undefined") return;
     const onStorage = (e: StorageEvent) => {
       if (e.key !== SESSION_CHANGED_KEY && e.key !== AUTH_TOKEN_KEY) return;
+      if (e.key === AUTH_TOKEN_KEY) {
+        // The changed value already lives in browser storage. Clear the
+        // same-tab quota fallback so this tab cannot keep using an older user.
+        forgetServerSessionToken();
+      }
       const token = currentServerSessionToken();
       if (!token) {
         lastIdRef.current = null;
@@ -222,13 +223,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         }
         const resolved = resolveAnyServerUser(session.user);
         if (resolved && !accessBlockForUser(resolved, { trustServerSession: true })) {
-          const hydrated = await hydrateAuthenticatedWorkspace();
-          if (!hydrated) {
-            clearServerSessionToken();
-            lastIdRef.current = null;
-            setUser(null);
-            return;
-          }
+          await hydrateAuthenticatedWorkspace();
           storeServerSessionUser(resolved);
           lastIdRef.current = resolved.id;
           setUser(resolved);
@@ -1275,24 +1270,20 @@ function isPersistableServerUser(value: Partial<User>): value is Partial<User> &
 function storeServerSessionToken(token: string) {
   if (typeof window === "undefined") return;
   rememberServerSessionToken(token);
-  if (!safeStorageSet(AUTH_TOKEN_KEY, token)) {
-    safeSessionStorageSet(AUTH_TOKEN_KEY, token);
-  }
+  const stored = safeStorageSet(AUTH_TOKEN_KEY, token) || safeSessionStorageSet(AUTH_TOKEN_KEY, token);
+  if (stored) forgetServerSessionToken();
   safeStorageRemove(LEGACY_AUTH_TOKEN_KEY);
   safeSessionStorageRemove(LEGACY_AUTH_TOKEN_KEY);
 }
 
 async function storeServerSessionAndHydrate(token: string) {
   storeServerSessionToken(token);
-  if (!(await hydrateAuthenticatedWorkspace())) {
-    clearServerSessionToken();
-    throw new Error("Authenticated workspace could not be loaded.");
-  }
+  await hydrateAuthenticatedWorkspace();
 }
 
 async function hydrateAuthenticatedWorkspace(): Promise<boolean> {
   const hydrated = await db.hydrateNow();
-  return envValue("VITE_STATE_SYNC_MODE") !== "supabase" || hydrated;
+  return !cloudStateSyncEnabled() || hydrated;
 }
 
 function currentServerSessionToken(): string | null {
