@@ -1622,6 +1622,8 @@ export interface MarketingMessage {
   fromEmail?: string;
   mailboxProvider?: MailProvider;
   mailboxConnectionId?: string;
+  providerMessageId?: string;
+  deliveryError?: string;
   createdAt: string;
 }
 

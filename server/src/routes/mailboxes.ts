@@ -10,7 +10,7 @@ import {
 } from "../services/mailboxOAuth.js";
 import { sendMailboxEmail } from "../services/mailboxProvider.js";
 import { listMailboxDiagnostics, listMailboxSyncStatus, syncMailboxMessages } from "../services/mailboxSync.js";
-import { sendEmail } from "../services/email.js";
+import { emailDeliveryConfiguration, sendEmail } from "../services/email.js";
 
 export const mailboxesRoutes = Router();
 export const mailboxOAuthCallbackRoutes = Router();
@@ -28,6 +28,8 @@ const attachmentSchema = z.object({
 });
 const sendSchema = z.object({
   connectionId: z.string().optional(),
+  senderMode: z.enum(["staff", "agency_marketing"]).optional(),
+  senderName: z.string().trim().min(1).max(160).optional(),
   to: z.array(emailSchema).min(1).max(50),
   cc: z.array(emailSchema).max(50).optional(),
   bcc: z.array(emailSchema).max(50).optional(),
@@ -96,6 +98,14 @@ mailboxesRoutes.post("/send", async (req, res, next) => {
     if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
 
     try {
+      if (parsed.data.senderMode === "agency_marketing" && !parsed.data.connectionId) {
+        const fallback = await sendWithTransactionalFallback(
+          parsed.data,
+          new Error("No connected agency marketing mailbox was selected.")
+        );
+        if (fallback.ok) return res.json(fallback);
+        return res.status(502).json(fallback);
+      }
       const result = await sendMailboxEmail({
         tenantId: req.auth.tenantId,
         userId: req.auth.userId,
@@ -194,12 +204,16 @@ async function sendWithTransactionalFallback(
     input.to.map((recipient) =>
       sendEmail({
         to: recipient,
+        from: transactionalFromFor(input),
         subject,
         text,
         html,
         replyTo: input.replyTo,
         attachments: input.attachments,
-        categories: ["mailbox-fallback", "user-portal"],
+        categories:
+          input.senderMode === "agency_marketing"
+            ? ["agency-marketing", "campaign"]
+            : ["mailbox-fallback", "user-portal"],
       })
     )
   );
@@ -228,6 +242,17 @@ async function sendWithTransactionalFallback(
       fallbackReason,
     },
   };
+}
+
+function transactionalFromFor(input: z.infer<typeof sendSchema>): string | undefined {
+  if (input.senderMode !== "agency_marketing" || !input.senderName) return undefined;
+  const configuredFrom = emailDeliveryConfiguration().from;
+  if (!configuredFrom) return undefined;
+  const address = configuredFrom.match(/<([^>]+)>/)?.[1] ?? configuredFrom;
+  const cleanAddress = address.trim();
+  if (!emailSchema.safeParse(cleanAddress).success) return undefined;
+  const cleanName = input.senderName.replace(/[\r\n<>]/g, " ").replace(/\s{2,}/g, " ").trim();
+  return cleanName ? `${cleanName} <${cleanAddress}>` : configuredFrom;
 }
 
 mailboxOAuthCallbackRoutes.get("/:provider/callback", async (req, res) => {

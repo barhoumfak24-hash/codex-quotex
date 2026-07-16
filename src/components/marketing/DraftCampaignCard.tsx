@@ -392,7 +392,7 @@ export function DraftCampaignCard({
     });
   }
 
-  function launchCampaign() {
+  async function launchCampaign() {
     if (!draft) return;
     if (!campaignName.trim()) return setError("Give the campaign a name.");
     if (channels.size === 0) return setError("Email must be selected.");
@@ -415,7 +415,7 @@ export function DraftCampaignCard({
     setBusy(true);
     setError(null);
     try {
-      const out = api.marketing.composeAiCampaign({
+      const out = await api.marketing.composeAiCampaign({
         tenantId,
         name: campaignName.trim(),
         channels: ["email"],
@@ -442,14 +442,30 @@ export function DraftCampaignCard({
         actorId: uploadedById,
       });
       const scheduled = scheduleMode === "scheduled";
+      if (!scheduled && out.failedCount > 0) {
+        const failureMessage = `Campaign created, but ${out.failedCount} of ${out.messageCount} email${
+          out.messageCount === 1 ? "" : "s"
+        } could not be delivered. Failed recipients were not marked sent.`;
+        reset();
+        setError(failureMessage);
+        setConfirmation(
+          out.sentCount > 0
+            ? `${out.sentCount} email${out.sentCount === 1 ? "" : "s"} sent; ${out.failedCount} failed.`
+            : null
+        );
+        onLaunched?.(campaignName.trim(), out.messageCount, scheduled);
+        return;
+      }
       setConfirmation(
-        `Campaign "${campaignName.trim()}" ${scheduled ? "scheduled" : "approved"} for ${out.messageCount} recipient${
+        `Campaign "${campaignName.trim()}" ${scheduled ? "scheduled" : "sent"} for ${out.messageCount} recipient${
           out.messageCount === 1 ? "" : "s"
         }.`
       );
       onLaunched?.(campaignName.trim(), out.messageCount, scheduled);
       reset();
       window.setTimeout(() => setConfirmation(null), 6000);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "The campaign could not be delivered.");
     } finally {
       setBusy(false);
     }

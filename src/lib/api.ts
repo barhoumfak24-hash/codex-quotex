@@ -2563,6 +2563,165 @@ function compactMarkdownBlocks(blocks: Array<string | undefined | null>): string
     .join("\n\n");
 }
 
+type MarketingCampaignDeliveryResult = {
+  provider?: "google" | "microsoft" | "transactional";
+  status?: "sent";
+  externalMessageId?: string;
+  fallbackReason?: string;
+};
+
+async function deliverMarketingCampaignEmail(input: {
+  tenantId: string;
+  user: User;
+  sender: ReturnType<typeof agencyMarketingSender>;
+  to: string;
+  subject: string;
+  text: string;
+  html: string;
+}): Promise<{ ok: true; result: MarketingCampaignDeliveryResult } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${apiBaseUrl()}/mailboxes/send`, {
+      method: "POST",
+      headers: liveMailboxAuthHeaders(input.user, input.tenantId),
+      body: JSON.stringify({
+        connectionId:
+          input.sender.status === "connected" ? input.sender.connectionId : undefined,
+        senderMode: "agency_marketing",
+        senderName: input.sender.fromName,
+        to: [input.to],
+        cc: [],
+        bcc: [],
+        subject: input.subject,
+        text: input.text,
+        html: input.html,
+        replyTo: input.sender.fromEmail,
+      }),
+    });
+    const json = (await response.json().catch(() => null)) as
+      | { ok: true; result: MarketingCampaignDeliveryResult }
+      | { ok: false; message?: string }
+      | null;
+    if (!response.ok || !json?.ok) {
+      return {
+        ok: false,
+        message:
+          (json && "message" in json && json.message) ||
+          `Campaign delivery failed with ${response.status} ${response.statusText}.`,
+      };
+    }
+    return json;
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : "Campaign delivery failed.",
+    };
+  }
+}
+
+function marketingCampaignDeliveryContent(input: {
+  emailBody: string;
+  pamphlet?: MarketingCampaignPamphletPayload;
+  heroImageUrl?: string;
+  heroImageAlt: string;
+  href: string;
+  ctaLabel: string;
+}): { text: string; html: string } {
+  const pamphlet = input.pamphlet;
+  const pamphletText = pamphlet
+    ? compactMarkdownBlocks([
+        pamphlet.eyebrow,
+        pamphlet.headline,
+        pamphlet.subheadline,
+        pamphlet.intro,
+        pamphlet.highlightsTitle,
+        ...(pamphlet.highlights ?? []).map((item) => `- ${item}`),
+        `${input.ctaLabel}: ${input.href}`,
+      ])
+    : "";
+  const text = compactMarkdownBlocks([pamphletText, input.emailBody]);
+  const safeImageUrl = safeMarketingEmailUrl(input.heroImageUrl);
+  const safeHref = safeMarketingEmailUrl(input.href) ?? input.href;
+  const pamphletHtml = pamphlet
+    ? [
+        safeImageUrl
+          ? `<img src="${escapeMarketingHtml(safeImageUrl)}" alt="${escapeMarketingHtml(
+              input.heroImageAlt
+            )}" style="display:block;width:100%;max-width:680px;height:auto;margin:0 0 24px;" />`
+          : "",
+        pamphlet.eyebrow
+          ? `<p style="margin:0 0 8px;font-size:12px;font-weight:700;text-transform:uppercase;">${escapeMarketingHtml(
+              pamphlet.eyebrow
+            )}</p>`
+          : "",
+        pamphlet.headline
+          ? `<h1 style="margin:0 0 12px;font-size:30px;line-height:1.2;">${escapeMarketingHtml(
+              pamphlet.headline
+            )}</h1>`
+          : "",
+        pamphlet.subheadline
+          ? `<p style="margin:0 0 16px;font-size:18px;line-height:1.5;">${escapeMarketingHtml(
+              pamphlet.subheadline
+            )}</p>`
+          : "",
+        pamphlet.intro ? marketingTextToHtml(pamphlet.intro) : "",
+        pamphlet.highlightsTitle
+          ? `<p style="margin:20px 0 8px;font-weight:700;">${escapeMarketingHtml(
+              pamphlet.highlightsTitle
+            )}</p>`
+          : "",
+        (pamphlet.highlights ?? []).length
+          ? `<ul style="margin:0 0 24px;padding-left:22px;">${(pamphlet.highlights ?? [])
+              .map((item) => `<li style="margin:0 0 8px;">${escapeMarketingHtml(item)}</li>`)
+              .join("")}</ul>`
+          : "",
+        `<p style="margin:24px 0;"><a href="${escapeMarketingHtml(
+          safeHref
+        )}" style="display:inline-block;background:#0b0b0a;color:#ffffff;text-decoration:none;padding:12px 18px;font-weight:700;">${escapeMarketingHtml(
+          input.ctaLabel
+        )}</a></p>`,
+      ].join("")
+    : safeImageUrl
+    ? `<img src="${escapeMarketingHtml(safeImageUrl)}" alt="${escapeMarketingHtml(
+        input.heroImageAlt
+      )}" style="display:block;width:100%;max-width:680px;height:auto;margin:0 0 24px;" />`
+    : "";
+  return {
+    text,
+    html: `<div style="font-family:Arial,Helvetica,sans-serif;color:#171714;font-size:16px;line-height:1.55;max-width:680px;margin:0 auto;">${pamphletHtml}<div style="margin-top:28px;">${marketingTextToHtml(
+      input.emailBody
+    )}</div></div>`,
+  };
+}
+
+function marketingTextToHtml(value: string): string {
+  return value
+    .replace(/\r\n/g, "\n")
+    .split(/\n{2,}/)
+    .map((block) => `<p style="margin:0 0 16px;">${escapeMarketingHtml(block).replace(/\n/g, "<br />")}</p>`)
+    .join("");
+}
+
+function safeMarketingEmailUrl(value?: string): string | undefined {
+  const clean = value?.trim();
+  if (!clean) return undefined;
+  try {
+    const parsed = new URL(clean, typeof window !== "undefined" ? window.location.origin : undefined);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return undefined;
+    return parsed.toString();
+  } catch {
+    return undefined;
+  }
+}
+
+function escapeMarketingHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function normalizeMarketingMessageForDisplay(row: MarketingMessage): MarketingMessage {
   const contact = row.customerId
     ? db.list("customers").find((customer) => customer.id === row.customerId)
@@ -12354,7 +12513,7 @@ export const api = {
     //
     // Manager-controlled — caller is responsible for gating in
     // the UI; this entry point doesn't enforce a role check.
-    composeAiCampaign(input: {
+    async composeAiCampaign(input: {
       tenantId: string;
       name: string;
       channels: "email"[];
@@ -12378,7 +12537,12 @@ export const api = {
       // Cadence for re-runs. "none" / undefined = one-shot.
       recurrence?: "none" | "daily" | "weekly" | "monthly";
       actorId?: string;
-    }): { campaign: MarketingCampaign; messageCount: number } {
+    }): Promise<{
+      campaign: MarketingCampaign;
+      messageCount: number;
+      sentCount: number;
+      failedCount: number;
+    }> {
       const tenant = db.list("agencies").find((a) => a.id === input.tenantId);
       const agencyName = tenant?.name ?? "your concierge agency";
       const cfg = this.getConfig(input.tenantId);
@@ -12392,6 +12556,9 @@ export const api = {
           : undefined;
       const isScheduled = !!sendAt;
       const isRecurring = recurrence !== "none";
+      const actor = input.actorId
+        ? db.list("users").find((user) => user.id === input.actorId && user.tenantId === input.tenantId)
+        : undefined;
       const productionGate = evaluateAiProductionGate({
         system: "marketing_ai",
         action: isScheduled ? "schedule_campaign" : "launch_campaign",
@@ -12409,6 +12576,9 @@ export const api = {
             ...productionGate.warnings,
           ].join(", ")}).`
         );
+      }
+      if (!actor) {
+        throw new Error("AI marketing campaign requires an active agency staff user for delivery.");
       }
 
       // Resolve the audience union (dedup by id) for the launch record
@@ -12458,9 +12628,7 @@ export const api = {
         nextRunAt: sendAt ?? (isRecurring ? nowIso() : undefined),
       });
 
-      const deliveryStatus: MarketingMessage["deliveryStatus"] = isScheduled
-        ? "queued"
-        : "sent";
+      const deliveryStatus: MarketingMessage["deliveryStatus"] = "queued";
       const messageCreatedAt = nowIso();
       const messageBody = input.emailBody?.trim() || input.brief.trim() || input.name;
       const subject = input.emailSubject?.trim() || input.name.trim() || "Agency update";
@@ -12494,9 +12662,10 @@ export const api = {
           ctaLabel
         );
       };
-      Array.from(customerIds).forEach((customerId) => {
+      const receiptIds: string[] = [];
+      for (const customerId of Array.from(customerIds)) {
         const customer = db.list("customers").find((row) => row.id === customerId);
-        db.insert("messages", {
+        const receipt: MarketingMessage = {
           id: uid("msg"),
           tenantId: input.tenantId,
           campaignId: campaign.id,
@@ -12505,18 +12674,19 @@ export const api = {
           subject: personalizeMarketingMergeFields(subject, customer),
           content: messageContentFor({ customerId }, customer),
           deliveryStatus,
-          sentAt: deliveryStatus === "sent" ? messageCreatedAt : undefined,
           nextScheduledAt: deliveryStatus === "queued" ? sendAt : undefined,
           fromName: sender.fromName,
           fromEmail: sender.fromEmail,
           mailboxProvider: sender.provider,
           mailboxConnectionId: sender.connectionId,
           createdAt: messageCreatedAt,
-        } satisfies MarketingMessage);
-      });
-      Array.from(prospectIds).forEach((prospectId) => {
+        };
+        db.insert("messages", receipt);
+        receiptIds.push(receipt.id);
+      }
+      for (const prospectId of Array.from(prospectIds)) {
         const prospect = db.list("prospects").find((row) => row.id === prospectId);
-        db.insert("messages", {
+        const receipt: MarketingMessage = {
           id: uid("msg"),
           tenantId: input.tenantId,
           campaignId: campaign.id,
@@ -12525,23 +12695,86 @@ export const api = {
           subject: personalizeMarketingMergeFields(subject, prospect),
           content: messageContentFor({ prospectId }, prospect),
           deliveryStatus,
-          sentAt: deliveryStatus === "sent" ? messageCreatedAt : undefined,
           nextScheduledAt: deliveryStatus === "queued" ? sendAt : undefined,
           fromName: sender.fromName,
           fromEmail: sender.fromEmail,
           mailboxProvider: sender.provider,
           mailboxConnectionId: sender.connectionId,
           createdAt: messageCreatedAt,
-        } satisfies MarketingMessage);
-      });
-      if (deliveryStatus === "sent") markMailboxSent(sender.connectionId);
+        };
+        db.insert("messages", receipt);
+        receiptIds.push(receipt.id);
+      }
+
+      let sentCount = 0;
+      let failedCount = 0;
+      if (!isScheduled) {
+        for (const receiptId of receiptIds) {
+          const receipt = db.list("messages").find((row) => row.id === receiptId);
+          if (!receipt) continue;
+          const contact = receipt.customerId
+            ? db.list("customers").find((row) => row.id === receipt.customerId)
+            : receipt.prospectId
+            ? db.list("prospects").find((row) => row.id === receipt.prospectId)
+            : undefined;
+          const to = normalizeEmail(contact?.email);
+          if (!to) {
+            failedCount += 1;
+            db.update("messages", receipt.id, {
+              deliveryStatus: "failed",
+              deliveryError: "No valid recipient email address was available.",
+            });
+            continue;
+          }
+          const href = marketingSmartContactUrl({
+            origin: input.appOrigin,
+            tenantId: input.tenantId,
+            customerId: receipt.customerId,
+            prospectId: receipt.prospectId,
+          });
+          const personalizedBody = personalizeMarketingMergeFields(messageBody, contact);
+          const deliveryContent = marketingCampaignDeliveryContent({
+            emailBody: personalizedBody,
+            pamphlet: input.pamphlet,
+            heroImageUrl: input.heroImageUrl,
+            heroImageAlt: input.heroImageAlt || input.name,
+            href,
+            ctaLabel,
+          });
+          const result = await deliverMarketingCampaignEmail({
+            tenantId: input.tenantId,
+            user: actor,
+            sender,
+            to,
+            subject: receipt.subject ?? subject,
+            text: deliveryContent.text,
+            html: deliveryContent.html,
+          });
+          if (result.ok) {
+            sentCount += 1;
+            db.update("messages", receipt.id, {
+              deliveryStatus: "sent",
+              sentAt: nowIso(),
+              providerMessageId: result.result.externalMessageId,
+              deliveryError: result.result.fallbackReason,
+            });
+            if (sender.status === "connected") markMailboxSent(sender.connectionId);
+          } else {
+            failedCount += 1;
+            db.update("messages", receipt.id, {
+              deliveryStatus: "failed",
+              deliveryError: result.message,
+            });
+          }
+        }
+      }
 
       // Audit trail — one tenant-scoped status event with the
       // campaign id, channels, recipient count, attachment manifest,
       // scheduling metadata, and recipient receipt count.
       const scheduleNote = isScheduled ? ` Scheduled for ${sendAt}.` : "";
       const recurrenceNote = isRecurring ? ` Recurring ${recurrence}.` : "";
-      const verb = isScheduled ? "scheduled" : "launched";
+      const verb = isScheduled ? "scheduled" : "processed";
       const channelLabel = channels.map((c) => c.toUpperCase()).join(" + ");
       db.insert("statusEvents", {
         id: uid("se"),
@@ -12555,14 +12788,18 @@ export const api = {
                 input.attachments.length === 1 ? "" : "s"
               }`
             : ""
-        }). Recipient campaign receipts were recorded. Agency: ${agencyName}.${scheduleNote}${recurrenceNote}`,
+        }). ${
+          isScheduled
+            ? "Recipient campaign receipts were queued."
+            : `${sentCount} provider-accepted, ${failedCount} failed. Recipient campaign receipts were updated from provider responses.`
+        } Agency: ${agencyName}.${scheduleNote}${recurrenceNote}`,
         visibility: "internal",
         marketingCampaignId: campaign.id,
         createdAt: nowIso(),
         createdById: input.actorId,
       });
 
-      return { campaign, messageCount };
+      return { campaign, messageCount, sentCount, failedCount };
     },
     messagesForProspect(prospectId: string): MarketingMessage[] {
       return db.list("messages").filter((m) => m.prospectId === prospectId);

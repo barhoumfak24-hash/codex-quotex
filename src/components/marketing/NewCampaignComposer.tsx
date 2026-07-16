@@ -138,8 +138,7 @@ export function NewCampaignComposer({
 
     setBusy(true);
     try {
-      await new Promise((resolve) => setTimeout(resolve, 600));
-      const { messageCount } = api.marketing.composeAiCampaign({
+      const { messageCount, sentCount, failedCount } = await api.marketing.composeAiCampaign({
         tenantId,
         name: name.trim(),
         channels: ["email"],
@@ -156,8 +155,16 @@ export function NewCampaignComposer({
         recurrence,
         actorId: uploadedById,
       });
+      if (sendMode === "now" && failedCount > 0) {
+        setError(
+          `${sentCount} email${sentCount === 1 ? "" : "s"} sent; ${failedCount} failed. Failed recipients were not marked sent.`
+        );
+        return;
+      }
       onCreated?.(name.trim(), messageCount);
       closeAndReset();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "The campaign could not be delivered.");
     } finally {
       setBusy(false);
     }

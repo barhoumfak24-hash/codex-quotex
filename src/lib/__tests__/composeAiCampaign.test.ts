@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // =====================================================================
 // Manager-only "compose new AI campaign" launcher.
@@ -12,10 +12,27 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 beforeEach(async () => {
   if (typeof window !== "undefined" && window.localStorage) window.localStorage.clear();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockImplementation(async () =>
+      new Response(
+        JSON.stringify({
+          ok: true,
+          result: {
+            provider: "transactional",
+            status: "sent",
+            externalMessageId: "campaign_provider_message_1",
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    )
+  );
   const { db } = await import("../db");
   db.reset();
 });
 afterEach(() => {
+  vi.unstubAllGlobals();
   if (typeof window !== "undefined" && window.localStorage) window.localStorage.clear();
 });
 
@@ -24,7 +41,7 @@ describe("marketing.composeAiCampaign", () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
 
-    expect(() =>
+    await expect(
       api.marketing.composeAiCampaign({
         tenantId: agency.id,
         name: "Anonymous launch",
@@ -32,7 +49,7 @@ describe("marketing.composeAiCampaign", () => {
         brief: "This should not launch without approval.",
         includeAllClients: true,
       })
-    ).toThrow(/approving staff user/i);
+    ).rejects.toThrow(/approving staff user/i);
   });
 
   it("records a campaign and writes per-recipient receipt messages", async () => {
@@ -42,7 +59,7 @@ describe("marketing.composeAiCampaign", () => {
     const clientCount = api.customers.list(agency.id).filter((c) => !c.archived).length;
     const beforeMessages = api.marketing.listMessages(agency.id).length;
 
-    const out = api.marketing.composeAiCampaign({
+    const out = await api.marketing.composeAiCampaign({
       tenantId: agency.id,
       name: "Spring portfolio review",
       channels: ["email"],
@@ -60,6 +77,23 @@ describe("marketing.composeAiCampaign", () => {
     expect(
       api.marketing.listMessages(agency.id).filter((m) => m.campaignId === out.campaign.id).length
     ).toBe(clientCount);
+    expect(out.sentCount).toBe(clientCount);
+    expect(out.failedCount).toBe(0);
+    expect(fetch).toHaveBeenCalledTimes(clientCount);
+    const [, request] = vi.mocked(fetch).mock.calls[0];
+    const payload = JSON.parse(String(request?.body));
+    expect(payload).toMatchObject({
+      senderMode: "agency_marketing",
+      senderName: expect.any(String),
+      replyTo: agency.contactEmail,
+    });
+    expect(payload.to).toHaveLength(1);
+    expect(
+      api.marketing
+        .listMessages(agency.id)
+        .filter((message) => message.campaignId === out.campaign.id)
+        .every((message) => message.deliveryStatus === "sent" && !!message.providerMessageId)
+    ).toBe(true);
   });
 
   it("combines all clients + all prospects in the recipient count", async () => {
@@ -70,7 +104,7 @@ describe("marketing.composeAiCampaign", () => {
       .listByTenant(agency.id)
       .filter((p) => !p.archived).length;
 
-    const out = api.marketing.composeAiCampaign({
+    const out = await api.marketing.composeAiCampaign({
       tenantId: agency.id,
       name: "Everyone blast",
       channels: ["email"],
@@ -88,7 +122,7 @@ describe("marketing.composeAiCampaign", () => {
     const customer = api.customers.list(agency.id)[0];
     const prospect = api.prospects.listByTenant(agency.id)[0];
 
-    const out = api.marketing.composeAiCampaign({
+    const out = await api.marketing.composeAiCampaign({
       tenantId: agency.id,
       name: "Hand-picked outreach",
       channels: ["email"],
@@ -105,7 +139,7 @@ describe("marketing.composeAiCampaign", () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     const future = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString();
-    const out = api.marketing.composeAiCampaign({
+    const out = await api.marketing.composeAiCampaign({
       tenantId: agency.id,
       name: "Hurricane prep checklist",
       channels: ["email"],
@@ -119,12 +153,47 @@ describe("marketing.composeAiCampaign", () => {
     const receipts = api.marketing.listMessages(agency.id).filter((m) => m.campaignId === out.campaign.id);
     expect(receipts.length).toBeGreaterThan(0);
     expect(receipts.every((m) => m.deliveryStatus === "queued")).toBe(true);
+    expect(out.sentCount).toBe(0);
+    expect(out.failedCount).toBe(0);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("marks rejected recipients failed instead of pretending the campaign was sent", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ ok: false, message: "Email provider rejected the campaign." }),
+        { status: 502, headers: { "content-type": "application/json" } }
+      )
+    );
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+
+    const out = await api.marketing.composeAiCampaign({
+      tenantId: agency.id,
+      name: "Provider rejection test",
+      channels: ["email"],
+      brief: "This message must not be marked sent when delivery fails.",
+      selectedCustomerIds: [customer.id],
+      actorId: "user_manager_pc",
+    });
+
+    expect(out.sentCount).toBe(0);
+    expect(out.failedCount).toBe(1);
+    const receipt = api.marketing
+      .listMessages(agency.id)
+      .find((message) => message.campaignId === out.campaign.id);
+    expect(receipt).toMatchObject({
+      deliveryStatus: "failed",
+      deliveryError: "Email provider rejected the campaign.",
+    });
+    expect(receipt?.sentAt).toBeUndefined();
   });
 
   it("recurrence is persisted on the campaign row", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
-    const out = api.marketing.composeAiCampaign({
+    const out = await api.marketing.composeAiCampaign({
       tenantId: agency.id,
       name: "Weekly market digest",
       channels: ["email"],
@@ -141,7 +210,7 @@ describe("marketing.composeAiCampaign", () => {
     const { api } = await import("../api");
     const { db } = await import("../db");
     const agency = api.agencies.list()[0];
-    const out = api.marketing.composeAiCampaign({
+    const out = await api.marketing.composeAiCampaign({
       tenantId: agency.id,
       name: "Inspection reminder",
       channels: ["email"],
@@ -165,7 +234,7 @@ describe("marketing.composeAiCampaign", () => {
     expect(launchEvent).toBeTruthy();
     expect(launchEvent!.message).toContain("EMAIL");
     expect(launchEvent!.message).toContain("1 attachment");
-    expect(launchEvent!.message).toMatch(/receipts were recorded/i);
+    expect(launchEvent!.message).toMatch(/provider-accepted/i);
   });
 
   it("stores a personalized full pamphlet message with a smart contact CTA", async () => {
@@ -174,7 +243,7 @@ describe("marketing.composeAiCampaign", () => {
     const customer = api.customers.list(agency.id)[0];
     const firstName = customer?.name.split(/\s+/)[0] ?? "";
 
-    const out = api.marketing.composeAiCampaign({
+    const out = await api.marketing.composeAiCampaign({
       tenantId: agency.id,
       name: "Coastal home readiness",
       channels: ["email"],

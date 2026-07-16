@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   listMailboxSyncStatus: vi.fn(),
   listMailboxDiagnostics: vi.fn(),
   sendEmail: vi.fn(),
+  emailDeliveryConfiguration: vi.fn(),
 }));
 
 vi.mock("../services/mailboxProvider.js", () => ({
@@ -23,6 +24,7 @@ vi.mock("../services/mailboxSync.js", () => ({
 
 vi.mock("../services/email.js", () => ({
   sendEmail: mocks.sendEmail,
+  emailDeliveryConfiguration: mocks.emailDeliveryConfiguration,
 }));
 
 const JWT_SECRET = "test-jwt-secret-with-more-than-32-characters";
@@ -37,6 +39,12 @@ beforeEach(() => {
   mocks.listMailboxSyncStatus.mockReset();
   mocks.listMailboxDiagnostics.mockReset();
   mocks.sendEmail.mockReset();
+  mocks.emailDeliveryConfiguration.mockReset();
+  mocks.emailDeliveryConfiguration.mockReturnValue({
+    configured: true,
+    provider: "sendgrid",
+    from: "Quotex Insurance <verified@quotexinsurance.com>",
+  });
 });
 
 afterEach(() => {
@@ -144,6 +152,74 @@ describe("mailbox delivery routes", () => {
         provider: "unconfigured",
         configured: false,
       },
+    });
+  });
+
+  it("sends agency campaigns from the verified sender with the agency contact as reply-to", async () => {
+    mocks.sendEmail.mockResolvedValue({
+      id: "sendgrid_campaign_1",
+      status: "sent",
+      provider: "sendgrid",
+      configured: true,
+    });
+
+    const response = await postMailbox(
+      "/send",
+      {
+        ...validSendPayload(),
+        senderMode: "agency_marketing",
+        senderName: "Palm Coast Private Client",
+        replyTo: "contact@palmcoast.example",
+      },
+      staffToken()
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      ok: true,
+      result: {
+        provider: "transactional",
+        status: "sent",
+        externalMessageId: "sendgrid_campaign_1",
+      },
+    });
+    expect(mocks.sendMailboxEmail).not.toHaveBeenCalled();
+    expect(mocks.sendEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "client@example.com",
+        from: "Palm Coast Private Client <verified@quotexinsurance.com>",
+        replyTo: "contact@palmcoast.example",
+        categories: ["agency-marketing", "campaign"],
+      })
+    );
+  });
+
+  it("does not report an agency campaign as sent when the provider rejects it", async () => {
+    mocks.sendEmail.mockResolvedValue({
+      id: "sendgrid_campaign_failed_1",
+      status: "failed",
+      provider: "sendgrid",
+      configured: true,
+      error: "Provider rejected the campaign email.",
+    });
+
+    const response = await postMailbox(
+      "/send",
+      {
+        ...validSendPayload(),
+        senderMode: "agency_marketing",
+        senderName: "Palm Coast Private Client",
+        replyTo: "contact@palmcoast.example",
+      },
+      staffToken()
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(502);
+    expect(body).toMatchObject({
+      ok: false,
+      message: "Provider rejected the campaign email.",
     });
   });
 

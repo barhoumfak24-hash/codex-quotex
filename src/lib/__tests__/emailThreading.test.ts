@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { db } from "../db";
 
 // =====================================================================
@@ -13,6 +13,7 @@ beforeEach(() => {
   db.reset();
 });
 afterEach(() => {
+  vi.unstubAllGlobals();
   if (typeof window !== "undefined" && window.localStorage) window.localStorage.clear();
 });
 
@@ -171,6 +172,22 @@ describe("communications threading", () => {
   });
 
   it("keeps company marketing on the agency mailbox instead of a staff mailbox", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation(async () =>
+        new Response(
+          JSON.stringify({
+            ok: true,
+            result: {
+              provider: "transactional",
+              status: "sent",
+              externalMessageId: "campaign_1",
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+      )
+    );
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
 
@@ -179,7 +196,7 @@ describe("communications threading", () => {
       name: "Palm Coast Private Client",
     });
 
-    const out = api.marketing.composeAiCampaign({
+    const out = await api.marketing.composeAiCampaign({
       tenantId: agency.id,
       name: "Coastal home review",
       channels: ["email"],
@@ -196,7 +213,7 @@ describe("communications threading", () => {
     expect(messages.every((message) => message.mailboxConnectionId === `mailbox_agency_marketing_${agency.id}`)).toBe(
       true
     );
-    expect(api.mailboxes.agencyMarketing(agency.id)?.lastSendAt).toBeTruthy();
+    expect(api.mailboxes.agencyMarketing(agency.id)?.lastSendAt).toBeUndefined();
   });
 });
 
