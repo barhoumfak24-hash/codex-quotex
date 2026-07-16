@@ -1,4 +1,4 @@
-import { browserAiFallbacksAllowed, postServerAi, serverAiEnabled } from "./aiGateway";
+import { postServerAi, serverAiEnabled } from "./aiGateway";
 import { cleanClosingBlock, createCampaignDraft, interpretCreativeBrief } from "./campaignCreative";
 
 export type MarketingStudioChannel = "email";
@@ -171,12 +171,18 @@ export async function draftMarketingStudioCampaign(input: {
       { timeoutMs: 60_000 }
     );
     if (raw) return ensureStudioDraftCompliance(normalizeStudioDraft(raw), input);
-    if (!browserAiFallbacksAllowed()) throw new Error("Marketing AI provider unavailable");
     return localDraft;
   } catch (error) {
-    if (!browserAiFallbacksAllowed()) throw error;
+    reportMarketingAiFallback(error);
     return localDraft;
   }
+}
+
+function reportMarketingAiFallback(error: unknown): void {
+  if (typeof console === "undefined") return;
+  console.warn("[quotex-marketing-ai-fallback]", {
+    message: error instanceof Error ? error.message : "Marketing AI provider returned an unusable response.",
+  });
 }
 
 export function normalizeStudioDraft(raw: unknown): MarketingStudioDraft {

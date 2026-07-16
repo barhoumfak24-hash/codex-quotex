@@ -45,6 +45,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
 });
 
 describe("marketingCampaignStudio", () => {
@@ -63,6 +64,66 @@ describe("marketingCampaignStudio", () => {
     expect(draft.pamphlet.headline).toMatch(/business|growth|liability|umbrella/i);
     expect(draft.pamphlet.highlights.length).toBeGreaterThanOrEqual(3);
     expect(draft.pamphlet.imagePrompt).toMatch(/business|commercial|vehicle|office/i);
+    expect(draft.pamphlet.ctaButton).toBe(MARKETING_STUDIO_CTA_BUTTON);
+  });
+
+  it("returns a complete campaign when the production AI provider is unavailable", async () => {
+    vi.stubEnv("VITE_AI_MODE", "server");
+    vi.stubEnv("VITE_ALLOW_BROWSER_AI_FALLBACKS", "false");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("provider unavailable")));
+
+    const draft = await draftMarketingStudioCampaign({
+      prompt: "Create a storm readiness campaign for coastal home clients.",
+      agencyName: "Palm Coast Private Client",
+    });
+
+    expect(draft.emailSubject).toMatch(/storm|home|coastal/i);
+    expect(draft.emailBody.split(/\s+/).length).toBeGreaterThan(45);
+    expect(draft.pamphlet.highlights.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("returns a complete campaign when the AI provider response is malformed", async () => {
+    vi.stubEnv("VITE_AI_MODE", "server");
+    vi.stubEnv("VITE_ALLOW_BROWSER_AI_FALLBACKS", "false");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ campaignName: "Incomplete response" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })
+      )
+    );
+
+    const draft = await draftMarketingStudioCampaign({
+      prompt: "Create a renewal review campaign for private clients.",
+      agencyName: "Palm Coast Private Client",
+    });
+
+    expect(draft.campaignName).toMatch(/renewal/i);
+    expect(draft.emailBody.split(/\s+/).length).toBeGreaterThan(45);
+    expect(draft.pamphlet.imagePrompt.length).toBeGreaterThan(20);
+  });
+
+  it.each([
+    "Prepare coastal homeowners for hurricane season.",
+    "Remind auto clients to review stored vehicles.",
+    "Ask private clients to update jewelry appraisals.",
+    "Create a commercial cyber liability awareness campaign.",
+    "Help prospects finish an incomplete quote.",
+    "Explain upcoming renewal reviews.",
+    "Welcome new clients to their agency portal.",
+  ])("always produces an executable fallback for: %s", async (prompt) => {
+    vi.stubEnv("VITE_AI_MODE", "server");
+    vi.stubEnv("VITE_ALLOW_BROWSER_AI_FALLBACKS", "false");
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("provider unavailable")));
+
+    const draft = await draftMarketingStudioCampaign({ prompt, agencyName: "Palm Coast Private Client" });
+
+    expect(draft.campaignName.length).toBeGreaterThan(3);
+    expect(draft.emailSubject.length).toBeGreaterThan(7);
+    expect(draft.emailBody).toContain("{first_name}");
+    expect(draft.pamphlet.highlights.length).toBeGreaterThanOrEqual(3);
     expect(draft.pamphlet.ctaButton).toBe(MARKETING_STUDIO_CTA_BUTTON);
   });
 
