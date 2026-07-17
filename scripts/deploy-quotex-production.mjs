@@ -54,11 +54,15 @@ async function main() {
   run("Production environment gate", pnpm, ["run", "production:check"]);
   clearRemoteProductionEnvSentinels(remoteProductionEnvSentinels);
   restoreLocalProductionEnv(localProductionEnv);
-  run("Frontend lint and typecheck", pnpm, ["run", "lint"]);
-  run("Unit tests", pnpm, ["run", "test"]);
-  run("Frontend typecheck", pnpm, ["run", "typecheck"]);
-  run("Server build", pnpm, ["run", "server:build"]);
-  run("Production build", pnpm, ["run", "build"]);
+  run("Frontend lint and typecheck", process.execPath, ["node_modules/typescript/bin/tsc", "--noEmit"]);
+  run("Unit tests", process.execPath, ["node_modules/vitest/vitest.mjs", "run"]);
+  run("Server build", process.execPath, [
+    "node_modules/typescript/bin/tsc",
+    "-p",
+    "server/tsconfig.json",
+  ]);
+  run("Production project references", process.execPath, ["node_modules/typescript/bin/tsc", "-b"]);
+  run("Production frontend build", process.execPath, ["node_modules/vite/bin/vite.js", "build"]);
   run("Dependency audit", pnpm, ["run", "security:audit"]);
   run("Server dependency audit", pnpm, ["run", "server:security:audit"]);
   const deploymentOutput = runCapture("Vercel production deploy", pnpm, [
