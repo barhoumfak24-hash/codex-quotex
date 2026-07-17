@@ -18,6 +18,7 @@ import { CustomerAssetsPage } from "@/pages/customer/CustomerAssetsPage";
 import { CustomerClaimsPage } from "@/pages/customer/CustomerClaimsPage";
 import { CustomerDashboard } from "@/pages/customer/CustomerDashboard";
 import { CustomerDocumentsPage } from "@/pages/customer/CustomerDocumentsPage";
+import { CustomerMessagesPage } from "@/pages/customer/CustomerMessagesPage";
 import { CustomerPoliciesPage } from "@/pages/customer/CustomerPoliciesPage";
 import { CustomerPolicyPage } from "@/pages/customer/CustomerPolicyPage";
 import { CustomerSettingsPage } from "@/pages/customer/CustomerSettingsPage";
@@ -142,6 +143,7 @@ export function UnifiedApp() {
         <Route path="/customer/assets/:assetId" element={<CustomerAssetPage />} />
         <Route path="/customer/documents" element={<CustomerDocumentsPage />} />
         <Route path="/customer/claims" element={<CustomerClaimsPage />} />
+        <Route path="/customer/messages" element={<CustomerMessagesPage />} />
         <Route path="/customer/settings" element={<CustomerSettingsPage />} />
         <Route path="/customer/quote/new" element={<QuoteFlowPage />} />
       </Route>
@@ -160,6 +162,7 @@ export function UnifiedApp() {
         <Route path="/agency/customer/assets/:assetId" element={<CustomerAssetPage />} />
         <Route path="/agency/customer/documents" element={<CustomerDocumentsPage />} />
         <Route path="/agency/customer/claims" element={<CustomerClaimsPage />} />
+        <Route path="/agency/customer/messages" element={<CustomerMessagesPage />} />
         <Route path="/agency/customer/settings" element={<CustomerSettingsPage />} />
         <Route path="/agency/customer/quote/new" element={<QuoteFlowPage />} />
       </Route>

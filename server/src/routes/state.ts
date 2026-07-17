@@ -4,7 +4,6 @@ import { z } from "zod";
 import { authenticateRequest, type AuthContext } from "../middleware/auth.js";
 import { readRemoteState, supabaseStateConfigured, writeRemoteState } from "../services/supabaseState.js";
 import {
-  canAccessAgencyStateForAuth,
   mergeStateSnapshotForAuth,
   scopeStateSnapshotForAuth,
   stateScopeForAuth,
@@ -22,7 +21,6 @@ stateRoutes.get("/:stateId", async (req, res, next) => {
     res.set("Cache-Control", "no-store, max-age=0");
     const access = stateAccess(req);
     if (!access) return res.status(401).json({ error: "unauthorized" });
-    if (!canAccessAgencyStateForAuth(access.auth)) return res.status(403).json({ error: "forbidden" });
     if (!supabaseStateConfigured()) return res.status(503).json({ found: false, error: "state_sync_not_configured" });
 
     const stateId = normalizeStateId(req.params.stateId);
@@ -31,7 +29,7 @@ stateRoutes.get("/:stateId", async (req, res, next) => {
     const row = await readRemoteState(appStateId(stateId));
     const scoped = row
       ? scopeStateSnapshotForAuth(row.snapshot, access.auth)
-      : { scoped: stateScopeForAuth(access.auth) === "tenant", snapshot: null };
+      : { scoped: ["tenant", "customer"].includes(stateScopeForAuth(access.auth)), snapshot: null };
     return res.json({
       found: Boolean(row),
       scoped: scoped.scoped,
@@ -49,7 +47,6 @@ stateRoutes.put("/:stateId", async (req, res, next) => {
     res.set("Cache-Control", "no-store, max-age=0");
     const access = stateAccess(req);
     if (!access) return res.status(401).json({ error: "unauthorized" });
-    if (!canAccessAgencyStateForAuth(access.auth)) return res.status(403).json({ error: "forbidden" });
     if (!supabaseStateConfigured()) return res.status(503).json({ ok: false, error: "state_sync_not_configured" });
 
     const stateId = normalizeStateId(req.params.stateId);

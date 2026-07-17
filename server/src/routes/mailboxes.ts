@@ -65,6 +65,29 @@ mailboxesRoutes.get("/connections", async (req, res, next) => {
   }
 });
 
+mailboxesRoutes.get("/capability", async (req, res, next) => {
+  try {
+    if (!req.auth?.tenantId) return res.status(403).json({ ok: false, error: "tenant_required" });
+    const connections = await listMailboxConnections({
+      tenantId: req.auth.tenantId,
+      userId: req.auth.userId,
+    });
+    const transactional = emailDeliveryConfiguration();
+    res.json({
+      ok: true,
+      capability: {
+        mailboxConnected: connections.some((connection) => connection.status === "connected"),
+        transactionalConfigured: transactional.configured,
+        transactionalProvider: transactional.provider,
+        missingEnvironmentVariables: transactional.missingEnvironmentVariables,
+        acceptedConfigurations: transactional.acceptedConfigurations,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 mailboxesRoutes.post("/oauth/:provider/start", async (req, res, next) => {
   try {
     if (!req.auth?.tenantId) return res.status(403).json({ ok: false, error: "tenant_required" });

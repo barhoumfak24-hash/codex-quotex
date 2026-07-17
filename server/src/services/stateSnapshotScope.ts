@@ -30,6 +30,27 @@ type TenantScope = Record<ScopeSetName, Set<string>>;
 const PLATFORM_ROLES = new Set(["platform_owner", "platform_admin", "master_admin"]);
 const CUSTOMER_ROLES = new Set(["customer"]);
 const GLOBAL_CATALOG_TABLES = new Set(["carriers", "categories"]);
+const CUSTOMER_OWNED_TABLES = new Set([
+  "assets",
+  "claims",
+  "communications",
+  "deposits",
+  "documents",
+  "payments",
+  "policies",
+  "quoteRequests",
+  "quotingSessions",
+  "renewals",
+  "statusEvents",
+]);
+const CUSTOMER_WRITABLE_TABLES = new Set([
+  "communications",
+  "customers",
+  "documents",
+  "quoteRequests",
+  "quotingSessions",
+  "statusEvents",
+]);
 const SHARED_CATALOG_BUCKETS = new Set<ScopeSetName>(["carrierIds", "categoryIds"]);
 const PLATFORM_ONLY_TABLES = new Set([
   "audit",
@@ -126,7 +147,16 @@ export function canAccessAgencyStateForAuth(auth: AuthContext | null): boolean {
 
 export function scopeStateSnapshotForAuth(snapshot: unknown, auth: AuthContext | null): ScopedStateResult {
   const scope = stateScopeForAuth(auth);
-  if (scope === "customer") return { scoped: true, snapshot: null };
+  if (scope === "customer") {
+    const source = asSnapshot(snapshot);
+    const customerId = source && auth ? resolveCustomerIdForAuth(source, auth) : "";
+    return {
+      scoped: true,
+      snapshot: source && customerId && auth?.tenantId
+        ? scopeSnapshotToCustomer(source, auth.tenantId, customerId)
+        : null,
+    };
+  }
   if (scope !== "tenant" || !auth?.tenantId) {
     return { scoped: false, snapshot };
   }
@@ -135,11 +165,176 @@ export function scopeStateSnapshotForAuth(snapshot: unknown, auth: AuthContext |
 
 export function mergeStateSnapshotForAuth(currentSnapshot: unknown, incomingSnapshot: unknown, auth: AuthContext | null): unknown {
   const scope = stateScopeForAuth(auth);
-  if (scope === "customer") return currentSnapshot;
+  if (scope === "customer") {
+    const current = asSnapshot(currentSnapshot);
+    const customerId = current && auth ? resolveCustomerIdForAuth(current, auth) : "";
+    return current && customerId && auth?.tenantId
+      ? mergeCustomerSnapshotIntoPlatform(current, incomingSnapshot, auth.tenantId, customerId)
+      : currentSnapshot;
+  }
   if (scope === "tenant" && auth?.tenantId) {
     return mergeTenantSnapshotIntoPlatform(currentSnapshot, incomingSnapshot, auth.tenantId);
   }
   return mergePlatformSnapshot(currentSnapshot, incomingSnapshot);
+}
+
+export function resolveCustomerIdForAuth(snapshot: unknown, auth: AuthContext): string {
+  if (stateScopeForAuth(auth) !== "customer" || !auth.tenantId) return "";
+  const source = asSnapshot(snapshot);
+  if (!source) return "";
+  const match = asRows(source.customers).find(
+    (row) => stringValue(row.userId) === auth.userId && stringValue(row.tenantId) === auth.tenantId
+  );
+  return match ? stringValue(match.id) : "";
+}
+
+export function scopeSnapshotToCustomer(snapshot: unknown, tenantId: string, customerId: string): unknown {
+  const source = asSnapshot(snapshot);
+  if (!source) return snapshot;
+  const out: JsonSnapshot = {};
+
+  for (const [table, value] of Object.entries(source)) {
+    if (!Array.isArray(value)) {
+      out[table] = value;
+      continue;
+    }
+    const rows = value.filter(isObject);
+    if (GLOBAL_CATALOG_TABLES.has(table)) {
+      out[table] = rows;
+    } else if (table === "agencies") {
+      out[table] = rows.filter((row) => stringValue(row.id) === tenantId);
+    } else if (table === "users") {
+      out[table] = rows
+        .filter((row) => stringValue(row.tenantId) === tenantId)
+        .map(customerSafeUserProjection);
+    } else if (table === "customers") {
+      out[table] = rows.filter(
+        (row) => stringValue(row.id) === customerId && stringValue(row.tenantId) === tenantId
+      );
+    } else if (table === "messages") {
+      out[table] = rows.filter(
+        (row) => stringValue(row.customerId) === customerId && stringValue(row.tenantId) === tenantId
+      );
+    } else if (table === "statusEvents") {
+      out[table] = rows.filter(
+        (row) =>
+          stringValue(row.customerId) === customerId &&
+          stringValue(row.tenantId) === tenantId &&
+          stringValue(row.visibility) === "customer_visible"
+      );
+    } else if (CUSTOMER_OWNED_TABLES.has(table)) {
+      out[table] = rows.filter(
+        (row) => stringValue(row.customerId) === customerId && stringValue(row.tenantId) === tenantId
+      );
+    } else if (table === "deletedRows") {
+      out[table] = customerTombstones(rows, source, tenantId, customerId);
+    } else {
+      out[table] = [];
+    }
+  }
+
+  return out;
+}
+
+export function mergeCustomerSnapshotIntoPlatform(
+  currentSnapshot: unknown,
+  incomingSnapshot: unknown,
+  tenantId: string,
+  customerId: string
+): unknown {
+  const current = asSnapshot(currentSnapshot) ?? {};
+  const incoming = asSnapshot(incomingSnapshot);
+  if (!incoming) return currentSnapshot;
+  const out: JsonSnapshot = { ...current };
+
+  for (const table of CUSTOMER_WRITABLE_TABLES) {
+    const currentRows = asRows(current[table]);
+    const incomingRows = asRows(incoming[table]);
+    if (incomingRows.length === 0) continue;
+    const merged = [...currentRows];
+    for (const row of incomingRows) {
+      const id = stringValue(row.id);
+      if (!id || !customerMayWriteRow(table, row, current, tenantId, customerId)) continue;
+      const existingIndex = merged.findIndex((candidate) => stringValue(candidate.id) === id);
+      if (existingIndex >= 0 && !customerOwnsExistingRow(table, merged[existingIndex], tenantId, customerId)) {
+        continue;
+      }
+      const stamped = stampCustomerOwnership(table, row, tenantId, customerId);
+      if (existingIndex >= 0) merged[existingIndex] = { ...merged[existingIndex], ...stamped };
+      else merged.push(stamped);
+    }
+    out[table] = merged;
+  }
+
+  const tombstones = customerTombstones(asRows(incoming.deletedRows), current, tenantId, customerId)
+    .filter((row) => CUSTOMER_WRITABLE_TABLES.has(stringValue(row.table)));
+  if (tombstones.length > 0) {
+    out.deletedRows = mergeTombstoneRows(asRows(current.deletedRows), tombstones);
+    for (const tombstone of tombstones) {
+      const table = stringValue(tombstone.table);
+      const rowId = stringValue(tombstone.rowId);
+      out[table] = asRows(out[table]).filter((row) => stringValue(row.id) !== rowId);
+    }
+  }
+  return out;
+}
+
+function customerSafeUserProjection(row: JsonObject): JsonObject {
+  return {
+    id: row.id,
+    tenantId: row.tenantId,
+    name: row.name,
+    firstName: row.firstName,
+    lastName: row.lastName,
+    role: row.role,
+    avatarUrl: row.avatarUrl,
+    active: row.active,
+  };
+}
+
+function customerMayWriteRow(
+  table: string,
+  row: JsonObject,
+  current: JsonSnapshot,
+  tenantId: string,
+  customerId: string
+): boolean {
+  if (table === "customers") return stringValue(row.id) === customerId;
+  const requestedCustomerId = stringValue(row.customerId);
+  if (requestedCustomerId && requestedCustomerId !== customerId) return false;
+  const requestedTenantId = stringValue(row.tenantId);
+  if (requestedTenantId && requestedTenantId !== tenantId) return false;
+  const existing = asRows(current[table]).find((candidate) => stringValue(candidate.id) === stringValue(row.id));
+  return !existing || customerOwnsExistingRow(table, existing, tenantId, customerId);
+}
+
+function customerOwnsExistingRow(table: string, row: JsonObject, tenantId: string, customerId: string): boolean {
+  if (table === "customers") {
+    return stringValue(row.id) === customerId && stringValue(row.tenantId) === tenantId;
+  }
+  return stringValue(row.customerId) === customerId && stringValue(row.tenantId) === tenantId;
+}
+
+function stampCustomerOwnership(table: string, row: JsonObject, tenantId: string, customerId: string): JsonObject {
+  return table === "customers"
+    ? { ...row, id: customerId, tenantId }
+    : { ...row, tenantId, customerId };
+}
+
+function customerTombstones(
+  rows: JsonObject[],
+  snapshot: JsonSnapshot,
+  tenantId: string,
+  customerId: string
+): JsonObject[] {
+  return rows.filter((row) => {
+    if (!validTombstoneShape(row)) return false;
+    if (stringValue(row.tenantId) !== tenantId) return false;
+    const table = stringValue(row.table);
+    if (!CUSTOMER_WRITABLE_TABLES.has(table)) return false;
+    const target = asRows(snapshot[table]).find((candidate) => stringValue(candidate.id) === stringValue(row.rowId));
+    return Boolean(target && customerOwnsExistingRow(table, target, tenantId, customerId));
+  });
 }
 
 export function scopeSnapshotToTenant(snapshot: unknown, tenantId: string): unknown {

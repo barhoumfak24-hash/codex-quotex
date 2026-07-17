@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   canAccessAgencyStateForAuth,
+  mergeCustomerSnapshotIntoPlatform,
   mergeStateSnapshotForAuth,
   mergeTenantSnapshotIntoPlatform,
+  scopeStateSnapshotForAuth,
   scopeSnapshotToTenant,
   stateScopeForAuth,
 } from "../services/stateSnapshotScope.js";
@@ -45,6 +47,77 @@ describe("state snapshot tenant scoping", () => {
     expect(canAccessAgencyStateForAuth(customerAuth)).toBe(false);
   });
 
+  it("returns only the authenticated customer's records and safe agency staff projections", () => {
+    const scoped = scopeStateSnapshotForAuth(platformSnapshot(), {
+      userId: "customer_user_a",
+      role: "customer",
+      tenantId: "agency_a",
+      permissions: [],
+    }).snapshot as any;
+
+    expect(scoped.customers.map((row: any) => row.id)).toEqual(["customer_a"]);
+    expect(scoped.assets.map((row: any) => row.id)).toEqual(["asset_a"]);
+    expect(scoped.communications.map((row: any) => row.id)).toEqual(["communication_a"]);
+    expect(scoped.tasks).toEqual([]);
+    expect(scoped.users.map((row: any) => row.id)).toEqual(["user_a", "user_a_unreferenced"]);
+    expect(scoped.users.every((row: any) => row.email === undefined)).toBe(true);
+  });
+
+  it("allows a customer message while preserving staff and other-customer records", () => {
+    const merged = mergeCustomerSnapshotIntoPlatform(
+      platformSnapshot(),
+      {
+        communications: [
+          {
+            id: "communication_customer_reply",
+            tenantId: "agency_a",
+            customerId: "customer_a",
+            body: "Customer reply",
+          },
+          {
+            id: "communication_forged",
+            tenantId: "agency_b",
+            customerId: "customer_b",
+            body: "Must be rejected",
+          },
+        ],
+      },
+      "agency_a",
+      "customer_a"
+    ) as any;
+
+    expect(merged.communications.map((row: any) => row.id)).toEqual([
+      "communication_a",
+      "communication_b",
+      "communication_customer_reply",
+    ]);
+    expect(merged.communications.find((row: any) => row.id === "communication_customer_reply")).toMatchObject({
+      tenantId: "agency_a",
+      customerId: "customer_a",
+    });
+  });
+
+  it("rejects a forged customer tombstone", () => {
+    const merged = mergeCustomerSnapshotIntoPlatform(
+      platformSnapshot(),
+      {
+        deletedRows: [
+          {
+            id: "delete_other_customer_message",
+            tenantId: "agency_b",
+            table: "communications",
+            rowId: "communication_b",
+            deletedAt: "2026-07-16T12:00:00.000Z",
+          },
+        ],
+      },
+      "agency_a",
+      "customer_a"
+    ) as any;
+
+    expect(merged.communications).toEqual(platformSnapshot().communications);
+  });
+
   it("preserves omitted tenant rows while upserting authorized rows", () => {
     const merged = mergeTenantSnapshotIntoPlatform(
       platformSnapshot(),
@@ -60,8 +133,8 @@ describe("state snapshot tenant scoping", () => {
     ) as any;
 
     expect(merged.customers).toEqual([
-      { id: "customer_a", tenantId: "agency_a", categoryId: "category_1", name: "Customer A" },
-      { id: "customer_b", tenantId: "agency_b", categoryId: "category_1", name: "Customer B" },
+      { id: "customer_a", userId: "customer_user_a", tenantId: "agency_a", categoryId: "category_1", name: "Customer A" },
+      { id: "customer_b", userId: "customer_user_b", tenantId: "agency_b", categoryId: "category_1", name: "Customer B" },
       { id: "customer_a_new", tenantId: "agency_a", name: "New A" },
     ]);
     expect(merged.assets).toEqual([
@@ -174,8 +247,8 @@ describe("state snapshot tenant scoping", () => {
     ) as any;
 
     expect(merged.customers).toEqual([
-      { id: "customer_a", tenantId: "agency_a", categoryId: "category_1", name: "Updated A" },
-      { id: "customer_b", tenantId: "agency_b", categoryId: "category_1", name: "Customer B" },
+      { id: "customer_a", userId: "customer_user_a", tenantId: "agency_a", categoryId: "category_1", name: "Updated A" },
+      { id: "customer_b", userId: "customer_user_b", tenantId: "agency_b", categoryId: "category_1", name: "Customer B" },
     ]);
     expect(merged.communications).toEqual(platformSnapshot().communications);
   });
@@ -188,14 +261,14 @@ function platformSnapshot() {
       { id: "agency_b", name: "Agency B" },
     ],
     users: [
-      { id: "user_a", tenantId: "agency_a", email: "a@example.test" },
-      { id: "user_a_unreferenced", tenantId: "agency_a", email: "a2@example.test" },
+      { id: "user_a", tenantId: "agency_a", email: "a@example.test", name: "Agent A" },
+      { id: "user_a_unreferenced", tenantId: "agency_a", email: "a2@example.test", name: "CSR A" },
       { id: "user_b", tenantId: "agency_b", email: "b@example.test" },
       { id: "master", tenantId: null, email: "master@example.test" },
     ],
     customers: [
-      { id: "customer_a", tenantId: "agency_a", categoryId: "category_1", name: "Customer A" },
-      { id: "customer_b", tenantId: "agency_b", categoryId: "category_1", name: "Customer B" },
+      { id: "customer_a", userId: "customer_user_a", tenantId: "agency_a", categoryId: "category_1", name: "Customer A" },
+      { id: "customer_b", userId: "customer_user_b", tenantId: "agency_b", categoryId: "category_1", name: "Customer B" },
     ],
     assets: [
       { id: "asset_a", tenantId: "agency_a", customerId: "customer_a", label: "A asset" },

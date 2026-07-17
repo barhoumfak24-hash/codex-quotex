@@ -39,6 +39,7 @@ import {
   type ReplyTarget,
 } from "@/components/messages/MessageComposer";
 import { RichMessageBody } from "@/components/messages/RichMessageBody";
+import { CommunicationDeliveryStatus } from "@/components/messages/CommunicationDeliveryStatus";
 import { positionLabel } from "@/pages/employee/CarrierRecommendationsPage";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
@@ -53,9 +54,12 @@ import {
 } from "@/lib/mailProvider";
 import { fileToCommunicationAttachment, formatAttachmentSize } from "@/lib/messageAttachments";
 import {
+  capabilityCanSendEmail,
+  getLiveMailboxCapability,
   getLiveMailboxSyncStatus,
   sendCommunicationThroughLiveMailbox,
   syncCommunicationsFromLiveMailbox,
+  type LiveMailboxCapability,
 } from "@/lib/liveMailbox";
 import { listMailboxConnections } from "@/lib/mailboxOAuth";
 import type {
@@ -220,6 +224,8 @@ export function MessagesPage() {
   const [serverMailbox, setServerMailbox] = useState<ConnectedMailbox | null>(null);
   const [serverMailboxError, setServerMailboxError] = useState<string | null>(null);
   const [mailboxSyncStatus, setMailboxSyncStatus] = useState<string | null>(null);
+  const [mailboxCapability, setMailboxCapability] = useState<LiveMailboxCapability | null>(null);
+  const [mailboxCapabilityError, setMailboxCapabilityError] = useState<string | null>(null);
   // Count of inbound messages the AI triaged into activities or notices this
   // visit - drives the "AI triaged your inbox" banner.
   const [aiTriaged, setAiTriaged] = useState(0);
@@ -277,6 +283,19 @@ export function MessagesPage() {
         });
       }
     });
+    void getLiveMailboxCapability({ tenantId: agency.id, user })
+      .then((capability) => {
+        if (cancelled) return;
+        setMailboxCapability(capability);
+        setMailboxCapabilityError(null);
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        setMailboxCapability(null);
+        setMailboxCapabilityError(
+          error instanceof Error ? error.message : "Email delivery status could not be checked."
+        );
+      });
     return () => {
       cancelled = true;
     };
@@ -590,7 +609,6 @@ export function MessagesPage() {
         connectionId: mailbox.connectionId,
         maxResults: 25,
       });
-      if (!sync.ok && mailbox.status === "connected" && !options.silent) alert(sync.message);
       if (sync.ok) {
         const imported = sync.serverImported ?? sync.imported;
         const updated = sync.serverUpdated ?? 0;
@@ -600,7 +618,7 @@ export function MessagesPage() {
             ? `Mailbox checked. ${imported} new, ${updated} updated, ${failed} failed.`
             : `Mailbox checked. ${imported} new, ${updated} updated.`
         );
-      } else if (!options.silent) {
+      } else {
         setMailboxSyncStatus(`Mailbox receive check failed: ${sync.message}`);
       }
       const created = api.communications.sweepInboundForActivities(agency.id, user.id);
@@ -655,6 +673,14 @@ export function MessagesPage() {
       {serverMailboxError && (
         <div className="rounded-md border border-gold-200 bg-gold-50/60 px-4 py-3 text-xs text-gold-900">
           Mailbox status could not be verified: {serverMailboxError}
+        </div>
+      )}
+
+      {(mailboxCapabilityError || (mailboxCapability && !capabilityCanSendEmail(mailboxCapability))) && (
+        <div className="rounded-md border border-gold-200 bg-gold-50/60 px-4 py-3 text-xs text-gold-900">
+          {mailboxCapabilityError
+            ? `Email delivery status could not be verified: ${mailboxCapabilityError}`
+            : "External email is not configured for this account. Client messages will still be delivered in the Quotex portal; carrier, prospect, and holder email requires a connected Google/Microsoft mailbox or a configured transactional email provider."}
         </div>
       )}
 
@@ -750,6 +776,7 @@ export function MessagesPage() {
                     /* db change tick rerenders */
                   }}
                   mailbox={mailbox}
+                  mailboxCapability={mailboxCapability}
                   fill={fill}
                 />
               )}
@@ -874,6 +901,7 @@ export function MessagesPage() {
                     /* db change tick rerenders */
                   }}
                   mailbox={mailbox}
+                  mailboxCapability={mailboxCapability}
                   fill={fill}
                 />
               )}
@@ -894,6 +922,7 @@ export function MessagesPage() {
         mode={newSend}
         tenantId={agency.id}
         viewer={user}
+        mailboxCapability={mailboxCapability}
         onClose={() => setNewSend(null)}
         onDone={(target) => {
           setNewSend(null);
@@ -1345,6 +1374,7 @@ function ActiveContactPane({
   onClose,
   onSent,
   mailbox,
+  mailboxCapability,
   fill = false,
 }: {
   tenantId: string;
@@ -1353,11 +1383,13 @@ function ActiveContactPane({
   onClose: () => void;
   onSent: () => void;
   mailbox: ConnectedMailbox;
+  mailboxCapability: LiveMailboxCapability | null;
   fill?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
   const [previewDocument, setPreviewDocument] = useState<Document | null>(null);
+  const [deliveryNotice, setDeliveryNotice] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const scrollContentRef = useRef<HTMLDivElement | null>(null);
   // Message count drives the auto-scroll-to-latest effect below.
@@ -1390,6 +1422,7 @@ function ActiveContactPane({
       </div>
     );
   }
+  const selectedContact = contact;
 
   const allTenantComms = api.communications
     .listByTenant(tenantId)
@@ -1444,6 +1477,10 @@ function ActiveContactPane({
     try {
       // Signature is auto-appended inside api.communications.create
       // based on the sender's saved emailSignature + images.
+      const portalOnly =
+        selectedContact.kind === "client" &&
+        (!selectedContact.email ||
+          (mailboxCapability !== null && !capabilityCanSendEmail(mailboxCapability)));
       const comm = api.communications.create({
         tenantId,
         customerId: contact!.kind === "client" ? contact!.id : undefined,
@@ -1468,11 +1505,14 @@ function ActiveContactPane({
         body: msg.body,
         attachments: msg.attachments,
         createdById: userId,
+        emailDeliveryMode: portalOnly ? "portal_only" : "auto",
       });
       const sender = api.users.get(userId);
-      if (sender) {
+      if (sender && !portalOnly) {
         const liveResult = await sendCommunicationThroughLiveMailbox({ tenantId, user: sender, communication: comm });
-        if (!liveResult.ok) alert(liveResult.message);
+        setDeliveryNotice(liveResult.ok ? null : liveResult.message);
+      } else if (portalOnly) {
+        setDeliveryNotice("Delivered to the client portal. External email was not available.");
       }
       setReplyTarget(null);
       onSent();
@@ -1587,6 +1627,13 @@ function ActiveContactPane({
                     <div className="font-medium mb-0.5">{r.row.subject}</div>
                   )}
                   <RichMessageBody body={body} tenantId={tenantId} message={r.kind === "comm" ? r.row : undefined} />
+                  {r.kind === "comm" && (
+                    <CommunicationDeliveryStatus
+                      communication={r.row}
+                      tenantId={tenantId}
+                      user={api.users.get(userId)}
+                    />
+                  )}
                   {attachments.length > 0 && (
                     <div className="mt-2 space-y-1.5">
                       {attachments.map((attachment) => (
@@ -1665,6 +1712,11 @@ function ActiveContactPane({
           )}
         </div>
       </div>
+      {(deliveryNotice || (contact.kind === "client" && !contact.email)) && (
+        <div className="border-t border-ink-100 bg-gold-50/60 px-3 py-2 text-xs text-gold-900">
+          {deliveryNotice ?? "No email address is on file. Messages will be delivered in the client portal."}
+        </div>
+      )}
       <MessageComposer
         replyTarget={replyTarget}
         onCancelReply={() => setReplyTarget(null)}
@@ -1999,12 +2051,14 @@ function NewSendModal({
   mode,
   tenantId,
   viewer,
+  mailboxCapability,
   onClose,
   onDone,
 }: {
   mode: null | "contact" | "internal" | "carrier";
   tenantId: string;
   viewer: User;
+  mailboxCapability: LiveMailboxCapability | null;
   onClose: () => void;
   onDone: (target: SendTarget) => void;
 }) {
@@ -2166,6 +2220,9 @@ function NewSendModal({
         onDone({ kind: "internal", id: thread.id });
         return;
       }
+      const portalOnly =
+        picked.kind === "client" &&
+        (!picked.sub || (mailboxCapability !== null && !capabilityCanSendEmail(mailboxCapability)));
       const comm = api.communications.create({
         tenantId,
         customerId: picked.kind === "client" ? picked.id : undefined,
@@ -2180,9 +2237,11 @@ function NewSendModal({
         body: body.trim(),
         attachments,
         createdById: viewer.id,
+        emailDeliveryMode: portalOnly ? "portal_only" : "auto",
       });
-      const liveResult = await sendCommunicationThroughLiveMailbox({ tenantId, user: viewer, communication: comm });
-      if (!liveResult.ok) alert(liveResult.message);
+      if (!portalOnly) {
+        await sendCommunicationThroughLiveMailbox({ tenantId, user: viewer, communication: comm });
+      }
       onDone({ kind: picked.kind, id: picked.id });
     } finally {
       setBusy(false);

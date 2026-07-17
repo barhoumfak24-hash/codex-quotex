@@ -6,7 +6,7 @@
 
 import * as seed from "./seed";
 import { apiBaseUrl, cloudStateSyncEnabled, envValue } from "./apiBase";
-import { currentServerSessionToken, serverSessionHeaders } from "./serverSession";
+import { currentServerSessionRole, currentServerSessionToken, serverSessionHeaders } from "./serverSession";
 import { isLargeInlineDataUrl, storeStateBlob } from "./stateBlobs";
 import {
   generateAgencyCode,
@@ -1499,10 +1499,20 @@ async function hydrateFromRemote(options: { force?: boolean; merge?: boolean } =
       headers: remoteHeaders(),
     });
     if (!res.ok) {
-      throw new Error(`State read failed: ${res.status}`);
+      const reason = syncFailureReason(res.status);
+      remoteLoadedOk = false;
+      remoteHydrated = false;
+      setSyncStatus({
+        status: "error",
+        reason,
+        message: `Cloud state could not be loaded (${res.status}).`,
+      });
+      return;
     }
     const payload = (await res.json()) as { found?: boolean; scoped?: boolean; snapshot?: unknown; revision?: number };
     if (!isActiveDbInstance()) return;
+    const firstSuccessfulHydration = !remoteLoadedOk;
+    const replaceCustomerSeed = firstSuccessfulHydration && currentServerSessionRole() === "customer";
     remoteLoadedOk = true;
     remoteHydrated = true;
     if (typeof payload.revision === "number") remoteRevision = payload.revision;
@@ -1511,7 +1521,8 @@ async function hydrateFromRemote(options: { force?: boolean; merge?: boolean } =
       scheduleRemotePersist(50, { skipStatus: true });
       return;
     }
-    const next = options.merge === false ? remote : mergeDbShapes(cache, remote);
+    const shouldMerge = options.merge !== false && !replaceCustomerSeed;
+    const next = shouldMerge ? mergeDbShapes(cache, remote) : remote;
     const changed = JSON.stringify(next) !== JSON.stringify(cache);
     cache = next;
     if (changed) {
@@ -1519,7 +1530,7 @@ async function hydrateFromRemote(options: { force?: boolean; merge?: boolean } =
       notify();
       broadcastDbChange("remote");
     }
-    if ((options.merge && JSON.stringify(next) !== JSON.stringify(remote)) || remoteDirtyDuringHydrate) {
+    if ((shouldMerge && JSON.stringify(next) !== JSON.stringify(remote)) || remoteDirtyDuringHydrate) {
       scheduleRemotePersist(100, { skipStatus: true });
     } else if (!remoteWriteTimer && !remoteRetryTimer) {
       setSyncStatus({ status: "synced", message: "All changes saved." });
@@ -1529,11 +1540,7 @@ async function hydrateFromRemote(options: { force?: boolean; merge?: boolean } =
     console.warn("[db] Supabase state hydrate failed", err);
     remoteLoadedOk = false;
     remoteHydrated = false;
-    setSyncStatus({
-      status: "error",
-      reason: err instanceof Error && /401|403/.test(err.message) ? "unauthorized" : "network",
-      message: err instanceof Error ? err.message : "Cloud state could not be loaded.",
-    });
+    setSyncStatus({ status: "error", reason: "network", message: "Cloud state could not be loaded." });
   } finally {
     remoteHydrating = false;
   }

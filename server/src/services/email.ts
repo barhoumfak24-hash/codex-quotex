@@ -55,11 +55,52 @@ export async function sendEmail(args: {
 
 export function emailDeliveryConfiguration() {
   const provider = preferredEmailProvider();
+  const missingEnvironmentVariables = missingEmailProviderEnvironmentVariables(provider);
   return {
-    configured: provider !== null,
+    configured: provider !== null && missingEnvironmentVariables.length === 0,
     provider: provider ?? "unconfigured",
     from: provider ? emailFromAddress() : null,
+    missingEnvironmentVariables,
+    acceptedConfigurations: [
+      ["SENDGRID_API_KEY", "EMAIL_FROM or SENDGRID_FROM_EMAIL"],
+      ["RESEND_API_KEY", "EMAIL_FROM or RESEND_FROM_EMAIL"],
+      ["SMTP_HOST", "SMTP_USER", "SMTP_PASS", "EMAIL_FROM or SMTP_FROM_EMAIL"],
+    ],
   };
+}
+
+function missingEmailProviderEnvironmentVariables(
+  detectedProvider: "sendgrid" | "resend" | "smtp" | null
+): string[] {
+  const explicit = env("EMAIL_PROVIDER").toLowerCase();
+  const provider = explicit === "sendgrid" || explicit === "resend" || explicit === "smtp"
+    ? explicit
+    : detectedProvider;
+  const hasFrom = Boolean(
+    env("EMAIL_FROM") ||
+      (provider === "sendgrid" && env("SENDGRID_FROM_EMAIL")) ||
+      (provider === "resend" && env("RESEND_FROM_EMAIL")) ||
+      (provider === "smtp" && env("SMTP_FROM_EMAIL"))
+  );
+  if (provider === "sendgrid") {
+    return [
+      ...(!env("SENDGRID_API_KEY") ? ["SENDGRID_API_KEY"] : []),
+      ...(!hasFrom ? ["EMAIL_FROM or SENDGRID_FROM_EMAIL"] : []),
+    ];
+  }
+  if (provider === "resend") {
+    return [
+      ...(!env("RESEND_API_KEY") ? ["RESEND_API_KEY"] : []),
+      ...(!hasFrom ? ["EMAIL_FROM or RESEND_FROM_EMAIL"] : []),
+    ];
+  }
+  if (provider === "smtp") {
+    return [
+      ...["SMTP_HOST", "SMTP_USER", "SMTP_PASS"].filter((key) => !env(key)),
+      ...(!hasFrom ? ["EMAIL_FROM or SMTP_FROM_EMAIL"] : []),
+    ];
+  }
+  return ["SENDGRID_API_KEY", "RESEND_API_KEY", "SMTP_HOST", "SMTP_USER", "SMTP_PASS"];
 }
 
 export function unsubscribeUrl(email: string, kind: "marketing" | "all" = "marketing") {

@@ -10,11 +10,18 @@ import {
   type ReplyTarget,
 } from "@/components/messages/MessageComposer";
 import { RichMessageBody } from "@/components/messages/RichMessageBody";
+import { CommunicationDeliveryStatus } from "@/components/messages/CommunicationDeliveryStatus";
 import { api } from "@/lib/api";
 import { subscribeToDbChanges } from "@/lib/db";
 import { fmt } from "@/lib/format";
 import { inferMailProvider, mailboxThreadUrl, mailProviderShortLabel } from "@/lib/mailProvider";
-import { sendCommunicationThroughLiveMailbox, syncCommunicationsFromLiveMailbox } from "@/lib/liveMailbox";
+import {
+  capabilityCanSendEmail,
+  getLiveMailboxCapability,
+  sendCommunicationThroughLiveMailbox,
+  syncCommunicationsFromLiveMailbox,
+  type LiveMailboxCapability,
+} from "@/lib/liveMailbox";
 import { listMailboxConnections } from "@/lib/mailboxOAuth";
 import type { Communication, CommunicationAttachment, Document, MarketingMessage, User } from "@/types";
 
@@ -264,6 +271,9 @@ export function ContactMessageThread({
   const scrollContentRef = useRef<HTMLDivElement | null>(null);
   const [highlightedId, setHighlightedId] = useState<string | null>(null);
   const [serverMailbox, setServerMailbox] = useState<ConnectedMailbox | null>(null);
+  const [mailboxCapability, setMailboxCapability] = useState<LiveMailboxCapability | null>(null);
+  const [deliveryNotice, setDeliveryNotice] = useState<string | null>(null);
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
   const contact = contactSummary(contactKind, contactId);
   const fallbackMailbox = mailboxForUser(userId);
   const mailbox = serverMailbox ?? fallbackMailbox;
@@ -300,6 +310,13 @@ export function ContactMessageThread({
           : null
       );
     });
+    void getLiveMailboxCapability({ tenantId, user })
+      .then((capability) => {
+        if (!cancelled) setMailboxCapability(capability);
+      })
+      .catch(() => {
+        if (!cancelled) setMailboxCapability(null);
+      });
     return () => {
       cancelled = true;
     };
@@ -328,6 +345,10 @@ export function ContactMessageThread({
   async function send(msg: ComposedMessage) {
     setBusy(true);
     try {
+      const sender = api.users.get(userId);
+      const portalOnly =
+        contactKind === "client" &&
+        (!contact.email || (mailboxCapability !== null && !capabilityCanSendEmail(mailboxCapability)));
       const comm = api.communications.create({
         tenantId,
         customerId: contactKind === "client" ? contactId : undefined,
@@ -344,11 +365,13 @@ export function ContactMessageThread({
         body: msg.body,
         attachments: msg.attachments,
         createdById: userId,
+        emailDeliveryMode: portalOnly ? "portal_only" : "auto",
       });
-      const sender = api.users.get(userId);
-      if (sender) {
+      if (sender && !portalOnly) {
         const liveResult = await sendCommunicationThroughLiveMailbox({ tenantId, user: sender, communication: comm });
-        if (!liveResult.ok) alert(liveResult.message);
+        setDeliveryNotice(liveResult.ok ? null : liveResult.message);
+      } else if (portalOnly) {
+        setDeliveryNotice("Delivered to the client portal. External email was not available.");
       }
       setReplyTarget(null);
       setRev((r) => r + 1);
@@ -369,7 +392,8 @@ export function ContactMessageThread({
           connectionId: mailbox.connectionId,
           maxResults: 25,
         });
-        if (!sync.ok && mailbox.status === "connected" && !options.silent) alert(sync.message);
+        if (!sync.ok && mailbox.status === "connected") setSyncNotice(sync.message);
+        else if (sync.ok) setSyncNotice(`Mailbox checked. ${sync.imported} new message${sync.imported === 1 ? "" : "s"}.`);
       }
       setRev((r) => r + 1);
       onChanged?.();
@@ -486,6 +510,13 @@ export function ContactMessageThread({
                       </div>
                       {row.subject && <div className="font-medium mb-0.5">{row.subject}</div>}
                       <RichMessageBody body={body} tenantId={tenantId} message={commRow} />
+                      {commRow && (
+                        <CommunicationDeliveryStatus
+                          communication={commRow}
+                          tenantId={tenantId}
+                          user={api.users.get(userId)}
+                        />
+                      )}
                       {attachments.length > 0 && (
                         <div className="mt-2 space-y-1.5">
                           {attachments.map((attachment) => (
@@ -562,6 +593,11 @@ export function ContactMessageThread({
             )}
           </div>
         </div>
+        {(syncNotice || deliveryNotice || (contactKind === "client" && !contact.email)) && (
+          <div className="border-t border-ink-100 bg-gold-50/60 px-3 py-2 text-xs text-gold-900">
+            {deliveryNotice ?? syncNotice ?? "No email address is on file. Messages will be delivered in the client portal."}
+          </div>
+        )}
         <MessageComposer
           replyTarget={replyTarget}
           onCancelReply={() => setReplyTarget(null)}

@@ -121,6 +121,37 @@ Required one-time production checks:
 2. Confirm the Vercel Cron job for `/api/mailboxes/poll` is visible and running in the Vercel project dashboard. The endpoint is protected by `CRON_SECRET` / `DIAG_TOKEN`. Vercel Hobby only allows daily cron runs; upgrade the project to Pro and change the schedule to `* * * * *` for near-real-time inbound mirroring.
 3. Use **Employee account settings -> Message-center mailbox -> Mailbox sync** to confirm read scope, token status, cursor presence, last poll counts, inbound count, and last error.
 
+### Messaging and cloud-sync production configuration
+
+Quotex keeps portal messaging and external email as two explicit delivery paths. A client portal message is stored in the tenant-scoped cloud snapshot and is visible to the client even when no email provider is available. External email is only shown as sent after Google, Microsoft, SendGrid, Resend, or SMTP confirms delivery. Failed email remains visible with its reason and a retry action.
+
+Required cloud-state variables:
+
+- `JWT_SECRET`
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY` (or `SUPABASE_SECRET_KEY`)
+- `SUPABASE_STATE_TABLE` (optional; defaults to the server's state table)
+- `VITE_STATE_SYNC_MODE=supabase`
+- `VITE_STATE_SYNC_ID` (use a stable production value)
+
+Configure at least one external email path:
+
+- Google or Microsoft mailbox: `MAILBOX_OAUTH_ENABLED=true`, `MAILBOX_TOKEN_ENCRYPTION_KEY`, and the corresponding client ID, client secret, redirect URI, and read/send scopes listed in `.env.example`.
+- SendGrid: `SENDGRID_API_KEY` plus `EMAIL_FROM` or `SENDGRID_FROM_EMAIL`.
+- Resend: `RESEND_API_KEY` plus `EMAIL_FROM` or `RESEND_FROM_EMAIL`.
+- SMTP: `SMTP_HOST`, `SMTP_USER`, `SMTP_PASS`, plus `EMAIL_FROM` or `SMTP_FROM_EMAIL`.
+
+Delivery behavior:
+
+| Configuration | Client portal message | External email | Inbound mailbox mirror |
+| --- | --- | --- | --- |
+| Cloud state only | Yes | No; portal delivery is labeled honestly | No |
+| Transactional provider | Yes | Yes | No |
+| Connected Google/Microsoft mailbox | Yes | Yes | Yes, with read scope and polling |
+| Both connected mailbox and transactional provider | Yes | Mailbox first, transactional fallback | Yes |
+
+The Messages page checks a connected mailbox immediately and every 60 seconds while mounted. The Vercel cron is a background safety net; on Vercel Hobby it remains daily, while Pro can use a one-minute schedule. Never use an in-process timer for production mailbox ingestion because serverless functions do not remain alive between requests.
+
 ---
 
 ## What's wired vs what's a placeholder

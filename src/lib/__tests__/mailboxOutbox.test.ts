@@ -25,6 +25,28 @@ async function mailboxFixture() {
 }
 
 describe("mailbox outbox", () => {
+  it("records a client portal delivery without creating a false email job", async () => {
+    const { api, agency, customer, user } = await mailboxFixture();
+
+    const message = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "outbound",
+      subject: "Portal update",
+      body: "Your secure portal has been updated.",
+      createdById: user.id,
+      emailDeliveryMode: "portal_only",
+    });
+
+    expect(message.deliveryStatus).toBe("synced");
+    expect(message.outboxJobId).toBeUndefined();
+    expect(api.mailboxOutbox.listByTenant(agency.id)).toHaveLength(0);
+    expect(api.communications.listByCustomer(customer.id)).toContainEqual(
+      expect.objectContaining({ id: message.id, deliveryStatus: "synced" })
+    );
+  });
+
   it("queues outbound app email and links the communication to the outbox job", async () => {
     const { api, agency, customer, user } = await mailboxFixture();
 

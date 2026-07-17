@@ -17,6 +17,54 @@ type LiveProviderResult = {
   fallbackReason?: string;
 };
 
+export type LiveMailboxCapability = {
+  mailboxConnected: boolean;
+  transactionalConfigured: boolean;
+  transactionalProvider: string;
+  missingEnvironmentVariables: string[];
+  acceptedConfigurations: string[][];
+};
+
+const capabilityCache = new Map<string, Promise<LiveMailboxCapability>>();
+
+export function getLiveMailboxCapability(input: {
+  tenantId: string;
+  user: User;
+  refresh?: boolean;
+}): Promise<LiveMailboxCapability> {
+  const key = `${input.tenantId}:${input.user.id}`;
+  if (input.refresh) capabilityCache.delete(key);
+  const cached = capabilityCache.get(key);
+  if (cached) return cached;
+  const request = fetch(`${apiBaseUrl()}/mailboxes/capability`, {
+    method: "GET",
+    headers: authHeaders(input.user, input.tenantId),
+  })
+    .then(async (response) => {
+      const json = (await response.json().catch(() => null)) as
+        | { ok: true; capability: LiveMailboxCapability }
+        | { ok: false; message?: string }
+        | null;
+      if (!response.ok || !json?.ok) {
+        throw new Error(
+          (json && "message" in json && json.message) ||
+            `Email delivery status could not be checked (${response.status}).`
+        );
+      }
+      return json.capability;
+    })
+    .catch((error) => {
+      capabilityCache.delete(key);
+      throw error;
+    });
+  capabilityCache.set(key, request);
+  return request;
+}
+
+export function capabilityCanSendEmail(capability: LiveMailboxCapability | null | undefined) {
+  return Boolean(capability?.mailboxConnected || capability?.transactionalConfigured);
+}
+
 export async function sendCommunicationThroughLiveMailbox(input: {
   tenantId: string;
   user: User;

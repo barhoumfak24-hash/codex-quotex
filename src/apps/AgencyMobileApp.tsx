@@ -13,6 +13,7 @@ import { CustomerAssetsPage } from "@/pages/customer/CustomerAssetsPage";
 import { CustomerClaimsPage } from "@/pages/customer/CustomerClaimsPage";
 import { CustomerDashboard } from "@/pages/customer/CustomerDashboard";
 import { CustomerDocumentsPage } from "@/pages/customer/CustomerDocumentsPage";
+import { CustomerMessagesPage } from "@/pages/customer/CustomerMessagesPage";
 import { CustomerPoliciesPage } from "@/pages/customer/CustomerPoliciesPage";
 import { CustomerPolicyPage } from "@/pages/customer/CustomerPolicyPage";
 import { CustomerSettingsPage } from "@/pages/customer/CustomerSettingsPage";
@@ -120,6 +121,7 @@ export function AgencyMobileApp() {
                 <Route path={routePath("/customer/assets/:assetId")} element={<CustomerAssetPage />} />
                 <Route path={routePath("/customer/documents")} element={<CustomerDocumentsPage />} />
                 <Route path={routePath("/customer/claims")} element={<CustomerClaimsPage />} />
+                <Route path={routePath("/customer/messages")} element={<CustomerMessagesPage />} />
                 <Route path={routePath("/customer/settings")} element={<CustomerSettingsPage />} />
                 <Route path={routePath("/customer/quote/new")} element={<QuoteFlowPage />} />
               </Route>

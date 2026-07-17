@@ -1,4 +1,4 @@
-import { ArrowLeft, Briefcase, FileText, Home, LifeBuoy, Settings, ShieldCheck, Sparkles } from "lucide-react";
+import { ArrowLeft, Briefcase, FileText, Home, LifeBuoy, MessageCircle, Settings, ShieldCheck, Sparkles } from "lucide-react";
 import { PortalShell } from "./PortalShell";
 import { useTenant } from "@/lib/tenant";
 
@@ -22,6 +22,7 @@ export function CustomerLayout() {
         { to: "/customer/policies", label: "Policies", icon: <ShieldCheck /> },
         { to: "/customer/documents", label: "Documents", icon: <FileText /> },
         { to: "/customer/claims", label: "Claims", icon: <LifeBuoy /> },
+        { to: "/customer/messages", label: "Messages", icon: <MessageCircle /> },
         { to: "/customer/quote/new", label: "Get a quote", icon: <Sparkles /> },
         { to: "/customer/settings", label: "Profile", icon: <Settings /> },
       ]}

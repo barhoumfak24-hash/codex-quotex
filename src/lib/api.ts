@@ -13945,12 +13945,17 @@ export const api = {
       }
       return created;
     },
-    create(input: Omit<Communication, "id" | "createdAt">): Communication {
+    create(
+      input: Omit<Communication, "id" | "createdAt"> & {
+        emailDeliveryMode?: "auto" | "portal_only";
+      }
+    ): Communication {
       // Auto-append the sender's personal email signature on every
       // outbound email. Centralized here so every composer in the
       // app (Messages page, inline Communications thread on detail
       // pages, agent reply UI, etc.) gets it for free — no per-
       // caller plumbing. SMS / inbound / no-signature passes through.
+      const { emailDeliveryMode = "auto", ...communicationInput } = input;
       const finalBody = applySenderEmailSignature(
         input.channel,
         input.direction,
@@ -13963,7 +13968,7 @@ export const api = {
           ? mailboxForUser(input.createdById)
           : {};
       const row: Communication = {
-        ...input,
+        ...communicationInput,
         body: finalBody,
         mailboxOrigin:
           input.mailboxOrigin ??
@@ -13974,12 +13979,18 @@ export const api = {
         id: uid("comm"),
         createdAt: nowIso(),
       };
-      const outboxJob = buildMailboxOutboxJob(row);
+      const outboxJob = emailDeliveryMode === "portal_only" ? null : buildMailboxOutboxJob(row);
       if (outboxJob) {
         row.outboxJobId = outboxJob.id;
         row.deliveryStatus = outboxJob.status === "failed" ? "failed" : "queued";
       } else if (row.channel === "email" && row.mailboxOrigin === "provider_sync") {
         row.deliveryStatus = row.direction === "inbound" ? "received" : "synced";
+      } else if (
+        row.channel === "email" &&
+        row.direction === "outbound" &&
+        emailDeliveryMode === "portal_only"
+      ) {
+        row.deliveryStatus = "synced";
       }
       db.insert("communications", row);
       if (outboxJob) {

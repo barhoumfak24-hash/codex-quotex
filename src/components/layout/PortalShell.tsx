@@ -338,8 +338,19 @@ function SyncStatusBanner({ compact = false }: { compact?: boolean }) {
 
   useEffect(() => subscribeToSyncStatus(setStatus), []);
 
-  const isRecovering = status.status === "error" && status.reason === "local_quota";
-  if (status.status !== "error" || isRecovering) return null;
+  const message =
+    status.reason === "not_configured"
+      ? "Cloud sync is not configured. Changes are only on this device."
+      : status.reason === "unauthorized"
+        ? "Your secure session expired. Sign in again to sync changes."
+        : status.reason === "too_large"
+          ? "A file is too large for cloud sync. Remove it or upload it to document storage."
+          : status.reason === "local_quota"
+            ? "This device is low on storage. Your cloud save will continue when space is available."
+            : "Cloud sync is temporarily unavailable. You can keep working while Quotex retries.";
+  const visible = status.status === "error" || status.status === "local-only" || status.reason === "unauthorized";
+  if (!visible) return null;
+  const canRetry = !["not_configured", "too_large", "local_quota", "unauthorized"].includes(status.reason ?? "");
 
   return (
     <div
@@ -349,9 +360,9 @@ function SyncStatusBanner({ compact = false }: { compact?: boolean }) {
       role="status"
     >
       <span className="min-w-0 truncate">
-        Changes are still syncing. You can keep working.
+        {message}
       </span>
-      <button
+      {canRetry && <button
         type="button"
         className="shrink-0 rounded border border-current/20 bg-white/60 px-2 py-1 text-[11px] font-bold"
         disabled={retrying}
@@ -365,7 +376,7 @@ function SyncStatusBanner({ compact = false }: { compact?: boolean }) {
         }}
       >
         {retrying ? "Retrying" : "Retry"}
-      </button>
+      </button>}
     </div>
   );
 }

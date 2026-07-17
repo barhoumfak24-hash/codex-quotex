@@ -1,5 +1,6 @@
-import { Link } from "react-router-dom";
-import { FileText, LifeBuoy, ShieldCheck, Sparkles } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
+import { FileText, LifeBuoy, MessageCircle, ShieldCheck, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Card, CardHeader, EmptyState, StatCard } from "@/components/ui/Card";
 import { Disclaimer } from "@/components/ui/Disclaimer";
@@ -9,8 +10,15 @@ import { api } from "@/lib/api";
 import { assetDisplayName } from "@/lib/assetDisplay";
 import { fmt } from "@/lib/format";
 import { useCustomer } from "@/lib/useCustomer";
+import { customerMessagesLastSeen, unreadCustomerMessageCount } from "@/lib/customerMessages";
+import { toSurfaceRoute } from "@/lib/appSurface";
+import { subscribeToDbChanges } from "@/lib/db";
 
 export function CustomerDashboard() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [, setRevision] = useState(0);
+  useEffect(() => subscribeToDbChanges(() => setRevision((value) => value + 1)), []);
   const customer = useCustomer();
   if (!customer) return null;
 
@@ -19,6 +27,8 @@ export function CustomerDashboard() {
   const claims = api.claims.listByCustomer(customer.id);
   const quoteRequests = api.quotes.listByCustomer(customer.id);
   const events = api.status.listFor({ customerId: customer.id }).filter((e) => e.visibility === "customer_visible");
+  const messages = api.communications.listByCustomer(customer.id);
+  const unreadMessages = unreadCustomerMessageCount(messages, customerMessagesLastSeen(customer.id));
   const upcomingRenewal = policies.find((p) => p.renewalStatus === "upcoming");
   const upcomingRenewalAsset = upcomingRenewal ? api.assets.get(upcomingRenewal.assetId) : undefined;
 
@@ -34,7 +44,7 @@ export function CustomerDashboard() {
         </Link>
       </div>
 
-      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-4">
         <StatCard
           label="Insured assets"
           value={assets.filter((a) => a.status === "insured").length}
@@ -56,6 +66,13 @@ export function CustomerDashboard() {
           value={claims.filter((c) => c.status !== "closed").length}
           hint={`${claims.length} on file`}
           icon={<LifeBuoy className="h-5 w-5" />}
+        />
+        <StatCard
+          label="Messages"
+          value={unreadMessages}
+          hint={unreadMessages === 1 ? "new message" : "new messages"}
+          icon={<MessageCircle className="h-5 w-5" />}
+          onClick={() => navigate(toSurfaceRoute("/customer/messages", location.pathname))}
         />
       </div>
 

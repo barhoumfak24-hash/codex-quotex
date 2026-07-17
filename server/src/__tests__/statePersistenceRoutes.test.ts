@@ -21,7 +21,7 @@ afterEach(() => {
 });
 
 describe("state persistence routes", () => {
-  it("denies customer sessions before reading an agency snapshot", async () => {
+  it("returns only the authenticated customer's snapshot", async () => {
     const supabaseFetch = vi.fn(async () => jsonResponse([stateRow()]));
     installSupabaseFetch(supabaseFetch);
 
@@ -29,13 +29,23 @@ describe("state persistence routes", () => {
       headers: authHeaders("customer", "agency_a", "customer_user_a"),
     });
 
-    expect(response.status).toBe(403);
-    expect(await response.json()).toEqual({ error: "forbidden" });
-    expect(supabaseFetch).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    const payload = await response.json();
+    expect(payload.scoped).toBe(true);
+    expect(payload.snapshot.customers.map((row: { id: string }) => row.id)).toEqual(["customer_a"]);
+    expect(payload.snapshot.communications.map((row: { id: string }) => row.id)).toEqual(["communication_a"]);
+    expect(payload.snapshot.users.every((row: { email?: string }) => row.email === undefined)).toBe(true);
   });
 
-  it("denies customer sessions before writing an agency snapshot", async () => {
-    const supabaseFetch = vi.fn(async () => jsonResponse([stateRow()]));
+  it("accepts a customer reply without replacing staff or other-customer messages", async () => {
+    const supabaseFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "GET") return jsonResponse([stateRow()]);
+      if (init?.method === "PATCH") {
+        const body = JSON.parse(String(init.body));
+        return jsonResponse([{ id: "app_state:default", ...body }]);
+      }
+      return jsonResponse([], 500);
+    });
     installSupabaseFetch(supabaseFetch);
 
     const response = await requestRoute(stateRoutes, "/default", {
@@ -44,12 +54,29 @@ describe("state persistence routes", () => {
         "content-type": "application/json",
         ...authHeaders("customer", "agency_a", "customer_user_a"),
       },
-      body: JSON.stringify({ baseRevision: 7, snapshot: { customers: [] } }),
+      body: JSON.stringify({
+        baseRevision: 7,
+        snapshot: {
+          communications: [
+            {
+              id: "communication_customer_reply",
+              tenantId: "agency_a",
+              customerId: "customer_a",
+              body: "Customer reply",
+            },
+          ],
+        },
+      }),
     });
 
-    expect(response.status).toBe(403);
-    expect(await response.json()).toEqual({ error: "forbidden" });
-    expect(supabaseFetch).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    const patchCall = supabaseFetch.mock.calls.find((call) => call[1]?.method === "PATCH");
+    const patchBody = JSON.parse(String(patchCall?.[1]?.body));
+    expect(patchBody.snapshot.communications.map((row: { id: string }) => row.id)).toEqual([
+      "communication_a",
+      "communication_b",
+      "communication_customer_reply",
+    ]);
   });
 
   it("rejects a stale tenant base revision without issuing a Supabase PATCH", async () => {
@@ -112,8 +139,8 @@ describe("state persistence routes", () => {
     expect(String(patchCall?.[0])).toContain("revision=eq.7");
     const patchBody = JSON.parse(String(patchCall?.[1]?.body));
     expect(patchBody.snapshot.customers).toEqual([
-      { id: "customer_a", tenantId: "agency_a", name: "Updated A" },
-      { id: "customer_b", tenantId: "agency_b", name: "Customer B" },
+      { id: "customer_a", userId: "customer_user_a", tenantId: "agency_a", name: "Updated A" },
+      { id: "customer_b", userId: "customer_user_b", tenantId: "agency_b", name: "Customer B" },
     ]);
   });
 });
@@ -274,8 +301,12 @@ function stateRow() {
         { id: "user_b", tenantId: "agency_b", role: "agent" },
       ],
       customers: [
-        { id: "customer_a", tenantId: "agency_a", name: "Customer A" },
-        { id: "customer_b", tenantId: "agency_b", name: "Customer B" },
+        { id: "customer_a", userId: "customer_user_a", tenantId: "agency_a", name: "Customer A" },
+        { id: "customer_b", userId: "customer_user_b", tenantId: "agency_b", name: "Customer B" },
+      ],
+      communications: [
+        { id: "communication_a", tenantId: "agency_a", customerId: "customer_a", body: "A" },
+        { id: "communication_b", tenantId: "agency_b", customerId: "customer_b", body: "B" },
       ],
       documents: [
         {

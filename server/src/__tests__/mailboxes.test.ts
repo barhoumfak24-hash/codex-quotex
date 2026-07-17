@@ -10,7 +10,15 @@ const mocks = vi.hoisted(() => ({
   listMailboxDiagnostics: vi.fn(),
   sendEmail: vi.fn(),
   emailDeliveryConfiguration: vi.fn(),
+  listMailboxConnections: vi.fn(),
 }));
+
+vi.mock("../services/mailboxOAuth.js", async () => {
+  const actual = await vi.importActual<typeof import("../services/mailboxOAuth.js")>(
+    "../services/mailboxOAuth.js"
+  );
+  return { ...actual, listMailboxConnections: mocks.listMailboxConnections };
+});
 
 vi.mock("../services/mailboxProvider.js", () => ({
   sendMailboxEmail: mocks.sendMailboxEmail,
@@ -40,11 +48,15 @@ beforeEach(() => {
   mocks.listMailboxDiagnostics.mockReset();
   mocks.sendEmail.mockReset();
   mocks.emailDeliveryConfiguration.mockReset();
+  mocks.listMailboxConnections.mockReset();
   mocks.emailDeliveryConfiguration.mockReturnValue({
     configured: true,
     provider: "sendgrid",
     from: "Quotex Insurance <verified@quotexinsurance.com>",
+    missingEnvironmentVariables: [],
+    acceptedConfigurations: [["SENDGRID_API_KEY", "EMAIL_FROM or SENDGRID_FROM_EMAIL"]],
   });
+  mocks.listMailboxConnections.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -52,6 +64,29 @@ afterEach(() => {
 });
 
 describe("mailbox delivery routes", () => {
+  it("reports the authenticated staff member's real email capability", async () => {
+    mocks.listMailboxConnections.mockResolvedValue([
+      { id: "mailbox_1", userId: "user_mail", status: "connected" },
+    ]);
+
+    const response = await getMailbox("/capability", staffToken());
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      capability: {
+        mailboxConnected: true,
+        transactionalConfigured: true,
+        transactionalProvider: "sendgrid",
+        missingEnvironmentVariables: [],
+      },
+    });
+    expect(mocks.listMailboxConnections).toHaveBeenCalledWith({
+      tenantId: "tenant_mail",
+      userId: "user_mail",
+    });
+  });
+
   it("requires a signed session before sending email", async () => {
     const response = await postMailbox("/send", validSendPayload());
 
@@ -280,6 +315,26 @@ async function postMailbox(path: string, payload: unknown, token?: string): Prom
         ...(token ? { authorization: `Bearer ${token}` } : {}),
       },
       body: JSON.stringify(payload),
+    });
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()));
+    });
+  }
+}
+
+async function getMailbox(path: string, token?: string): Promise<Response> {
+  const { mailboxesRoutes } = await import("../routes/mailboxes.js");
+  const app = express();
+  app.use(express.json());
+  app.use("/api/mailboxes", requireAuth, enforceTenantIsolation, mailboxesRoutes);
+  const server = app.listen(0);
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("Test server did not bind.");
+    return await fetch(`http://127.0.0.1:${address.port}/api/mailboxes${path}`, {
+      method: "GET",
+      headers: token ? { authorization: `Bearer ${token}` } : {},
     });
   } finally {
     await new Promise<void>((resolve, reject) => {
