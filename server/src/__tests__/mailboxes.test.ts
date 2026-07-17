@@ -132,70 +132,52 @@ describe("mailbox delivery routes", () => {
     );
   });
 
-  it("falls back to transactional delivery when the staff mailbox is not connected", async () => {
+  it("never falls back to a Quotex sender when the staff mailbox is not connected", async () => {
     mocks.sendMailboxEmail.mockRejectedValue(new Error("No connected mailbox was found for this staff account."));
-    mocks.sendEmail.mockResolvedValue({
-      id: "sendgrid_msg_1",
-      status: "sent",
-      provider: "sendgrid",
-      configured: true,
-    });
 
     const response = await postMailbox("/send", validSendPayload(), staffToken());
     const body = await response.json();
 
-    expect(response.status).toBe(200);
-    expect(body).toEqual({
-      ok: true,
-      result: {
-        provider: "transactional",
-        status: "sent",
-        externalMessageId: "sendgrid_msg_1",
-        fallbackReason: "No connected mailbox was found for this staff account.",
-      },
+    expect(response.status).toBe(409);
+    expect(body).toMatchObject({
+      ok: false,
+      error: "mailbox_connection_required",
+      message: "Connect your Google or Microsoft mailbox in Account settings before sending email.",
     });
-    expect(mocks.sendEmail).toHaveBeenCalledWith(
-      expect.objectContaining({
-        to: "client@example.com",
-        subject: "Hello from Quotex",
-        html: "<p>Hello client.</p>",
-        categories: ["mailbox-fallback", "user-portal"],
-      })
+    expect(mocks.sendEmail).not.toHaveBeenCalled();
+  });
+
+  it("passes the staff owner identity to the live mailbox provider", async () => {
+    mocks.sendMailboxEmail.mockResolvedValue({ provider: "microsoft", status: "sent" });
+
+    const response = await postMailbox("/send", validSendPayload(), staffToken());
+
+    expect(response.status).toBe(200);
+    expect(mocks.sendMailboxEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ ownerType: "staff", userId: "user_mail" })
     );
   });
 
-  it("returns a readable failure when no mailbox or transactional provider can deliver", async () => {
+  it("returns a readable failure when the staff mailbox cannot deliver", async () => {
     mocks.sendMailboxEmail.mockRejectedValue(new Error("No connected mailbox was found for this staff account."));
-    mocks.sendEmail.mockResolvedValue({
-      id: "email_not_configured_1",
-      status: "failed",
-      provider: "unconfigured",
-      configured: false,
-      error: "No email provider is configured.",
-    });
 
     const response = await postMailbox("/send", validSendPayload(), staffToken());
     const body = await response.json();
 
-    expect(response.status).toBe(502);
+    expect(response.status).toBe(409);
     expect(body).toMatchObject({
       ok: false,
-      error: "mailbox_send_failed",
-      message: "No email provider is configured.",
-      fallback: {
-        mailboxReason: "No connected mailbox was found for this staff account.",
-        provider: "unconfigured",
-        configured: false,
-      },
+      error: "mailbox_connection_required",
+      reason: "No connected mailbox was found for this staff account.",
     });
+    expect(mocks.sendEmail).not.toHaveBeenCalled();
   });
 
-  it("sends agency campaigns from the verified sender with the agency contact as reply-to", async () => {
-    mocks.sendEmail.mockResolvedValue({
-      id: "sendgrid_campaign_1",
+  it("sends agency campaigns through the connected agency mailbox", async () => {
+    mocks.sendMailboxEmail.mockResolvedValue({
+      externalMessageId: "gmail_campaign_1",
+      provider: "google",
       status: "sent",
-      provider: "sendgrid",
-      configured: true,
     });
 
     const response = await postMailbox(
@@ -214,30 +196,22 @@ describe("mailbox delivery routes", () => {
     expect(body).toMatchObject({
       ok: true,
       result: {
-        provider: "transactional",
+        provider: "google",
         status: "sent",
-        externalMessageId: "sendgrid_campaign_1",
+        externalMessageId: "gmail_campaign_1",
       },
     });
-    expect(mocks.sendMailboxEmail).not.toHaveBeenCalled();
-    expect(mocks.sendEmail).toHaveBeenCalledWith(
+    expect(mocks.sendMailboxEmail).toHaveBeenCalledWith(
       expect.objectContaining({
-        to: "client@example.com",
-        from: "Palm Coast Private Client <verified@quotexinsurance.com>",
-        replyTo: "contact@palmcoast.example",
-        categories: ["agency-marketing", "campaign"],
+        ownerType: "agency_marketing",
+        to: ["client@example.com"],
       })
     );
+    expect(mocks.sendEmail).not.toHaveBeenCalled();
   });
 
-  it("does not report an agency campaign as sent when the provider rejects it", async () => {
-    mocks.sendEmail.mockResolvedValue({
-      id: "sendgrid_campaign_failed_1",
-      status: "failed",
-      provider: "sendgrid",
-      configured: true,
-      error: "Provider rejected the campaign email.",
-    });
+  it("does not report an agency campaign as sent when its mailbox is not connected", async () => {
+    mocks.sendMailboxEmail.mockRejectedValue(new Error("No connected agency marketing mailbox was found."));
 
     const response = await postMailbox(
       "/send",
@@ -251,11 +225,13 @@ describe("mailbox delivery routes", () => {
     );
     const body = await response.json();
 
-    expect(response.status).toBe(502);
+    expect(response.status).toBe(409);
     expect(body).toMatchObject({
       ok: false,
-      message: "Provider rejected the campaign email.",
+      error: "mailbox_connection_required",
+      message: "Connect the agency main mailbox in Agency setup before sending campaigns.",
     });
+    expect(mocks.sendEmail).not.toHaveBeenCalled();
   });
 
   it("syncs provider messages through the same authenticated route", async () => {

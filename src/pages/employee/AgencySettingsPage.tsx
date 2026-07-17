@@ -43,6 +43,11 @@ import { subscribeToDbChanges } from "@/lib/db";
 import { fmt } from "@/lib/format";
 import { mailboxUrl, mailProviderLabel } from "@/lib/mailProvider";
 import {
+  listMailboxConnections,
+  startMailboxOAuth,
+  type MailboxOAuthProvider,
+} from "@/lib/mailboxOAuth";
+import {
   SOFTWARE_USER_MONTHLY_PRICE_USD,
   TIER_LIMITS,
   WEBSITE_APP_ADD_ON_OPTIONS,
@@ -51,6 +56,7 @@ import type {
   Agency,
   AssetType,
   Branch,
+  ConnectedMailbox,
   SecurityBan,
   SecurityIncident,
   SecurityIncidentSeverity,
@@ -871,7 +877,7 @@ export function AgencySettingsPage() {
           </p>
         </div>
         <AgencyProfileSummary agency={agency} />
-        <MarketingSenderCard agency={agency} editable={false} />
+        <MarketingSenderCard agency={agency} user={user} editable={false} />
         <AgencyLogoCard agency={agency} editable={false} />
         <BranchesCard
           agencyId={agency.id}
@@ -1283,6 +1289,7 @@ export function AgencySettingsPage() {
 
       <MarketingSenderCard
         agency={agency}
+        user={user}
         editable
         onChanged={() => setRev((r) => r + 1)}
       />
@@ -1678,19 +1685,68 @@ function AgencyProfileSummary({ agency }: { agency: Agency }) {
 
 function MarketingSenderCard({
   agency,
+  user,
   editable = false,
   onChanged,
 }: {
   agency: Agency;
+  user?: User | null;
   editable?: boolean;
   onChanged?: () => void;
 }) {
   const [notice, setNotice] = useState<string | null>(null);
-  const mailbox = api.mailboxes.agencyMarketing(agency.id);
+  const [error, setError] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState<MailboxOAuthProvider | null>(null);
+  const [serverMailbox, setServerMailbox] = useState<ConnectedMailbox | undefined>();
+  const localMailbox = api.mailboxes.agencyMarketing(agency.id);
+  const mailbox = serverMailbox ?? localMailbox;
   const sender = api.mailboxes.resolveAgencyMarketingSender(agency.id);
-  const address = sender.fromEmail ?? agency.contactEmail;
-  const provider = sender.provider ?? mailbox?.provider ?? "other";
+  const address = mailbox?.address ?? sender.fromEmail ?? agency.contactEmail;
+  const provider = mailbox?.provider ?? sender.provider ?? "other";
   const requirements = api.mailboxes.productionRequirements(mailbox);
+
+  useEffect(() => {
+    if (!user) return;
+    let active = true;
+    void listMailboxConnections({ user, tenantId: agency.id, mineOnly: false }).then((result) => {
+      if (!active) return;
+      if (!result.ok) {
+        setError(result.message ?? "Agency mailbox status could not be loaded.");
+        return;
+      }
+      const connected = result.connections.find(
+        (connection) => connection.ownerType === "agency_marketing" && connection.status === "connected"
+      );
+      setServerMailbox(connected);
+      setError(null);
+    });
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("mailbox") === "connected" && params.get("owner") === "agency_marketing") {
+      setNotice("Agency campaign mailbox connected. New campaigns will send from this address.");
+    }
+    return () => {
+      active = false;
+    };
+  }, [agency.id, user?.id]);
+
+  async function connect(providerName: MailboxOAuthProvider) {
+    if (!user || connecting) return;
+    setConnecting(providerName);
+    setError(null);
+    const result = await startMailboxOAuth({
+      provider: providerName,
+      user,
+      tenantId: agency.id,
+      ownerType: "agency_marketing",
+      redirectAfter: "/employee/settings",
+    });
+    if (!result.ok) {
+      setError(result.message ?? "Agency mailbox connection could not be started.");
+      setConnecting(null);
+      return;
+    }
+    window.location.assign(result.authorizationUrl);
+  }
 
   return (
     <Card>
@@ -1700,6 +1756,28 @@ function MarketingSenderCard({
           subtitle="Company campaigns send from the agency main contact email. Direct client, prospect, holder, and carrier emails send from the logged-in staff mailbox."
         />
         <div className="flex flex-wrap items-center gap-2">
+          {editable && user ? (
+            <>
+              <button
+                type="button"
+                className="btn-outline text-xs"
+                onClick={() => void connect("google")}
+                disabled={Boolean(connecting)}
+              >
+                {connecting === "google" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Mail className="h-3.5 w-3.5" />}
+                Connect Google
+              </button>
+              <button
+                type="button"
+                className="btn-outline text-xs"
+                onClick={() => void connect("microsoft")}
+                disabled={Boolean(connecting)}
+              >
+                {connecting === "microsoft" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Mail className="h-3.5 w-3.5" />}
+                Connect Microsoft
+              </button>
+            </>
+          ) : null}
           {address ? (
             <a
               className="btn-outline text-xs"
@@ -1716,6 +1794,18 @@ function MarketingSenderCard({
       {notice ? (
         <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
           {notice}
+        </div>
+      ) : null}
+
+      {error ? (
+        <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+          {error}
+        </div>
+      ) : null}
+
+      {editable && mailbox?.status !== "connected" ? (
+        <div className="mt-3 rounded-md border border-gold-200 bg-gold-50 px-3 py-2 text-sm text-ink-700">
+          Connect <strong>{agency.contactEmail}</strong>. Campaigns remain unsent until that exact agency mailbox is authorized.
         </div>
       ) : null}
 

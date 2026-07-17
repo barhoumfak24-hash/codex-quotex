@@ -8,14 +8,13 @@ export type LiveMailboxSendResult =
   | { ok: false; message: string };
 
 type LiveProviderResult = {
-  provider?: "google" | "microsoft" | "transactional";
+  provider?: "google" | "microsoft";
   status?: "sent";
   externalMessageId?: string;
   externalThreadId?: string;
   externalUrl?: string;
   rfc822MessageId?: string;
   messageIdHeader?: string;
-  fallbackReason?: string;
 };
 
 export type LiveMailboxCapability = {
@@ -63,7 +62,7 @@ export function getLiveMailboxCapability(input: {
 }
 
 export function capabilityCanSendEmail(capability: LiveMailboxCapability | null | undefined) {
-  return Boolean(capability?.mailboxConnected || capability?.transactionalConfigured);
+  return Boolean(capability?.mailboxConnected);
 }
 
 export async function sendCommunicationThroughLiveMailbox(input: {
@@ -299,6 +298,7 @@ type SyncedMailboxMessage = {
 function mailboxPayload(job: MailboxOutboxJob) {
   return {
     connectionId: job.mailboxConnectionId,
+    senderMode: "staff",
     to: job.to,
     cc: job.cc,
     bcc: job.bcc,

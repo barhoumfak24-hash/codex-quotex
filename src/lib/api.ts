@@ -2245,14 +2245,13 @@ function reconcileOutboxFromProviderMessage(row: Communication) {
 }
 
 type MailboxDeliveryProviderResult = {
-  provider?: "google" | "microsoft" | "transactional";
+  provider?: "google" | "microsoft";
   status?: "sent";
   externalMessageId?: string;
   externalThreadId?: string;
   externalUrl?: string;
   rfc822MessageId?: string;
   messageIdHeader?: string;
-  fallbackReason?: string;
 };
 
 const liveMailboxDeliveryInFlight = new Set<string>();
@@ -2348,9 +2347,7 @@ function markOutboxSentLocal(id: string, provider: MailboxDeliveryProviderResult
     providerThreadId: provider.externalThreadId ?? job.providerThreadId,
     providerUrl: provider.externalUrl ?? job.providerUrl,
     lastAttemptAt: nowIso(),
-    lastError: provider.fallbackReason
-      ? `Sent through transactional fallback: ${provider.fallbackReason}`
-      : undefined,
+    lastError: undefined,
     updatedAt: nowIso(),
   });
   if (updated) {
@@ -2384,6 +2381,7 @@ function markOutboxFailedLocal(id: string, error: string): MailboxOutboxJob | nu
 function mailboxSendPayload(job: MailboxOutboxJob) {
   return {
     connectionId: job.mailboxConnectionId,
+    senderMode: "staff",
     to: job.to,
     cc: job.cc,
     bcc: job.bcc,
@@ -2567,10 +2565,9 @@ function compactMarkdownBlocks(blocks: Array<string | undefined | null>): string
 }
 
 type MarketingCampaignDeliveryResult = {
-  provider?: "google" | "microsoft" | "transactional";
+  provider?: "google" | "microsoft";
   status?: "sent";
   externalMessageId?: string;
-  fallbackReason?: string;
 };
 
 async function deliverMarketingCampaignEmail(input: {
@@ -12776,7 +12773,7 @@ export const api = {
               deliveryStatus: "sent",
               sentAt: nowIso(),
               providerMessageId: result.result.externalMessageId,
-              deliveryError: result.result.fallbackReason,
+              deliveryError: undefined,
             });
             if (sender.status === "connected") markMailboxSent(sender.connectionId);
           } else {

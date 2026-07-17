@@ -10,7 +10,7 @@ import {
 } from "../services/mailboxOAuth.js";
 import { sendMailboxEmail } from "../services/mailboxProvider.js";
 import { listMailboxDiagnostics, listMailboxSyncStatus, syncMailboxMessages } from "../services/mailboxSync.js";
-import { emailDeliveryConfiguration, sendEmail } from "../services/email.js";
+import { emailDeliveryConfiguration } from "../services/email.js";
 
 export const mailboxesRoutes = Router();
 export const mailboxOAuthCallbackRoutes = Router();
@@ -18,6 +18,7 @@ export const mailboxOAuthCallbackRoutes = Router();
 const providerSchema = z.enum(["google", "microsoft"]);
 const startSchema = z.object({
   redirectAfter: z.string().optional(),
+  ownerType: z.enum(["staff", "agency_marketing"]).optional(),
 });
 const emailSchema = z.string().email();
 const attachmentSchema = z.object({
@@ -94,12 +95,20 @@ mailboxesRoutes.post("/oauth/:provider/start", async (req, res, next) => {
     const provider = parseProvider(req.params.provider);
     const parsed = startSchema.safeParse(req.body ?? {});
     if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+    const ownerType = parsed.data.ownerType ?? "staff";
+    if (
+      ownerType === "agency_marketing" &&
+      !["agency_owner", "agency_admin", "manager"].includes(req.auth.role)
+    ) {
+      return res.status(403).json({ ok: false, error: "manager_required" });
+    }
 
     const result = await createMailboxOAuthStart({
       provider,
       tenantId: req.auth.tenantId,
       userId: req.auth.userId,
       redirectAfter: parsed.data.redirectAfter,
+      ownerType,
     });
     res.status(result.ok ? 200 : 503).json(result);
   } catch (error) {
@@ -120,25 +129,25 @@ mailboxesRoutes.post("/send", async (req, res, next) => {
     const parsed = sendSchema.safeParse(req.body ?? {});
     if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
 
+    const ownerType = parsed.data.senderMode === "agency_marketing" ? "agency_marketing" : "staff";
     try {
-      if (parsed.data.senderMode === "agency_marketing" && !parsed.data.connectionId) {
-        const fallback = await sendWithTransactionalFallback(
-          parsed.data,
-          new Error("No connected agency marketing mailbox was selected.")
-        );
-        if (fallback.ok) return res.json(fallback);
-        return res.status(502).json(fallback);
-      }
       const result = await sendMailboxEmail({
         tenantId: req.auth.tenantId,
         userId: req.auth.userId,
+        ownerType,
         ...parsed.data,
       });
       return res.json({ ok: true, result });
     } catch (mailboxError) {
-      const fallback = await sendWithTransactionalFallback(parsed.data, mailboxError);
-      if (fallback.ok) return res.json(fallback);
-      return res.status(502).json(fallback);
+      return res.status(409).json({
+        ok: false,
+        error: "mailbox_connection_required",
+        message:
+          ownerType === "agency_marketing"
+            ? "Connect the agency main mailbox in Agency setup before sending campaigns."
+            : "Connect your Google or Microsoft mailbox in Account settings before sending email.",
+        reason: mailboxError instanceof Error ? mailboxError.message : "Mailbox delivery was unavailable.",
+      });
     }
   } catch (error) {
     if (error instanceof Error) {
@@ -203,81 +212,6 @@ mailboxesRoutes.get("/diagnostics", async (req, res, next) => {
   }
 });
 
-async function sendWithTransactionalFallback(
-  input: z.infer<typeof sendSchema>,
-  mailboxError: unknown
-): Promise<
-  | {
-      ok: true;
-      result: {
-        provider: "transactional";
-        status: "sent";
-        externalMessageId: string;
-        fallbackReason: string;
-      };
-    }
-  | { ok: false; error: "mailbox_send_failed"; message: string; fallback?: unknown }
-> {
-  const subject = input.subject?.trim() || "A message from Quotex Insurance";
-  const text = input.text?.trim() || stripHtml(input.html ?? "");
-  const html = input.html?.trim() || plainTextToHtml(text);
-  const fallbackReason = mailboxError instanceof Error ? mailboxError.message : "Mailbox provider send failed.";
-
-  const results = await Promise.all(
-    input.to.map((recipient) =>
-      sendEmail({
-        to: recipient,
-        from: transactionalFromFor(input),
-        subject,
-        text,
-        html,
-        replyTo: input.replyTo,
-        attachments: input.attachments,
-        categories:
-          input.senderMode === "agency_marketing"
-            ? ["agency-marketing", "campaign"]
-            : ["mailbox-fallback", "user-portal"],
-      })
-    )
-  );
-  const failed = results.find((result) => result.status !== "sent");
-  if (failed) {
-    return {
-      ok: false,
-      error: "mailbox_send_failed",
-      message:
-        failed.error ||
-        `Mailbox send failed (${fallbackReason}) and transactional fallback could not deliver.`,
-      fallback: {
-        mailboxReason: fallbackReason,
-        provider: failed.provider,
-        configured: failed.configured,
-      },
-    };
-  }
-
-  return {
-    ok: true,
-    result: {
-      provider: "transactional",
-      status: "sent",
-      externalMessageId: results.map((result) => result.id).join(","),
-      fallbackReason,
-    },
-  };
-}
-
-function transactionalFromFor(input: z.infer<typeof sendSchema>): string | undefined {
-  if (input.senderMode !== "agency_marketing" || !input.senderName) return undefined;
-  const configuredFrom = emailDeliveryConfiguration().from;
-  if (!configuredFrom) return undefined;
-  const address = configuredFrom.match(/<([^>]+)>/)?.[1] ?? configuredFrom;
-  const cleanAddress = address.trim();
-  if (!emailSchema.safeParse(cleanAddress).success) return undefined;
-  const cleanName = input.senderName.replace(/[\r\n<>]/g, " ").replace(/\s{2,}/g, " ").trim();
-  return cleanName ? `${cleanName} <${cleanAddress}>` : configuredFrom;
-}
-
 mailboxOAuthCallbackRoutes.get("/:provider/callback", async (req, res) => {
   const providerResult = providerSchema.safeParse(req.params.provider);
   const fallback = mailboxRedirectUrl("/employee/account-settings?mailbox=error");
@@ -296,7 +230,11 @@ mailboxOAuthCallbackRoutes.get("/:provider/callback", async (req, res) => {
       state: req.query.state,
     });
     const separator = result.redirectAfter.includes("?") ? "&" : "?";
-    res.redirect(mailboxRedirectUrl(`${result.redirectAfter}${separator}mailbox=connected&provider=${providerResult.data}`));
+    res.redirect(
+      mailboxRedirectUrl(
+        `${result.redirectAfter}${separator}mailbox=connected&provider=${providerResult.data}&owner=${result.connection.ownerType}`
+      )
+    );
   } catch {
     res.redirect(mailboxRedirectUrl(`/employee/account-settings?mailbox=error&provider=${providerResult.data}`));
   }
@@ -312,33 +250,4 @@ function mailboxRedirectUrl(path: string): string {
   const safePath = path.startsWith("/") && !path.startsWith("//") ? path : "/employee/account-settings";
   const origin = frontendOrigins()[0] ?? "http://localhost:5174";
   return `${origin.replace(/\/+$/, "")}${safePath}`;
-}
-
-function plainTextToHtml(value: string) {
-  return escapeHtml(value || "A message from Quotex Insurance.")
-    .split(/\n{2,}/)
-    .map((paragraph) => `<p>${paragraph.replace(/\n/g, "<br>")}</p>`)
-    .join("");
-}
-
-function stripHtml(value: string) {
-  return value
-    .replace(/<style[\s\S]*?<\/style>/gi, " ")
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/p>/gi, "\n\n")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/\s+\n/g, "\n")
-    .replace(/\n\s+/g, "\n")
-    .replace(/[ \t]{2,}/g, " ")
-    .trim();
-}
-
-function escapeHtml(value: string) {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
 }

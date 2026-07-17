@@ -19,7 +19,7 @@ beforeEach(async () => {
         JSON.stringify({
           ok: true,
           result: {
-            provider: "transactional",
+            provider: "google",
             status: "sent",
             externalMessageId: "campaign_provider_message_1",
           },

@@ -2,6 +2,7 @@ import { apiBaseUrl } from "@/lib/apiBase";
 import type { ConnectedMailbox, MailProvider, User } from "@/types";
 
 export type MailboxOAuthProvider = "google" | "microsoft";
+export type MailboxOAuthOwnerType = "staff" | "agency_marketing";
 
 export type MailboxOAuthStartResult =
   | {
@@ -52,12 +53,14 @@ export async function startMailboxOAuth(input: {
   user: User;
   tenantId: string;
   redirectAfter?: string;
+  ownerType?: MailboxOAuthOwnerType;
 }): Promise<MailboxOAuthStartResult> {
   const res = await fetch(`${apiBaseUrl()}/mailboxes/oauth/${input.provider}/start`, {
     method: "POST",
     headers: authHeaders(input.user, input.tenantId),
     body: JSON.stringify({
       redirectAfter: input.redirectAfter ?? "/employee/account-settings",
+      ownerType: input.ownerType ?? "staff",
     }),
   });
   const json = (await res.json().catch(() => null)) as MailboxOAuthStartResult | null;

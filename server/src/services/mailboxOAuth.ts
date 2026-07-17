@@ -3,6 +3,7 @@ import { Prisma } from "@prisma/client";
 import { databaseConfigured, prisma } from "./prisma.js";
 
 export type MailboxOAuthProvider = "google" | "microsoft";
+export type MailboxOAuthOwnerType = "staff" | "agency_marketing";
 
 type ProviderConfig = {
   provider: MailboxOAuthProvider;
@@ -19,6 +20,7 @@ type OAuthStateRow = {
   tenant_id: string;
   user_id: string;
   provider: string;
+  owner_type: string;
   redirect_after: string | null;
   code_verifier: string;
   expires_at: Date;
@@ -62,6 +64,7 @@ export async function createMailboxOAuthStart(input: {
   tenantId: string;
   userId: string;
   redirectAfter?: string;
+  ownerType?: MailboxOAuthOwnerType;
 }) {
   assertMailboxOAuthEnabled();
   if (!databaseConfigured()) {
@@ -78,6 +81,7 @@ export async function createMailboxOAuthStart(input: {
   const codeChallenge = base64Url(createHash("sha256").update(codeVerifier).digest());
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
   const redirectAfter = safeRedirectAfter(input.redirectAfter);
+  const ownerType = input.ownerType ?? "staff";
 
   await prisma.$executeRaw`
     INSERT INTO mailbox_oauth_states (
@@ -85,6 +89,7 @@ export async function createMailboxOAuthStart(input: {
       tenant_id,
       user_id,
       provider,
+      owner_type,
       redirect_after,
       code_verifier,
       expires_at
@@ -94,6 +99,7 @@ export async function createMailboxOAuthStart(input: {
       ${input.tenantId},
       ${input.userId},
       ${input.provider},
+      ${ownerType},
       ${redirectAfter},
       ${codeVerifier},
       ${expiresAt}
@@ -103,6 +109,7 @@ export async function createMailboxOAuthStart(input: {
       tenant_id = excluded.tenant_id,
       user_id = excluded.user_id,
       provider = excluded.provider,
+      owner_type = excluded.owner_type,
       redirect_after = excluded.redirect_after,
       code_verifier = excluded.code_verifier,
       expires_at = excluded.expires_at
@@ -140,7 +147,7 @@ export async function completeMailboxOAuth(input: {
   assertMailboxOAuthEnabled();
   const config = providerConfig(input.provider);
   const rows = await prisma.$queryRaw<OAuthStateRow[]>`
-    SELECT state, tenant_id, user_id, provider, redirect_after, code_verifier, expires_at
+    SELECT state, tenant_id, user_id, provider, owner_type, redirect_after, code_verifier, expires_at
     FROM mailbox_oauth_states
     WHERE state = ${input.state}
       AND provider = ${input.provider}
@@ -156,8 +163,36 @@ export async function completeMailboxOAuth(input: {
   const token = await exchangeCodeForToken(config, input.code, oauthState.code_verifier);
   if (!token.access_token) throw new Error(token.error_description ?? token.error ?? "Token exchange failed.");
   const profile = await readProviderProfile(input.provider, token.access_token);
+  const ownerType: MailboxOAuthOwnerType =
+    oauthState.owner_type === "agency_marketing" ? "agency_marketing" : "staff";
+  const expectedAddress =
+    ownerType === "agency_marketing"
+      ? (await prisma.$queryRaw<Array<{ email: string }>>`
+      SELECT contact_email AS email
+      FROM agencies
+      WHERE id = ${oauthState.tenant_id}
+      LIMIT 1
+    `.then((rows) => rows[0]?.email?.trim().toLowerCase()))
+      : (await prisma.$queryRaw<Array<{ email: string }>>`
+      SELECT email
+      FROM users
+      WHERE id = ${oauthState.user_id}
+        AND tenant_id = ${oauthState.tenant_id}
+      LIMIT 1
+    `.then((rows) => rows[0]?.email?.trim().toLowerCase()));
+  if (!expectedAddress || profile.email.trim().toLowerCase() !== expectedAddress) {
+    await deleteOAuthState(oauthState.state);
+    throw new Error(
+      expectedAddress
+        ? `Connect the mailbox used for this ${ownerType === "agency_marketing" ? "agency" : "staff"} account (${expectedAddress}).`
+        : `Set the ${ownerType === "agency_marketing" ? "agency contact" : "staff account"} email before connecting its mailbox.`
+    );
+  }
   const now = new Date();
-  const connectionId = `mailbox_${input.provider}_${oauthState.tenant_id}_${oauthState.user_id}`;
+  const connectionId =
+    ownerType === "agency_marketing"
+      ? `mailbox_${input.provider}_${oauthState.tenant_id}_agency_marketing`
+      : `mailbox_${input.provider}_${oauthState.tenant_id}_${oauthState.user_id}`;
   const vaultId = `mailbox_token_${connectionId}`;
   const tokenVaultRef = `mailbox-token:${vaultId}`;
   const expiresAt =
@@ -200,8 +235,8 @@ export async function completeMailboxOAuth(input: {
       VALUES (
         ${connectionId},
         ${oauthState.tenant_id},
-        ${oauthState.user_id},
-        ${"staff"},
+        ${ownerType === "staff" ? oauthState.user_id : null},
+        ${ownerType},
         ${input.provider},
         ${profile.email},
         ${profile.displayName ?? profile.email},
@@ -270,7 +305,8 @@ export async function completeMailboxOAuth(input: {
     connection: {
       id: connectionId,
       tenantId: oauthState.tenant_id,
-      userId: oauthState.user_id,
+      userId: ownerType === "staff" ? oauthState.user_id : null,
+      ownerType,
       provider: input.provider,
       address: profile.email,
       displayName: profile.displayName ?? profile.email,

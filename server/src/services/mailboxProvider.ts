@@ -12,6 +12,7 @@ export type MailboxSendAttachment = {
 export type MailboxSendInput = {
   tenantId: string;
   userId: string;
+  ownerType?: "staff" | "agency_marketing";
   connectionId?: string;
   to: string[];
   cc?: string[];
@@ -80,6 +81,7 @@ type MailboxConnectionLookupInput = {
   tenantId: string;
   userId: string;
   connectionId?: string;
+  ownerType?: "staff" | "agency_marketing";
 };
 
 type MicrosoftMessageMetadata = {
@@ -141,13 +143,34 @@ export async function writeMailboxSyncCursor(
 }
 
 async function resolveMailboxConnection(input: MailboxConnectionLookupInput): Promise<MailboxConnectionRow> {
+  const ownerType = input.ownerType ?? "staff";
   const rows = input.connectionId
-    ? await prisma.$queryRaw<MailboxConnectionRow[]>`
+    ? ownerType === "agency_marketing"
+      ? await prisma.$queryRaw<MailboxConnectionRow[]>`
         SELECT id, tenant_id, user_id, provider, address, status, token_vault_ref
         FROM mailbox_connections
         WHERE id = ${input.connectionId}
           AND tenant_id = ${input.tenantId}
-          AND (user_id = ${input.userId} OR owner_type = 'agency_marketing')
+          AND owner_type = 'agency_marketing'
+        LIMIT 1
+      `
+      : await prisma.$queryRaw<MailboxConnectionRow[]>`
+        SELECT id, tenant_id, user_id, provider, address, status, token_vault_ref
+        FROM mailbox_connections
+        WHERE id = ${input.connectionId}
+          AND tenant_id = ${input.tenantId}
+          AND user_id = ${input.userId}
+          AND owner_type = 'staff'
+        LIMIT 1
+      `
+    : ownerType === "agency_marketing"
+    ? await prisma.$queryRaw<MailboxConnectionRow[]>`
+        SELECT id, tenant_id, user_id, provider, address, status, token_vault_ref
+        FROM mailbox_connections
+        WHERE tenant_id = ${input.tenantId}
+          AND owner_type = 'agency_marketing'
+          AND status = 'connected'
+        ORDER BY updated_at DESC
         LIMIT 1
       `
     : await prisma.$queryRaw<MailboxConnectionRow[]>`
@@ -162,7 +185,13 @@ async function resolveMailboxConnection(input: MailboxConnectionLookupInput): Pr
       `;
 
   const connection = rows[0];
-  if (!connection) throw new Error("No connected mailbox was found for this staff account.");
+  if (!connection) {
+    throw new Error(
+      ownerType === "agency_marketing"
+        ? "No connected agency marketing mailbox was found."
+        : "No connected mailbox was found for this staff account."
+    );
+  }
   if (!connection.token_vault_ref) throw new Error("Connected mailbox is missing its encrypted token reference.");
   return connection;
 }

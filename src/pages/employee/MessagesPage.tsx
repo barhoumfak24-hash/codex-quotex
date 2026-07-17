@@ -680,7 +680,7 @@ export function MessagesPage() {
         <div className="rounded-md border border-gold-200 bg-gold-50/60 px-4 py-3 text-xs text-gold-900">
           {mailboxCapabilityError
             ? `Email delivery status could not be verified: ${mailboxCapabilityError}`
-            : "External email is not configured for this account. Client messages will still be delivered in the Quotex portal; carrier, prospect, and holder email requires a connected Google/Microsoft mailbox or a configured transactional email provider."}
+            : "Connect your Google or Microsoft mailbox in Account settings before sending email. Messages are never sent from a Quotex address on your behalf."}
         </div>
       )}
 

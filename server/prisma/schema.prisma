@@ -358,6 +358,7 @@ model MailboxOauthState {
   tenantId      String   @map("tenant_id") @db.Text
   userId        String   @map("user_id") @db.Text
   provider      String   @db.Text
+  ownerType     String   @default("staff") @map("owner_type") @db.Text
   redirectAfter String?  @map("redirect_after") @db.Text
   codeVerifier  String   @map("code_verifier") @db.Text
   expiresAt     DateTime @map("expires_at")
