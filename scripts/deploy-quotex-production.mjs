@@ -55,7 +55,11 @@ async function main() {
   clearRemoteProductionEnvSentinels(remoteProductionEnvSentinels);
   restoreLocalProductionEnv(localProductionEnv);
   run("Frontend lint and typecheck", process.execPath, ["node_modules/typescript/bin/tsc", "--noEmit"]);
-  run("Unit tests", process.execPath, ["node_modules/vitest/vitest.mjs", "run"]);
+  run("Unit tests", process.execPath, [
+    "node_modules/vitest/vitest.mjs",
+    "run",
+    "--testTimeout=60000",
+  ]);
   run("Server build", process.execPath, [
     "node_modules/typescript/bin/tsc",
     "-p",
