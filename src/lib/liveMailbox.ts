@@ -8,13 +8,14 @@ export type LiveMailboxSendResult =
   | { ok: false; message: string };
 
 type LiveProviderResult = {
-  provider?: "google" | "microsoft";
+  provider?: "google" | "microsoft" | "transactional";
   status?: "sent";
   externalMessageId?: string;
   externalThreadId?: string;
   externalUrl?: string;
   rfc822MessageId?: string;
   messageIdHeader?: string;
+  fallbackReason?: string;
 };
 
 export type LiveMailboxCapability = {
@@ -65,7 +66,7 @@ export function getLiveMailboxCapability(input: {
 }
 
 export function capabilityCanSendEmail(capability: LiveMailboxCapability | null | undefined) {
-  return Boolean(capability?.mailboxConnected);
+  return Boolean(capability?.mailboxConnected || capability?.transactionalConfigured);
 }
 
 export async function sendCommunicationThroughLiveMailbox(input: {
@@ -92,7 +93,7 @@ export async function sendCommunicationThroughLiveMailbox(input: {
     const response = await fetch(`${apiBaseUrl()}/mailboxes/send`, {
       method: "POST",
       headers: authHeaders(input.user, input.tenantId),
-      body: JSON.stringify(mailboxPayload(job)),
+      body: JSON.stringify(mailboxPayload(job, input.user)),
     });
     const json = (await response.json().catch(() => null)) as
       | { ok: true; result: LiveProviderResult }
@@ -338,10 +339,11 @@ type SyncedMailboxMessage = {
   direction?: "inbound" | "outbound";
 };
 
-function mailboxPayload(job: MailboxOutboxJob) {
+function mailboxPayload(job: MailboxOutboxJob, user: User) {
   return {
     connectionId: job.mailboxConnectionId,
     senderMode: "staff",
+    senderName: user.name || [user.firstName, user.lastName].filter(Boolean).join(" ") || undefined,
     to: job.to,
     cc: job.cc,
     bcc: job.bcc,

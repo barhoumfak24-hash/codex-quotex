@@ -11,6 +11,9 @@ const mocks = vi.hoisted(() => ({
   sendEmail: vi.fn(),
   emailDeliveryConfiguration: vi.fn(),
   listMailboxConnections: vi.fn(),
+  isMailboxFallbackSafeError: vi.fn(),
+  userFindFirst: vi.fn(),
+  agencyFindFirst: vi.fn(),
 }));
 
 vi.mock("../services/mailboxOAuth.js", async () => {
@@ -22,6 +25,14 @@ vi.mock("../services/mailboxOAuth.js", async () => {
 
 vi.mock("../services/mailboxProvider.js", () => ({
   sendMailboxEmail: mocks.sendMailboxEmail,
+  isMailboxFallbackSafeError: mocks.isMailboxFallbackSafeError,
+}));
+
+vi.mock("../services/prisma.js", () => ({
+  prisma: {
+    user: { findFirst: mocks.userFindFirst },
+    agency: { findFirst: mocks.agencyFindFirst },
+  },
 }));
 
 vi.mock("../services/mailboxSync.js", () => ({
@@ -49,6 +60,9 @@ beforeEach(() => {
   mocks.sendEmail.mockReset();
   mocks.emailDeliveryConfiguration.mockReset();
   mocks.listMailboxConnections.mockReset();
+  mocks.isMailboxFallbackSafeError.mockReset();
+  mocks.userFindFirst.mockReset();
+  mocks.agencyFindFirst.mockReset();
   mocks.emailDeliveryConfiguration.mockReturnValue({
     configured: true,
     provider: "sendgrid",
@@ -57,6 +71,12 @@ beforeEach(() => {
     acceptedConfigurations: [["SENDGRID_API_KEY", "EMAIL_FROM or SENDGRID_FROM_EMAIL"]],
   });
   mocks.listMailboxConnections.mockResolvedValue([]);
+  mocks.isMailboxFallbackSafeError.mockReturnValue(true);
+  mocks.userFindFirst.mockResolvedValue({ name: "Abe Fakhoury", email: "abe@example.com" });
+  mocks.agencyFindFirst.mockResolvedValue({
+    name: "Palm Coast Private Client",
+    contactEmail: "contact@palmcoast.example",
+  });
 });
 
 afterEach(() => {
@@ -132,17 +152,80 @@ describe("mailbox delivery routes", () => {
     );
   });
 
-  it("never falls back to a Quotex sender when the staff mailbox is not connected", async () => {
+  it("falls back to the configured transactional provider when the staff mailbox is not connected", async () => {
     mocks.sendMailboxEmail.mockRejectedValue(new Error("No connected mailbox was found for this staff account."));
+    mocks.sendEmail.mockResolvedValue({
+      id: "sendgrid_staff_1",
+      provider: "sendgrid",
+      status: "sent",
+      configured: true,
+    });
 
     const response = await postMailbox("/send", validSendPayload(), staffToken());
     const body = await response.json();
 
-    expect(response.status).toBe(409);
+    expect(response.status).toBe(200);
     expect(body).toMatchObject({
+      ok: true,
+      result: {
+        provider: "transactional",
+        status: "sent",
+        externalMessageId: "sendgrid_staff_1",
+      },
+    });
+    expect(mocks.sendEmail).toHaveBeenCalledWith({
+      to: ["client@example.com"],
+      cc: [],
+      bcc: [],
+      from: "Abe Fakhoury <verified@quotexinsurance.com>",
+      subject: "Hello from Quotex",
+      text: "Hello client.",
+      html: "<p>Hello client.</p>",
+      replyTo: "abe@example.com",
+      headers: undefined,
+      attachments: validSendPayload().attachments,
+      categories: ["mailbox-fallback", "user-portal"],
+    });
+  });
+
+  it("derives the transactional sender from the authenticated staff record", async () => {
+    mocks.sendMailboxEmail.mockRejectedValue(new Error("No connected mailbox was found for this staff account."));
+    mocks.sendEmail.mockResolvedValue({
+      id: "sendgrid_staff_identity",
+      provider: "sendgrid",
+      status: "sent",
+      configured: true,
+    });
+
+    const response = await postMailbox(
+      "/send",
+      { ...validSendPayload(), senderName: "Spoofed Name", replyTo: "attacker@example.com" },
+      staffToken()
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.userFindFirst).toHaveBeenCalledWith({
+      where: { id: "user_mail", tenantId: "tenant_mail", status: "active" },
+      select: { name: true, email: true },
+    });
+    expect(mocks.sendEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        from: "Abe Fakhoury <verified@quotexinsurance.com>",
+        replyTo: "abe@example.com",
+      })
+    );
+  });
+
+  it("does not retry transactionally when mailbox delivery is uncertain", async () => {
+    mocks.sendMailboxEmail.mockRejectedValue(new Error("Mailbox request timed out after submission."));
+    mocks.isMailboxFallbackSafeError.mockReturnValue(false);
+
+    const response = await postMailbox("/send", validSendPayload(), staffToken());
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toMatchObject({
       ok: false,
-      error: "mailbox_connection_required",
-      message: "Connect your Google or Microsoft mailbox in Account settings before sending email.",
+      error: "mailbox_delivery_unconfirmed",
     });
     expect(mocks.sendEmail).not.toHaveBeenCalled();
   });
@@ -158,19 +241,26 @@ describe("mailbox delivery routes", () => {
     );
   });
 
-  it("returns a readable failure when the staff mailbox cannot deliver", async () => {
+  it("returns a readable failure only when both mailbox and transactional delivery fail", async () => {
     mocks.sendMailboxEmail.mockRejectedValue(new Error("No connected mailbox was found for this staff account."));
+    mocks.sendEmail.mockResolvedValue({
+      id: "sendgrid_failed_1",
+      provider: "sendgrid",
+      status: "failed",
+      configured: true,
+      error: "Provider unavailable.",
+    });
 
     const response = await postMailbox("/send", validSendPayload(), staffToken());
     const body = await response.json();
 
-    expect(response.status).toBe(409);
+    expect(response.status).toBe(502);
     expect(body).toMatchObject({
       ok: false,
-      error: "mailbox_connection_required",
-      reason: "No connected mailbox was found for this staff account.",
+      error: "mailbox_send_failed",
+      message: "Provider unavailable.",
     });
-    expect(mocks.sendEmail).not.toHaveBeenCalled();
+    expect(mocks.sendEmail).toHaveBeenCalledTimes(1);
   });
 
   it("sends agency campaigns through the connected agency mailbox", async () => {
@@ -210,8 +300,14 @@ describe("mailbox delivery routes", () => {
     expect(mocks.sendEmail).not.toHaveBeenCalled();
   });
 
-  it("does not report an agency campaign as sent when its mailbox is not connected", async () => {
+  it("sends an agency campaign through the transactional provider when its mailbox is not connected", async () => {
     mocks.sendMailboxEmail.mockRejectedValue(new Error("No connected agency marketing mailbox was found."));
+    mocks.sendEmail.mockResolvedValue({
+      id: "sendgrid_campaign_1",
+      provider: "sendgrid",
+      status: "sent",
+      configured: true,
+    });
 
     const response = await postMailbox(
       "/send",
@@ -225,13 +321,26 @@ describe("mailbox delivery routes", () => {
     );
     const body = await response.json();
 
-    expect(response.status).toBe(409);
+    expect(response.status).toBe(200);
     expect(body).toMatchObject({
-      ok: false,
-      error: "mailbox_connection_required",
-      message: "Connect the agency main mailbox in Agency setup before sending campaigns.",
+      ok: true,
+      result: {
+        provider: "transactional",
+        status: "sent",
+        externalMessageId: "sendgrid_campaign_1",
+      },
     });
-    expect(mocks.sendEmail).not.toHaveBeenCalled();
+    expect(mocks.sendEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        from: "Palm Coast Private Client <verified@quotexinsurance.com>",
+        replyTo: "contact@palmcoast.example",
+        categories: ["agency-marketing", "campaign"],
+      })
+    );
+    expect(mocks.agencyFindFirst).toHaveBeenCalledWith({
+      where: { id: "tenant_mail", active: true },
+      select: { name: true, contactEmail: true },
+    });
   });
 
   it("syncs provider messages through the same authenticated route", async () => {
@@ -330,12 +439,14 @@ function staffToken() {
 
 function validSendPayload() {
   return {
+    senderName: "Abe Fakhoury",
     to: ["client@example.com"],
     cc: [],
     bcc: [],
     subject: "Hello from Quotex",
     html: "<p>Hello client.</p>",
     text: "Hello client.",
+    replyTo: "abe@example.com",
     attachments: [
       {
         fileName: "quote.pdf",

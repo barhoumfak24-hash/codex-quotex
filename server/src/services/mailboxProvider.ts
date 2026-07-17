@@ -94,15 +94,28 @@ type MicrosoftMessageMetadata = {
 
 const MICROSOFT_IMMUTABLE_ID_PREFERENCE = 'IdType="ImmutableId"';
 
-export async function sendMailboxEmail(input: MailboxSendInput): Promise<MailboxSendResult> {
-  if (input.to.length === 0) throw new Error("At least one recipient is required.");
-  const connection = await resolveMailboxConnection(input);
-  if (connection.status !== "connected") {
-    throw new Error("Mailbox is not connected. Reconnect the staff mailbox before live sending.");
-  }
+export class MailboxFallbackSafeError extends Error {
+  readonly fallbackSafe = true;
+}
 
-  const token = await readMailboxToken(connection);
-  const freshToken = await ensureFreshToken(connection, token);
+export function isMailboxFallbackSafeError(error: unknown): error is MailboxFallbackSafeError {
+  return error instanceof MailboxFallbackSafeError;
+}
+
+export async function sendMailboxEmail(input: MailboxSendInput): Promise<MailboxSendResult> {
+  if (input.to.length === 0) throw new MailboxFallbackSafeError("At least one recipient is required.");
+  let connection: MailboxConnectionRow;
+  let freshToken: TokenPayload;
+  try {
+    connection = await resolveMailboxConnection(input);
+    if (connection.status !== "connected") {
+      throw new Error("Mailbox is not connected. Reconnect the staff mailbox before live sending.");
+    }
+    const token = await readMailboxToken(connection);
+    freshToken = await ensureFreshToken(connection, token);
+  } catch (error) {
+    throw new MailboxFallbackSafeError(error instanceof Error ? error.message : "Mailbox is unavailable.");
+  }
 
   if (freshToken.provider === "google") {
     return sendGoogleMail(connection, freshToken, input);
@@ -110,7 +123,7 @@ export async function sendMailboxEmail(input: MailboxSendInput): Promise<Mailbox
   if (freshToken.provider === "microsoft") {
     return sendMicrosoftMail(connection, freshToken, input);
   }
-  throw new Error(`Unsupported mailbox provider: ${connection.provider}.`);
+  throw new MailboxFallbackSafeError(`Unsupported mailbox provider: ${connection.provider}.`);
 }
 
 export async function readFreshMailboxToken(input: MailboxConnectionLookupInput): Promise<{
@@ -311,14 +324,14 @@ async function sendGoogleMail(
   const json = (await safeJson(res)) as { id?: string; threadId?: string; error?: { message?: string } } | null;
   if (!res.ok || !json?.id) {
     const message = json?.error?.message ?? `Gmail send failed with ${res.status}.`;
-    await markConnectionError(connection.id, message);
-    throw new Error(message);
+    await markConnectionError(connection.id, message).catch(() => undefined);
+    throw new MailboxFallbackSafeError(message);
   }
 
   const sentMetadata = await readGmailMessageMetadata(json.id, connection.address, token.accessToken).catch(() => null);
   const messageIdHeader = sentMetadata?.messageIdHeader;
 
-  await markConnectionSent(connection.id);
+  await markConnectionSent(connection.id).catch(() => undefined);
   return {
     provider: "google",
     status: "sent",
@@ -360,8 +373,8 @@ async function sendMicrosoftMail(
     | null;
   if (!createRes.ok || !created?.id) {
     const message = created?.error?.message ?? `Microsoft draft creation failed with ${createRes.status}.`;
-    await markConnectionError(connection.id, message);
-    throw new Error(message);
+    await markConnectionError(connection.id, message).catch(() => undefined);
+    throw new MailboxFallbackSafeError(message);
   }
 
   const sendRes = await fetch(`https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(created.id)}/send`, {
@@ -374,12 +387,12 @@ async function sendMicrosoftMail(
   if (!sendRes.ok) {
     const json = (await safeJson(sendRes)) as { error?: { message?: string } } | null;
     const message = json?.error?.message ?? `Microsoft send failed with ${sendRes.status}.`;
-    await markConnectionError(connection.id, message);
-    throw new Error(message);
+    await markConnectionError(connection.id, message).catch(() => undefined);
+    throw new MailboxFallbackSafeError(message);
   }
 
   const sent = await readMicrosoftSentMessage(created.id, token.accessToken).catch(() => null);
-  await markConnectionSent(connection.id);
+  await markConnectionSent(connection.id).catch(() => undefined);
   return {
     provider: "microsoft",
     status: "sent",

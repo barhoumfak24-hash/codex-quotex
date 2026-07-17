@@ -29,6 +29,20 @@ async function mailboxFixture() {
 }
 
 describe("mailbox outbox", () => {
+  it("treats a configured transactional provider as live email capability", async () => {
+    const { capabilityCanSendEmail } = await import("../liveMailbox");
+
+    expect(
+      capabilityCanSendEmail({
+        mailboxConnected: false,
+        transactionalConfigured: true,
+        transactionalProvider: "sendgrid",
+        missingEnvironmentVariables: [],
+        acceptedConfigurations: [],
+      })
+    ).toBe(true);
+  });
+
   it("records a client portal delivery without creating a false email job", async () => {
     const { api, agency, customer, user } = await mailboxFixture();
 
@@ -118,7 +132,11 @@ describe("mailbox outbox", () => {
       })
     );
     const request = fetchSpy.mock.calls[0]?.[1];
-    expect(JSON.parse(String(request?.body))).toMatchObject({ replyTo: user.businessEmail ?? user.email });
+    expect(JSON.parse(String(request?.body))).toMatchObject({
+      senderMode: "staff",
+      senderName: user.name,
+      replyTo: user.businessEmail ?? user.email,
+    });
   });
 
   it("automatically retries a failed mailbox delivery and marks it sent", async () => {

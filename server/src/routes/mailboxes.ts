@@ -8,9 +8,10 @@ import {
   mailboxOAuthReadiness,
   type MailboxOAuthProvider,
 } from "../services/mailboxOAuth.js";
-import { sendMailboxEmail } from "../services/mailboxProvider.js";
+import { isMailboxFallbackSafeError, sendMailboxEmail } from "../services/mailboxProvider.js";
 import { listMailboxDiagnostics, listMailboxSyncStatus, syncMailboxMessages } from "../services/mailboxSync.js";
-import { emailDeliveryConfiguration } from "../services/email.js";
+import { emailDeliveryConfiguration, sendEmail } from "../services/email.js";
+import { prisma } from "../services/prisma.js";
 
 export const mailboxesRoutes = Router();
 export const mailboxOAuthCallbackRoutes = Router();
@@ -130,6 +131,12 @@ mailboxesRoutes.post("/send", async (req, res, next) => {
     if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
 
     const ownerType = parsed.data.senderMode === "agency_marketing" ? "agency_marketing" : "staff";
+    if (
+      ownerType === "agency_marketing" &&
+      !["agency_owner", "agency_admin", "manager"].includes(req.auth.role)
+    ) {
+      return res.status(403).json({ ok: false, error: "manager_required" });
+    }
     try {
       const result = await sendMailboxEmail({
         tenantId: req.auth.tenantId,
@@ -139,15 +146,21 @@ mailboxesRoutes.post("/send", async (req, res, next) => {
       });
       return res.json({ ok: true, result });
     } catch (mailboxError) {
-      return res.status(409).json({
-        ok: false,
-        error: "mailbox_connection_required",
-        message:
-          ownerType === "agency_marketing"
-            ? "Connect the agency main mailbox in Agency setup before sending campaigns."
-            : "Connect your Google or Microsoft mailbox in Account settings before sending email.",
-        reason: mailboxError instanceof Error ? mailboxError.message : "Mailbox delivery was unavailable.",
+      if (!isMailboxFallbackSafeError(mailboxError)) {
+        return res.status(502).json({
+          ok: false,
+          error: "mailbox_delivery_unconfirmed",
+          message: "The mailbox provider did not confirm delivery. Check Sent mail before retrying.",
+        });
+      }
+      const identity = await resolveTransactionalIdentity({
+        tenantId: req.auth.tenantId,
+        userId: req.auth.userId,
+        ownerType,
       });
+      const fallback = await sendWithTransactionalFallback(parsed.data, mailboxError, identity);
+      if (fallback.ok) return res.json(fallback);
+      return res.status(502).json(fallback);
     }
   } catch (error) {
     if (error instanceof Error) {
@@ -212,6 +225,111 @@ mailboxesRoutes.get("/diagnostics", async (req, res, next) => {
   }
 });
 
+async function sendWithTransactionalFallback(
+  input: z.infer<typeof sendSchema>,
+  mailboxError: unknown,
+  identity: { name: string; email: string }
+): Promise<
+  | {
+      ok: true;
+      result: {
+        provider: "transactional";
+        status: "sent";
+        externalMessageId: string;
+        fallbackReason: string;
+      };
+    }
+  | { ok: false; error: "mailbox_send_failed"; message: string; fallback?: unknown }
+> {
+  const subject = input.subject?.trim() || "A message from your insurance agency";
+  const text = input.text?.trim() || stripHtml(input.html ?? "");
+  const html = input.html?.trim() || plainTextToHtml(text);
+  const fallbackReason = mailboxError instanceof Error ? mailboxError.message : "Mailbox provider send failed.";
+
+  const result = await sendEmail({
+    to: input.to,
+    cc: input.cc,
+    bcc: input.bcc,
+    from: transactionalFromFor(identity.name),
+    subject,
+    text,
+    html,
+    replyTo: identity.email,
+    headers: transactionalThreadHeaders(input),
+    attachments: input.attachments,
+    categories:
+      input.senderMode === "agency_marketing"
+        ? ["agency-marketing", "campaign"]
+        : ["mailbox-fallback", "user-portal"],
+  });
+  if (result.status !== "sent") {
+    return {
+      ok: false,
+      error: "mailbox_send_failed",
+      message: result.error || "Email delivery is temporarily unavailable.",
+      fallback: {
+        mailboxReason: fallbackReason,
+        provider: result.provider,
+        configured: result.configured,
+      },
+    };
+  }
+
+  return {
+    ok: true,
+    result: {
+      provider: "transactional",
+      status: "sent",
+      externalMessageId: result.id,
+      fallbackReason,
+    },
+  };
+}
+
+function transactionalFromFor(senderName: string): string | undefined {
+  const configuredFrom = emailDeliveryConfiguration().from;
+  if (!configuredFrom) return undefined;
+  const address = configuredFrom.match(/<([^>]+)>/)?.[1] ?? configuredFrom;
+  const cleanAddress = address.trim();
+  if (!emailSchema.safeParse(cleanAddress).success) return undefined;
+  const cleanName = senderName.replace(/[\r\n<>]/g, " ").replace(/\s{2,}/g, " ").trim();
+  return cleanName ? `${cleanName} <${cleanAddress}>` : configuredFrom;
+}
+
+async function resolveTransactionalIdentity(input: {
+  tenantId: string;
+  userId: string;
+  ownerType: "staff" | "agency_marketing";
+}): Promise<{ name: string; email: string }> {
+  if (input.ownerType === "agency_marketing") {
+    const agency = await prisma.agency.findFirst({
+      where: { id: input.tenantId, active: true },
+      select: { name: true, contactEmail: true },
+    });
+    if (!agency || !emailSchema.safeParse(agency.contactEmail).success) {
+      throw new Error("The agency contact email is unavailable.");
+    }
+    return { name: agency.name.trim() || "Insurance agency", email: agency.contactEmail.trim() };
+  }
+
+  const user = await prisma.user.findFirst({
+    where: { id: input.userId, tenantId: input.tenantId, status: "active" },
+    select: { name: true, email: true },
+  });
+  if (!user || !emailSchema.safeParse(user.email).success) {
+    throw new Error("The signed-in staff email is unavailable.");
+  }
+  return { name: user.name.trim() || "Agency staff", email: user.email.trim() };
+}
+
+function transactionalThreadHeaders(input: z.infer<typeof sendSchema>): Record<string, string> | undefined {
+  const headers: Record<string, string> = {};
+  if (input.replyToMessageIdHeader?.trim()) headers["In-Reply-To"] = input.replyToMessageIdHeader.trim();
+  const references = input.references?.map((value) => value.trim()).filter(Boolean);
+  if (references?.length) headers.References = references.join(" ");
+  return Object.keys(headers).length ? headers : undefined;
+}
+
 mailboxOAuthCallbackRoutes.get("/:provider/callback", async (req, res) => {
   const providerResult = providerSchema.safeParse(req.params.provider);
   const fallback = mailboxRedirectUrl("/employee/account-settings?mailbox=error");
@@ -250,4 +368,33 @@ function mailboxRedirectUrl(path: string): string {
   const safePath = path.startsWith("/") && !path.startsWith("//") ? path : "/employee/account-settings";
   const origin = frontendOrigins()[0] ?? "http://localhost:5174";
   return `${origin.replace(/\/+$/, "")}${safePath}`;
+}
+
+function plainTextToHtml(value: string) {
+  return escapeHtml(value || "A message from your insurance agency.")
+    .split(/\n{2,}/)
+    .map((paragraph) => `<p>${paragraph.replace(/\n/g, "<br>")}</p>`)
+    .join("");
+}
+
+function stripHtml(value: string) {
+  return value
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p>/gi, "\n\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+\n/g, "\n")
+    .replace(/\n\s+/g, "\n")
+    .replace(/[ \t]{2,}/g, " ")
+    .trim();
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }

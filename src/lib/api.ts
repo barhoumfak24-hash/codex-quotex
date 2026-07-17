@@ -2245,7 +2245,7 @@ function reconcileOutboxFromProviderMessage(row: Communication) {
 }
 
 type MailboxDeliveryProviderResult = {
-  provider?: "google" | "microsoft";
+  provider?: "google" | "microsoft" | "transactional";
   status?: "sent";
   externalMessageId?: string;
   externalThreadId?: string;
@@ -2298,7 +2298,7 @@ async function deliverMailboxOutboxJob(input: { tenantId: string; user?: User; j
     const response = await fetch(`${apiBaseUrl()}/mailboxes/send`, {
       method: "POST",
       headers: liveMailboxAuthHeaders(input.user, input.tenantId),
-      body: JSON.stringify(mailboxSendPayload(sending)),
+      body: JSON.stringify(mailboxSendPayload(sending, input.user)),
     });
     const json = (await response.json().catch(() => null)) as
       | { ok: true; result: MailboxDeliveryProviderResult }
@@ -2378,10 +2378,12 @@ function markOutboxFailedLocal(id: string, error: string): MailboxOutboxJob | nu
   return updated;
 }
 
-function mailboxSendPayload(job: MailboxOutboxJob) {
+function mailboxSendPayload(job: MailboxOutboxJob, user?: User) {
   return {
     connectionId: job.mailboxConnectionId,
     senderMode: "staff",
+    senderName:
+      user?.name || [user?.firstName, user?.lastName].filter(Boolean).join(" ") || undefined,
     to: job.to,
     cc: job.cc,
     bcc: job.bcc,
@@ -2565,7 +2567,7 @@ function compactMarkdownBlocks(blocks: Array<string | undefined | null>): string
 }
 
 type MarketingCampaignDeliveryResult = {
-  provider?: "google" | "microsoft";
+  provider?: "google" | "microsoft" | "transactional";
   status?: "sent";
   externalMessageId?: string;
 };

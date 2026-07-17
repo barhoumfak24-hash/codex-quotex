@@ -13,7 +13,10 @@ vi.mock("../services/prisma.js", () => ({
   },
 }));
 
-import { sendMailboxEmail } from "../services/mailboxProvider.js";
+import {
+  isMailboxFallbackSafeError,
+  sendMailboxEmail,
+} from "../services/mailboxProvider.js";
 
 const ENCRYPTION_SECRET = "mailbox-provider-test-key";
 
@@ -100,6 +103,36 @@ describe("Microsoft mailbox send metadata", () => {
       externalUrl: "https://outlook.office.com/mail/drafts/draft-link",
     });
     expect(mocks.executeRaw).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not turn accepted provider delivery into a failure when bookkeeping is unavailable", async () => {
+    mocks.executeRaw.mockRejectedValueOnce(new Error("database temporarily unavailable"));
+    fetchMock()
+      .mockResolvedValueOnce(jsonResponse({ id: "immutable-draft-id" }))
+      .mockResolvedValueOnce(new Response(null, { status: 202 }))
+      .mockResolvedValueOnce(jsonResponse({ id: "immutable-draft-id", isDraft: false }));
+
+    await expect(sendMailboxEmail(validMicrosoftSend())).resolves.toMatchObject({
+      provider: "microsoft",
+      status: "sent",
+      externalMessageId: "immutable-draft-id",
+    });
+  });
+
+  it("marks an explicit provider rejection as safe for transactional fallback", async () => {
+    fetchMock().mockResolvedValueOnce(jsonResponse({ error: { message: "Mailbox permission revoked" } }, 403));
+
+    const error = await sendMailboxEmail(validMicrosoftSend()).catch((caught) => caught);
+
+    expect(isMailboxFallbackSafeError(error)).toBe(true);
+  });
+
+  it("does not mark an ambiguous network failure as safe for fallback", async () => {
+    fetchMock().mockRejectedValueOnce(new Error("connection reset after request write"));
+
+    const error = await sendMailboxEmail(validMicrosoftSend()).catch((caught) => caught);
+
+    expect(isMailboxFallbackSafeError(error)).toBe(false);
   });
 });
 

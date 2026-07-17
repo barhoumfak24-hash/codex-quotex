@@ -26,7 +26,9 @@ type NormalizedEmailAttachment = {
 };
 
 export async function sendEmail(args: {
-  to: string;
+  to: string | string[];
+  cc?: string[];
+  bcc?: string[];
   subject: string;
   html: string;
   text?: string;
@@ -134,7 +136,9 @@ function env(key: string) {
 }
 
 async function sendWithSendGrid(args: {
-  to: string;
+  to: string | string[];
+  cc?: string[];
+  bcc?: string[];
   subject: string;
   html: string;
   text?: string;
@@ -154,7 +158,12 @@ async function sendWithSendGrid(args: {
         "content-type": "application/json",
       },
       body: JSON.stringify({
-        personalizations: [{ to: [{ email: args.to }], ...(headers ? { headers } : {}) }],
+        personalizations: [{
+          to: emailList(args.to).map((email) => ({ email })),
+          ...(args.cc?.length ? { cc: args.cc.map((email) => ({ email })) } : {}),
+          ...(args.bcc?.length ? { bcc: args.bcc.map((email) => ({ email })) } : {}),
+          ...(headers ? { headers } : {}),
+        }],
         from: parseEmailAddress(args.from),
         ...(args.replyTo ? { reply_to: parseEmailAddress(args.replyTo) } : {}),
         subject: args.subject,
@@ -204,7 +213,9 @@ async function sendWithSendGrid(args: {
 }
 
 async function sendWithResend(args: {
-  to: string;
+  to: string | string[];
+  cc?: string[];
+  bcc?: string[];
   subject: string;
   html: string;
   text?: string;
@@ -224,7 +235,9 @@ async function sendWithResend(args: {
       },
       body: JSON.stringify({
         from: args.from,
-        to: args.to,
+        to: emailList(args.to),
+        ...(args.cc?.length ? { cc: args.cc } : {}),
+        ...(args.bcc?.length ? { bcc: args.bcc } : {}),
         ...(args.replyTo ? { reply_to: args.replyTo } : {}),
         subject: args.subject,
         html: args.html,
@@ -270,7 +283,9 @@ async function sendWithResend(args: {
 }
 
 async function sendWithSmtp(args: {
-  to: string;
+  to: string | string[];
+  cc?: string[];
+  bcc?: string[];
   subject: string;
   html: string;
   text?: string;
@@ -295,6 +310,8 @@ async function sendWithSmtp(args: {
     const result = await transporter.sendMail({
       from: args.from,
       to: args.to,
+      cc: args.cc,
+      bcc: args.bcc,
       replyTo: args.replyTo,
       subject: args.subject,
       html: args.html,
@@ -322,6 +339,10 @@ async function sendWithSmtp(args: {
       error: error instanceof Error ? error.message : "Unknown SMTP error",
     };
   }
+}
+
+function emailList(value: string | string[]): string[] {
+  return Array.isArray(value) ? value : [value];
 }
 
 function smtpConfigured() {
