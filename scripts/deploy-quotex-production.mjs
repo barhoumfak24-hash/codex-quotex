@@ -14,6 +14,8 @@ const projectPath = path.join(root, ".vercel", "project.json");
 const localProductionEnvPath = path.join(root, ".env.vercel.production.local");
 const pnpm = resolvePnpmCommand();
 const REMOTE_PRODUCTION_ENV_SENTINELS = {
+  DATABASE_URL: "postgresql://remote-vercel-sentinel.invalid/quotex",
+  DIRECT_URL: "postgresql://remote-vercel-sentinel.invalid/quotex",
   JWT_SECRET: "remote-vercel-jwt-secret-sentinel-value-000000000000",
   SESSION_SECRET: "remote-vercel-session-secret-sentinel-value-000000000",
   WEBSITE_WEBHOOK_SECRET: "remote-vercel-website-webhook-secret-sentinel-000",
@@ -28,8 +30,15 @@ const REMOTE_PRODUCTION_ENV_SENTINELS = {
   SENDGRID_FROM_EMAIL: "Quotex Insurance <contact@quotexinsurance.com>",
   RESEND_FROM_EMAIL: "Quotex Insurance <contact@quotexinsurance.com>",
   SMTP_FROM_EMAIL: "Quotex Insurance <contact@quotexinsurance.com>",
+  FRONTEND_ORIGIN: "https://quotexinsurance.com",
+  OPENAI_API_KEY: "remote-vercel-openai-api-key-sentinel-value",
+  SMARTY_AUTH_ID: "remote-vercel-smarty-auth-id-sentinel",
+  SMARTY_AUTH_TOKEN: "remote-vercel-smarty-auth-token-sentinel-value",
   STRIPE_SECRET_KEY: "remote-vercel-stripe-secret-key-sentinel-value",
   STRIPE_WEBHOOK_SECRET: "remote-vercel-stripe-webhook-secret-sentinel-value",
+  SUPABASE_URL: "https://remote-vercel-sentinel.supabase.co",
+  SUPABASE_SERVICE_ROLE_KEY: "remote-vercel-supabase-service-role-key-sentinel-value",
+  SUPABASE_STORAGE_DOCUMENT_BUCKET: "documents",
   SUPABASE_PROJECT_REF: "remote-vercel-supabase-project-ref-sentinel",
   SUPABASE_ACCESS_TOKEN: "remote-vercel-supabase-access-token-sentinel",
   BACKUP_STORAGE_BUCKETS: "documents",
