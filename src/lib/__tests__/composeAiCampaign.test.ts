@@ -158,6 +158,37 @@ describe("marketing.composeAiCampaign", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("accepts the authenticated staff session when its server user is not in the local user table", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const serverSessionManager = {
+      id: "server_session_manager",
+      tenantId: agency.id,
+      role: "manager" as const,
+      email: "manager@agency.example",
+      businessEmail: "manager@agency.example",
+      name: "Session Manager",
+      active: true,
+      createdAt: new Date().toISOString(),
+    };
+
+    expect(api.users.get(serverSessionManager.id)).toBeUndefined();
+
+    const out = await api.marketing.composeAiCampaign({
+      tenantId: agency.id,
+      name: "Authenticated session launch",
+      channels: ["email"],
+      brief: "A manager approved this campaign from a secure server session.",
+      includeAllClients: true,
+      actorId: serverSessionManager.id,
+      actor: serverSessionManager,
+    });
+
+    expect(out.messageCount).toBeGreaterThan(0);
+    expect(out.sentCount).toBe(out.messageCount);
+    expect(out.failedCount).toBe(0);
+  });
+
   it("marks rejected recipients failed instead of pretending the campaign was sent", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       new Response(

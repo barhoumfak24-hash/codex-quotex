@@ -14,7 +14,7 @@ import { Badge } from "@/components/ui/Badge";
 import { FileDropZone } from "@/components/ui/FileDropZone";
 import { api } from "@/lib/api";
 import { fmt } from "@/lib/format";
-import type { CustomMessageRecurrence } from "@/types";
+import type { CustomMessageRecurrence, User } from "@/types";
 
 type CampaignAttachmentDraft = {
   fileName: string;
@@ -27,12 +27,14 @@ export function NewCampaignComposer({
   onClose,
   tenantId,
   uploadedById,
+  approvingUser,
   onCreated,
 }: {
   open: boolean;
   onClose: () => void;
   tenantId: string;
   uploadedById: string;
+  approvingUser: User;
   onCreated?: (campaignName: string, messageCount: number) => void;
 }) {
   const [name, setName] = useState("");
@@ -154,6 +156,7 @@ export function NewCampaignComposer({
         scheduledFor: scheduledIso,
         recurrence,
         actorId: uploadedById,
+        actor: approvingUser,
       });
       if (sendMode === "now" && failedCount > 0) {
         setError(

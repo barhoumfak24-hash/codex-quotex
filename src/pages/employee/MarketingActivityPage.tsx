@@ -201,6 +201,7 @@ export function MarketingActivityPage() {
         <DraftCampaignCard
           tenantId={agency.id}
           uploadedById={user.id}
+          approvingUser={user}
           onLaunched={(name, count, scheduled) => {
             setCampaignBanner(
               `Campaign "${name}" ${scheduled ? "scheduled" : "approved & sent"} for ${count} recipient${
@@ -285,6 +286,7 @@ export function MarketingActivityPage() {
           onClose={() => setCampaignComposerOpen(false)}
           tenantId={agency.id}
           uploadedById={user.id}
+          approvingUser={user}
           onCreated={(name, count) => {
             setCampaignBanner(
               `Campaign "${name}" launched. AI sent ${count} personalized message${

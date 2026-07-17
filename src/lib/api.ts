@@ -12537,6 +12537,7 @@ export const api = {
       // Cadence for re-runs. "none" / undefined = one-shot.
       recurrence?: "none" | "daily" | "weekly" | "monthly";
       actorId?: string;
+      actor?: User;
     }): Promise<{
       campaign: MarketingCampaign;
       messageCount: number;
@@ -12556,17 +12557,33 @@ export const api = {
           : undefined;
       const isScheduled = !!sendAt;
       const isRecurring = recurrence !== "none";
-      const actor = input.actorId
-        ? db.list("users").find((user) => user.id === input.actorId && user.tenantId === input.tenantId)
+      const approvingActorId = input.actorId ?? input.actor?.id;
+      const localActorCandidate = approvingActorId
+        ? db.list("users").find((user) => user.id === approvingActorId && user.tenantId === input.tenantId)
         : undefined;
+      const localActor =
+        localActorCandidate &&
+        localActorCandidate.active !== false &&
+        ["manager", "agent", "csr"].includes(localActorCandidate.role)
+          ? localActorCandidate
+          : undefined;
+      const sessionActor =
+        input.actor &&
+        input.actor.id === approvingActorId &&
+        input.actor.tenantId === input.tenantId &&
+        input.actor.active !== false &&
+        ["manager", "agent", "csr"].includes(input.actor.role)
+          ? input.actor
+          : undefined;
+      const actor = sessionActor ?? localActor;
       const productionGate = evaluateAiProductionGate({
         system: "marketing_ai",
         action: isScheduled ? "schedule_campaign" : "launch_campaign",
         tenantScoped: true,
-        humanApproved: !!input.actorId,
+        humanApproved: !!actor,
         sendsOutboundMessage: true,
         writesSystemOfRecord: true,
-        humanReviewed: !!input.actorId,
+        humanReviewed: !!actor,
         usesOnlyProvidedFacts: true,
       });
       if (!productionGate.allowed) {
@@ -12796,7 +12813,7 @@ export const api = {
         visibility: "internal",
         marketingCampaignId: campaign.id,
         createdAt: nowIso(),
-        createdById: input.actorId,
+        createdById: actor.id,
       });
 
       return { campaign, messageCount, sentCount, failedCount };

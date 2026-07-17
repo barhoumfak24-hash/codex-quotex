@@ -28,7 +28,7 @@ import {
   type MarketingStudioRecurrence,
 } from "@/lib/marketingCampaignStudio";
 import { marketingSmartContactUrl, normalizeMarketingHref } from "@/lib/marketingSmartLinks";
-import type { Agency, AssetType, CustomerProfile, Prospect } from "@/types";
+import type { Agency, AssetType, CustomerProfile, Prospect, User } from "@/types";
 
 type AudienceMode = MarketingStudioAudience;
 type PamphletThemeId = "executive" | "coastal" | "ivory" | "midnight";
@@ -184,10 +184,12 @@ const THEME_OPTIONS = Object.entries(PAMPHLET_THEMES) as [PamphletThemeId, (type
 export function DraftCampaignCard({
   tenantId,
   uploadedById,
+  approvingUser,
   onLaunched,
 }: {
   tenantId: string;
   uploadedById: string;
+  approvingUser: User;
   onLaunched?: (name: string, recipientCount: number, scheduled: boolean) => void;
 }) {
   const [prompt, setPrompt] = useState("");
@@ -440,6 +442,7 @@ export function DraftCampaignCard({
         scheduledFor: scheduledIso,
         recurrence,
         actorId: uploadedById,
+        actor: approvingUser,
       });
       const scheduled = scheduleMode === "scheduled";
       if (!scheduled && out.failedCount > 0) {
