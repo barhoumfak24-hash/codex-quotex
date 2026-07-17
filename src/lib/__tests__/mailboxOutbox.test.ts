@@ -121,6 +121,92 @@ describe("mailbox outbox", () => {
     expect(JSON.parse(String(request?.body))).toMatchObject({ replyTo: user.businessEmail ?? user.email });
   });
 
+  it("automatically retries a failed mailbox delivery and marks it sent", async () => {
+    const { api, agency, customer, user } = await mailboxFixture();
+    const { retryPendingMailboxOutbox, sendCommunicationThroughLiveMailbox } = await import("../liveMailbox");
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: false, message: "Provider temporarily unavailable." }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            ok: true,
+            result: { provider: "google", status: "sent", externalMessageId: "gmail-retry-1" },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+      );
+    const message = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "outbound",
+      subject: "Automatic retry",
+      body: "This delivery should recover automatically.",
+      createdById: user.id,
+    });
+
+    const first = await sendCommunicationThroughLiveMailbox({
+      tenantId: agency.id,
+      user,
+      communication: message,
+    });
+    expect(first.ok).toBe(false);
+    const failedJob = api.mailboxOutbox.get(message.outboxJobId!);
+    expect(failedJob?.status).toBe("failed");
+    expect(failedJob?.nextAttemptAt).toBeTruthy();
+
+    api.mailboxOutbox.markFailed(
+      failedJob!.id,
+      failedJob!.lastError ?? "Temporary failure",
+      new Date(Date.now() - 1_000).toISOString()
+    );
+    const retried = await retryPendingMailboxOutbox({ tenantId: agency.id, user });
+
+    expect(retried).toEqual({ attempted: 1, sent: 1 });
+    expect(api.mailboxOutbox.get(message.outboxJobId!)?.status).toBe("sent");
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("renders a calm automatic-send state instead of a provider failure message", async () => {
+    const { createElement } = await import("react");
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { CommunicationDeliveryStatus } = await import(
+      "@/components/messages/CommunicationDeliveryStatus"
+    );
+    const { api, agency, customer, user } = await mailboxFixture();
+    const message = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "outbound",
+      subject: "Pending delivery",
+      body: "This message is waiting for its connected mailbox.",
+      createdById: user.id,
+    });
+    api.mailboxOutbox.markFailed(
+      message.outboxJobId!,
+      "Internal provider code that must not be visible.",
+      new Date(Date.now() + 60_000).toISOString()
+    );
+
+    const html = renderToStaticMarkup(
+      createElement(CommunicationDeliveryStatus, {
+        communication: message,
+        tenantId: agency.id,
+        user,
+      })
+    );
+    expect(html).toContain("Sending automatically");
+    expect(html).not.toContain("Email not sent yet");
+    expect(html).not.toContain("Internal provider code");
+  });
+
   it("marks a queued email sent with provider metadata", async () => {
     const { api, agency, customer, user } = await mailboxFixture();
     const message = api.communications.create({

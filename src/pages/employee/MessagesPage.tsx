@@ -1386,6 +1386,7 @@ function ActiveContactPane({
   mailboxCapability: LiveMailboxCapability | null;
   fill?: boolean;
 }) {
+  const { user: authenticatedUser } = useAuth();
   const [busy, setBusy] = useState(false);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
   const [previewDocument, setPreviewDocument] = useState<Document | null>(null);
@@ -1507,10 +1508,10 @@ function ActiveContactPane({
         createdById: userId,
         emailDeliveryMode: portalOnly ? "portal_only" : "auto",
       });
-      const sender = api.users.get(userId);
+      const sender = authenticatedUser?.id === userId ? authenticatedUser : api.users.get(userId);
       if (sender && !portalOnly) {
         const liveResult = await sendCommunicationThroughLiveMailbox({ tenantId, user: sender, communication: comm });
-        setDeliveryNotice(liveResult.ok ? null : liveResult.message);
+        setDeliveryNotice(liveResult.ok ? null : "Your email is sending automatically.");
       } else if (portalOnly) {
         setDeliveryNotice("Delivered to the client portal. External email was not available.");
       }
@@ -1631,7 +1632,7 @@ function ActiveContactPane({
                     <CommunicationDeliveryStatus
                       communication={r.row}
                       tenantId={tenantId}
-                      user={api.users.get(userId)}
+                      user={authenticatedUser?.id === userId ? authenticatedUser : api.users.get(userId)}
                     />
                   )}
                   {attachments.length > 0 && (

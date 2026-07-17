@@ -26,6 +26,9 @@ export type LiveMailboxCapability = {
 };
 
 const capabilityCache = new Map<string, Promise<LiveMailboxCapability>>();
+const retryInFlight = new Set<string>();
+
+const OUTBOX_RETRY_DELAYS_MS = [15_000, 60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000];
 
 export function getLiveMailboxCapability(input: {
   tenantId: string;
@@ -80,7 +83,7 @@ export async function sendCommunicationThroughLiveMailbox(input: {
   }
   if (job.to.length === 0) {
     const message = job.lastError ?? "No recipient email address was available.";
-    api.mailboxOutbox.markFailed(job.id, message);
+    scheduleOutboxRetry(job.id, message);
     return { ok: false, message };
   }
 
@@ -100,7 +103,7 @@ export async function sendCommunicationThroughLiveMailbox(input: {
       const message =
         (json && "message" in json && json.message) ||
         `Mailbox send failed with ${response.status} ${response.statusText}.`;
-      api.mailboxOutbox.markFailed(job.id, message);
+      scheduleOutboxRetry(job.id, message);
       return { ok: false, message };
     }
 
@@ -108,9 +111,49 @@ export async function sendCommunicationThroughLiveMailbox(input: {
     return { ok: true, provider: json.result };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Mailbox send failed.";
-    api.mailboxOutbox.markFailed(job.id, message);
+    scheduleOutboxRetry(job.id, message);
     return { ok: false, message };
   }
+}
+
+export async function retryPendingMailboxOutbox(input: {
+  tenantId: string;
+  user: User;
+  limit?: number;
+}): Promise<{ attempted: number; sent: number }> {
+  if (retryInFlight.has(input.user.id)) return { attempted: 0, sent: 0 };
+  retryInFlight.add(input.user.id);
+  try {
+    const communications = api.communications.listByTenant(input.tenantId);
+    const byId = new Map(communications.map((row) => [row.id, row]));
+    const jobs = api.mailboxOutbox
+      .retryDue(input.tenantId)
+      .filter((job) => job.createdById === input.user.id)
+      .slice(0, input.limit ?? 10);
+    let attempted = 0;
+    let sent = 0;
+    for (const job of jobs) {
+      const communication = byId.get(job.communicationId);
+      if (!communication) continue;
+      attempted += 1;
+      const result = await sendCommunicationThroughLiveMailbox({
+        tenantId: input.tenantId,
+        user: input.user,
+        communication,
+      });
+      if (result.ok && !result.skipped) sent += 1;
+    }
+    return { attempted, sent };
+  } finally {
+    retryInFlight.delete(input.user.id);
+  }
+}
+
+function scheduleOutboxRetry(jobId: string, message: string) {
+  const current = api.mailboxOutbox.get(jobId);
+  const attempts = Math.max(1, current?.attemptCount ?? 1);
+  const delay = OUTBOX_RETRY_DELAYS_MS[Math.min(attempts - 1, OUTBOX_RETRY_DELAYS_MS.length - 1)];
+  api.mailboxOutbox.markFailed(jobId, message, new Date(Date.now() + delay).toISOString());
 }
 
 async function waitForExistingDelivery(jobId: string): Promise<LiveMailboxSendResult> {

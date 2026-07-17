@@ -12,6 +12,7 @@ import {
 import { RichMessageBody } from "@/components/messages/RichMessageBody";
 import { CommunicationDeliveryStatus } from "@/components/messages/CommunicationDeliveryStatus";
 import { api } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { subscribeToDbChanges } from "@/lib/db";
 import { fmt } from "@/lib/format";
 import { inferMailProvider, mailboxThreadUrl, mailProviderShortLabel } from "@/lib/mailProvider";
@@ -259,6 +260,7 @@ export function ContactMessageThread({
   onChanged?: () => void;
   fillHeight?: boolean;
 }) {
+  const { user: authenticatedUser } = useAuth();
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
@@ -285,7 +287,7 @@ export function ContactMessageThread({
 
   useEffect(() => {
     let cancelled = false;
-    const user = api.users.get(userId);
+    const user = authenticatedUser?.id === userId ? authenticatedUser : api.users.get(userId);
     if (!user) {
       setServerMailbox(null);
       return;
@@ -320,7 +322,7 @@ export function ContactMessageThread({
     return () => {
       cancelled = true;
     };
-  }, [tenantId, userId]);
+  }, [authenticatedUser, tenantId, userId]);
 
   useAnchoredMessageScroll(scrollRef, scrollContentRef, [contactId, fillHeight, visibleRows.length]);
 
@@ -345,7 +347,7 @@ export function ContactMessageThread({
   async function send(msg: ComposedMessage) {
     setBusy(true);
     try {
-      const sender = api.users.get(userId);
+      const sender = authenticatedUser?.id === userId ? authenticatedUser : api.users.get(userId);
       const portalOnly =
         contactKind === "client" &&
         (!contact.email || (mailboxCapability !== null && !capabilityCanSendEmail(mailboxCapability)));
@@ -369,7 +371,7 @@ export function ContactMessageThread({
       });
       if (sender && !portalOnly) {
         const liveResult = await sendCommunicationThroughLiveMailbox({ tenantId, user: sender, communication: comm });
-        setDeliveryNotice(liveResult.ok ? null : liveResult.message);
+        setDeliveryNotice(liveResult.ok ? null : "Your email is sending automatically.");
       } else if (portalOnly) {
         setDeliveryNotice("Delivered to the client portal. External email was not available.");
       }
@@ -384,7 +386,7 @@ export function ContactMessageThread({
   async function refreshThread(options: { silent?: boolean } = {}) {
     if (!options.silent) setRefreshing(true);
     try {
-      const user = api.users.get(userId);
+      const user = authenticatedUser?.id === userId ? authenticatedUser : api.users.get(userId);
       if (user) {
         const sync = await syncCommunicationsFromLiveMailbox({
           tenantId,
@@ -514,7 +516,7 @@ export function ContactMessageThread({
                         <CommunicationDeliveryStatus
                           communication={commRow}
                           tenantId={tenantId}
-                          user={api.users.get(userId)}
+                          user={authenticatedUser?.id === userId ? authenticatedUser : api.users.get(userId)}
                         />
                       )}
                       {attachments.length > 0 && (
