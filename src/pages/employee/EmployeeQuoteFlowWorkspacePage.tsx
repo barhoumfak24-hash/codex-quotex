@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ArrowLeft, FileText, Sparkles } from "lucide-react";
 import { Link, Navigate, useParams } from "react-router-dom";
 import {
@@ -17,10 +17,22 @@ export function EmployeeQuoteFlowWorkspacePage() {
   const { user } = useAuth();
   const [, setRevision] = useState(0);
 
+  const preloadProfile = useCallback(() => {
+    if (customerId) {
+      void import("@/pages/employee/ClientDetailPage");
+      return;
+    }
+    if (prospectId) void import("@/pages/employee/ProspectDetailPage");
+  }, [customerId, prospectId]);
+
   useEffect(
     () => subscribeToDbChanges(() => setRevision((revision) => revision + 1)),
     []
   );
+
+  useEffect(() => {
+    preloadProfile();
+  }, [preloadProfile]);
 
   if (!customerId && !prospectId) return <Navigate to="/employee/clients" replace />;
   if (!agency || !user) return null;
@@ -70,7 +82,10 @@ export function EmployeeQuoteFlowWorkspacePage() {
         <div className="relative flex min-h-[70px] flex-col justify-center gap-3 sm:block">
           <Link
             to={backPath}
-            className="btn-outline z-10 inline-flex shrink-0 text-sm sm:absolute sm:left-0 sm:top-1/2 sm:-translate-y-1/2"
+            replace
+            onFocus={preloadProfile}
+            onPointerDown={preloadProfile}
+            className="btn-outline relative z-20 inline-flex min-h-11 shrink-0 touch-manipulation select-none text-sm sm:absolute sm:left-0 sm:top-1/2 sm:-translate-y-1/2"
           >
             <ArrowLeft className="h-4 w-4" />
             Back to profile

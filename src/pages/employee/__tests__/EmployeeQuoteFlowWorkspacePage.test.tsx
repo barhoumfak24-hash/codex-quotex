@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Agency, User } from "@/types";
 import { api } from "@/lib/api";
@@ -65,6 +65,55 @@ describe("EmployeeQuoteFlowWorkspacePage", () => {
     ).toContain("Back to profile");
     expect(host.querySelector('aside[aria-label^="Quote workflow steps"]')).toBeTruthy();
     expect(host.querySelector('[role="dialog"]')).toBeNull();
+
+    await act(async () => {
+      root!.unmount();
+    });
+    host.remove();
+  });
+
+  it("returns to the exact client profile with one click", async () => {
+    const customer = api.customers.list(context.agency!.id)[0];
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    let root: Root;
+    let currentPath = "";
+
+    function ProfileDestination() {
+      const location = useLocation();
+      currentPath = location.pathname;
+      return <div>Client profile destination</div>;
+    }
+
+    await act(async () => {
+      root = createRoot(host);
+      root.render(
+        <MemoryRouter initialEntries={[`/employee/clients/${customer.id}/quote-flow`]}>
+          <Routes>
+            <Route
+              path="/employee/clients/:customerId/quote-flow"
+              element={<EmployeeQuoteFlowWorkspacePage />}
+            />
+            <Route
+              path="/employee/clients/:customerId"
+              element={<ProfileDestination />}
+            />
+          </Routes>
+        </MemoryRouter>
+      );
+    });
+
+    const backLink = Array.from(host.querySelectorAll("a")).find((link) =>
+      link.textContent?.includes("Back to profile")
+    );
+    expect(backLink).toBeTruthy();
+
+    await act(async () => {
+      backLink!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+
+    expect(currentPath).toBe(`/employee/clients/${customer.id}`);
+    expect(host.textContent).toContain("Client profile destination");
 
     await act(async () => {
       root!.unmount();
