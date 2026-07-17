@@ -2145,6 +2145,19 @@ export type QuotingSessionStatus =
 
 export type QuotingLineOfBusiness = "personal" | "commercial";
 
+export interface QuotingSessionAssetMapping {
+  assetId?: string;
+  label: string;
+  assetType: AssetType;
+  address?: string;
+  estimatedValue: number;
+  assetDetails?: Record<string, string>;
+  publicFields: Record<string, unknown>;
+  publicFieldEvidence?: PublicDataEvidenceMap;
+  missingFields: string[];
+  aiSummary: string;
+}
+
 export type CommercialCarrierSubmissionStatus =
   | "application_sent"
   | "awaiting_response"
@@ -2416,6 +2429,10 @@ export interface QuotingSession {
   // Existing asset being re-quoted (clients) or undefined for a
   // new-business quote.
   assetId?: string;
+  // Every asset selected when the quote flow starts. The first entry
+  // remains the primary asset for legacy carrier and policy workflows,
+  // while AI mapping and questionnaires use every entry.
+  selectedAssetMappings?: QuotingSessionAssetMapping[];
   // Snapshot of the asset / line being quoted so runQuotes doesn't
   // have to re-derive from the contact record. Persisted on
   // startSession.

@@ -860,6 +860,20 @@ function ContactQuotingCard({
             personalLinesAssetRequired: true,
             personalLinesAssetSelected: hasSelectedQuoteAsset,
             lineOfBusiness: existing?.lineOfBusiness,
+            assets:
+              selectedAssets.length > 0
+                ? selectedAssets.map((asset) => {
+                    const details = cleanQuoteAssetDetails(asset.type, asset.details);
+                    return {
+                      assetId: asset.id,
+                      label: assetDisplayName(asset),
+                      assetType: asset.type,
+                      address: primaryQuoteAssetAddress(asset.type, details),
+                      estimatedValue: asset.estimatedValue,
+                      assetDetails: details,
+                    };
+                  })
+                : undefined,
           }}
           onChanged={refresh}
           onSetupLineOfBusinessChange={handleSetupLineChange}

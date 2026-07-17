@@ -319,6 +319,14 @@ export function AiQuotingWorkspace({
     lineOfBusiness?: QuotingLineOfBusiness;
     // Client side: existing asset being re-quoted.
     assetId?: string;
+    assets?: Array<{
+      assetId?: string;
+      label: string;
+      assetType: AssetType;
+      address?: string;
+      estimatedValue?: number;
+      assetDetails?: Record<string, string>;
+    }>;
   };
   onChanged?: () => void;
   onReset?: () => void;
@@ -531,6 +539,7 @@ export function AiQuotingWorkspace({
         lineOfBusiness: selectedLine,
         selectedAcordTemplateIds:
           selectedLine === "commercial" ? selectedAcordTemplateIds : undefined,
+        assets: contact.assets,
       });
       onChanged?.();
     } catch (error) {
@@ -1877,6 +1886,38 @@ function WorkspaceSideRail({
 }
 
 function PublicFields({ session }: { session: QuotingSession }) {
+  const selectedAssets = session.selectedAssetMappings ?? [];
+  if (selectedAssets.length > 1) {
+    const assetsWithFields = selectedAssets.filter(
+      (asset) => Object.keys(asset.publicFields).length > 0
+    );
+    if (assetsWithFields.length === 0) return null;
+    return (
+      <div className="rounded-md border border-blue-100 bg-blue-50/40 p-3">
+        <div className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-blue-800">
+          <Bot className="h-3 w-3" /> AI-sourced values for all selected assets
+        </div>
+        <div className="grid gap-2 lg:grid-cols-2">
+          {assetsWithFields.map((asset, index) => (
+            <section
+              key={asset.assetId ?? `${asset.label}-${index}`}
+              className="rounded-md border border-blue-100 bg-white/80 p-3"
+            >
+              <h4 className="mb-2 text-xs font-semibold text-ink-900">{asset.label}</h4>
+              <dl className="space-y-1.5 text-xs">
+                {Object.entries(asset.publicFields).map(([key, value]) => (
+                  <div key={key} className="flex justify-between gap-3">
+                    <dt className="text-ink-500">{key}</dt>
+                    <dd className="text-right text-ink-800">{String(value)}</dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
+          ))}
+        </div>
+      </div>
+    );
+  }
   const entries = Object.entries(session.publicFields);
   if (entries.length === 0) return null;
   return (

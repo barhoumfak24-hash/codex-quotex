@@ -208,6 +208,7 @@ import type {
   QuotingQuestion,
   QuotingLineOfBusiness,
   QuotingSession,
+  QuotingSessionAssetMapping,
   QuotingSessionStatus,
   QuestionnaireEditorRole,
   QuestionnaireResponseMeta,
@@ -5500,6 +5501,17 @@ function compactAcordAiDossier(
       assetDetails: compactAcordAiDetails(session.assetDetails, 30),
       publicFields: compactAcordAiDetails(session.publicFields, 60),
       publicFieldEvidence: compactAcordAiEvidence(session.publicFieldEvidence, 60),
+      selectedAssets: (session.selectedAssetMappings ?? []).map((asset) => ({
+        assetId: asset.assetId,
+        label: asset.label,
+        assetType: asset.assetType,
+        address: asset.address,
+        estimatedValue: asset.estimatedValue || undefined,
+        assetDetails: compactAcordAiDetails(asset.assetDetails, 30),
+        publicFields: compactAcordAiDetails(asset.publicFields, 60),
+        publicFieldEvidence: compactAcordAiEvidence(asset.publicFieldEvidence, 60),
+        missingFields: asset.missingFields.slice(0, 60),
+      })),
     },
     assets: dossier.assets.slice(0, 12).map((asset) => ({
       id: asset.id,
@@ -16101,6 +16113,14 @@ export const api = {
       prospectId?: string;
       customerId?: string;
       assetId?: string;
+      assets?: Array<{
+        assetId?: string;
+        label: string;
+        assetType: AssetType;
+        address?: string;
+        estimatedValue?: number;
+        assetDetails?: Record<string, string>;
+      }>;
       createdById: string;
       assetType: AssetType;
       contactName: string;
@@ -16116,13 +16136,72 @@ export const api = {
         aiPreparePublicFields,
         aiInferLineOfBusiness,
       } = await import("./ai");
-      const prep = await aiPreparePublicFields({
-        assetType: input.assetType,
-        prospectName: input.contactName,
-        address: input.address,
-        estimatedValue: input.estimatedValue,
-        assetDetails: input.assetDetails,
-        rngSeed: `${input.prospectId ?? input.customerId ?? ""}-${input.assetType}-${input.assetId ?? ""}`,
+      const requestedAssets =
+        input.assets && input.assets.length > 0
+          ? input.assets
+          : [
+              {
+                assetId: input.assetId,
+                label: sharedAssetTypeDisplayName(input.assetType),
+                assetType: input.assetType,
+                address: input.address,
+                estimatedValue: input.estimatedValue,
+                assetDetails: input.assetDetails,
+              },
+            ];
+      const duplicateAssetLabels = new Map<string, number>();
+      requestedAssets.forEach((asset) => {
+        const label = asset.label.trim() || sharedAssetTypeDisplayName(asset.assetType);
+        duplicateAssetLabels.set(label, (duplicateAssetLabels.get(label) ?? 0) + 1);
+      });
+      const selectedAssetMappings: QuotingSessionAssetMapping[] = [];
+      for (const [index, asset] of requestedAssets.entries()) {
+        const baseLabel = asset.label.trim() || sharedAssetTypeDisplayName(asset.assetType);
+        const label =
+          (duplicateAssetLabels.get(baseLabel) ?? 0) > 1
+            ? `${baseLabel} (${index + 1})`
+            : baseLabel;
+        const prep = await aiPreparePublicFields({
+          assetType: asset.assetType,
+          prospectName: input.contactName,
+          address: asset.address,
+          estimatedValue: asset.estimatedValue,
+          assetDetails: asset.assetDetails,
+          rngSeed: `${input.prospectId ?? input.customerId ?? ""}-${asset.assetType}-${asset.assetId ?? index}`,
+        });
+        selectedAssetMappings.push({
+          assetId: asset.assetId,
+          label,
+          assetType: asset.assetType,
+          address: asset.address,
+          estimatedValue: asset.estimatedValue ?? 0,
+          assetDetails: asset.assetDetails,
+          publicFields: prep.publicFields,
+          publicFieldEvidence: prep.publicFieldEvidence,
+          missingFields: prep.missingFields,
+          aiSummary: prep.summary,
+        });
+      }
+      const primaryAsset = selectedAssetMappings[0];
+      const hasMultipleAssets = selectedAssetMappings.length > 1;
+      const publicFields: Record<string, unknown> = {};
+      const publicFieldEvidence: PublicDataEvidenceMap = {};
+      const aggregateMissingFields: string[] = [];
+      selectedAssetMappings.forEach((asset, index) => {
+        if (index === 0) {
+          Object.assign(publicFields, asset.publicFields);
+          Object.assign(publicFieldEvidence, asset.publicFieldEvidence ?? {});
+        }
+        Object.entries(asset.publicFields).forEach(([field, value]) => {
+          if (!hasMultipleAssets) return;
+          const scopedField = `${asset.label} - ${field}`;
+          publicFields[scopedField] = value;
+          const evidence = asset.publicFieldEvidence?.[field];
+          if (evidence) publicFieldEvidence[scopedField] = { ...evidence, fieldKey: scopedField };
+        });
+        asset.missingFields.forEach((field) => {
+          aggregateMissingFields.push(hasMultipleAssets ? `${asset.label}: ${field}` : field);
+        });
       });
       const lineOfBusiness =
         input.lineOfBusiness ??
@@ -16131,11 +16210,15 @@ export const api = {
           assetType: input.assetType,
           estimatedValue: input.estimatedValue,
         });
-      const state = input.address
-        ? extractStateFromString(input.address)
-        : input.assetDetails
-        ? extractStateFromString(Object.values(input.assetDetails).join(" "))
-        : undefined;
+      const state = selectedAssetMappings
+        .map((asset) =>
+          asset.address
+            ? extractStateFromString(asset.address)
+            : asset.assetDetails
+            ? extractStateFromString(Object.values(asset.assetDetails).join(" "))
+            : undefined
+        )
+        .find(Boolean);
       const sessionId = uid("quote_session");
       const createdAt = nowIso();
       // Personal sessions generate client questions immediately.
@@ -16145,49 +16228,87 @@ export const api = {
       let questionnaireQuestions: QuotingQuestion[] | undefined;
       let questionnaireResponses: Record<string, string> | undefined;
       let questionnaireResponseMeta: Record<string, QuestionnaireResponseMeta> | undefined;
-      let missingFields = prep.missingFields;
+      let missingFields = aggregateMissingFields;
       const category = input.categoryId ? api.categories.get(input.categoryId) : undefined;
-      const seededAssetDetails =
-        lineOfBusiness === "personal"
-          ? {
-              ...personalCategoryAnswerHints(category),
-              ...(input.assetDetails ?? {}),
-            }
-          : input.assetDetails;
+      const primaryAssetDetails = primaryAsset.assetDetails ?? {};
+      const seededAssetDetails: Record<string, string> = {
+        ...(lineOfBusiness === "personal" ? personalCategoryAnswerHints(category) : {}),
+        ...primaryAssetDetails,
+      };
+      if (hasMultipleAssets) {
+        selectedAssetMappings.forEach((asset) => {
+          Object.entries(asset.assetDetails ?? {}).forEach(([field, value]) => {
+            if (value.trim()) seededAssetDetails[`${asset.label} - ${field}`] = value;
+          });
+        });
+      }
       const commercialAcordTemplates =
         lineOfBusiness === "commercial"
           ? selectedCommercialAcordTemplates(
               input.tenantId,
               input.selectedAcordTemplateIds ?? [],
-              prep.publicFields,
-              prep.publicFieldEvidence
+              publicFields,
+              publicFieldEvidence
             )
           : undefined;
       if (lineOfBusiness === "commercial") {
         questionnaireQuestions = [];
       } else {
-        questionnaireQuestions = completePersonalQuestionnaireQuestions({
-          assetType: input.assetType,
-          category,
-          publicFields: prep.publicFields,
-          missingFields: prep.missingFields,
+        const combinedQuestions: QuotingQuestion[] = [];
+        const combinedResponses: Record<string, string> = {};
+        const combinedResponseMeta: Record<string, QuestionnaireResponseMeta> = {};
+        const combinedMissingFields: string[] = [];
+        selectedAssetMappings.forEach((asset, assetIndex) => {
+          const assetQuestions = completePersonalQuestionnaireQuestions({
+            assetType: asset.assetType,
+            category,
+            publicFields: asset.publicFields,
+            missingFields: asset.missingFields,
+          });
+          const assetDetailsForQuestions = {
+            ...personalCategoryAnswerHints(category),
+            ...(asset.assetDetails ?? {}),
+          };
+          const seeded = seedKnownQuestionnaireResponses({
+            questions: assetQuestions,
+            contactName: input.contactName,
+            contactEmail: undefined,
+            contactPhone: undefined,
+            businessName: undefined,
+            address: asset.address,
+            estimatedValue: asset.estimatedValue,
+            assetDetails: assetDetailsForQuestions,
+            publicFields: asset.publicFields,
+            publicFieldEvidence: asset.publicFieldEvidence,
+            updatedAt: createdAt,
+          });
+          assetQuestions.forEach((question) => {
+            const scopedId = hasMultipleAssets
+              ? `${question.id}__asset_${asset.assetId ?? assetIndex}`
+              : question.id;
+            combinedQuestions.push(
+              hasMultipleAssets
+                ? {
+                    ...question,
+                    id: scopedId,
+                    section: `${asset.label} - ${question.section}`,
+                    label: `${asset.label}: ${question.label}`,
+                  }
+                : question
+            );
+            const answer = seeded.questionnaireResponses?.[question.id];
+            if (answer) combinedResponses[scopedId] = answer;
+            const meta = seeded.questionnaireResponseMeta?.[question.id];
+            if (meta) combinedResponseMeta[scopedId] = meta;
+          });
+          seeded.missingFields.forEach((field) => {
+            combinedMissingFields.push(hasMultipleAssets ? `${asset.label}: ${field}` : field);
+          });
         });
-        const seededQuestionnaire = seedKnownQuestionnaireResponses({
-          questions: questionnaireQuestions,
-        contactName: input.contactName,
-        contactEmail: undefined,
-        contactPhone: undefined,
-        businessName: undefined,
-        address: input.address,
-          estimatedValue: input.estimatedValue,
-          assetDetails: seededAssetDetails,
-          publicFields: prep.publicFields,
-          publicFieldEvidence: prep.publicFieldEvidence,
-          updatedAt: createdAt,
-        });
-        questionnaireResponses = seededQuestionnaire.questionnaireResponses;
-        questionnaireResponseMeta = seededQuestionnaire.questionnaireResponseMeta;
-        missingFields = seededQuestionnaire.missingFields;
+        questionnaireQuestions = combinedQuestions;
+        questionnaireResponses = Object.keys(combinedResponses).length > 0 ? combinedResponses : undefined;
+        questionnaireResponseMeta = Object.keys(combinedResponseMeta).length > 0 ? combinedResponseMeta : undefined;
+        missingFields = combinedMissingFields;
       }
       const needsClient = (questionnaireQuestions?.length ?? 0) > 0;
       const row: QuotingSession = {
@@ -16197,23 +16318,31 @@ export const api = {
         categoryLabel: input.categoryLabel,
         prospectId: input.prospectId,
         customerId: input.customerId,
-        assetId: input.assetId,
-        assetType: input.assetType,
-        estimatedValue: input.estimatedValue ?? 0,
+        assetId: primaryAsset.assetId,
+        selectedAssetMappings,
+        assetType: primaryAsset.assetType,
+        estimatedValue:
+          selectedAssetMappings.reduce((sum, asset) => sum + asset.estimatedValue, 0) ||
+          primaryAsset.estimatedValue,
         assetDetails: seededAssetDetails,
         state,
         lineOfBusiness,
         commercialAcordTemplates,
         createdById: input.createdById,
         status: lineOfBusiness === "commercial" || needsClient ? "gathering_info" : "quoting",
-        publicFields: prep.publicFields,
-        publicFieldEvidence: prep.publicFieldEvidence,
+        publicFields,
+        publicFieldEvidence,
         missingFields,
         questionnaireQuestions,
         questionnaireResponses,
         questionnaireResponseMeta,
         quotes: [],
-        aiSummary: prep.summary,
+        aiSummary:
+          selectedAssetMappings.length === 1
+            ? primaryAsset.aiSummary
+            : `AI mapping completed for all ${selectedAssetMappings.length} selected assets. ${selectedAssetMappings
+                .map((asset) => `${asset.label}: ${asset.aiSummary}`)
+                .join(" ")}`,
         createdAt,
         updatedAt: createdAt,
       };
@@ -16233,12 +16362,17 @@ export const api = {
           }) ?? mappedRow
         : mappedRow;
       syncVehicleAssetIdentityFromSession(activeRow);
+      const mappedFieldCount =
+        activeRow.selectedAssetMappings?.reduce(
+          (sum, asset) => sum + Object.keys(asset.publicFields).length,
+          0
+        ) ?? Object.keys(activeRow.publicFields).length;
       logQuotingWorkflowProgress(activeRow, {
         message: `AI quoting workflow started for ${activeRow.lineOfBusiness === "commercial" ? "commercial" : "personal"} ${assetTypeDisplayName(activeRow.assetType)}.`,
         detail: [
-          `Public-record enrichment completed with ${Object.keys(activeRow.publicFields).length} field${
-            Object.keys(activeRow.publicFields).length === 1 ? "" : "s"
-          } prepared.`,
+          `Public-record enrichment completed for ${activeRow.selectedAssetMappings?.length ?? 1} selected asset${
+            (activeRow.selectedAssetMappings?.length ?? 1) === 1 ? "" : "s"
+          }, with ${mappedFieldCount} field${mappedFieldCount === 1 ? "" : "s"} prepared.`,
           activeRow.missingFields.length > 0
             ? `Missing fields queued for questionnaire: ${activeRow.missingFields.join(", ")}.`
             : "No missing client fields were found; carrier ranking can begin immediately.",

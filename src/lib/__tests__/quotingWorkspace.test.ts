@@ -41,6 +41,129 @@ async function seed() {
 }
 
 describe("api.quoting workspace", () => {
+  it("completes and persists AI mapping for every selected asset", async () => {
+    const { api, agency, agent } = await seed();
+    const customer = api.customers.list(agency.id)[0];
+    const category = api.categories.get("cat_primary_home")!;
+    const enrichmentRequests: Array<{ seed?: { address?: string } }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((u: string, init?: RequestInit) => {
+        const url = String(u);
+        if (url === "/api/ai/enrich-asset") {
+          const request = JSON.parse(String(init?.body ?? "{}")) as {
+            seed?: { address?: string };
+          };
+          enrichmentRequests.push(request);
+          const firstAsset = request.seed?.address?.includes("First") ?? false;
+          const yearBuilt = firstAsset ? "2001" : "2012";
+          const squareFootage = firstAsset ? "2100" : "3400";
+          const collectedAt = "2026-07-17T00:00:00.000Z";
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              fields: { yearBuilt, squareFootage },
+              evidence: {
+                yearBuilt: {
+                  fieldKey: "yearBuilt",
+                  sourceKind: "government_api",
+                  sourceLabel: "County property records",
+                  confidence: 0.98,
+                  verified: true,
+                  allowDocumentAutofill: true,
+                  collectedAt,
+                },
+                squareFootage: {
+                  fieldKey: "squareFootage",
+                  sourceKind: "government_api",
+                  sourceLabel: "County property records",
+                  confidence: 0.98,
+                  verified: true,
+                  allowDocumentAutofill: true,
+                  collectedAt,
+                },
+              },
+              sources: ["County property records"],
+              confidence: 0.98,
+              unavailableFields: [],
+            }),
+          });
+        }
+        if (url === "/api/ai/acord-map") {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              fields: {},
+              publicFieldEvidence: {},
+              mappings: [],
+              missingFields: [],
+              webSources: [],
+              summary: "No additional mapped values.",
+              confidence: 0,
+            }),
+          });
+        }
+        return Promise.reject(new Error(`Unexpected URL ${url}`));
+      })
+    );
+
+    const assets = [
+      {
+        assetId: "asset_first",
+        label: "First Street Home",
+        assetType: "coastal_home" as const,
+        address: "101 First Street, Palm Beach, FL 33480",
+        estimatedValue: 900_000,
+        assetDetails: { propertyAddress: "101 First Street, Palm Beach, FL 33480" },
+      },
+      {
+        assetId: "asset_second",
+        label: "Second Avenue Home",
+        assetType: "coastal_home" as const,
+        address: "202 Second Avenue, Palm Beach, FL 33480",
+        estimatedValue: 1_400_000,
+        assetDetails: { propertyAddress: "202 Second Avenue, Palm Beach, FL 33480" },
+      },
+    ];
+    const session = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      assetId: assets[0].assetId,
+      createdById: agent.id,
+      assetType: assets[0].assetType,
+      categoryId: category.id,
+      categoryLabel: category.label,
+      contactName: customer.name,
+      estimatedValue: assets[0].estimatedValue,
+      address: assets[0].address,
+      assetDetails: assets[0].assetDetails,
+      assets,
+      lineOfBusiness: "personal",
+    });
+
+    expect(enrichmentRequests).toHaveLength(2);
+    expect(enrichmentRequests.map((request) => request.seed?.address)).toEqual(
+      assets.map((asset) => asset.address)
+    );
+    expect(session.selectedAssetMappings?.map((asset) => asset.assetId)).toEqual([
+      "asset_first",
+      "asset_second",
+    ]);
+    expect(session.selectedAssetMappings?.[0].publicFields["Year built"]).toBe("2001");
+    expect(session.selectedAssetMappings?.[1].publicFields["Year built"]).toBe("2012");
+    expect(session.publicFields["First Street Home - Year built"]).toBe("2001");
+    expect(session.publicFields["Second Avenue Home - Year built"]).toBe("2012");
+    expect(session.questionnaireQuestions?.some((question) =>
+      question.section.startsWith("First Street Home - ")
+    )).toBe(true);
+    expect(session.questionnaireQuestions?.some((question) =>
+      question.section.startsWith("Second Avenue Home - ")
+    )).toBe(true);
+    expect(new Set(session.questionnaireQuestions?.map((question) => question.id)).size).toBe(
+      session.questionnaireQuestions?.length
+    );
+  });
+
   it("startSession pulls public fields + lists missing fields", async () => {
     const { api, agency, agent, prospect } = await seed();
     const session = await api.quoting.startSession({
