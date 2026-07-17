@@ -14,6 +14,7 @@ export type MailboxSendInput = {
   userId: string;
   ownerType?: "staff" | "agency_marketing";
   connectionId?: string;
+  expectedAddress?: string;
   to: string[];
   cc?: string[];
   bcc?: string[];
@@ -82,6 +83,7 @@ type MailboxConnectionLookupInput = {
   userId: string;
   connectionId?: string;
   ownerType?: "staff" | "agency_marketing";
+  expectedAddress?: string;
 };
 
 type MicrosoftMessageMetadata = {
@@ -205,8 +207,22 @@ async function resolveMailboxConnection(input: MailboxConnectionLookupInput): Pr
         : "No connected mailbox was found for this staff account."
     );
   }
+  if (
+    input.expectedAddress &&
+    normalizeMailboxAddress(connection.address) !== normalizeMailboxAddress(input.expectedAddress)
+  ) {
+    throw new Error(
+      ownerType === "agency_marketing"
+        ? "The connected agency marketing mailbox does not match the agency contact email."
+        : "The connected mailbox does not match the signed-in staff email."
+    );
+  }
   if (!connection.token_vault_ref) throw new Error("Connected mailbox is missing its encrypted token reference.");
   return connection;
+}
+
+function normalizeMailboxAddress(value: string): string {
+  return value.trim().toLowerCase();
 }
 
 async function readMailboxToken(connection: MailboxConnectionRow): Promise<TokenPayload> {

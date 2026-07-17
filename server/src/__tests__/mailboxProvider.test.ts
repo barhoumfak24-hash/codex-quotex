@@ -134,6 +134,27 @@ describe("Microsoft mailbox send metadata", () => {
 
     expect(isMailboxFallbackSafeError(error)).toBe(false);
   });
+
+  it("refuses to send through a mailbox that does not match the required sender address", async () => {
+    mocks.queryRaw.mockReset().mockResolvedValueOnce([{
+      id: "connection-1",
+      tenant_id: "tenant-1",
+      user_id: null,
+      provider: "microsoft",
+      address: "old-marketing@example.com",
+      status: "connected",
+      token_vault_ref: "mailbox-token:vault-1",
+    }]);
+
+    const error = await sendMailboxEmail({
+      ...validMicrosoftSend(),
+      ownerType: "agency_marketing",
+      expectedAddress: "contact@example.com",
+    }).catch((caught) => caught);
+
+    expect(isMailboxFallbackSafeError(error)).toBe(true);
+    expect(fetchMock()).not.toHaveBeenCalled();
+  });
 });
 
 function validMicrosoftSend() {

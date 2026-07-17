@@ -137,11 +137,17 @@ mailboxesRoutes.post("/send", async (req, res, next) => {
     ) {
       return res.status(403).json({ ok: false, error: "manager_required" });
     }
+    const identity = await resolveTransactionalIdentity({
+      tenantId: req.auth.tenantId,
+      userId: req.auth.userId,
+      ownerType,
+    });
     try {
       const result = await sendMailboxEmail({
         tenantId: req.auth.tenantId,
         userId: req.auth.userId,
         ownerType,
+        expectedAddress: identity.email,
         ...parsed.data,
       });
       return res.json({ ok: true, result });
@@ -153,11 +159,6 @@ mailboxesRoutes.post("/send", async (req, res, next) => {
           message: "The mailbox provider did not confirm delivery. Check Sent mail before retrying.",
         });
       }
-      const identity = await resolveTransactionalIdentity({
-        tenantId: req.auth.tenantId,
-        userId: req.auth.userId,
-        ownerType,
-      });
       const fallback = await sendWithTransactionalFallback(parsed.data, mailboxError, identity);
       if (fallback.ok) return res.json(fallback);
       return res.status(502).json(fallback);

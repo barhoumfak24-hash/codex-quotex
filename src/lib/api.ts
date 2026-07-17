@@ -2123,21 +2123,22 @@ function agencyMarketingSender(tenantId: string): {
   status?: ConnectedMailboxStatus;
 } {
   const agency = db.list("agencies").find((row) => row.id === tenantId);
+  const agencyContactEmail = normalizeEmail(agency?.contactEmail);
   const mailbox = db
     .list("connectedMailboxes")
     .find(
       (row) =>
         row.tenantId === tenantId &&
         row.ownerType === "agency_marketing" &&
-        row.status !== "disabled"
+        row.status !== "disabled" &&
+        normalizeEmail(row.address) === agencyContactEmail
     );
-  const address = mailbox?.address ?? agency?.contactEmail;
   return {
-    fromName: mailbox?.displayName ?? (agency ? `${agency.name} Concierge Team` : "Your Insurance Concierge"),
-    fromEmail: address,
-    provider: mailbox?.provider ?? (address ? inferMailProvider(address) : undefined),
+    fromName: agency?.name.trim() || mailbox?.displayName || "Your Insurance Concierge",
+    fromEmail: agencyContactEmail || undefined,
+    provider: mailbox?.provider ?? (agencyContactEmail ? inferMailProvider(agencyContactEmail) : undefined),
     connectionId: mailbox?.id,
-    status: mailbox?.status ?? (address ? "needs_auth" : undefined),
+    status: mailbox?.status ?? (agencyContactEmail ? "needs_auth" : undefined),
   };
 }
 

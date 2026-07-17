@@ -96,6 +96,42 @@ describe("marketing.composeAiCampaign", () => {
     ).toBe(true);
   });
 
+  it("uses the current agency contact email instead of a stale connected marketing mailbox", async () => {
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    const agency = api.agencies.list()[0];
+    const mailbox = api.mailboxes.agencyMarketing(agency.id);
+    expect(mailbox).toBeTruthy();
+    db.update("connectedMailboxes", mailbox!.id, {
+      address: "old-marketing@example.com",
+      status: "connected",
+    });
+    const customer = api.customers.list(agency.id)[0];
+
+    const out = await api.marketing.composeAiCampaign({
+      tenantId: agency.id,
+      name: "Agency identity test",
+      channels: ["email"],
+      brief: "This campaign must use the agency's current contact email.",
+      selectedCustomerIds: [customer.id],
+      actorId: "user_manager_pc",
+    });
+
+    expect(out.sentCount).toBe(1);
+    const [, request] = vi.mocked(fetch).mock.calls[0];
+    const payload = JSON.parse(String(request?.body));
+    expect(payload).toMatchObject({
+      senderMode: "agency_marketing",
+      replyTo: agency.contactEmail,
+    });
+    expect(payload.connectionId).toBeUndefined();
+    const receipt = api.marketing
+      .listMessages(agency.id)
+      .find((message) => message.campaignId === out.campaign.id);
+    expect(receipt?.fromEmail).toBe(agency.contactEmail.toLowerCase());
+    expect(receipt?.mailboxConnectionId).toBeUndefined();
+  });
+
   it("combines all clients + all prospects in the recipient count", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];

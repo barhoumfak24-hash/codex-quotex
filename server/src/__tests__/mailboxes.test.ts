@@ -294,6 +294,7 @@ describe("mailbox delivery routes", () => {
     expect(mocks.sendMailboxEmail).toHaveBeenCalledWith(
       expect.objectContaining({
         ownerType: "agency_marketing",
+        expectedAddress: "contact@palmcoast.example",
         to: ["client@example.com"],
       })
     );
