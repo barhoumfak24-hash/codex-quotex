@@ -1,14 +1,18 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 beforeEach(async () => {
   if (typeof window !== "undefined" && window.localStorage) window.localStorage.clear();
+  if (typeof window !== "undefined" && window.sessionStorage) window.sessionStorage.clear();
   const { db } = await import("../db");
   db.reset();
 });
 
 afterEach(() => {
   if (typeof window !== "undefined" && window.localStorage) window.localStorage.clear();
+  if (typeof window !== "undefined" && window.sessionStorage) window.sessionStorage.clear();
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
 });
 
 async function mailboxFixture() {
@@ -69,6 +73,52 @@ describe("mailbox outbox", () => {
     expect(jobs[0].status).toBe("queued");
     expect(jobs[0].to).toEqual([customer.email.toLowerCase()]);
     expect(jobs[0].idempotencyKey).toBe(`communication:${agency.id}:${message.id}`);
+  });
+
+  it("sends with the authenticated server session when the local user row is unavailable", async () => {
+    const { api, agency, customer, user } = await mailboxFixture();
+    const { db } = await import("../db");
+    vi.stubEnv("NODE_ENV", "development");
+    window.sessionStorage.setItem("quotex.authToken", "server-session-token");
+    window.sessionStorage.setItem("quotex.auth.serverUser.v1", JSON.stringify(user));
+    db.remove("users", user.id);
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          ok: true,
+          result: {
+            provider: "transactional",
+            status: "sent",
+            externalMessageId: "sendgrid-session-user-1",
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    );
+
+    const message = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "outbound",
+      subject: "Server session sender",
+      body: "This should send without a browser-local user row.",
+      createdById: user.id,
+    });
+
+    await vi.waitFor(() => {
+      expect(api.mailboxOutbox.get(message.outboxJobId!)?.status).toBe("sent");
+    });
+    expect(fetchSpy).toHaveBeenCalledWith(
+      expect.stringContaining("/mailboxes/send"),
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: "Bearer server-session-token",
+        }),
+      })
+    );
+    const request = fetchSpy.mock.calls[0]?.[1];
+    expect(JSON.parse(String(request?.body))).toMatchObject({ replyTo: user.businessEmail ?? user.email });
   });
 
   it("marks a queued email sent with provider metadata", async () => {

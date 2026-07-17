@@ -1,5 +1,6 @@
 import { api } from "@/lib/api";
 import { apiBaseUrl } from "@/lib/apiBase";
+import { serverSessionHeaders } from "@/lib/serverSession";
 import type { Communication, CommunicationAttachment, MailboxOutboxJob, User } from "@/types";
 
 export type LiveMailboxSendResult =
@@ -323,21 +324,11 @@ function sendableAttachment(attachment: CommunicationAttachment) {
 function authHeaders(user: User, tenantId: string): HeadersInit {
   const headers: Record<string, string> = {
     "content-type": "application/json",
+    ...serverSessionHeaders(),
     "x-user-id": user.id,
     "x-user-role": user.role,
     "x-tenant-id": tenantId,
   };
   if (user.branchId) headers["x-branch-id"] = user.branchId;
-  const token = authToken();
-  if (token) headers.authorization = `Bearer ${token}`;
   return headers;
-}
-
-function authToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return (
-    window.localStorage.getItem("quotex.authToken") ||
-    window.localStorage.getItem("quotex.jwt") ||
-    null
-  );
 }

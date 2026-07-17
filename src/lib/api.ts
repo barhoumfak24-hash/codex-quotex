@@ -26,6 +26,10 @@ import { fmt } from "./format";
 import { uid, nowIso } from "./id";
 import { apiBaseUrl } from "./apiBase";
 import {
+  currentServerSessionUser,
+  serverSessionHeaders,
+} from "./serverSession";
+import {
   generateConnectionSecret,
   generatePassword,
   generateAgencyCode,
@@ -2098,7 +2102,10 @@ function mailboxForUser(userId?: string): {
       status: connection.status,
     };
   }
-  const user = db.list("users").find((u) => u.id === userId);
+  const sessionUser = currentServerSessionUser();
+  const user =
+    db.list("users").find((u) => u.id === userId) ??
+    (sessionUser?.id === userId ? sessionUser : undefined);
   if (!user) return {};
   const account = user.businessEmail ?? user.email;
   return {
@@ -2252,9 +2259,13 @@ const liveMailboxDeliveryInFlight = new Set<string>();
 
 function scheduleLiveMailboxDelivery(row: Communication, job: MailboxOutboxJob) {
   if (!shouldAttemptLiveMailboxDelivery(row, job)) return;
-  const sender = row.createdById ? db.list("users").find((user) => user.id === row.createdById) : undefined;
-  if (!sender) {
-    markOutboxFailedLocal(job.id, "No sender user was available for live email delivery.");
+  const sessionUser = currentServerSessionUser();
+  const sender = row.createdById
+    ? db.list("users").find((user) => user.id === row.createdById) ??
+      (sessionUser?.id === row.createdById ? sessionUser : undefined)
+    : undefined;
+  if (!sender && !serverSessionHeaders().authorization) {
+    markOutboxFailedLocal(job.id, "Sign in again to send this email.");
     return;
   }
   void deliverMailboxOutboxJob({
@@ -2272,7 +2283,7 @@ function shouldAttemptLiveMailboxDelivery(row: Communication, job: MailboxOutbox
   return job.status === "queued" && job.to.length > 0;
 }
 
-async function deliverMailboxOutboxJob(input: { tenantId: string; user: User; jobId: string }) {
+async function deliverMailboxOutboxJob(input: { tenantId: string; user?: User; jobId: string }) {
   if (liveMailboxDeliveryInFlight.has(input.jobId)) return;
   const queued = db.list("mailboxOutbox").find((job) => job.id === input.jobId);
   if (!queued || queued.status === "sent" || queued.status === "sending" || queued.status === "cancelled") return;
@@ -2391,26 +2402,18 @@ function mailboxSendPayload(job: MailboxOutboxJob) {
   };
 }
 
-function liveMailboxAuthHeaders(user: User, tenantId: string): HeadersInit {
+function liveMailboxAuthHeaders(user: User | undefined, tenantId: string): HeadersInit {
   const headers: Record<string, string> = {
     "content-type": "application/json",
-    "x-user-id": user.id,
-    "x-user-role": user.role,
-    "x-tenant-id": tenantId,
+    ...serverSessionHeaders(),
   };
-  if (user.branchId) headers["x-branch-id"] = user.branchId;
-  const token = authToken();
-  if (token) headers.authorization = `Bearer ${token}`;
+  if (user) {
+    headers["x-user-id"] = user.id;
+    headers["x-user-role"] = user.role;
+    headers["x-tenant-id"] = tenantId;
+    if (user.branchId) headers["x-branch-id"] = user.branchId;
+  }
   return headers;
-}
-
-function authToken(): string | null {
-  if (typeof window === "undefined") return null;
-  return (
-    window.localStorage.getItem("quotex.authToken") ||
-    window.localStorage.getItem("quotex.jwt") ||
-    null
-  );
 }
 
 function isTestRuntime() {

@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { AlertCircle, Check, Loader2, RefreshCw } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Check, Loader2, RefreshCw } from "lucide-react";
 import { api } from "@/lib/api";
 import { sendCommunicationThroughLiveMailbox } from "@/lib/liveMailbox";
 import type { Communication, User } from "@/types";
@@ -14,8 +14,7 @@ export function CommunicationDeliveryStatus({
   user?: User;
 }) {
   const [retrying, setRetrying] = useState(false);
-  const [retryError, setRetryError] = useState<string | null>(null);
-  if (communication.direction !== "outbound" || communication.channel !== "email") return null;
+  const recoveredLegacySenderFailure = useRef(false);
 
   const job = communication.outboxJobId
     ? api.mailboxOutbox.get(communication.outboxJobId)
@@ -25,11 +24,30 @@ export function CommunicationDeliveryStatus({
   async function retry() {
     if (!user || !communication.outboxJobId) return;
     setRetrying(true);
-    setRetryError(null);
-    const result = await sendCommunicationThroughLiveMailbox({ tenantId, user, communication });
-    if (!result.ok) setRetryError(result.message);
-    setRetrying(false);
+    try {
+      await sendCommunicationThroughLiveMailbox({ tenantId, user, communication });
+    } finally {
+      setRetrying(false);
+    }
   }
+
+  useEffect(() => {
+    if (
+      recoveredLegacySenderFailure.current ||
+      communication.direction !== "outbound" ||
+      communication.channel !== "email" ||
+      !user ||
+      communication.createdById !== user.id ||
+      job?.status !== "failed" ||
+      job.lastError !== "No sender user was available for live email delivery."
+    ) {
+      return;
+    }
+    recoveredLegacySenderFailure.current = true;
+    void retry();
+  }, [communication.channel, communication.createdById, communication.direction, job?.lastError, job?.status, user?.id]);
+
+  if (communication.direction !== "outbound" || communication.channel !== "email") return null;
 
   if (!job && status === "synced") {
     return (
@@ -53,21 +71,17 @@ export function CommunicationDeliveryStatus({
     );
   }
   if (status === "failed") {
-    const message = retryError ?? job?.lastError ?? "Email delivery was not confirmed.";
     return (
-      <div className="mt-1 rounded border border-red-200 bg-red-50 px-2 py-1 text-[10px] text-red-800">
-        <div className="flex items-start gap-1">
-          <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
-          <span>{message}</span>
-        </div>
+      <div className="mt-1 inline-flex items-center gap-2 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] text-amber-900">
+        <span>Email not sent yet.</span>
         {user && communication.outboxJobId && (
           <button
             type="button"
-            className="mt-1 inline-flex items-center gap-1 font-semibold hover:text-red-950"
+            className="inline-flex items-center gap-1 font-semibold hover:text-amber-950"
             onClick={() => void retry()}
             disabled={retrying}
           >
-            <RefreshCw className={`h-3 w-3 ${retrying ? "animate-spin" : ""}`} /> Retry email
+            <RefreshCw className={`h-3 w-3 ${retrying ? "animate-spin" : ""}`} /> Try again
           </button>
         )}
       </div>
