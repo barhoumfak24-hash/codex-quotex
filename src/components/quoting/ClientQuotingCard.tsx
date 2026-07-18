@@ -250,7 +250,7 @@ function ContactQuotingCard({
   );
   const [selectedLineOfBusiness, setSelectedLineOfBusiness] =
     useState<QuotingLineOfBusiness | null>(existing?.lineOfBusiness ?? null);
-  const [selectedNewCategoryId, setSelectedNewCategoryId] = useState<string | null>(null);
+  const [selectedNewCategoryIds, setSelectedNewCategoryIds] = useState<string[]>([]);
   const [assetCategorySearch, setAssetCategorySearch] = useState("");
   const [assetSearch, setAssetSearch] = useState("");
   const [showNewAssetForm, setShowNewAssetForm] = useState(false);
@@ -274,10 +274,10 @@ function ContactQuotingCard({
     assetCategoryOptions.find((option) => option.assetType === (existing?.assetType ?? "coastal_home")) ??
     assetCategoryOptions[0] ??
     FALLBACK_ASSET_CATEGORY_OPTIONS[0];
-  const selectedNewCategory =
-    selectedNewCategoryId
-      ? selectedLineCategoryOptions.find((option) => option.id === selectedNewCategoryId)
-      : undefined;
+  const selectedNewCategories = selectedLineCategoryOptions.filter((option) =>
+    selectedNewCategoryIds.includes(option.id)
+  );
+  const selectedNewCategory = selectedNewCategories[0];
   const defaultCommercialAssetCategory =
     selectedLineCategoryOptions.find((option) => option.assetType === "other") ??
     selectedLineCategoryOptions[0] ??
@@ -289,8 +289,11 @@ function ContactQuotingCard({
   const newAssetType: AssetType =
     assetCreationCategory?.assetType ?? existing?.assetType ?? prospect?.assetType ?? defaultNewCategory.assetType;
   const allAvailableAssets = [...assets, ...prospectDraftAssets];
-  const matchingAssets = selectedNewCategory
-    ? allAvailableAssets.filter((asset) => asset.type === selectedNewCategory.assetType)
+  const selectedCategoryAssetTypes = new Set(
+    selectedNewCategories.map((category) => category.assetType)
+  );
+  const matchingAssets = selectedNewCategories.length > 0
+    ? allAvailableAssets.filter((asset) => selectedCategoryAssetTypes.has(asset.type))
     : selectedLineOfBusiness === "commercial"
     ? allAvailableAssets
     : [];
@@ -342,8 +345,8 @@ function ContactQuotingCard({
       : selectedLineOfBusiness === "commercial"
       ? "Commercial lines"
       : "Not selected";
-  const setupCategoryLabel = selectedNewCategory
-    ? selectedNewCategory.label
+  const setupCategoryLabel = selectedNewCategories.length > 0
+    ? selectedNewCategories.map((category) => category.label).join(" + ")
     : selectedLineOfBusiness === "commercial"
     ? "No category selected"
     : "Required";
@@ -368,7 +371,7 @@ function ContactQuotingCard({
   function handleSetupLineChange(line: QuotingLineOfBusiness) {
     setSelectedLineOfBusiness((current) => {
       if (current === line) return current;
-      setSelectedNewCategoryId(null);
+      setSelectedNewCategoryIds([]);
       setSelectedAssetIds([]);
       setNewAssetDetails({});
       setAssetCategorySearch("");
@@ -497,24 +500,34 @@ function ContactQuotingCard({
     <div className="space-y-4">
       <div>
         <label className="label">
-          Category{selectedLineOfBusiness === "commercial" ? " (optional)" : ""}
+          {selectedLineOfBusiness === "personal" ? "Categories" : "Category (optional)"}
         </label>
         <AssetCategorySearchPicker
           options={selectedLineCategoryOptions}
-          selectedId={selectedNewCategory?.id}
+          selectedIds={selectedNewCategoryIds}
           search={assetCategorySearch}
           onSearchChange={setAssetCategorySearch}
           onSelect={(option) => {
-            if (option.id === selectedNewCategoryId) {
-              setSelectedNewCategoryId(null);
+            const isSelected = selectedNewCategoryIds.includes(option.id);
+            if (selectedLineOfBusiness === "personal") {
+              const nextIds = isSelected
+                ? selectedNewCategoryIds.filter((id) => id !== option.id)
+                : [...selectedNewCategoryIds, option.id];
+              const nextCategories = selectedLineCategoryOptions.filter((category) =>
+                nextIds.includes(category.id)
+              );
+              const nextAssetTypes = new Set(nextCategories.map((category) => category.assetType));
+              setSelectedNewCategoryIds(nextIds);
+              setSelectedAssetIds((current) =>
+                current.filter((assetId) => {
+                  const asset = allAvailableAssets.find((row) => row.id === assetId);
+                  return !!asset && nextAssetTypes.has(asset.type);
+                })
+              );
+            } else {
+              setSelectedNewCategoryIds(isSelected ? [] : [option.id]);
               setSelectedAssetIds([]);
-              setNewAssetDetails({});
-              setAssetSearch("");
-              setShowNewAssetForm(false);
-              return;
             }
-            setSelectedNewCategoryId(option.id);
-            setSelectedAssetIds([]);
             setNewAssetDetails({});
             setAssetSearch("");
             setShowNewAssetForm(false);
@@ -617,7 +630,9 @@ function ContactQuotingCard({
             <dd className="font-medium text-ink-900">{setupLineLabel}</dd>
           </div>
           <div>
-            <dt className="text-blue-700">Category</dt>
+            <dt className="text-blue-700">
+              {selectedLineOfBusiness === "personal" ? "Categories" : "Category"}
+            </dt>
             <dd className="font-medium text-ink-900">{setupCategoryLabel}</dd>
           </div>
           <div>
@@ -660,7 +675,7 @@ function ContactQuotingCard({
                     }`}
                     onClick={() => {
                       setSelectedLineOfBusiness(line);
-                      setSelectedNewCategoryId(null);
+                      setSelectedNewCategoryIds([]);
                       setSelectedAssetIds([]);
                       setNewAssetDetails({});
                       setAssetCategorySearch("");
@@ -856,6 +871,8 @@ function ContactQuotingCard({
             assetDetails,
             categoryId: selectedNewCategory?.id,
             categoryLabel: selectedNewCategory?.label,
+            categoryIds: selectedNewCategories.map((category) => category.id),
+            categoryLabels: selectedNewCategories.map((category) => category.label),
             intakeWarnings,
             personalLinesAssetRequired: true,
             personalLinesAssetSelected: hasSelectedQuoteAsset,
@@ -864,6 +881,9 @@ function ContactQuotingCard({
               selectedAssets.length > 0
                 ? selectedAssets.map((asset) => {
                     const details = cleanQuoteAssetDetails(asset.type, asset.details);
+                    const category = selectedNewCategories.find(
+                      (option) => option.assetType === asset.type
+                    );
                     return {
                       assetId: asset.id,
                       label: assetDisplayName(asset),
@@ -871,6 +891,8 @@ function ContactQuotingCard({
                       address: primaryQuoteAssetAddress(asset.type, details),
                       estimatedValue: asset.estimatedValue,
                       assetDetails: details,
+                      categoryId: category?.id,
+                      categoryLabel: category?.label,
                     };
                   })
                 : undefined,
@@ -1135,13 +1157,13 @@ function AssetMultiSelectPicker({
 
 function AssetCategorySearchPicker({
   options,
-  selectedId,
+  selectedIds,
   search,
   onSearchChange,
   onSelect,
 }: {
   options: AssetCategoryOption[];
-  selectedId?: string;
+  selectedIds: string[];
   search: string;
   onSearchChange: (value: string) => void;
   onSelect: (option: AssetCategoryOption) => void;
@@ -1156,7 +1178,7 @@ function AssetCategorySearchPicker({
       return true;
     });
   }, [options]);
-  const selected = uniqueOptions.find((option) => option.id === selectedId);
+  const selected = uniqueOptions.filter((option) => selectedIds.includes(option.id));
   const filteredOptions = uniqueOptions.filter((option) => {
     if (!normalizedSearch) return true;
     const searchableText = [
@@ -1182,16 +1204,20 @@ function AssetCategorySearchPicker({
           placeholder="Search linked agency categories..."
         />
       </div>
-      {selected && (
+      {selected.length > 0 && (
         <div className="mt-2 rounded-md bg-gold-50 px-2 py-1.5 text-xs text-ink-700">
-          Selected: <span className="font-semibold text-ink-950">{selected.label}</span>
-          <span className="text-ink-400"> / </span>
-          {api.helpers.assetTypeLabel(selected.assetType)}
+          <span className="font-medium">Selected: </span>
+          {selected.map((option, index) => (
+            <span key={option.id}>
+              {index > 0 ? <span className="text-ink-400"> + </span> : null}
+              <span className="font-semibold text-ink-950">{option.label}</span>
+            </span>
+          ))}
         </div>
       )}
       <div className="mt-2 max-h-64 space-y-1 overflow-y-auto pr-1">
         {filteredOptions.map((option) => {
-          const isSelected = option.id === selectedId;
+          const isSelected = selectedIds.includes(option.id);
           return (
             <button
               key={`${option.id}:${option.lineOfBusiness}:${option.assetType}:${option.label}`}

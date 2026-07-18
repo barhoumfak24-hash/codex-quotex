@@ -2149,6 +2149,8 @@ export interface QuotingSessionAssetMapping {
   assetId?: string;
   label: string;
   assetType: AssetType;
+  categoryId?: string;
+  categoryLabel?: string;
   address?: string;
   estimatedValue: number;
   assetDetails?: Record<string, string>;
@@ -2424,6 +2426,8 @@ export interface QuotingSession {
   quoteRequestId?: string;
   categoryId?: string;
   categoryLabel?: string;
+  categoryIds?: string[];
+  categoryLabels?: string[];
   prospectId?: string;
   customerId?: string;
   // Existing asset being re-quoted (clients) or undefined for a

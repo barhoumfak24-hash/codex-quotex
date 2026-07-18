@@ -313,6 +313,8 @@ export function AiQuotingWorkspace({
     assetDetails?: Record<string, string>;
     categoryId?: string;
     categoryLabel?: string;
+    categoryIds?: string[];
+    categoryLabels?: string[];
     intakeWarnings?: string[];
     personalLinesAssetRequired?: boolean;
     personalLinesAssetSelected?: boolean;
@@ -326,6 +328,8 @@ export function AiQuotingWorkspace({
       address?: string;
       estimatedValue?: number;
       assetDetails?: Record<string, string>;
+      categoryId?: string;
+      categoryLabel?: string;
     }>;
   };
   onChanged?: () => void;
@@ -536,6 +540,8 @@ export function AiQuotingWorkspace({
         assetDetails: contact.assetDetails,
         categoryId: contact.categoryId,
         categoryLabel: contact.categoryLabel,
+        categoryIds: contact.categoryIds,
+        categoryLabels: contact.categoryLabels,
         lineOfBusiness: selectedLine,
         selectedAcordTemplateIds:
           selectedLine === "commercial" ? selectedAcordTemplateIds : undefined,
@@ -1885,36 +1891,36 @@ function WorkspaceSideRail({
   );
 }
 
-function PublicFields({ session }: { session: QuotingSession }) {
+export function PublicFields({ session }: { session: QuotingSession }) {
   const selectedAssets = session.selectedAssetMappings ?? [];
-  if (selectedAssets.length > 1) {
-    const assetsWithFields = selectedAssets.filter(
-      (asset) => Object.keys(asset.publicFields).length > 0
-    );
-    if (assetsWithFields.length === 0) return null;
+  if (selectedAssets.length > 0) {
     return (
-      <div className="rounded-md border border-blue-100 bg-blue-50/40 p-3">
-        <div className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-blue-800">
-          <Bot className="h-3 w-3" /> AI-sourced values for all selected assets
-        </div>
-        <div className="grid gap-2 lg:grid-cols-2">
-          {assetsWithFields.map((asset, index) => (
+      <div className="space-y-3">
+        {selectedAssets.map((asset, index) => {
+          const entries = Object.entries(asset.publicFields);
+          return (
             <section
               key={asset.assetId ?? `${asset.label}-${index}`}
-              className="rounded-md border border-blue-100 bg-white/80 p-3"
+              className="rounded-md border border-blue-100 bg-blue-50/40 p-3"
             >
-              <h4 className="mb-2 text-xs font-semibold text-ink-900">{asset.label}</h4>
-              <dl className="space-y-1.5 text-xs">
-                {Object.entries(asset.publicFields).map(([key, value]) => (
-                  <div key={key} className="flex justify-between gap-3">
-                    <dt className="text-ink-500">{key}</dt>
-                    <dd className="text-right text-ink-800">{String(value)}</dd>
-                  </div>
-                ))}
-              </dl>
+              <div className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-blue-800">
+                <Bot className="h-3 w-3" /> AI-sourced values for {asset.label}
+              </div>
+              {entries.length > 0 ? (
+                <dl className="grid gap-x-4 gap-y-1.5 text-xs sm:grid-cols-2">
+                  {entries.map(([key, value]) => (
+                    <div key={key} className="flex justify-between gap-3">
+                      <dt className="text-ink-500">{key}</dt>
+                      <dd className="text-right text-ink-800">{String(value)}</dd>
+                    </div>
+                  ))}
+                </dl>
+              ) : (
+                <p className="text-xs text-ink-500">No reliable public values were found.</p>
+              )}
             </section>
-          ))}
-        </div>
+          );
+        })}
       </div>
     );
   }

@@ -45,17 +45,18 @@ describe("api.quoting workspace", () => {
     const { api, agency, agent } = await seed();
     const customer = api.customers.list(agency.id)[0];
     const category = api.categories.get("cat_primary_home")!;
-    const enrichmentRequests: Array<{ seed?: { address?: string } }> = [];
+    const vehicleCategory = api.categories.get("cat_luxury_vehicle")!;
+    const enrichmentRequests: Array<{ seed?: Record<string, unknown> }> = [];
     vi.stubGlobal(
       "fetch",
       vi.fn((u: string, init?: RequestInit) => {
         const url = String(u);
         if (url === "/api/ai/enrich-asset") {
           const request = JSON.parse(String(init?.body ?? "{}")) as {
-            seed?: { address?: string };
+            seed?: Record<string, unknown>;
           };
           enrichmentRequests.push(request);
-          const firstAsset = request.seed?.address?.includes("First") ?? false;
+          const firstAsset = String(request.seed?.address ?? "").includes("First");
           const yearBuilt = firstAsset ? "2001" : "2012";
           const squareFootage = firstAsset ? "2100" : "3400";
           const collectedAt = "2026-07-17T00:00:00.000Z";
@@ -114,15 +115,19 @@ describe("api.quoting workspace", () => {
         assetType: "coastal_home" as const,
         address: "101 First Street, Palm Beach, FL 33480",
         estimatedValue: 900_000,
-        assetDetails: { propertyAddress: "101 First Street, Palm Beach, FL 33480" },
+        assetDetails: {
+          propertyAddress: "101 First Street, Palm Beach, FL 33480",
+        } as Record<string, string>,
       },
       {
         assetId: "asset_second",
-        label: "Second Avenue Home",
-        assetType: "coastal_home" as const,
+        label: "2023 Test Vehicle",
+        assetType: "luxury_vehicle" as const,
+        categoryId: vehicleCategory.id,
+        categoryLabel: vehicleCategory.label,
         address: "202 Second Avenue, Palm Beach, FL 33480",
-        estimatedValue: 1_400_000,
-        assetDetails: { propertyAddress: "202 Second Avenue, Palm Beach, FL 33480" },
+        estimatedValue: 140_000,
+        assetDetails: { vin: "1HGCM82633A004352" } as Record<string, string>,
       },
     ];
     const session = await api.quoting.startSession({
@@ -133,6 +138,8 @@ describe("api.quoting workspace", () => {
       assetType: assets[0].assetType,
       categoryId: category.id,
       categoryLabel: category.label,
+      categoryIds: [category.id, vehicleCategory.id],
+      categoryLabels: [category.label, vehicleCategory.label],
       contactName: customer.name,
       estimatedValue: assets[0].estimatedValue,
       address: assets[0].address,
@@ -142,22 +149,25 @@ describe("api.quoting workspace", () => {
     });
 
     expect(enrichmentRequests).toHaveLength(2);
-    expect(enrichmentRequests.map((request) => request.seed?.address)).toEqual(
-      assets.map((asset) => asset.address)
-    );
+    expect(enrichmentRequests[0].seed?.address).toBe(assets[0].address);
+    expect(enrichmentRequests[1].seed?.vin).toBe("1HGCM82633A004352");
     expect(session.selectedAssetMappings?.map((asset) => asset.assetId)).toEqual([
       "asset_first",
       "asset_second",
     ]);
+    expect(session.categoryIds).toEqual([category.id, vehicleCategory.id]);
+    expect(session.selectedAssetMappings?.[1].categoryId).toBe(vehicleCategory.id);
     expect(session.selectedAssetMappings?.[0].publicFields["Year built"]).toBe("2001");
-    expect(session.selectedAssetMappings?.[1].publicFields["Year built"]).toBe("2012");
     expect(session.publicFields["First Street Home - Year built"]).toBe("2001");
-    expect(session.publicFields["Second Avenue Home - Year built"]).toBe("2012");
+    expect(Object.keys(session.selectedAssetMappings?.[1].publicFields ?? {}).length).toBeGreaterThan(0);
     expect(session.questionnaireQuestions?.some((question) =>
       question.section.startsWith("First Street Home - ")
     )).toBe(true);
     expect(session.questionnaireQuestions?.some((question) =>
-      question.section.startsWith("Second Avenue Home - ")
+      question.section.startsWith("2023 Test Vehicle - ")
+    )).toBe(true);
+    expect(session.questionnaireQuestions?.some((question) =>
+      question.section.startsWith("2023 Test Vehicle - ") && /VIN/i.test(question.label)
     )).toBe(true);
     expect(new Set(session.questionnaireQuestions?.map((question) => question.id)).size).toBe(
       session.questionnaireQuestions?.length

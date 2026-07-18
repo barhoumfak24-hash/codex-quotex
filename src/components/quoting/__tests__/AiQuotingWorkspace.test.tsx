@@ -3,6 +3,8 @@ import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { QuotingSession } from "../../../types";
+import { PublicFields } from "../AiQuotingWorkspace";
 import { ClientQuotingCard } from "../ClientQuotingCard";
 
 beforeEach(async () => {
@@ -91,6 +93,49 @@ async function renderClientQuotingCard(
 }
 
 describe("AiQuotingWorkspace component", () => {
+  it("renders one independent AI-results box for every selected asset", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const session = {
+      publicFields: {},
+      selectedAssetMappings: [
+        {
+          assetId: "asset_home",
+          label: "Primary Home",
+          assetType: "coastal_home",
+          estimatedValue: 0,
+          publicFields: { "Year built": "2005" },
+          missingFields: [],
+          aiSummary: "Mapped home",
+        },
+        {
+          assetId: "asset_auto",
+          label: "2023 Test Vehicle",
+          assetType: "luxury_vehicle",
+          estimatedValue: 0,
+          publicFields: {},
+          missingFields: [],
+          aiSummary: "No reliable values",
+        },
+      ],
+    } as QuotingSession;
+
+    await act(async () => {
+      root.render(<PublicFields session={session} />);
+    });
+
+    expect(host.querySelectorAll("section")).toHaveLength(2);
+    expect(host.textContent).toContain("AI-sourced values for Primary Home");
+    expect(host.textContent).toContain("AI-sourced values for 2023 Test Vehicle");
+    expect(host.textContent).toContain("No reliable public values were found.");
+
+    await act(async () => {
+      root.unmount();
+    });
+    host.remove();
+  });
+
   it("uses a launcher on the profile and keeps the full workflow on its routed page", async () => {
     const { customer, host, root } = await renderClientQuotingCard(undefined, {
       launcher: true,
@@ -293,6 +338,23 @@ describe("AiQuotingWorkspace component", () => {
     const dialogText = host.querySelector('[role="dialog"]')?.textContent ?? "";
     expect(dialogText).toContain("Asset (optional)");
     expect(dialogText).toContain("Create new asset");
+
+    await act(async () => {
+      root.unmount();
+    });
+    host.remove();
+  });
+
+  it("allows multiple personal-lines categories to stay selected", async () => {
+    const { host, root } = await renderClientQuotingCard();
+
+    await openAiWorkspace(host);
+    await click(buttonByText(host, /Personal lines/i));
+    await click(buttonByText(host, /^Primary Home/));
+    await click(buttonByText(host, /^Luxury Vehicle/));
+
+    const workspaceText = host.querySelector('[role="dialog"]')?.textContent ?? "";
+    expect(workspaceText).toContain("Selected: Primary Home + Luxury Vehicle");
 
     await act(async () => {
       root.unmount();

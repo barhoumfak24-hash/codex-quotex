@@ -16117,6 +16117,8 @@ export const api = {
         assetId?: string;
         label: string;
         assetType: AssetType;
+        categoryId?: string;
+        categoryLabel?: string;
         address?: string;
         estimatedValue?: number;
         assetDetails?: Record<string, string>;
@@ -16129,6 +16131,8 @@ export const api = {
       assetDetails?: Record<string, string>;
       categoryId?: string;
       categoryLabel?: string;
+      categoryIds?: string[];
+      categoryLabels?: string[];
       lineOfBusiness?: QuotingLineOfBusiness;
       selectedAcordTemplateIds?: string[];
     }): Promise<QuotingSession> {
@@ -16144,6 +16148,8 @@ export const api = {
                 assetId: input.assetId,
                 label: sharedAssetTypeDisplayName(input.assetType),
                 assetType: input.assetType,
+                categoryId: input.categoryId,
+                categoryLabel: input.categoryLabel,
                 address: input.address,
                 estimatedValue: input.estimatedValue,
                 assetDetails: input.assetDetails,
@@ -16173,6 +16179,11 @@ export const api = {
           assetId: asset.assetId,
           label,
           assetType: asset.assetType,
+          categoryId:
+            asset.categoryId ?? (asset.assetType === input.assetType ? input.categoryId : undefined),
+          categoryLabel:
+            asset.categoryLabel ??
+            (asset.assetType === input.assetType ? input.categoryLabel : undefined),
           address: asset.address,
           estimatedValue: asset.estimatedValue ?? 0,
           assetDetails: asset.assetDetails,
@@ -16229,7 +16240,12 @@ export const api = {
       let questionnaireResponses: Record<string, string> | undefined;
       let questionnaireResponseMeta: Record<string, QuestionnaireResponseMeta> | undefined;
       let missingFields = aggregateMissingFields;
-      const category = input.categoryId ? api.categories.get(input.categoryId) : undefined;
+      const selectedCategories = (input.categoryIds ?? [])
+        .map((categoryId) => api.categories.get(categoryId))
+        .filter((category): category is InsuranceCategory => !!category);
+      const category = input.categoryId
+        ? api.categories.get(input.categoryId)
+        : selectedCategories[0];
       const primaryAssetDetails = primaryAsset.assetDetails ?? {};
       const seededAssetDetails: Record<string, string> = {
         ...(lineOfBusiness === "personal" ? personalCategoryAnswerHints(category) : {}),
@@ -16259,14 +16275,17 @@ export const api = {
         const combinedResponseMeta: Record<string, QuestionnaireResponseMeta> = {};
         const combinedMissingFields: string[] = [];
         selectedAssetMappings.forEach((asset, assetIndex) => {
+          const assetCategory = asset.categoryId
+            ? api.categories.get(asset.categoryId)
+            : selectedCategories.find((option) => option.assetType === asset.assetType) ?? category;
           const assetQuestions = completePersonalQuestionnaireQuestions({
             assetType: asset.assetType,
-            category,
+            category: assetCategory,
             publicFields: asset.publicFields,
             missingFields: asset.missingFields,
           });
           const assetDetailsForQuestions = {
-            ...personalCategoryAnswerHints(category),
+            ...personalCategoryAnswerHints(assetCategory),
             ...(asset.assetDetails ?? {}),
           };
           const seeded = seedKnownQuestionnaireResponses({
@@ -16316,6 +16335,9 @@ export const api = {
         tenantId: input.tenantId,
         categoryId: input.categoryId,
         categoryLabel: input.categoryLabel,
+        categoryIds: input.categoryIds ?? (input.categoryId ? [input.categoryId] : undefined),
+        categoryLabels:
+          input.categoryLabels ?? (input.categoryLabel ? [input.categoryLabel] : undefined),
         prospectId: input.prospectId,
         customerId: input.customerId,
         assetId: primaryAsset.assetId,
