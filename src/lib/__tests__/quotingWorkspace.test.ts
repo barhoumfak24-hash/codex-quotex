@@ -10,6 +10,8 @@ beforeEach(async () => {
   vi.unstubAllEnvs();
   vi.stubEnv("VITE_AI_MODE", "browser");
   if (typeof window !== "undefined" && window.localStorage) window.localStorage.clear();
+  const { resetAiResourceGovernor } = await import("../aiResourceGovernor");
+  resetAiResourceGovernor();
   const { db } = await import("../db");
   db.reset();
 });
