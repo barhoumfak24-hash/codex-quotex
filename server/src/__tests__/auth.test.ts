@@ -71,7 +71,7 @@ describe("server auth middleware", () => {
     expect(res.state.headers.expires).toBe("0");
   });
 
-  it("rejects spoofable identity headers in production", () => {
+  it("rejects spoofable identity headers in production", async () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("ALLOW_DEV_AUTH_HEADERS", "true");
     const req = mockReq({
@@ -82,14 +82,14 @@ describe("server auth middleware", () => {
     const res = mockRes();
     const next = vi.fn();
 
-    requireAuth(req as Request, res as unknown as Response, next);
+    await requireAuth(req as Request, res as unknown as Response, next);
 
     expect(next).not.toHaveBeenCalled();
     expect(res.state.status).toBe(401);
-    expect(res.state.json).toEqual({ error: "unauthorized" });
+    expect(res.state.json).toEqual({ ok: false, reason: "no_session", error: "no_session" });
   });
 
-  it("allows development header auth only when explicitly enabled", () => {
+  it("allows development header auth only when explicitly enabled", async () => {
     vi.stubEnv("NODE_ENV", "development");
     vi.stubEnv("ALLOW_DEV_AUTH_HEADERS", "true");
     const req = mockReq({
@@ -101,7 +101,7 @@ describe("server auth middleware", () => {
     const res = mockRes();
     const next = vi.fn();
 
-    requireAuth(req as Request, res as unknown as Response, next);
+    await requireAuth(req as Request, res as unknown as Response, next);
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(req.auth).toMatchObject({
@@ -112,7 +112,7 @@ describe("server auth middleware", () => {
     });
   });
 
-  it("accepts a signed tenant-scoped JWT in production", () => {
+  it("accepts a signed tenant-scoped JWT in production", async () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("JWT_ISSUER", "quotex");
     vi.stubEnv("JWT_AUDIENCE", "quotex-api");
@@ -122,6 +122,7 @@ describe("server auth middleware", () => {
         role: "agent",
         tenantId: "tenant_a",
         permissions: ["quotes:run"],
+        authVersion: 0,
       },
       process.env.JWT_SECRET!,
       { algorithm: "HS256", issuer: "quotex", audience: "quotex-api" }
@@ -129,8 +130,18 @@ describe("server auth middleware", () => {
     const req = mockReq({ authorization: `Bearer ${token}` });
     const res = mockRes();
     const next = vi.fn();
+    vi.stubEnv("DATABASE_URL", "postgresql://test");
+    vi.spyOn(prisma.user, "findUnique").mockResolvedValue({
+      id: "user_1",
+      tenantId: "tenant_a",
+      branchId: null,
+      role: "agent",
+      status: "active",
+      authVersion: 0,
+      agency: { active: true },
+    } as any);
 
-    requireAuth(req as Request, res as unknown as Response, next);
+    await requireAuth(req as Request, res as unknown as Response, next);
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(req.auth).toMatchObject({
@@ -138,7 +149,65 @@ describe("server auth middleware", () => {
       role: "agent",
       tenantId: "tenant_a",
       permissions: ["quotes:run"],
+      authVersion: 0,
     });
+  });
+
+  it("rejects a previously issued JWT after logout increments the auth version", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("DATABASE_URL", "postgresql://test");
+    const token = jwt.sign(
+      {
+        userId: "user_logged_out",
+        role: "manager",
+        tenantId: "tenant_a",
+        permissions: [],
+        authVersion: 0,
+      },
+      process.env.JWT_SECRET!,
+      { algorithm: "HS256" }
+    );
+    vi.spyOn(prisma.user, "findUnique").mockResolvedValue({
+      id: "user_logged_out",
+      tenantId: "tenant_a",
+      branchId: null,
+      role: "manager",
+      status: "active",
+      authVersion: 1,
+      agency: { active: true },
+    } as any);
+    const req = mockReq({ authorization: `Bearer ${token}` });
+    const res = mockRes();
+    const next = vi.fn();
+
+    await requireAuth(req as Request, res as unknown as Response, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.state.status).toBe(401);
+    expect(res.state.json).toEqual({ ok: false, reason: "no_session", error: "no_session" });
+  });
+
+  it("rejects pre-rebuild JWTs that do not carry an auth version", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const token = jwt.sign(
+      {
+        userId: "legacy_user",
+        role: "manager",
+        tenantId: "tenant_a",
+        permissions: [],
+      },
+      process.env.JWT_SECRET!,
+      { algorithm: "HS256" }
+    );
+    const req = mockReq({ authorization: `Bearer ${token}` });
+    const res = mockRes();
+    const next = vi.fn();
+
+    await requireAuth(req as Request, res as unknown as Response, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.state.status).toBe(401);
+    expect(res.state.json).toEqual({ ok: false, reason: "no_session", error: "no_session" });
   });
 
   it("rejects tenant IDs in the body that do not match the authenticated tenant", () => {
@@ -229,7 +298,7 @@ describe("server auth login helpers", () => {
     expect(verifyRoutePasswordHash("correct horse battery staple", "correct horse battery staple")).toBe(false);
   });
 
-  it("issues a JWT accepted by production auth middleware", () => {
+  it("issues a JWT accepted by production auth middleware", async () => {
     vi.stubEnv("NODE_ENV", "production");
     vi.stubEnv("JWT_ISSUER", "quotex");
     vi.stubEnv("JWT_AUDIENCE", "quotex-api");
@@ -239,12 +308,23 @@ describe("server auth login helpers", () => {
       tenantId: "tenant_login",
       branchId: "branch_1",
       permissions: ["documents:read"],
+      authVersion: 0,
     });
     const req = mockReq({ authorization: `Bearer ${token}` });
     const res = mockRes();
     const next = vi.fn();
+    vi.stubEnv("DATABASE_URL", "postgresql://test");
+    vi.spyOn(prisma.user, "findUnique").mockResolvedValue({
+      id: "user_login",
+      tenantId: "tenant_login",
+      branchId: "branch_1",
+      role: "manager",
+      status: "active",
+      authVersion: 0,
+      agency: { active: true },
+    } as any);
 
-    requireAuth(req as Request, res as unknown as Response, next);
+    await requireAuth(req as Request, res as unknown as Response, next);
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(req.auth).toMatchObject({
@@ -310,7 +390,16 @@ describe("server auth login helpers", () => {
     const authReq = mockReq({ authorization: `Bearer ${body.token}` });
     const authRes = mockRes();
     const next = vi.fn();
-    requireAuth(authReq as Request, authRes as unknown as Response, next);
+    vi.spyOn(prisma.user, "findUnique").mockResolvedValue({
+      id: body.user?.id,
+      tenantId: "agency_quotex_platform",
+      branchId: null,
+      role: "master_admin",
+      status: "active",
+      authVersion: 0,
+      agency: null,
+    } as any);
+    await requireAuth(authReq as Request, authRes as unknown as Response, next);
 
     expect(next).toHaveBeenCalledTimes(1);
     expect(authReq.auth).toMatchObject({
@@ -398,6 +487,7 @@ describe("server auth login helpers", () => {
       lastLoginAt: new Date(),
       createdAt: new Date(),
       updatedAt: new Date(),
+      authVersion: 0,
       agency: null,
     } as any);
 
@@ -411,7 +501,7 @@ describe("server auth login helpers", () => {
     const res = mockRes();
     const next = vi.fn();
 
-    authMiddleware(req as Request, res as unknown as Response, next);
+    await authMiddleware(req as Request, res as unknown as Response, next);
     expect(next).toHaveBeenCalledTimes(1);
     await handler(req as Request, res as unknown as Response);
 
@@ -454,6 +544,7 @@ describe("server auth login helpers", () => {
       lastLoginAt: new Date(),
       createdAt: new Date(),
       updatedAt: new Date(),
+      authVersion: 0,
       agency: {
         id: "agency_suspended",
         name: "Suspended Agency",
@@ -471,11 +562,10 @@ describe("server auth login helpers", () => {
     const res = mockRes();
     const next = vi.fn();
 
-    authMiddleware(req as Request, res as unknown as Response, next);
-    expect(next).toHaveBeenCalledTimes(1);
-    await handler(req as Request, res as unknown as Response);
+    await authMiddleware(req as Request, res as unknown as Response, next);
 
     expect(res.state.status).toBe(403);
-    expect(res.state.json).toMatchObject({ ok: false, error: "inactive_agency" });
+    expect(next).not.toHaveBeenCalled();
+    expect(res.state.json).toMatchObject({ ok: false, reason: "agency_inactive", error: "agency_inactive" });
   });
 });

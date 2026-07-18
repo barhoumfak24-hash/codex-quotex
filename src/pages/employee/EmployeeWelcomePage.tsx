@@ -19,7 +19,7 @@ import type { MailProvider } from "@/types";
 // fills in their real identity, contact details, and permanent password
 // the first time they sign in.
 export function EmployeeWelcomePage() {
-  const { user, signOut, refreshUser } = useAuth();
+  const { user, signOut, refreshUser, changeMyPassword } = useAuth();
   const { agency } = useTenant();
   const nav = useNavigate();
   const [firstName, setFirstName] = useState("");
@@ -32,6 +32,7 @@ export function EmployeeWelcomePage() {
     inferMailProvider(user?.businessEmail ?? user?.email ?? "")
   );
   const [newPassword, setNewPassword] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
 
@@ -44,7 +45,7 @@ export function EmployeeWelcomePage() {
 
   if (!user || !agency) return null;
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     if (!user) return;
@@ -76,6 +77,16 @@ export function EmployeeWelcomePage() {
       setError("Passwords don't match.");
       return;
     }
+    if (!currentPassword) {
+      setError("Enter the password you used to sign in.");
+      return;
+    }
+
+    const passwordResult = await changeMyPassword(currentPassword, newPassword);
+    if (!passwordResult.ok) {
+      setError(passwordResult.reason);
+      return;
+    }
 
     const patch: Parameters<typeof api.users.update>[1] = {
       firstName: cleanFirstName,
@@ -88,7 +99,6 @@ export function EmployeeWelcomePage() {
       title: title.trim() || undefined,
       bio: bio.trim() || undefined,
       profileCompleted: true,
-      generatedPassword: newPassword,
       passwordUpdatedAt: new Date().toISOString(),
     };
     api.users.update(user.id, patch);
@@ -219,7 +229,18 @@ export function EmployeeWelcomePage() {
               }
               subtitle="Required. After this setup, use your business email and this password to sign in."
             />
-            <div className="grid sm:grid-cols-2 gap-3">
+            <div className="grid sm:grid-cols-3 gap-3">
+              <div>
+                <label className="label">Current password *</label>
+                <input
+                  className="input"
+                  type="password"
+                  required
+                  value={currentPassword}
+                  onChange={(e) => setCurrentPassword(e.target.value)}
+                  autoComplete="current-password"
+                />
+              </div>
               <div>
                 <label className="label">Password *</label>
                 <input

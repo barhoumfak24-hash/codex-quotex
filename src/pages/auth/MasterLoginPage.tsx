@@ -1,13 +1,13 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { LockKeyhole, ShieldCheck, UserPlus } from "lucide-react";
+import { LoaderCircle, LockKeyhole, ShieldCheck, UserPlus } from "lucide-react";
 import { AuthShell } from "./AuthShell";
 import { authFailureMessage, useAuth } from "@/lib/auth";
 
 type Mode = "sign-in" | "create";
 
 export function MasterLoginPage() {
-  const { createMasterAccount, signInMaster } = useAuth();
+  const { createMasterAccount, signInMaster, requestPasswordReset } = useAuth();
   const nav = useNavigate();
   const [mode, setMode] = useState<Mode>("sign-in");
   const [signInEmail, setSignInEmail] = useState("");
@@ -18,6 +18,8 @@ export function MasterLoginPage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [message, setMessage] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [resettingPassword, setResettingPassword] = useState(false);
+  const [resetNotice, setResetNotice] = useState<string | null>(null);
 
   async function submitSignIn(event: React.FormEvent) {
     event.preventDefault();
@@ -98,8 +100,12 @@ export function MasterLoginPage() {
               className="input"
               type="email"
               value={signInEmail}
-              onChange={(event) => setSignInEmail(event.target.value)}
+              onChange={(event) => {
+                setSignInEmail(event.target.value);
+                setResetNotice(null);
+              }}
               required
+              autoComplete="username"
             />
           </div>
           <div>
@@ -110,11 +116,32 @@ export function MasterLoginPage() {
               value={signInPassword}
               onChange={(event) => setSignInPassword(event.target.value)}
               required
+              autoComplete="current-password"
             />
           </div>
-          <button className="btn-primary w-full" type="submit" disabled={submitting}>
+          <button className="btn-primary flex w-full items-center justify-center gap-2" type="submit" disabled={submitting}>
+            {submitting && <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />}
             {submitting ? "Checking access..." : "Enter master portal"}
           </button>
+          <button
+            className="w-full text-right text-xs text-ink-500 hover:text-ink-900"
+            type="button"
+            disabled={submitting || resettingPassword || !signInEmail.trim()}
+            onClick={async () => {
+              setResettingPassword(true);
+              setResetNotice(null);
+              const result = await requestPasswordReset("master", signInEmail);
+              setResetNotice(
+                result.ok
+                  ? "If an account exists for that email, password reset instructions have been sent."
+                  : authFailureMessage(result.reason, "master")
+              );
+              setResettingPassword(false);
+            }}
+          >
+            {resettingPassword ? "Sending reset instructions..." : "Forgot password?"}
+          </button>
+          {resetNotice && <div className="text-xs text-ink-600">{resetNotice}</div>}
         </form>
       ) : (
         <form onSubmit={submitCreate} className="space-y-3">

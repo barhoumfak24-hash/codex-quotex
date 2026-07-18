@@ -20,6 +20,7 @@ function PortalLoading() {
 
 const EmployeeLoginPage = lazyPage(() => import("@/pages/auth/EmployeeLoginPage"), "EmployeeLoginPage");
 const MasterLoginPage = lazyPage(() => import("@/pages/auth/MasterLoginPage"), "MasterLoginPage");
+const PasswordResetPage = lazyPage(() => import("@/pages/auth/PasswordResetPage"), "PasswordResetPage");
 const NotFoundPage = lazyPage(() => import("@/pages/public/NotFoundPage"), "NotFoundPage");
 const PrivacyPage = lazyPage(() => import("@/pages/public/LegalPages"), "PrivacyPage");
 const TermsPage = lazyPage(() => import("@/pages/public/LegalPages"), "TermsPage");
@@ -104,6 +105,7 @@ export function SoftwareApp() {
         <Route path="/signup" element={<Navigate to="/employee/login" replace />} />
         <Route path="/employee/login" element={<EmployeeLoginPage />} />
         <Route path="/master/login" element={<MasterLoginPage />} />
+        <Route path="/reset-password" element={<PasswordResetPage />} />
         <Route path="/demo/app" element={<AgencyAppDemoPage />} />
         <Route path="/checkout/sign/:packetId" element={<CheckoutRemoteSignPage />} />
         <Route path="/privacy" element={<PrivacyPage />} />

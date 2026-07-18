@@ -1,5 +1,6 @@
 import { apiBaseUrl } from "@/lib/apiBase";
 import type { ConnectedMailbox, MailProvider, User } from "@/types";
+import { currentServerSessionToken } from "@/lib/serverSession";
 
 export type MailboxOAuthProvider = "google" | "microsoft";
 export type MailboxOAuthOwnerType = "staff" | "agency_marketing";
@@ -145,11 +146,7 @@ function authHeaders(user: User, tenantId: string): HeadersInit {
 
 function authToken(): string | null {
   if (typeof window === "undefined") return null;
-  return (
-    window.localStorage.getItem("quotex.authToken") ||
-    window.localStorage.getItem("quotex.jwt") ||
-    null
-  );
+  return currentServerSessionToken();
 }
 
 type ServerMailboxConnection = {

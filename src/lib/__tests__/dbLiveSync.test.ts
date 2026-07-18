@@ -5,7 +5,7 @@ beforeEach(() => {
   vi.resetModules();
   window.localStorage.clear();
   window.sessionStorage.clear();
-  window.sessionStorage.setItem("quotex.authToken", "test-session-token");
+  window.localStorage.setItem("quotex.authToken", "test-session-token");
 });
 
 afterEach(() => {
@@ -277,7 +277,7 @@ describe("db live sync", () => {
   });
 
   it("does not attempt cloud hydration before a secure session exists", async () => {
-    window.sessionStorage.removeItem("quotex.authToken");
+    window.localStorage.removeItem("quotex.authToken");
     vi.stubEnv("VITE_STATE_SYNC_MODE", "supabase");
     const fetchMock = vi.fn(async () => ({
       ok: true,
@@ -291,7 +291,7 @@ describe("db live sync", () => {
     await wait(50);
     expect(fetchMock).not.toHaveBeenCalled();
 
-    window.sessionStorage.setItem("quotex.authToken", "new-session-token");
+    window.localStorage.setItem("quotex.authToken", "new-session-token");
     expect(await db.hydrateNow()).toBe(true);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

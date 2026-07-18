@@ -1,5 +1,6 @@
 import { useLocation, useNavigate } from "react-router-dom";
 import { useState } from "react";
+import { LoaderCircle } from "lucide-react";
 import { AuthShell } from "./AuthShell";
 import { resolveAgencyByKey } from "@/lib/agencyWebsite";
 import { authFailureMessage, useAuth } from "@/lib/auth";
@@ -14,7 +15,7 @@ const STAFF_LOGIN_ROLES: StaffRole[] = [
 ];
 
 export function EmployeeLoginPage() {
-  const { signInStaff, registerStaff } = useAuth();
+  const { signInStaff, registerStaff, requestPasswordReset } = useAuth();
   const { setAgencyId } = useTenant();
   const nav = useNavigate();
   const location = useLocation();
@@ -24,6 +25,9 @@ export function EmployeeLoginPage() {
   const [mode, setMode] = useState<"signIn" | "create">("signIn");
   const [role, setRole] = useState<StaffRole>("agent");
   const [submitting, setSubmitting] = useState(false);
+  const [signInIdentifier, setSignInIdentifier] = useState("");
+  const [resettingPassword, setResettingPassword] = useState(false);
+  const [resetNotice, setResetNotice] = useState<string | null>(null);
   const requestedAgency = resolveAgencyByKey(
     api.agencies.list(),
     new URLSearchParams(location.search).get("agency")
@@ -128,7 +132,7 @@ export function EmployeeLoginPage() {
               return;
             }
 
-            const identifier = String(data.get("identifier")).trim();
+            const identifier = signInIdentifier.trim();
             const password = String(data.get("password"));
             const result = await signInStaff(identifier, password);
             if (!result.ok) {
@@ -263,9 +267,15 @@ export function EmployeeLoginPage() {
               <input
                 className="input"
                 name="identifier"
+                type="email"
                 required
                 autoComplete="username"
                 placeholder="you@agency.com"
+                value={signInIdentifier}
+                onChange={(event) => {
+                  setSignInIdentifier(event.target.value);
+                  setResetNotice(null);
+                }}
               />
             </div>
             <div>
@@ -282,9 +292,31 @@ export function EmployeeLoginPage() {
         )}
 
         {error && <div className="text-xs text-rose-600">{error}</div>}
-        <button className="btn-primary w-full" type="submit" disabled={submitting}>
+        <button className="btn-primary flex w-full items-center justify-center gap-2" type="submit" disabled={submitting}>
+          {submitting && <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />}
           {submitting ? "Working..." : mode === "create" ? "Create account" : "Sign in"}
         </button>
+        {mode === "signIn" && (
+          <button
+            className="w-full text-right text-xs text-ink-500 hover:text-ink-900"
+            type="button"
+            disabled={submitting || resettingPassword || !signInIdentifier.trim()}
+            onClick={async () => {
+              setResettingPassword(true);
+              setResetNotice(null);
+              const result = await requestPasswordReset("staff", signInIdentifier);
+              setResetNotice(
+                result.ok
+                  ? "If an account exists for that email, password reset instructions have been sent."
+                  : authFailureMessage(result.reason, "staff")
+              );
+              setResettingPassword(false);
+            }}
+          >
+            {resettingPassword ? "Sending reset instructions..." : "Forgot password?"}
+          </button>
+        )}
+        {resetNotice && <div className="text-xs text-ink-600">{resetNotice}</div>}
       </form>
 
     </AuthShell>

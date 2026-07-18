@@ -7,6 +7,7 @@ import { QuotexMark, QuotexWordmark } from "@/components/layout/Logo";
 import { RequireRole } from "@/components/layout/RequireRole";
 import { CustomerLoginPage } from "@/pages/auth/CustomerLoginPage";
 import { CustomerSignupPage } from "@/pages/auth/CustomerSignupPage";
+import { PasswordResetPage } from "@/pages/auth/PasswordResetPage";
 import { ClientQuestionnairePage } from "@/pages/customer/ClientQuestionnairePage";
 import { CustomerAssetPage } from "@/pages/customer/CustomerAssetPage";
 import { CustomerAssetsPage } from "@/pages/customer/CustomerAssetsPage";
@@ -88,6 +89,7 @@ export function AgencyMobileApp() {
               <Route index element={<QuotexAppHome appPath={appPath} />} />
               <Route path={routePath("/login")} element={<CustomerLoginPage />} />
               <Route path={routePath("/signup")} element={<CustomerSignupPage />} />
+              <Route path={routePath("/reset-password")} element={<PasswordResetPage />} />
               <Route path={routePath("/marketing/contact")} element={<MarketingSmartContactPage />} />
               <Route path={routePath("/customer/questionnaire/:sessionId")} element={<ClientQuestionnairePage />} />
               <Route

@@ -5,6 +5,7 @@ import { RequireRole } from "@/components/layout/RequireRole";
 import { CustomerLoginPage } from "@/pages/auth/CustomerLoginPage";
 import { CustomerSignupPage } from "@/pages/auth/CustomerSignupPage";
 import { QuoteStartGate } from "@/pages/auth/QuoteStartGate";
+import { PasswordResetPage } from "@/pages/auth/PasswordResetPage";
 import { ClientQuestionnairePage } from "@/pages/customer/ClientQuestionnairePage";
 import { CustomerAssetPage } from "@/pages/customer/CustomerAssetPage";
 import { CustomerAssetsPage } from "@/pages/customer/CustomerAssetsPage";
@@ -40,6 +41,7 @@ export function AgencyWebsiteApp() {
 
       <Route path="/login" element={<CustomerLoginPage />} />
       <Route path="/signup" element={<CustomerSignupPage />} />
+      <Route path="/reset-password" element={<PasswordResetPage />} />
       <Route path="/quote/start" element={<QuoteStartGate />} />
       <Route path="/marketing/contact" element={<MarketingSmartContactPage />} />
       <Route path="/app" element={<Navigate to="/login" replace />} />

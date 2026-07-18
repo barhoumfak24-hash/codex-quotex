@@ -1,5 +1,6 @@
 import { aiFeatureForPath, runGovernedAiJob } from "./aiResourceGovernor";
 import { apiBaseUrl, envValue } from "./apiBase";
+import { currentServerSessionClaims, currentServerSessionToken } from "./serverSession";
 
 type AiPath =
   | "/ai/parse-intake"
@@ -267,32 +268,18 @@ function authHeaders(): HeadersInit {
 
 function authToken(): string | null {
   if (typeof window === "undefined") return null;
-  return (
-    window.localStorage.getItem("quotex.authToken") ||
-    window.localStorage.getItem("quotex.jwt") ||
-    null
-  );
+  return currentServerSessionToken();
 }
 
 function currentBrowserUser():
   | { id: string; role: string; tenantId?: string | null; branchId?: string | null }
   | null {
-  if (typeof window === "undefined") return null;
-  const userId = window.localStorage.getItem("quotex.auth.userId.v1");
-  if (!userId) return null;
-  const raw = window.localStorage.getItem("quotex.db.v31");
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as { users?: unknown[] };
-    const user = (parsed.users ?? []).find(
-      (row): row is { id: string; role: string; tenantId?: string | null; branchId?: string | null } =>
-        typeof row === "object" &&
-        row !== null &&
-        (row as { id?: unknown }).id === userId &&
-        typeof (row as { role?: unknown }).role === "string"
-    );
-    return user ?? null;
-  } catch {
-    return null;
-  }
+  const claims = currentServerSessionClaims();
+  if (!claims) return null;
+  return {
+    id: claims.userId,
+    role: claims.role,
+    tenantId: claims.tenantId,
+    branchId: claims.branchId,
+  };
 }

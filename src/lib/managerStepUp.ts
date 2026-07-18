@@ -1,5 +1,6 @@
 import { apiBaseUrl } from "@/lib/apiBase";
 import type { User } from "@/types";
+import { currentServerSessionToken } from "@/lib/serverSession";
 
 export type ManagerStepUpRequestResult =
   | { ok: true; challengeId: string; expiresAt: string; maskedEmail: string }
@@ -170,11 +171,7 @@ function authHeaders(user: User, tenantId: string): HeadersInit {
 
 function authToken(): string | null {
   if (typeof window === "undefined") return null;
-  return (
-    window.localStorage.getItem("quotex.authToken") ||
-    window.localStorage.getItem("quotex.jwt") ||
-    null
-  );
+  return currentServerSessionToken();
 }
 
 function managerStepUpErrorMessage(error?: string, fallback?: string): string {

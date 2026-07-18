@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   emailDeliveryConfiguration: vi.fn(),
   listMailboxConnections: vi.fn(),
   isMailboxFallbackSafeError: vi.fn(),
+  userFindUnique: vi.fn(),
   userFindFirst: vi.fn(),
   agencyFindFirst: vi.fn(),
 }));
@@ -29,8 +30,9 @@ vi.mock("../services/mailboxProvider.js", () => ({
 }));
 
 vi.mock("../services/prisma.js", () => ({
+  databaseConfigured: () => true,
   prisma: {
-    user: { findFirst: mocks.userFindFirst },
+    user: { findUnique: mocks.userFindUnique, findFirst: mocks.userFindFirst },
     agency: { findFirst: mocks.agencyFindFirst },
   },
 }));
@@ -61,6 +63,7 @@ beforeEach(() => {
   mocks.emailDeliveryConfiguration.mockReset();
   mocks.listMailboxConnections.mockReset();
   mocks.isMailboxFallbackSafeError.mockReset();
+  mocks.userFindUnique.mockReset();
   mocks.userFindFirst.mockReset();
   mocks.agencyFindFirst.mockReset();
   mocks.emailDeliveryConfiguration.mockReturnValue({
@@ -72,6 +75,15 @@ beforeEach(() => {
   });
   mocks.listMailboxConnections.mockResolvedValue([]);
   mocks.isMailboxFallbackSafeError.mockReturnValue(true);
+  mocks.userFindUnique.mockResolvedValue({
+    id: "user_mail",
+    role: "manager",
+    tenantId: "tenant_mail",
+    branchId: "branch_mail",
+    authVersion: 0,
+    status: "active",
+    agency: { active: true },
+  });
   mocks.userFindFirst.mockResolvedValue({ name: "Abe Fakhoury", email: "abe@example.com" });
   mocks.agencyFindFirst.mockResolvedValue({
     name: "Palm Coast Private Client",
@@ -111,7 +123,11 @@ describe("mailbox delivery routes", () => {
     const response = await postMailbox("/send", validSendPayload());
 
     expect(response.status).toBe(401);
-    expect(await response.json()).toEqual({ error: "unauthorized" });
+    expect(await response.json()).toEqual({
+      ok: false,
+      reason: "no_session",
+      error: "no_session",
+    });
     expect(mocks.sendMailboxEmail).not.toHaveBeenCalled();
   });
 

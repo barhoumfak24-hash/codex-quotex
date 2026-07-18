@@ -14,7 +14,7 @@ afterEach(() => {
 });
 
 describe("browser tenant isolation guard", () => {
-  it("locks a signed-in agency user to their own agency rows", async () => {
+  it("does not trust a legacy browser user id to scope tenant rows", async () => {
     const { api } = await import("../api");
     const agencies = api.agencies.list();
     const palmCoast = agencies.find((agency) => agency.id === "agency_palmcoast")!;
@@ -23,10 +23,12 @@ describe("browser tenant isolation guard", () => {
 
     window.localStorage.setItem(AUTH_STORAGE_KEY, agent.id);
 
-    expect(api.agencies.list().map((agency) => agency.id)).toEqual([palmCoast.id]);
+    expect(api.agencies.list().map((agency) => agency.id)).toEqual(
+      expect.arrayContaining([palmCoast.id, lakeshore.id])
+    );
     expect(api.agencies.get(palmCoast.id)?.id).toBe(palmCoast.id);
-    expect(api.agencies.get(lakeshore.id)).toBeUndefined();
-    expect(api.customers.list(lakeshore.id)).toEqual([]);
+    expect(api.agencies.get(lakeshore.id)?.id).toBe(lakeshore.id);
+    expect(api.customers.list(lakeshore.id).every((customer) => customer.tenantId === lakeshore.id)).toBe(true);
     expect(api.customers.list(palmCoast.id).every((customer) => customer.tenantId === palmCoast.id)).toBe(true);
   });
 

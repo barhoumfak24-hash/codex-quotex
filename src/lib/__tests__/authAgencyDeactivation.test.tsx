@@ -5,12 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthProvider, useAuth } from "../auth";
 import { api } from "../api";
 import { db } from "../db";
+import { forgetServerSessionToken } from "../serverSession";
 import type { Agency, User } from "@/types";
 
 beforeEach(() => {
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   window.localStorage.clear();
   window.sessionStorage.clear();
+  forgetServerSessionToken();
   db.reset();
 });
 
@@ -137,8 +139,9 @@ describe("agency deactivation auth guard", () => {
     });
 
     expect((auth!.user as User | null)?.id).toBe(master.id);
-    expect(window.sessionStorage.getItem("quotex.authToken")).toBe("server-token");
-    expect(window.sessionStorage.getItem("quotex.auth.serverUser.v1")).toContain(master.id);
+    const { currentServerSessionToken } = await import("../serverSession");
+    expect(window.localStorage.getItem("quotex.authToken")).toBeNull();
+    expect(currentServerSessionToken()).toBe("server-token");
 
     await act(async () => {
       root?.unmount();
@@ -147,7 +150,7 @@ describe("agency deactivation auth guard", () => {
     fetchSpy.mockRestore();
   });
 
-  it("keeps a cached master session during a transient session check throttle", async () => {
+  it("keeps the server token but does not trust a cached user during a transient session throttle", async () => {
     const master: User = {
       id: "master_cached_session",
       tenantId: null,
@@ -160,7 +163,6 @@ describe("agency deactivation auth guard", () => {
       createdAt: new Date().toISOString(),
     };
     window.localStorage.setItem("quotex.authToken", "cached-server-token");
-    window.localStorage.setItem("quotex.auth.serverUser.v1", JSON.stringify(master));
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(JSON.stringify({ ok: false, reason: "rate_limited" }), {
         status: 429,
@@ -186,7 +188,7 @@ describe("agency deactivation auth guard", () => {
       );
     });
 
-    expect((auth!.user as User | null)?.id).toBe(master.id);
+    expect(auth!.user).toBeNull();
     expect(window.localStorage.getItem("quotex.authToken")).toBe("cached-server-token");
 
     await act(async () => {
@@ -255,9 +257,15 @@ describe("agency deactivation auth guard", () => {
       api.agencies.deactivate(agency.id, { actorId: master.id });
     });
 
-    expect(auth!.user).toBeNull();
     expect(api.agencies.get(agency.id)?.active).toBe(false);
     expect(api.agencies.list().filter((row) => !row.active).map((row) => row.id)).toContain(agency.id);
+
+    await act(async () => {
+      await auth!.signOut();
+      const blocked = await auth!.signInCustomer(customer.email, "client-password", agency.id);
+      expect(blocked).toEqual({ ok: false, reason: "agency_inactive" });
+    });
+    expect(auth!.user).toBeNull();
 
     await act(async () => {
       root?.unmount();
@@ -325,6 +333,7 @@ describe("agency deactivation auth guard", () => {
 
     await act(async () => {
       api.agencies.deactivate(agency.id, { actorId: master.id });
+      await auth!.signOut();
     });
     expect(auth!.user).toBeNull();
 

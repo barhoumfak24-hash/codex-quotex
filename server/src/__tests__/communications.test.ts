@@ -3,6 +3,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { communicationsRoutes } from "../routes/communications.js";
 import { issueSessionJwt } from "../routes/auth.js";
 
+const mocks = vi.hoisted(() => ({
+  userFindUnique: vi.fn(),
+}));
+
+vi.mock("../services/prisma.js", () => ({
+  databaseConfigured: () => true,
+  prisma: {
+    user: { findUnique: mocks.userFindUnique },
+  },
+}));
+
 const JWT_SECRET = "test-jwt-secret-with-more-than-32-characters";
 
 beforeEach(() => {
@@ -13,6 +24,15 @@ beforeEach(() => {
   vi.stubEnv("EMAIL_PROVIDER", "");
   vi.stubEnv("SENDGRID_API_KEY", "");
   vi.stubEnv("RESEND_API_KEY", "");
+  mocks.userFindUnique.mockReset().mockResolvedValue({
+    id: "master_user",
+    role: "master_admin",
+    tenantId: null,
+    branchId: null,
+    authVersion: 0,
+    status: "active",
+    agency: null,
+  });
 });
 
 afterEach(() => {
@@ -28,7 +48,11 @@ describe("communications delivery routes", () => {
     });
 
     expect(response.status).toBe(401);
-    expect(await response.json()).toEqual({ error: "unauthorized" });
+    expect(await response.json()).toEqual({
+      ok: false,
+      reason: "no_session",
+      error: "no_session",
+    });
   });
 
   it("allows authenticated platform delivery requests through to the provider layer", async () => {

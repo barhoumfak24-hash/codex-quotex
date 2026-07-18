@@ -1,7 +1,7 @@
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useState } from "react";
 import { AuthShell } from "./AuthShell";
-import { useAuth } from "@/lib/auth";
+import { authFailureMessage, useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
 import { Disclaimer } from "@/components/ui/Disclaimer";
@@ -13,10 +13,10 @@ const TERMS_VERSION = "1.0";
 
 export function CustomerSignupPage() {
   const { agency, setAgencyId } = useTenant();
-  const { signInWithEmail } = useAuth();
+  const { registerCustomer } = useAuth();
   const nav = useNavigate();
   const location = useLocation();
-  const [form, setForm] = useState({ name: "", email: "", phone: "" });
+  const [form, setForm] = useState({ name: "", email: "", phone: "", password: "", confirmPassword: "" });
   const activeAgencies = api.agencies.list().filter((item) => item.active);
   const [selectedAgencyId, setSelectedAgencyId] = useState(
     () => agency?.id ?? activeAgencies[0]?.id ?? "agency_palmcoast"
@@ -26,6 +26,7 @@ export function CustomerSignupPage() {
   const [ageConfirmed, setAgeConfirmed] = useState(false);
   const [consent, setConsent] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   const selectedAgency =
     activeAgencies.find((item) => item.id === selectedAgencyId) ?? activeAgencies[0] ?? agency;
@@ -65,8 +66,9 @@ export function CustomerSignupPage() {
         </Disclaimer>
       </div>
       <form
-        onSubmit={(e) => {
+        onSubmit={async (e) => {
           e.preventDefault();
+          if (submitting) return;
           setError(null);
           setAgencyId(selectedAgencyId);
           if (!selectedAgency) {
@@ -89,35 +91,57 @@ export function CustomerSignupPage() {
             );
             return;
           }
-          if (api.users.byEmail(form.email)) {
-            setError("An account with that email already exists.");
+          if (form.password.length < 8) {
+            setError("Password must be at least 8 characters.");
+            return;
+          }
+          if (form.password !== form.confirmPassword) {
+            setError("Passwords do not match.");
+            return;
+          }
+          setSubmitting(true);
+          const result = await registerCustomer({
+            tenantId: selectedAgency.id,
+            branchId: selectedBranchId || undefined,
+            name: form.name.trim(),
+            email: form.email.trim(),
+            phone: form.phone.trim() || undefined,
+            password: form.password,
+          });
+          if (!result.ok) {
+            setError(authFailureMessage(result.reason, "customer"));
+            setSubmitting(false);
             return;
           }
           const now = new Date().toISOString();
-          const user = api.users.create({
-            role: "customer",
-            tenantId: selectedAgency.id,
-            email: form.email,
-            name: form.name,
-            phone: form.phone,
-          });
-          const customer = api.customers.create({
-            tenantId: selectedAgency.id,
-            userId: user.id,
-            email: form.email,
-            name: form.name,
-            phone: form.phone,
-            branchId: selectedBranchId || undefined,
-            marketingOptInEmail: true,
-            marketingOptInSms: false,
-            // Compliance trail — immutable evidence of when consent
-            // was captured + the version of the wording it was
-            // captured against.
-            termsAcceptedAt: now,
-            termsVersion: TERMS_VERSION,
-            smsConsentAt: undefined,
-            emailConsentAt: now,
-          });
+          const existingCustomer = api.customers.byUserId(result.user.id);
+          const customer = existingCustomer
+            ? api.customers.update(existingCustomer.id, {
+                branchId: selectedBranchId || existingCustomer.branchId,
+                marketingOptInEmail: true,
+                termsAcceptedAt: now,
+                termsVersion: TERMS_VERSION,
+                emailConsentAt: now,
+              })
+            : api.customers.create({
+                tenantId: selectedAgency.id,
+                userId: result.user.id,
+                email: result.user.email,
+                name: result.user.name,
+                phone: form.phone.trim() || undefined,
+                branchId: selectedBranchId || undefined,
+                marketingOptInEmail: true,
+                marketingOptInSms: false,
+                termsAcceptedAt: now,
+                termsVersion: TERMS_VERSION,
+                smsConsentAt: undefined,
+                emailConsentAt: now,
+              });
+          if (!customer) {
+            setError("Your secure account was created, but the customer profile could not be loaded. Sign in to continue.");
+            setSubmitting(false);
+            return;
+          }
           // Internal audit event so agency staff have a non-mutable
           // record of the consent capture for CAN-SPAM
           // compliance purposes.
@@ -131,10 +155,10 @@ export function CustomerSignupPage() {
             }.`,
             visibility: "internal",
             customerId: customer.id,
-            createdById: user.id,
+            createdById: result.user.id,
           });
-          signInWithEmail(form.email);
-          nav(isAppSurface ? surfaceRoute("/") : surfaceRoute("/customer/quote/new"));
+          setSubmitting(false);
+          nav(isAppSurface ? surfaceRoute("/") : surfaceRoute("/customer/quote/new"), { replace: true });
         }}
         className="space-y-3"
       >
@@ -202,6 +226,34 @@ export function CustomerSignupPage() {
             onChange={(e) => setForm({ ...form, phone: e.target.value })}
             placeholder="Best phone number"
           />
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div>
+            <label className="label" htmlFor="signup-password">Password</label>
+            <input
+              id="signup-password"
+              type="password"
+              className="input"
+              required
+              minLength={8}
+              autoComplete="new-password"
+              value={form.password}
+              onChange={(e) => setForm({ ...form, password: e.target.value })}
+            />
+          </div>
+          <div>
+            <label className="label" htmlFor="signup-confirm-password">Confirm password</label>
+            <input
+              id="signup-confirm-password"
+              type="password"
+              className="input"
+              required
+              minLength={8}
+              autoComplete="new-password"
+              value={form.confirmPassword}
+              onChange={(e) => setForm({ ...form, confirmPassword: e.target.value })}
+            />
+          </div>
         </div>
 
         <label className="flex items-start gap-3 rounded-md border border-gold-200 bg-gold-50/60 p-3 mt-2 cursor-pointer hover:bg-gold-50 transition-colors">
@@ -271,15 +323,15 @@ export function CustomerSignupPage() {
         <button
           className="btn-primary w-full"
           type="submit"
-          disabled={!identityConfirmed || !ageConfirmed || !consent}
-          aria-disabled={!identityConfirmed || !ageConfirmed || !consent}
+          disabled={submitting || !identityConfirmed || !ageConfirmed || !consent}
+          aria-disabled={submitting || !identityConfirmed || !ageConfirmed || !consent}
           title={
             identityConfirmed && ageConfirmed && consent
               ? undefined
               : "Identity, age, and communications consent are required to continue."
           }
         >
-          Create account
+          {submitting ? "Creating account..." : "Create account"}
         </button>
       </form>
     </AuthShell>

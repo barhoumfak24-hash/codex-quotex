@@ -5,6 +5,17 @@ import { stateRoutes } from "../routes/state.js";
 import { stateBlobRoutes } from "../routes/stateBlobs.js";
 import { scopeStateSnapshotForAuth } from "../services/stateSnapshotScope.js";
 
+const mocks = vi.hoisted(() => ({
+  userFindUnique: vi.fn(),
+}));
+
+vi.mock("../services/prisma.js", () => ({
+  databaseConfigured: () => true,
+  prisma: {
+    user: { findUnique: mocks.userFindUnique },
+  },
+}));
+
 const nativeFetch = globalThis.fetch;
 
 beforeEach(() => {
@@ -13,6 +24,15 @@ beforeEach(() => {
   vi.stubEnv("SUPABASE_URL", "https://supabase.test");
   vi.stubEnv("SUPABASE_SERVICE_ROLE_KEY", "service-role-test-key");
   vi.stubEnv("JWT_SECRET", "state-persistence-test-secret");
+  mocks.userFindUnique.mockReset().mockImplementation(async ({ where }: { where: { id: string } }) => ({
+    id: where.id,
+    role: "agent",
+    tenantId: where.id === "user_b" ? "agency_b" : "agency_a",
+    branchId: null,
+    authVersion: 0,
+    status: "active",
+    agency: { active: true },
+  }));
 });
 
 afterEach(() => {
@@ -254,12 +274,12 @@ describe("state blob routes", () => {
     const supabaseFetch = vi.fn(async () => new Response(Buffer.from("hello"), { status: 200 }));
     installSupabaseFetch(supabaseFetch);
     const agencyAToken = jwt.sign(
-      { userId: "user_a", role: "agent", tenantId: "agency_a", permissions: [] },
+      { userId: "user_a", role: "agent", tenantId: "agency_a", permissions: [], authVersion: 0 },
       "state-persistence-test-secret",
       { algorithm: "HS256" }
     );
     const agencyBToken = jwt.sign(
-      { userId: "user_b", role: "agent", tenantId: "agency_b", permissions: [] },
+      { userId: "user_b", role: "agent", tenantId: "agency_b", permissions: [], authVersion: 0 },
       "state-persistence-test-secret",
       { algorithm: "HS256" }
     );

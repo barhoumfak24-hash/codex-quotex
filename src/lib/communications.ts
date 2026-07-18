@@ -3,6 +3,7 @@ import { apiBaseUrl } from "@/lib/apiBase";
 import { revealProtectedAgencyCode } from "@/lib/credentials";
 import { provisionAgencyForCompletedSale } from "@/lib/softwareSaleProvisioning";
 import type { SoftwareSale, SoftwareSaleSignedAgreement } from "@/types";
+import { currentServerSessionToken } from "@/lib/serverSession";
 
 export type CommunicationResult = {
   ok: boolean;
@@ -118,10 +119,7 @@ async function postCommunication(path: string, payload: Record<string, unknown>)
 function communicationAuthHeaders(): HeadersInit {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (typeof window === "undefined") return headers;
-  const token =
-    window.localStorage.getItem("quotex.authToken") ||
-    window.localStorage.getItem("quotex.jwt") ||
-    "";
+  const token = currentServerSessionToken() ?? "";
   if (token) headers.authorization = `Bearer ${token}`;
   return headers;
 }

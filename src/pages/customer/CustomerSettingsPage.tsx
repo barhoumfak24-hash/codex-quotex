@@ -210,7 +210,7 @@ function ChangePasswordCard() {
     setLocked(true);
   }
 
-  function submit(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (next.length < 8) {
       setStatus({
@@ -226,7 +226,7 @@ function ChangePasswordCard() {
       });
       return;
     }
-    const out = changeMyPassword(current, next);
+    const out = await changeMyPassword(current, next);
     if (!out.ok) {
       setStatus({ kind: "error", message: out.reason });
       return;

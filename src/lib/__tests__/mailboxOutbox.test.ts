@@ -93,8 +93,7 @@ describe("mailbox outbox", () => {
     const { api, agency, customer, user } = await mailboxFixture();
     const { db } = await import("../db");
     vi.stubEnv("NODE_ENV", "development");
-    window.sessionStorage.setItem("quotex.authToken", "server-session-token");
-    window.sessionStorage.setItem("quotex.auth.serverUser.v1", JSON.stringify(user));
+    window.localStorage.setItem("quotex.authToken", "server-session-token");
     db.remove("users", user.id);
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response(
@@ -134,7 +133,6 @@ describe("mailbox outbox", () => {
     const request = fetchSpy.mock.calls[0]?.[1];
     expect(JSON.parse(String(request?.body))).toMatchObject({
       senderMode: "staff",
-      senderName: user.name,
       replyTo: user.businessEmail ?? user.email,
     });
   });

@@ -1,4 +1,5 @@
 import type { NextFunction, Request, RequestHandler, Response } from "express";
+import { createHash } from "node:crypto";
 import { prisma, databaseConfigured } from "../services/prisma.js";
 
 function envLimit(name: string, fallback: number): number {
@@ -21,14 +22,19 @@ const DEFAULT_POSTGRES_RETRY_MS = 30_000;
 let postgresRetryAfter = 0;
 let postgresFallbackLogged = false;
 
-function limiter(name: string, limit: number, windowMs = 60_000): RequestHandler {
+function limiter(
+  name: string,
+  limit: number,
+  windowMs = 60_000,
+  identity?: (req: Request) => string
+): RequestHandler {
   return async (req, res, next) => {
     if (!useGlobalRateLimitStore() || Date.now() < postgresRetryAfter) {
-      return applyMemoryRateLimit(req, res, next, name, limit, windowMs);
+      return applyMemoryRateLimit(req, res, next, name, limit, windowMs, identity);
     }
 
     try {
-      const allowed = await applyPostgresRateLimit(req, res, name, limit, windowMs);
+      const allowed = await applyPostgresRateLimit(req, res, name, limit, windowMs, identity);
       if (postgresFallbackLogged) {
         console.info("[rate-limit] postgres store recovered");
       }
@@ -43,7 +49,7 @@ function limiter(name: string, limit: number, windowMs = 60_000): RequestHandler
         console.warn("[rate-limit] using the in-memory fallback while the postgres store recovers");
         postgresFallbackLogged = true;
       }
-      return applyMemoryRateLimit(req, res, next, name, limit, windowMs);
+      return applyMemoryRateLimit(req, res, next, name, limit, windowMs, identity);
     }
   };
 }
@@ -51,6 +57,13 @@ function limiter(name: string, limit: number, windowMs = 60_000): RequestHandler
 export const appLimiter = limiter("app", envLimit("RATE_LIMIT_APP_PER_MINUTE", 900));
 export const apiLimiter = limiter("api", envLimit("RATE_LIMIT_API_PER_MINUTE", 300));
 export const authLimiter = limiter("auth", envLimit("RATE_LIMIT_AUTH_PER_MINUTE", 30));
+export const authIpLimiter = limiter("auth-ip", envLimit("RATE_LIMIT_AUTH_IP_PER_MINUTE", 10));
+export const authIdentityLimiter = limiter(
+  "auth-identity",
+  envLimit("RATE_LIMIT_AUTH_IDENTIFIER_PER_MINUTE", 10),
+  60_000,
+  authIdentifier
+);
 export const publicWorkflowLimiter = limiter("public-workflow", envLimit("RATE_LIMIT_PUBLIC_WORKFLOW_PER_MINUTE", 90));
 export const strictApiLimiter = limiter("strict-api", envLimit("RATE_LIMIT_STRICT_API_PER_MINUTE", 20));
 export const webhookLimiter = limiter("webhook", envLimit("RATE_LIMIT_WEBHOOK_PER_MINUTE", 120));
@@ -66,9 +79,10 @@ async function applyPostgresRateLimit(
   res: Response,
   name: string,
   limit: number,
-  windowMs: number
+  windowMs: number,
+  identity?: (req: Request) => string
 ): Promise<boolean> {
-  const key = ["quotex", sanitizeKeyPart(name), sanitizeKeyPart(clientIp(req))].join(":");
+  const key = rateLimitKey(req, name, identity);
   const windowSeconds = Math.max(1, Math.ceil(windowMs / 1000));
   const rows = await prisma.$queryRaw<RateLimitRow[]>`
     INSERT INTO public.rate_limit_counters (key, count, reset_at, updated_at)
@@ -96,10 +110,11 @@ function applyMemoryRateLimit(
   next: NextFunction,
   name: string,
   limit: number,
-  windowMs: number
+  windowMs: number,
+  identity?: (req: Request) => string
 ) {
   const now = Date.now();
-  const key = ["quotex", sanitizeKeyPart(name), sanitizeKeyPart(clientIp(req))].join(":");
+  const key = rateLimitKey(req, name, identity);
   const current = memoryBuckets.get(key);
   const entry =
     !current || current.resetAt <= now
@@ -124,7 +139,7 @@ function writeRateLimitResponse(res: Response, limit: number, count: number, res
   if (count <= limit) return true;
 
   res.setHeader("Retry-After", resetSeconds);
-  res.status(429).json({ error: "rate_limited", retryAfterSeconds: resetSeconds });
+  res.status(429).json({ ok: false, reason: "rate_limited", error: "rate_limited", retryAfterSeconds: resetSeconds });
   return false;
 }
 
@@ -135,7 +150,8 @@ function clientIp(req: Request): string {
 }
 
 function headerValue(req: Request, name: string): string {
-  const raw = req.headers[name] ?? req.headers[name.toLowerCase()];
+  const headers = req.headers ?? {};
+  const raw = headers[name] ?? headers[name.toLowerCase()];
   if (Array.isArray(raw)) return raw[0] ?? "";
   return raw ?? "";
 }
@@ -149,6 +165,23 @@ function cleanupExpiredMemoryBuckets(now: number) {
   for (const [key, entry] of memoryBuckets) {
     if (entry.resetAt <= now) memoryBuckets.delete(key);
   }
+}
+
+function rateLimitKey(req: Request, name: string, identity?: (req: Request) => string): string {
+  const parts = ["quotex", sanitizeKeyPart(name)];
+  const value = identity?.(req).trim().toLowerCase();
+  if (value) parts.push(createHash("sha256").update(value).digest("hex"));
+  else parts.push(sanitizeKeyPart(clientIp(req)));
+  return parts.join(":");
+}
+
+function authIdentifier(req: Request): string {
+  const body = req.body && typeof req.body === "object" ? req.body as Record<string, unknown> : {};
+  for (const key of ["identifier", "email", "businessEmail"]) {
+    const value = body[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return "anonymous";
 }
 
 export function resetRateLimitStateForTests() {

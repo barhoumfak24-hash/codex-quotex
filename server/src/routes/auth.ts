@@ -1,8 +1,10 @@
-import { createHmac, pbkdf2Sync, randomBytes, randomInt, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
-import { Router, type Response } from "express";
+import { createHash, createHmac, pbkdf2Sync, randomBytes, randomInt, randomUUID, scryptSync, timingSafeEqual } from "node:crypto";
+import { compareSync as compareBcrypt, hashSync as hashBcrypt } from "bcryptjs";
+import { Router, type NextFunction, type Request, type Response } from "express";
 import jwt from "jsonwebtoken";
 import { z } from "zod";
-import { requireAuth } from "../middleware/auth.js";
+import { authenticateRequest, requireAuth, validateAuthContext } from "../middleware/auth.js";
+import { authIdentityLimiter, authIpLimiter } from "../middleware/rateLimits.js";
 import { sendEmail } from "../services/email.js";
 import { databaseConfigured, prisma } from "../services/prisma.js";
 import { readRemoteState, supabaseStateConfigured } from "../services/supabaseState.js";
@@ -45,16 +47,17 @@ type ManagerStepUpChallengeRow = {
 
 const endpoints = [
   { method: "POST", path: "/login", description: "Canonical customer, staff, and master login" },
+  { method: "POST", path: "/register", description: "Canonical customer and agency staff registration" },
   { method: "GET", path: "/session", description: "Return current canonical session user" },
+  { method: "POST", path: "/password/reset-request", description: "Email a one-time password reset link" },
+  { method: "POST", path: "/password/reset", description: "Consume a one-time password reset token" },
   { method: "POST", path: "/google/callback", description: "Exchange Google id_token -> session" },
   { method: "POST", path: "/email/send-link", description: "Send magic link to customer email" },
   { method: "POST", path: "/email/verify", description: "Verify magic link token, create session" },
   { method: "POST", path: "/employee/login", description: "Agency user login (email+password+MFA)" },
   { method: "POST", path: "/employee/register", description: "Create a hashed agency staff account" },
-  { method: "POST", path: "/employee/promote-local", description: "Migrate a verified legacy staff account into hashed server auth" },
   { method: "POST", path: "/master/login", description: "Master admin login with a server-issued platform session" },
   { method: "POST", path: "/master/create", description: "Create the one allowed master admin account" },
-  { method: "POST", path: "/master/promote-local", description: "Migrate a verified legacy master account into hashed server auth" },
   { method: "POST", path: "/password/change", description: "Change the current user's server-backed password" },
   { method: "POST", path: "/manager-2fa/request", description: "Email a manager step-up verification code" },
   { method: "POST", path: "/manager-2fa/verify", description: "Verify a manager step-up code" },
@@ -95,6 +98,40 @@ const canonicalLoginSchema = z.object({
   tenantId: z.string().min(1).max(120).optional().nullable(),
 });
 
+const canonicalRegisterSchema = z.discriminatedUnion("scope", [
+  z.object({
+    scope: z.literal("staff"),
+    agencyCode: z.string().min(3).max(80),
+    branchId: z.string().max(120).optional(),
+    role: z.enum(["agent", "manager", "csr"]),
+    firstName: z.string().min(1).max(120),
+    lastName: z.string().min(1).max(120),
+    phone: z.string().min(1).max(80),
+    businessEmail: z.string().email().max(254),
+    password: z.string().min(8).max(500),
+  }),
+  z.object({
+    scope: z.literal("customer"),
+    tenantId: z.string().min(1).max(120),
+    branchId: z.string().max(120).optional(),
+    name: z.string().min(1).max(240),
+    email: z.string().email().max(254),
+    phone: z.string().max(80).optional(),
+    password: z.string().min(8).max(500),
+  }),
+]);
+
+const passwordResetRequestSchema = z.object({
+  email: z.string().email().max(254),
+  scope: z.enum(["customer", "staff", "master"]).optional(),
+  tenantId: z.string().min(1).max(120).optional().nullable(),
+});
+
+const passwordResetSchema = z.object({
+  token: z.string().min(32).max(500),
+  newPassword: z.string().min(8).max(500),
+});
+
 const masterLoginSchema = z.object({
   email: z.string().email().max(254),
   password: z.string().min(1).max(500),
@@ -109,18 +146,6 @@ const masterCreateSchema = z.object({
 const changePasswordSchema = z.object({
   currentPassword: z.string().min(1).max(500),
   newPassword: z.string().min(8).max(500),
-});
-
-const masterLocalPromotionSchema = z.object({
-  password: z.string().min(12).max(500),
-  user: z.object({
-    id: z.string().min(1).max(120).optional(),
-    role: z.literal("master_admin"),
-    email: z.string().email().max(254),
-    name: z.string().min(1).max(240),
-    active: z.boolean().optional(),
-    staffAccessStatus: z.enum(["active", "banned", "deleted", "inactive"]).optional(),
-  }),
 });
 
 const optionalSnapshotEmailSchema = z.preprocess(
@@ -169,29 +194,9 @@ const employeeRegisterSchema = z.object({
   branch: staffBranchSnapshotSchema.optional().nullable(),
 });
 
-const employeeLocalPromotionSchema = z.object({
-  password: z.string().min(8).max(500),
-  user: z.object({
-    id: z.string().min(1).max(120).optional(),
-    tenantId: z.string().min(1).max(120),
-    branchId: z.string().max(120).optional().nullable(),
-    role: z.enum(["agent", "manager", "csr"]),
-    email: z.string().email().max(254),
-    businessEmail: z.string().email().max(254).optional(),
-    firstName: z.string().max(120).optional(),
-    lastName: z.string().max(120).optional(),
-    name: z.string().min(1).max(240),
-    phone: z.string().max(80).optional(),
-    active: z.boolean().optional(),
-    staffAccessStatus: z.enum(["active", "banned", "deleted", "inactive"]).optional(),
-  }),
-  agency: staffAgencySnapshotSchema,
-  branch: staffBranchSnapshotSchema.optional().nullable(),
-});
-
 authRoutes.get("/", (_req, res) => res.json({ resource: "auth", endpoints }));
 
-authRoutes.post("/login", async (req, res) => {
+authRoutes.post("/login", authIpLimiter, authIdentityLimiter, canonicalAsync(async (req, res) => {
   if (!databaseConfigured()) {
     return authFailure(res, 503, "server_unreachable", "Server authentication is not connected to the production database.");
   }
@@ -216,7 +221,146 @@ authRoutes.post("/login", async (req, res) => {
   const result = await authenticateCustomerForLogin(identifier, password, parsed.data.tenantId);
   if (!result.ok) return authFailure(res, result.status, result.reason);
   return sendCanonicalSession(res, result.user);
-});
+}));
+
+authRoutes.post("/register", authIpLimiter, authIdentityLimiter, canonicalAsync(async (req, res) => {
+  if (!databaseConfigured()) {
+    return authFailure(res, 503, "server_unreachable", "Server authentication is not connected to the production database.");
+  }
+  const parsed = canonicalRegisterSchema.safeParse(req.body ?? {});
+  if (!parsed.success) return authFailure(res, 400, "invalid_credentials", "Registration request is incomplete.");
+
+  if (parsed.data.scope === "staff") {
+    const result = await createServerStaffAccount(parsed.data);
+    if (!result.ok) {
+      const status = result.error === "inactive_agency" ? 403 : result.error === "duplicate_email" || result.error === "slot_limit" ? 409 : result.error === "agency_not_found" ? 404 : 400;
+      const reason: AuthFailReason = result.error === "inactive_agency" ? "agency_inactive" : result.error === "duplicate_email" ? "invalid_credentials" : "account_not_found";
+      return res.status(status).json({ ok: false, reason, error: result.error });
+    }
+    return sendCanonicalSession(res, result.user);
+  }
+
+  const input = parsed.data;
+  const email = input.email.trim().toLowerCase();
+  const agency = await prisma.agency.findUnique({ where: { id: input.tenantId } });
+  if (!agency) return authFailure(res, 404, "account_not_found");
+  if (!agency.active) return authFailure(res, 403, "agency_inactive");
+  const existing = await prisma.user.findFirst({
+    where: {
+      tenantId: agency.id,
+      email: { equals: email, mode: "insensitive" },
+    },
+  });
+  if (existing) return authFailure(res, 409, existing.role === "customer" ? "invalid_credentials" : "wrong_portal");
+  const branchId = input.branchId ? await resolveBranchForStaff(input.branchId, agency.id) : null;
+  if (input.branchId && !branchId) return authFailure(res, 400, "invalid_credentials");
+
+  const user = await prisma.$transaction(async (tx) => {
+    const created = await tx.user.create({
+      data: {
+        id: `user_${randomUUID()}`,
+        tenantId: agency.id,
+        branchId,
+        name: input.name.trim(),
+        email,
+        phone: input.phone?.trim() || null,
+        role: "customer",
+        status: "active",
+        passwordHash: hashPasswordForStorage(input.password),
+        passwordChangedAt: new Date(),
+        profile: { profileCompleted: true },
+        permissions: {},
+      },
+    });
+    await tx.customerProfile.create({
+      data: {
+        id: `customer_${randomUUID()}`,
+        tenantId: agency.id,
+        userId: created.id,
+        branchId,
+        name: created.name,
+        email: created.email,
+        phone: created.phone,
+      },
+    });
+    return created;
+  });
+  return sendCanonicalSession(res, { ...user, agency });
+}));
+
+authRoutes.post("/password/reset-request", authIpLimiter, authIdentityLimiter, canonicalAsync(async (req, res) => {
+  const parsed = passwordResetRequestSchema.safeParse(req.body ?? {});
+  if (!parsed.success || !databaseConfigured()) return res.status(202).json({ ok: true });
+  try {
+    const email = parsed.data.email.trim().toLowerCase();
+    let user = await prisma.user.findFirst({
+    where: {
+      email: { equals: email, mode: "insensitive" },
+      ...(parsed.data.scope ? { role: parsed.data.scope === "staff" ? { in: [...ACTIVE_STAFF_ROLES] } : parsed.data.scope === "master" ? "master_admin" : "customer" } : {}),
+      ...(parsed.data.tenantId ? { tenantId: parsed.data.tenantId } : {}),
+      status: { in: ["active", "inactive"] },
+    },
+    include: { agency: true },
+  });
+    if (!user && parsed.data.scope) {
+      await migrateLegacySnapshotIdentity(parsed.data.scope, email, parsed.data.tenantId);
+      user = await prisma.user.findFirst({
+        where: {
+          email: { equals: email, mode: "insensitive" },
+          role: parsed.data.scope === "staff" ? { in: [...ACTIVE_STAFF_ROLES] } : parsed.data.scope === "master" ? "master_admin" : "customer",
+          ...(parsed.data.tenantId ? { tenantId: parsed.data.tenantId } : {}),
+          status: { in: ["active", "inactive"] },
+        },
+        include: { agency: true },
+      });
+    }
+    if (user && (user.role === "master_admin" || user.agency?.active)) {
+      const token = randomBytes(32).toString("base64url");
+      const tokenHash = hashResetToken(token);
+      const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
+      await prisma.$transaction([
+      prisma.passwordResetToken.updateMany({ where: { userId: user.id, usedAt: null }, data: { usedAt: new Date() } }),
+      prisma.passwordResetToken.create({ data: { id: `reset_${randomUUID()}`, userId: user.id, tokenHash, expiresAt } }),
+    ]);
+      const base = (process.env.FRONTEND_ORIGIN || "https://quotexinsurance.com").replace(/\/$/, "");
+      const resetUrl = `${base}/reset-password?token=${encodeURIComponent(token)}`;
+      const delivery = await sendEmail({
+      to: user.email,
+      subject: "Reset your Quotex password",
+      text: `Use this secure link to reset your Quotex password. It expires in 30 minutes: ${resetUrl}`,
+      html: `<p>Use the secure link below to reset your Quotex password. It expires in 30 minutes.</p><p><a href="${escapeHtml(resetUrl)}">Reset password</a></p>`,
+      categories: ["security", "password-reset"],
+    });
+      if (delivery.status !== "sent") console.error("[auth] password reset email failed", { userId: user.id, provider: delivery.provider, error: delivery.error });
+    }
+  } catch (error) {
+    console.error("[auth] password reset request failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return res.status(202).json({ ok: true });
+}));
+
+authRoutes.post("/password/reset", authIpLimiter, authIdentityLimiter, canonicalAsync(async (req, res) => {
+  if (!databaseConfigured()) return authFailure(res, 503, "server_unreachable");
+  const parsed = passwordResetSchema.safeParse(req.body ?? {});
+  if (!parsed.success) return authFailure(res, 400, "invalid_credentials");
+  const tokenHash = hashResetToken(parsed.data.token);
+  const reset = await prisma.passwordResetToken.findUnique({ where: { tokenHash } });
+  if (!reset || reset.usedAt || reset.expiresAt <= new Date()) return authFailure(res, 400, "invalid_credentials");
+  await prisma.$transaction([
+    prisma.user.update({
+      where: { id: reset.userId },
+      data: {
+        passwordHash: hashPasswordForStorage(parsed.data.newPassword),
+        passwordChangedAt: new Date(),
+        authVersion: { increment: 1 },
+      },
+    }),
+    prisma.passwordResetToken.update({ where: { id: reset.id }, data: { usedAt: new Date() } }),
+  ]);
+  return res.json({ ok: true });
+}));
 
 authRoutes.post("/master/login", async (req, res) => {
   if (!databaseConfigured()) {
@@ -255,15 +399,7 @@ authRoutes.post("/master/create", async (req, res) => {
       await prisma.user.update({ where: { id: existing.id }, data: { lastLoginAt: new Date() } }).catch(() => null);
       return sendMasterSession(res, existing);
     }
-    if (!existing.passwordHash) {
-      const repaired = await promoteMasterAccount({
-        email,
-        password: parsed.data.password,
-        name: parsed.data.name.trim(),
-        localUserId: existing.id,
-      });
-      if (repaired) return sendMasterSession(res, repaired);
-    }
+    if (!existing.passwordHash) return authFailure(res, 409, "password_not_set");
     return res.status(409).json({ ok: false, error: "master_account_exists" });
   }
 
@@ -285,39 +421,6 @@ authRoutes.post("/master/create", async (req, res) => {
     },
   });
 
-  return sendMasterSession(res, user);
-});
-
-authRoutes.post("/master/promote-local", async (req, res) => {
-  if (!databaseConfigured()) {
-    return res.status(503).json({
-      ok: false,
-      error: "database_unavailable",
-      message: "Server authentication is not connected to the production database.",
-    });
-  }
-  const parsed = masterLocalPromotionSchema.safeParse(req.body ?? {});
-  if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
-  if (
-    parsed.data.user.active === false ||
-    parsed.data.user.staffAccessStatus === "banned" ||
-    parsed.data.user.staffAccessStatus === "deleted" ||
-    parsed.data.user.staffAccessStatus === "inactive"
-  ) {
-    return res.status(401).json({ ok: false, error: "invalid_credentials" });
-  }
-
-  const user = await promoteMasterAccount({
-    email: parsed.data.user.email,
-    password: parsed.data.password,
-    name: parsed.data.user.name,
-    localUserId: parsed.data.user.id,
-  });
-  if (!user || blockedStaffStatus(user.status)) {
-    return res.status(401).json({ ok: false, error: "invalid_credentials" });
-  }
-
-  await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } }).catch(() => null);
   return sendMasterSession(res, user);
 });
 
@@ -370,49 +473,9 @@ authRoutes.post("/employee/register", async (req, res) => {
     tenantId: user.tenantId,
     branchId: user.branchId,
     permissions: permissionsFromJson(user.permissions),
+    authVersion: user.authVersion,
   });
-  await prisma.user.update({
-    where: { id: user.id },
-    data: { lastLoginAt: new Date() },
-  }).catch(() => null);
-
-  return res.json(staffSessionResponse(token, user));
-});
-
-authRoutes.post("/employee/promote-local", async (req, res) => {
-  if (!databaseConfigured()) {
-    return res.status(503).json({
-      ok: false,
-      error: "database_unavailable",
-      message: "Server authentication is not connected to the production database.",
-    });
-  }
-  const parsed = employeeLocalPromotionSchema.safeParse(req.body ?? {});
-  if (!parsed.success) {
-    const error = localPromotionErrorCode(req.body, parsed.error);
-    return res.status(400).json({ ok: false, error, details: parsed.error.flatten() });
-  }
-
-  const result = await promoteLocalStaffAccount(parsed.data);
-  if (!result.ok) {
-    const status =
-      result.error === "inactive_agency" ? 403 :
-      result.error === "duplicate_email" ? 409 :
-      result.error === "weak_password" ? 400 :
-      result.error === "missing_fields" ? 400 :
-      401;
-    return res.status(status).json({ ok: false, error: result.error });
-  }
-
-  const { user } = result;
-  const token = issueSessionJwt({
-    userId: user.id,
-    role: user.role,
-    tenantId: user.tenantId,
-    branchId: user.branchId,
-    permissions: permissionsFromJson(user.permissions),
-  });
-  await prisma.user.update({
+  const updated = await prisma.user.update({
     where: { id: user.id },
     data: { lastLoginAt: new Date() },
   }).catch(() => null);
@@ -570,11 +633,12 @@ authRoutes.get("/me", requireAuth, async (req, res) => {
   });
 });
 
-authRoutes.get("/session", requireAuth, async (req, res) => {
-  if (!req.auth) return authFailure(res, 401, "invalid_credentials");
-  if (!databaseConfigured()) {
-    return authFailure(res, 503, "server_unreachable", "Server authentication is not connected to the production database.");
-  }
+authRoutes.get("/session", canonicalAsync(async (req, res) => {
+  const authenticated = authenticateRequest(req);
+  if (!authenticated) return authFailure(res, 401, "no_session");
+  const validation = await validateAuthContext(authenticated);
+  if (!validation.ok) return authFailure(res, validation.status, validation.reason);
+  req.auth = validation.auth;
 
   const user = await prisma.user.findUnique({
     where: { id: req.auth.userId },
@@ -599,13 +663,18 @@ authRoutes.get("/session", requireAuth, async (req, res) => {
       agency: user.role === "master_admin" ? undefined : sessionAgencyPayload(user.agency),
     },
   });
-});
+}));
 
-authRoutes.post("/logout", (_req, res) => {
-  res.json({ ok: true });
-});
+authRoutes.post("/logout", requireAuth, canonicalAsync(async (req, res) => {
+  if (!req.auth) return authFailure(res, 401, "no_session");
+  await prisma.user.update({
+    where: { id: req.auth.userId },
+    data: { authVersion: { increment: 1 } },
+  });
+  return res.json({ ok: true });
+}));
 
-authRoutes.post("/password/change", requireAuth, async (req, res) => {
+authRoutes.post("/password/change", requireAuth, canonicalAsync(async (req, res) => {
   if (!req.auth) return authFailure(res, 401, "invalid_credentials");
   if (!databaseConfigured()) {
     return authFailure(res, 503, "server_unreachable", "Server authentication is not connected to the production database.");
@@ -624,15 +693,17 @@ authRoutes.post("/password/change", requireAuth, async (req, res) => {
     return authFailure(res, 401, "invalid_credentials");
   }
 
-  await prisma.user.update({
+  const updated = await prisma.user.update({
     where: { id: user.id },
     data: {
       passwordHash: hashPasswordForStorage(parsed.data.newPassword),
       passwordChangedAt: new Date(),
+      authVersion: { increment: 1 },
     },
+    include: { agency: true },
   });
-  return res.json({ ok: true });
-});
+  return sendCanonicalSession(res, updated);
+}));
 
 for (const endpoint of endpoints) {
   if (endpoint.path === "/" || endpoint.path.startsWith("/manager-2fa/")) continue;
@@ -649,7 +720,7 @@ for (const endpoint of endpoints) {
 
 type SnapshotRecord = Record<string, unknown>;
 type StaffRegisterInput = z.infer<typeof employeeRegisterSchema>;
-type LocalStaffPromotionInput = z.infer<typeof employeeLocalPromotionSchema>;
+type StaffBranchSnapshotInput = z.infer<typeof staffBranchSnapshotSchema>;
 type StaffInputErrorCode = "missing_fields" | "invalid_email" | "weak_password";
 type StaffAccountResult =
   | { ok: true; user: Awaited<ReturnType<typeof prisma.user.findFirst>> & { agency: NonNullable<Awaited<ReturnType<typeof prisma.agency.findFirst>>> } }
@@ -664,6 +735,7 @@ type MasterSessionUser = {
   email: string;
   name: string;
   permissions: unknown;
+  authVersion: number;
 };
 type SessionAgency = {
   id: string;
@@ -696,7 +768,8 @@ type AuthFailReason =
   | "password_not_set"
   | "rate_limited"
   | "server_unreachable"
-  | "wrong_portal";
+  | "wrong_portal"
+  | "no_session";
 
 type CanonicalSessionUser = {
   id: string;
@@ -708,6 +781,7 @@ type CanonicalSessionUser = {
   email: string;
   name: string;
   permissions: unknown;
+  authVersion: number;
   agency?: SessionAgency | null;
 };
 
@@ -732,6 +806,7 @@ function sendCanonicalSession(res: Response, user: CanonicalSessionUser) {
     tenantId: isMaster ? null : user.tenantId,
     branchId: user.branchId,
     permissions: permissionsFromJson(user.permissions),
+    authVersion: user.authVersion,
   });
 
   return res.json({
@@ -751,12 +826,17 @@ function sendCanonicalSession(res: Response, user: CanonicalSessionUser) {
 }
 
 async function authenticateMasterForLogin(email: string, password: string): Promise<LoginOutcome> {
-  const user = await prisma.user.findFirst({
+  let user = await prisma.user.findFirst({
     where: { role: "master_admin", email: { equals: email, mode: "insensitive" } },
   });
+  if (!user && await migrateLegacySnapshotIdentity("master", email)) {
+    user = await prisma.user.findFirst({
+      where: { role: "master_admin", email: { equals: email, mode: "insensitive" } },
+    });
+  }
   if (!user) {
     const otherPortal = await prisma.user.findFirst({ where: { email: { equals: email, mode: "insensitive" } } });
-    return { ok: false, status: otherPortal ? 403 : 401, reason: otherPortal ? "wrong_portal" : "invalid_credentials" };
+    return { ok: false, status: otherPortal ? 403 : 401, reason: otherPortal ? "wrong_portal" : "account_not_found" };
   }
   if (blockedStaffStatus(user.status)) return { ok: false, status: 403, reason: "account_disabled" };
   if (!user.passwordHash) return { ok: false, status: 409, reason: "password_not_set" };
@@ -765,62 +845,70 @@ async function authenticateMasterForLogin(email: string, password: string): Prom
   }
   const updated = await prisma.user.update({
     where: { id: user.id },
-    data: { lastLoginAt: new Date() },
+    data: {
+      lastLoginAt: new Date(),
+      ...(passwordHashNeedsUpgrade(user.passwordHash) ? { passwordHash: hashPasswordForStorage(password) } : {}),
+    },
   }).catch(() => user);
   return { ok: true, user: { ...updated, agency: null } };
 }
 
 async function authenticateStaffForLogin(identifier: string, password: string): Promise<LoginOutcome> {
-  let user = await prisma.user.findFirst({
+  let candidates = await prisma.user.findMany({
     where: {
-      role: { in: [...SNAPSHOT_STAFF_ROLES] },
+      role: { in: [...ACTIVE_STAFF_ROLES] },
       email: { equals: identifier, mode: "insensitive" },
     },
     include: { agency: true },
   });
-  if (!user) {
+  if (candidates.length === 0 && await migrateLegacySnapshotIdentity("staff", identifier)) {
+    candidates = await prisma.user.findMany({
+      where: {
+        role: { in: [...ACTIVE_STAFF_ROLES] },
+        email: { equals: identifier, mode: "insensitive" },
+      },
+      include: { agency: true },
+    });
+  }
+  if (candidates.length === 0) {
     const otherPortal = await prisma.user.findFirst({ where: { email: { equals: identifier, mode: "insensitive" } } });
     if (otherPortal) return { ok: false, status: 403, reason: "wrong_portal" };
-    const promoted = await promoteSnapshotStaffForLogin(identifier, password);
-    if (!promoted) return { ok: false, status: 401, reason: "invalid_credentials" };
-    user = promoted;
+    return { ok: false, status: 401, reason: "account_not_found" };
   }
-
-  if (user.status === "banned" || user.status === "deleted") {
+  if (candidates.every((candidate) => !candidate.agency?.active)) {
+    return { ok: false, status: 403, reason: "agency_inactive" };
+  }
+  if (candidates.every((candidate) => permanentlyBlockedStatus(candidate.status))) {
     return { ok: false, status: 403, reason: "account_disabled" };
   }
-  if (!user.agency?.active) return { ok: false, status: 403, reason: "agency_inactive" };
-  if (user.status === "inactive") {
-    if (user.passwordHash && verifyPasswordHashForLogin(password, user.passwordHash)) {
-      user = await prisma.user.update({
-        where: { id: user.id },
-        data: { status: "active" },
-        include: { agency: true },
-      });
-    } else if (!user.passwordHash) {
-      const repaired = await promoteSnapshotStaffForLogin(identifier, password, user.tenantId);
-      if (!repaired || blockedStaffStatus(repaired.status) || !repaired.agency?.active) {
+  const matches = candidates.filter((candidate) =>
+    Boolean(candidate.passwordHash && verifyPasswordHashForLogin(password, candidate.passwordHash))
+  );
+  if (matches.length === 0) {
+    if (candidates.every((candidate) => !candidate.passwordHash)) {
+      if (candidates.every((candidate) => !candidate.agency?.active)) {
+        return { ok: false, status: 403, reason: "agency_inactive" };
+      }
+      if (candidates.every((candidate) => permanentlyBlockedStatus(candidate.status))) {
         return { ok: false, status: 403, reason: "account_disabled" };
       }
-      user = repaired;
-    } else {
-      return { ok: false, status: 401, reason: "invalid_credentials" };
+      return { ok: false, status: 409, reason: "password_not_set" };
     }
-  }
-
-  if (!user.passwordHash) {
-    const promoted = await promoteSnapshotStaffForLogin(identifier, password, user.tenantId);
-    if (promoted) user = promoted;
-  }
-  if (!user.agency?.active) return { ok: false, status: 403, reason: "agency_inactive" };
-  if (!user.passwordHash) return { ok: false, status: 409, reason: "password_not_set" };
-  if (!verifyPasswordHashForLogin(password, user.passwordHash)) {
     return { ok: false, status: 401, reason: "invalid_credentials" };
   }
+  if (matches.length > 1) return { ok: false, status: 401, reason: "invalid_credentials" };
+  const user = matches[0];
+  if (!user.passwordHash) return { ok: false, status: 409, reason: "password_not_set" };
+  if (!user.agency?.active) return { ok: false, status: 403, reason: "agency_inactive" };
+  if (permanentlyBlockedStatus(user.status)) return { ok: false, status: 403, reason: "account_disabled" };
 
   const updated = await prisma.user.update({
     where: { id: user.id },
-    data: { lastLoginAt: new Date() },
+    data: {
+      ...(user.status === "inactive" ? { status: "active" } : {}),
+      lastLoginAt: new Date(),
+      ...(passwordHashNeedsUpgrade(user.passwordHash) ? { passwordHash: hashPasswordForStorage(password) } : {}),
+    },
     include: { agency: true },
   }).catch(() => user);
   return { ok: true, user: updated };
@@ -832,8 +920,11 @@ async function authenticateCustomerForLogin(email: string, password: string, ten
     email: { equals: email, mode: "insensitive" as const },
     ...(tenantId ? { tenantId } : {}),
   };
-  let user = await prisma.user.findFirst({ where, include: { agency: true } });
-  if (!user) {
+  let candidates = await prisma.user.findMany({ where, include: { agency: true } });
+  if (candidates.length === 0 && await migrateLegacySnapshotIdentity("customer", email, tenantId)) {
+    candidates = await prisma.user.findMany({ where, include: { agency: true } });
+  }
+  if (candidates.length === 0) {
     const otherPortal = await prisma.user.findFirst({
       where: {
         email: { equals: email, mode: "insensitive" },
@@ -841,47 +932,155 @@ async function authenticateCustomerForLogin(email: string, password: string, ten
       },
     });
     if (otherPortal) return { ok: false, status: 403, reason: "wrong_portal" };
-    const promoted = await promoteSnapshotCustomerForLogin(email, password, tenantId);
-    if (!promoted) return { ok: false, status: 401, reason: "invalid_credentials" };
-    user = promoted;
+    return { ok: false, status: 401, reason: "account_not_found" };
   }
-
-  if (!user.agency?.active) return { ok: false, status: 403, reason: "agency_inactive" };
-  if (user.status === "banned" || user.status === "deleted") {
+  if (candidates.every((candidate) => !candidate.agency?.active)) {
+    return { ok: false, status: 403, reason: "agency_inactive" };
+  }
+  if (candidates.every((candidate) => blockedStaffStatus(candidate.status))) {
     return { ok: false, status: 403, reason: "account_disabled" };
   }
-  if (user.status === "inactive") {
-    if (user.passwordHash && verifyPasswordHashForLogin(password, user.passwordHash)) {
-      user = await prisma.user.update({
-        where: { id: user.id },
-        data: { status: "active" },
-        include: { agency: true },
-      });
-    } else if (!user.passwordHash) {
-      const promoted = await promoteSnapshotCustomerForLogin(email, password, tenantId ?? user.tenantId);
-      if (!promoted || !promoted.agency?.active) {
+
+  const matches = candidates.filter((candidate) =>
+    Boolean(candidate.passwordHash && verifyPasswordHashForLogin(password, candidate.passwordHash))
+  );
+  if (matches.length === 0) {
+    if (candidates.every((candidate) => !candidate.passwordHash)) {
+      if (candidates.every((candidate) => !candidate.agency?.active)) {
+        return { ok: false, status: 403, reason: "agency_inactive" };
+      }
+      if (candidates.every((candidate) => blockedStaffStatus(candidate.status))) {
         return { ok: false, status: 403, reason: "account_disabled" };
       }
-      user = promoted;
-    } else {
-      return { ok: false, status: 401, reason: "invalid_credentials" };
+      return { ok: false, status: 409, reason: "password_not_set" };
     }
-  }
-  if (!user.passwordHash) {
-    const promoted = await promoteSnapshotCustomerForLogin(email, password, tenantId ?? user.tenantId);
-    if (promoted) user = promoted;
-  }
-  if (!user.passwordHash) return { ok: false, status: 409, reason: "password_not_set" };
-  if (!verifyPasswordHashForLogin(password, user.passwordHash)) {
     return { ok: false, status: 401, reason: "invalid_credentials" };
   }
+  if (matches.length > 1) return { ok: false, status: 401, reason: "invalid_credentials" };
+  const user = matches[0];
+  if (!user.passwordHash) return { ok: false, status: 409, reason: "password_not_set" };
+
+  if (!user.agency?.active) return { ok: false, status: 403, reason: "agency_inactive" };
+  if (blockedStaffStatus(user.status)) return { ok: false, status: 403, reason: "account_disabled" };
 
   const updated = await prisma.user.update({
     where: { id: user.id },
-    data: { lastLoginAt: new Date() },
+    data: {
+      lastLoginAt: new Date(),
+      ...(passwordHashNeedsUpgrade(user.passwordHash) ? { passwordHash: hashPasswordForStorage(password) } : {}),
+    },
     include: { agency: true },
   }).catch(() => user);
   return { ok: true, user: updated };
+}
+
+async function migrateLegacySnapshotIdentity(
+  scope: "customer" | "staff" | "master",
+  identifier: string,
+  requiredTenantId?: string | null
+): Promise<boolean> {
+  const snapshot = await loadCurrentAppStateSnapshot();
+  if (!snapshot) return false;
+  const normalized = identifier.trim().toLowerCase();
+  const candidate = snapshotArray(snapshot, "users").find((item) => {
+    if (!snapshotUserMatches(item, normalized)) return false;
+    const role = fieldString(item.role);
+    if (scope === "master" && role !== "master_admin") return false;
+    if (scope === "customer" && role !== "customer") return false;
+    if (scope === "staff" && !ACTIVE_STAFF_ROLES.includes(role as (typeof ACTIVE_STAFF_ROLES)[number])) return false;
+    if (requiredTenantId && fieldString(item.tenantId) !== requiredTenantId) return false;
+    return true;
+  });
+  if (!candidate) return false;
+
+  const email = (fieldString(candidate.businessEmail) || fieldString(candidate.email)).toLowerCase();
+  if (!email) return false;
+  const name =
+    fieldString(candidate.name) ||
+    `${fieldString(candidate.firstName)} ${fieldString(candidate.lastName)}`.trim() ||
+    email;
+  const legacyStatus = snapshotAccountStatus(candidate);
+
+  if (scope === "master") {
+    const existingMaster = await prisma.user.findFirst({ where: { role: "master_admin" } });
+    if (existingMaster) return existingMaster.email.toLowerCase() === email;
+    const platformTenant = await ensurePlatformTenant();
+    await prisma.user.create({
+      data: {
+        id: `user_${randomUUID()}`,
+        tenantId: platformTenant.id,
+        name,
+        email,
+        phone: nullableFieldString(candidate.phone),
+        role: "master_admin",
+        status: legacyStatus,
+        passwordHash: null,
+        passwordChangedAt: null,
+        profile: { profileCompleted: true, platformOwner: true, migratedFromLegacySnapshot: true },
+        permissions: {},
+      },
+    });
+    return true;
+  }
+
+  const tenantId = fieldString(candidate.tenantId);
+  if (!tenantId) return false;
+  const agencySnapshot = snapshotArray(snapshot, "agencies").find((agency) => fieldString(agency.id) === tenantId);
+  if (!agencySnapshot) return false;
+  const agency = await upsertAgencyFromSnapshot(
+    agencySnapshot,
+    snapshotAgencyCode(agencySnapshot),
+    email
+  );
+  const role = scope === "customer" ? "customer" : fieldString(candidate.role);
+  const branchId = await resolveBranchForStaff(fieldString(candidate.branchId), agency.id, snapshot);
+  const existing = await prisma.user.findFirst({
+    where: {
+      tenantId: agency.id,
+      email: { equals: email, mode: "insensitive" },
+      role,
+    },
+  });
+  if (existing) return true;
+
+  const user = await prisma.user.create({
+    data: {
+      id: `user_${randomUUID()}`,
+      tenantId: agency.id,
+      branchId,
+      name,
+      email,
+      phone: nullableFieldString(candidate.phone),
+      role,
+      status: legacyStatus,
+      passwordHash: null,
+      passwordChangedAt: null,
+      profile: {
+        firstName: fieldString(candidate.firstName) || firstNameFromFullName(name),
+        lastName: fieldString(candidate.lastName) || lastNameFromFullName(name),
+        businessEmail: email,
+        profileCompleted: true,
+        migratedFromLegacySnapshot: true,
+      },
+      permissions: {},
+    },
+  });
+
+  if (scope === "customer") {
+    await prisma.customerProfile.create({
+      data: {
+        id: `customer_${randomUUID()}`,
+        tenantId: agency.id,
+        userId: user.id,
+        branchId,
+        name,
+        email,
+        phone: nullableFieldString(candidate.phone),
+        mailingAddress: nullableFieldString(candidate.mailingAddress),
+      },
+    });
+  }
+  return true;
 }
 
 function sendMasterSession(res: Response, user: MasterSessionUser) {
@@ -891,6 +1090,7 @@ function sendMasterSession(res: Response, user: MasterSessionUser) {
     tenantId: null,
     branchId: null,
     permissions: permissionsFromJson(user.permissions),
+    authVersion: user.authVersion,
   });
 
   return res.json({
@@ -956,70 +1156,6 @@ async function ensurePlatformTenant() {
   });
 }
 
-async function promoteMasterAccount(input: {
-  email: string;
-  password: string;
-  name: string;
-  localUserId?: string;
-}): Promise<MasterSessionUser | null> {
-  const email = fieldString(input.email).toLowerCase();
-  const name = fieldString(input.name) || email;
-  if (!email || input.password.length < 12) return null;
-
-  const existingMaster = await prisma.user.findFirst({ where: { role: "master_admin" } });
-  if (existingMaster && existingMaster.email.toLowerCase() !== email) return null;
-  if (existingMaster && blockedStaffStatus(existingMaster.status)) return null;
-  if (existingMaster?.passwordHash) {
-    return verifyPasswordHashForLogin(input.password, existingMaster.passwordHash) ? existingMaster : null;
-  }
-
-  const trustedSnapshot = await trustedLegacyMasterSnapshot(email, input.password);
-  if (!trustedSnapshot) return null;
-
-  const platformTenant = await ensurePlatformTenant();
-  const data = {
-    tenantId: platformTenant.id,
-    branchId: null,
-    name,
-    email,
-    phone: null,
-    role: "master_admin",
-    status: "active",
-    passwordHash: hashPasswordForStorage(input.password),
-    passwordChangedAt: new Date(),
-    profile: { profileCompleted: true, platformOwner: true, legacyLocalAuthPromotedAt: new Date().toISOString() },
-    permissions: {},
-  };
-
-  if (existingMaster) {
-    return prisma.user.update({
-      where: { id: existingMaster.id },
-      data,
-    });
-  }
-
-  return prisma.user.create({
-    data: {
-      id: fieldString(input.localUserId) || fieldString(trustedSnapshot.id) || `user_${randomUUID()}`,
-      ...data,
-      lastLoginAt: new Date(),
-    },
-  });
-}
-
-async function trustedLegacyMasterSnapshot(email: string, password: string): Promise<SnapshotRecord | null> {
-  const snapshot = await loadCurrentAppStateSnapshot();
-  if (!snapshot) return null;
-  const user = snapshotArray(snapshot, "users").find((candidate) => {
-    if (fieldString(candidate.role) !== "master_admin") return false;
-    if (candidate.active === false || blockedSnapshotStaff(candidate)) return false;
-    return fieldString(candidate.email).toLowerCase() === email;
-  });
-  if (!user) return null;
-  const legacyPassword = fieldString(user.generatedPassword);
-  return legacyPassword && timingSafeEqualString(legacyPassword, password) ? user : null;
-}
-
 function employeeRegisterErrorCode(input: unknown, error: z.ZodError<z.infer<typeof employeeRegisterSchema>>): StaffInputErrorCode {
   const body = isRecord(input) ? input : {};
   if (
@@ -1035,14 +1171,6 @@ function employeeRegisterErrorCode(input: unknown, error: z.ZodError<z.infer<typ
   }
   const fields = error.flatten().fieldErrors;
   if (fields.businessEmail?.length) return "invalid_email";
-  if (fields.password?.length) return "weak_password";
-  return "missing_fields";
-}
-
-function localPromotionErrorCode(input: unknown, error: z.ZodError<z.infer<typeof employeeLocalPromotionSchema>>): StaffInputErrorCode {
-  const body = isRecord(input) ? input : {};
-  if (!fieldString(body.password)) return "missing_fields";
-  const fields = error.flatten().fieldErrors;
   if (fields.password?.length) return "weak_password";
   return "missing_fields";
 }
@@ -1107,41 +1235,6 @@ function staffSessionResponse(
         }
       : null,
   };
-}
-
-async function repairAgencyActivationFromSnapshot(tenantId: string | null, fallbackEmail: string) {
-  if (!tenantId) return null;
-  const snapshot = await loadCurrentAppStateSnapshot();
-  if (!snapshot) return null;
-  const snapshotAgency = snapshotArray(snapshot, "agencies").find((agency) => fieldString(agency.id) === tenantId);
-  if (!snapshotAgency || snapshotAgency.active === false) return null;
-
-  const existing = await prisma.agency.findFirst({ where: { id: tenantId } });
-  const agencyCode = snapshotAgencyCode(snapshotAgency);
-  if (!existing) return upsertAgencyFromSnapshot(snapshotAgency, agencyCode, fallbackEmail);
-
-  const codeFields = agencyCode
-    ? {
-        agencyCodeHash: agencyCodeHashForStorage(agencyCode),
-        agencyCodePreview: agencyCode.slice(-4),
-      }
-    : {};
-  return prisma.agency.update({
-    where: { id: existing.id },
-    data: {
-      name: fieldString(snapshotAgency.name) || existing.name,
-      contactEmail: fieldString(snapshotAgency.contactEmail) || existing.contactEmail || fallbackEmail,
-      phone: nullableFieldString(snapshotAgency.phone),
-      address: nullableFieldString(snapshotAgency.address),
-      website: nullableFieldString(snapshotAgency.website),
-      websiteSlug: nullableFieldString(snapshotAgency.websiteSlug),
-      websiteEnabled: booleanField(snapshotAgency.websiteEnabled, existing.websiteEnabled),
-      tier: fieldString(snapshotAgency.tier) || existing.tier,
-      active: true,
-      allowedUsers: boundedInteger(snapshotAgency.allowedUsers, 1, 1000, existing.allowedUsers),
-      ...codeFields,
-    },
-  });
 }
 
 async function createServerStaffAccount(input: StaffRegisterInput): Promise<StaffAccountResult> {
@@ -1229,281 +1322,6 @@ async function createServerStaffAccount(input: StaffRegisterInput): Promise<Staf
   return { ok: true, user };
 }
 
-async function promoteLocalStaffAccount(input: LocalStaffPromotionInput): Promise<StaffAccountResult> {
-  const requestedEmail = (fieldString(input.user.businessEmail) || fieldString(input.user.email)).toLowerCase();
-  const trustedSnapshot = await trustedSnapshotForLocalPromotion(input, requestedEmail, input.password);
-  if (!trustedSnapshot) return { ok: false, error: "invalid_credentials" };
-
-  const email = fieldString(trustedSnapshot.user.businessEmail) || fieldString(trustedSnapshot.user.email) || requestedEmail;
-  const normalizedEmail = email.toLowerCase();
-  const name = fieldString(trustedSnapshot.user.name) || fieldString(input.user.name) || normalizedEmail;
-  const tenantId = fieldString(trustedSnapshot.user.tenantId) || fieldString(input.user.tenantId);
-  const role = fieldString(trustedSnapshot.user.role) || input.user.role;
-  if (
-    !normalizedEmail ||
-    input.password.length < 8 ||
-    !SNAPSHOT_STAFF_ROLES.has(role) ||
-    tenantId !== fieldString(input.agency.id)
-  ) {
-    return { ok: false, error: "missing_fields" };
-  }
-  if (
-    input.user.active === false ||
-    input.user.staffAccessStatus === "banned" ||
-    input.user.staffAccessStatus === "deleted" ||
-    input.user.staffAccessStatus === "inactive"
-  ) {
-    return { ok: false, error: "invalid_credentials" };
-  }
-  if (input.agency.active === false) return { ok: false, error: "inactive_agency" };
-
-  const agency = await resolveExistingAgencyForLocalPromotion(input.agency, tenantId, normalizedEmail, trustedSnapshot.agency);
-  if (!agency?.active) return { ok: false, error: "inactive_agency" };
-
-  const branchId = await upsertBranchFromLocalPromotion(
-    input.branch,
-    agency.id,
-    (fieldString(trustedSnapshot.user.branchId) || input.user.branchId) ?? undefined
-  );
-  const existing = await prisma.user.findFirst({
-    where: {
-      role: { in: [...SNAPSHOT_STAFF_ROLES] },
-      email: { equals: normalizedEmail, mode: "insensitive" },
-    },
-    include: { agency: true },
-  });
-  if (existing && existing.tenantId !== agency.id) return { ok: false, error: "duplicate_email" };
-  if (existing && blockedStaffStatus(existing.status)) return { ok: false, error: "invalid_credentials" };
-  if (existing?.passwordHash) return { ok: false, error: "invalid_credentials" };
-
-  const firstName = fieldString(trustedSnapshot.user.firstName) || fieldString(input.user.firstName) || firstNameFromFullName(name);
-  const lastName = fieldString(trustedSnapshot.user.lastName) || fieldString(input.user.lastName) || lastNameFromFullName(name);
-  const profile = {
-    ...(existing && isRecord(existing.profile) ? existing.profile : {}),
-    firstName,
-    lastName,
-    businessEmail: normalizedEmail,
-    profileCompleted: true,
-    legacyLocalAuthPromotedAt: new Date().toISOString(),
-  };
-  const passwordHash = hashPasswordForStorage(input.password);
-  const user = existing
-    ? await prisma.user.update({
-        where: { id: existing.id },
-        data: {
-          tenantId: agency.id,
-          branchId,
-          name,
-          phone: nullableFieldString(trustedSnapshot.user.phone) ?? nullableFieldString(input.user.phone) ?? existing.phone,
-          role,
-          status: "active",
-          passwordHash,
-          passwordChangedAt: new Date(),
-          profile,
-        },
-        include: { agency: true },
-      })
-    : await prisma.user.create({
-        data: {
-          id: fieldString(input.user.id) || `user_${randomUUID()}`,
-          tenantId: agency.id,
-          branchId,
-          name,
-          email: normalizedEmail,
-          phone: nullableFieldString(trustedSnapshot.user.phone) ?? nullableFieldString(input.user.phone),
-          role,
-          status: "active",
-          passwordHash,
-          passwordChangedAt: new Date(),
-          profile,
-          permissions: {},
-        },
-        include: { agency: true },
-      });
-
-  return { ok: true, user };
-}
-
-async function trustedSnapshotForLocalPromotion(
-  input: LocalStaffPromotionInput,
-  requestedEmail: string,
-  password: string
-): Promise<{ user: SnapshotRecord; agency: SnapshotRecord } | null> {
-  const snapshot = await loadCurrentAppStateSnapshot();
-  if (!snapshot) return null;
-  const tenantId = fieldString(input.user.tenantId);
-  const userId = fieldString(input.user.id);
-  const userSnapshot = snapshotArray(snapshot, "users").find((user) => {
-    if (blockedSnapshotStaff(user)) return false;
-    if (fieldString(user.tenantId) !== tenantId) return false;
-    const byId = userId && fieldString(user.id) === userId;
-    const byIdentifier = snapshotUserMatches(user, requestedEmail);
-    return Boolean(byId || byIdentifier);
-  });
-  if (!userSnapshot) return null;
-  const snapshotPassword = fieldString(userSnapshot.generatedPassword);
-  if (!snapshotPassword || !timingSafeEqualString(snapshotPassword, password)) return null;
-  const agencySnapshot = snapshotArray(snapshot, "agencies").find((agency) => fieldString(agency.id) === tenantId);
-  if (!agencySnapshot) return null;
-  return { user: userSnapshot, agency: agencySnapshot };
-}
-
-async function promoteSnapshotStaffForLogin(identifier: string, password: string, requiredTenantId?: string | null) {
-  const snapshot = await loadCurrentAppStateSnapshot();
-  if (!snapshot) return null;
-  const userSnapshot = snapshotArray(snapshot, "users").find((user) => snapshotUserMatches(user, identifier));
-  if (!userSnapshot || blockedSnapshotStaff(userSnapshot)) return null;
-  const snapshotPassword = fieldString(userSnapshot.generatedPassword);
-  if (!snapshotPassword || !timingSafeEqualString(snapshotPassword, password)) return null;
-
-  const tenantId = fieldString(userSnapshot.tenantId);
-  if (!tenantId) return null;
-  if (requiredTenantId && tenantId !== requiredTenantId) return null;
-  const agencySnapshot = snapshotArray(snapshot, "agencies").find((agency) => fieldString(agency.id) === tenantId);
-  if (!agencySnapshot) return null;
-  const agencyCode = snapshotAgencyCode(agencySnapshot);
-  const agency = await upsertAgencyFromSnapshot(agencySnapshot, agencyCode, fieldString(userSnapshot.email));
-  if (!agency?.active) return null;
-  const branchId = await resolveBranchForStaff(fieldString(userSnapshot.branchId), agency.id, snapshot);
-
-  const email = fieldString(userSnapshot.businessEmail) || fieldString(userSnapshot.email);
-  if (!email) return null;
-  const name =
-    fieldString(userSnapshot.name) ||
-    `${fieldString(userSnapshot.firstName)} ${fieldString(userSnapshot.lastName)}`.trim() ||
-    email;
-  const role = fieldString(userSnapshot.role);
-  if (!SNAPSHOT_STAFF_ROLES.has(role)) return null;
-
-  const existing = await prisma.user.findFirst({
-    where: {
-      role: { in: [...SNAPSHOT_STAFF_ROLES] },
-      email: { equals: email.toLowerCase(), mode: "insensitive" },
-    },
-    include: { agency: true },
-  });
-  if (existing && existing.tenantId !== agency.id) return null;
-  if (existing?.passwordHash) return null;
-
-  const user = existing
-    ? await prisma.user.update({
-        where: { id: existing.id },
-        data: {
-          tenantId: agency.id,
-          branchId,
-          name,
-          phone: fieldString(userSnapshot.phone) || existing.phone,
-          role,
-          status: "active",
-          passwordHash: hashPasswordForStorage(password),
-          passwordChangedAt: new Date(),
-          profile: {
-            ...(isRecord(existing.profile) ? existing.profile : {}),
-            firstName: fieldString(userSnapshot.firstName),
-            lastName: fieldString(userSnapshot.lastName),
-            businessEmail: email.toLowerCase(),
-            profileCompleted: true,
-          },
-        },
-        include: { agency: true },
-      })
-    : await prisma.user.create({
-        data: {
-          id: fieldString(userSnapshot.id) || `user_${randomUUID()}`,
-          tenantId: agency.id,
-          branchId,
-          name,
-          email: email.toLowerCase(),
-          phone: fieldString(userSnapshot.phone) || null,
-          role,
-          status: "active",
-          passwordHash: hashPasswordForStorage(password),
-          passwordChangedAt: new Date(),
-          profile: {
-            firstName: fieldString(userSnapshot.firstName),
-            lastName: fieldString(userSnapshot.lastName),
-            businessEmail: email.toLowerCase(),
-            profileCompleted: true,
-          },
-          permissions: {},
-        },
-        include: { agency: true },
-      });
-  return user;
-}
-
-async function promoteSnapshotCustomerForLogin(email: string, password: string, requiredTenantId?: string | null) {
-  const snapshot = await loadCurrentAppStateSnapshot();
-  if (!snapshot) return null;
-  const normalized = email.trim().toLowerCase();
-  const userSnapshot = snapshotArray(snapshot, "users").find((user) => {
-    if (fieldString(user.role) !== "customer") return false;
-    if (user.active === false) return false;
-    if (requiredTenantId && fieldString(user.tenantId) !== requiredTenantId) return false;
-    return fieldString(user.email).toLowerCase() === normalized;
-  });
-  if (!userSnapshot) return null;
-  const snapshotPassword = fieldString(userSnapshot.generatedPassword);
-  if (!snapshotPassword || !timingSafeEqualString(snapshotPassword, password)) return null;
-
-  const tenantId = fieldString(userSnapshot.tenantId);
-  if (!tenantId) return null;
-  const agencySnapshot = snapshotArray(snapshot, "agencies").find((agency) => fieldString(agency.id) === tenantId);
-  if (!agencySnapshot) return null;
-  const agencyCode = snapshotAgencyCode(agencySnapshot);
-  const agency = await upsertAgencyFromSnapshot(agencySnapshot, agencyCode, normalized);
-  if (!agency?.active) return null;
-
-  const name = fieldString(userSnapshot.name) || normalized;
-  const existing = await prisma.user.findFirst({
-    where: {
-      role: "customer",
-      tenantId: agency.id,
-      email: { equals: normalized, mode: "insensitive" },
-    },
-    include: { agency: true },
-  });
-  if (existing?.passwordHash) return null;
-  const profile = {
-    ...(existing && isRecord(existing.profile) ? existing.profile : {}),
-    profileCompleted: true,
-    legacyLocalAuthPromotedAt: new Date().toISOString(),
-  };
-  const user = existing
-    ? await prisma.user.update({
-        where: { id: existing.id },
-        data: {
-          tenantId: agency.id,
-          branchId: fieldString(userSnapshot.branchId) || existing.branchId,
-          name,
-          phone: nullableFieldString(userSnapshot.phone) ?? existing.phone,
-          status: "active",
-          passwordHash: hashPasswordForStorage(password),
-          passwordChangedAt: new Date(),
-          profile,
-        },
-        include: { agency: true },
-      })
-    : await prisma.user.create({
-        data: {
-          id: fieldString(userSnapshot.id) || `user_${randomUUID()}`,
-          tenantId: agency.id,
-          branchId: nullableFieldString(userSnapshot.branchId),
-          name,
-          email: normalized,
-          phone: nullableFieldString(userSnapshot.phone),
-          role: "customer",
-          status: "active",
-          passwordHash: hashPasswordForStorage(password),
-          passwordChangedAt: new Date(),
-          profile,
-          permissions: {},
-        },
-        include: { agency: true },
-      });
-  return user;
-}
-
 async function resolveAgencyForStaffRegistration(
   agencyCode: string,
   fallbackEmail: string,
@@ -1579,62 +1397,8 @@ async function upsertAgencyFromSnapshot(snapshotAgency: SnapshotRecord, agencyCo
   });
 }
 
-async function resolveExistingAgencyForLocalPromotion(
-  input: LocalStaffPromotionInput["agency"],
-  tenantId: string,
-  fallbackEmail: string,
-  trustedSnapshotAgency?: SnapshotRecord
-) {
-  const agencyCode = normalizeAgencyCode(
-    fieldString(input.agencyCode) || decryptSnapshotAgencyCode(fieldString(input.agencyCodeEncrypted)) || ""
-  );
-  const codeHash = agencyCode ? agencyCodeHashForStorage(agencyCode) : null;
-  const id = fieldString(input.id);
-  if (!id || id !== fieldString(tenantId)) return null;
-  const hashLookups = codeHash ? [codeHash, codeHash.replace(/^hmac\$sha256\$/, "")] : [];
-  const existing = await prisma.agency.findFirst({
-    where: {
-      OR: [
-        { id },
-        ...hashLookups.map((agencyCodeHash) => ({ agencyCodeHash })),
-      ],
-    },
-  });
-  if (!existing || existing.id !== id) {
-    if (!trustedSnapshotAgency || fieldString(trustedSnapshotAgency.id) !== id) return null;
-    const snapshotCode = snapshotAgencyCode(trustedSnapshotAgency);
-    if (agencyCode && snapshotCode && snapshotCode !== agencyCode) return null;
-    return upsertAgencyFromSnapshot(trustedSnapshotAgency, snapshotCode || agencyCode, fallbackEmail);
-  }
-  if (!existing.active || input.active === false) return existing;
-
-  const name = fieldString(input.name) || "Agency";
-  const base = {
-    name,
-    contactEmail: fieldString(input.contactEmail) || fallbackEmail || "support@quotexinsurance.com",
-    phone: nullableFieldString(input.phone),
-    address: nullableFieldString(input.address),
-    website: nullableFieldString(input.website),
-    websiteSlug: nullableFieldString(input.websiteSlug),
-    websiteEnabled: booleanField(input.websiteEnabled, false),
-  };
-  const codeFields = codeHash
-    ? {
-        agencyCodeHash: codeHash,
-        agencyCodePreview: agencyCode.slice(-4),
-      }
-    : {};
-  return prisma.agency.update({
-    where: { id },
-    data: {
-      ...base,
-      ...codeFields,
-    },
-  });
-}
-
 async function upsertBranchFromLocalPromotion(
-  input: LocalStaffPromotionInput["branch"],
+  input: StaffBranchSnapshotInput | null | undefined,
   agencyId: string,
   requestedBranchId?: string | null
 ): Promise<string | null> {
@@ -1729,29 +1493,49 @@ function snapshotUserMatches(user: SnapshotRecord, identifier: string): boolean 
   ].some((value) => value.toLowerCase() === normalized);
 }
 
-function blockedSnapshotStaff(user: SnapshotRecord): boolean {
-  const role = fieldString(user.role);
-  const status = fieldString(user.staffAccessStatus) || fieldString(user.status);
-  return (
-    !SNAPSHOT_STAFF_ROLES.has(role) ||
-    user.active === false ||
-    status === "banned" ||
-    status === "deleted" ||
-    status === "inactive"
-  );
-}
-
 function blockedStaffStatus(status: string): boolean {
   return status === "banned" || status === "deleted" || status === "inactive";
 }
 
+function permanentlyBlockedStatus(status: string): boolean {
+  return status === "banned" || status === "deleted";
+}
+
+function snapshotAccountStatus(user: SnapshotRecord): "active" | "inactive" | "banned" | "deleted" {
+  const status = fieldString(user.staffAccessStatus) || fieldString(user.status);
+  if (status === "banned" || status === "deleted" || status === "inactive") return status;
+  return user.active === false ? "inactive" : "active";
+}
+
 function hashPasswordForStorage(password: string): string {
-  const salt = randomBytes(16).toString("hex");
-  const n = 16_384;
-  const r = 8;
-  const p = 1;
-  const hash = scryptSync(password, salt, 32, { N: n, r, p }).toString("hex");
-  return `scrypt$${n}$${r}$${p}$${salt}$${hash}`;
+  return hashBcrypt(password, 12);
+}
+
+function canonicalAsync(handler: (req: Request, res: Response) => Promise<unknown>) {
+  return (req: Request, res: Response, _next: NextFunction) => {
+    return handler(req, res).catch((error) => {
+      console.error("[auth] canonical endpoint failed", {
+        method: req.method,
+        path: req.path,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      if (!res.headersSent) authFailure(res, 503, "server_unreachable");
+    });
+  };
+}
+
+function hashResetToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  })[character] ?? character);
 }
 
 function agencyCodeHashForStorage(code: string): string {
@@ -1875,6 +1659,7 @@ export function issueSessionJwt(input: {
   tenantId: string | null;
   branchId?: string | null;
   permissions?: string[];
+  authVersion?: number;
 }): string {
   const secret = process.env.JWT_SECRET?.trim();
   if (!secret) throw new Error("JWT_SECRET is required to issue a session.");
@@ -1893,6 +1678,7 @@ export function issueSessionJwt(input: {
       tenantId: input.tenantId,
       branchId: input.branchId ?? null,
       permissions: input.permissions ?? [],
+      authVersion: input.authVersion ?? 0,
     },
     secret,
     options
@@ -1902,6 +1688,13 @@ export function issueSessionJwt(input: {
 export function verifyPasswordHashForLogin(password: string, encodedHash: string): boolean {
   const encoded = encodedHash.trim();
   if (!encoded) return false;
+  if (/^\$2[aby]\$/.test(encoded)) {
+    try {
+      return compareBcrypt(password, encoded);
+    } catch {
+      return false;
+    }
+  }
   const parts = encoded.split("$");
   if (parts[0] === "scrypt" && parts.length === 6) {
     const [, nRaw, rRaw, pRaw, salt, expectedHex] = parts;
@@ -1924,6 +1717,10 @@ export function verifyPasswordHashForLogin(password: string, encodedHash: string
     return timingSafeEqualHex(actual.toString("hex"), expectedHex);
   }
   return false;
+}
+
+function passwordHashNeedsUpgrade(encodedHash: string): boolean {
+  return !/^\$2[aby]\$12\$/.test(encodedHash.trim());
 }
 
 function timingSafeEqualHex(actualHex: string, expectedHex: string): boolean {

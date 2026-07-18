@@ -104,7 +104,7 @@ describe("api.users.provisionMore", () => {
     for (const u of made) {
       expect(u.profileCompleted).toBe(false);
       expect(u.username).toBeTruthy();
-      expect(u.generatedPassword).toBeTruthy();
+      expect(u.generatedPassword).toBeUndefined();
     }
   });
 

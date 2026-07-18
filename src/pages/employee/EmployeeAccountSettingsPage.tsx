@@ -284,7 +284,7 @@ export function EmployeeAccountSettingsPage() {
     setProfileError(null);
   }
 
-  function savePassword() {
+  async function savePassword() {
     setPasswordError(null);
     setPasswordSaved(false);
     if (passwordDraft.next.length < 8) {
@@ -295,7 +295,7 @@ export function EmployeeAccountSettingsPage() {
       setPasswordError("New password and confirmation do not match.");
       return;
     }
-    const result = changeMyPassword(passwordDraft.current, passwordDraft.next);
+    const result = await changeMyPassword(passwordDraft.current, passwordDraft.next);
     if (!result.ok) {
       setPasswordError(result.reason);
       return;

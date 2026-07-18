@@ -26,12 +26,11 @@ import { fmt } from "./format";
 import { uid, nowIso } from "./id";
 import { apiBaseUrl } from "./apiBase";
 import {
-  currentServerSessionUser,
+  currentServerSessionClaims,
   serverSessionHeaders,
 } from "./serverSession";
 import {
   generateConnectionSecret,
-  generatePassword,
   generateAgencyCode,
   generateUsername,
   agencyCodeMatches,
@@ -1625,7 +1624,6 @@ function isDueTodayOrPast(iso: string, now = new Date()): boolean {
   return new Date(dateOnly(new Date(iso))).getTime() <= new Date(dateOnly(now)).getTime();
 }
 
-const AUTH_STORAGE_KEY = "quotex.auth.userId.v1";
 const FORBIDDEN_TENANT_ID = "__quotex_forbidden_tenant__";
 const PLATFORM_ROLES = new Set<Role>(["master_admin"]);
 
@@ -1640,12 +1638,9 @@ function assertCanUseMasterAdminRole(role: Role, currentUserId?: string) {
 }
 
 function browserTenantLock(): { tenantId: string; userId: string } | null {
-  if (typeof window === "undefined") return null;
-  const userId = window.localStorage.getItem(AUTH_STORAGE_KEY);
-  if (!userId) return null;
-  const user = db.list("users").find((row) => row.id === userId);
-  if (!user || !user.tenantId || PLATFORM_ROLES.has(user.role)) return null;
-  return { tenantId: user.tenantId, userId: user.id };
+  const claims = currentServerSessionClaims();
+  if (!claims?.tenantId || PLATFORM_ROLES.has(claims.role as Role)) return null;
+  return { tenantId: claims.tenantId, userId: claims.userId };
 }
 
 function scopedTenantForBrowser(tenantId?: string | null): string | null | undefined {
@@ -2103,10 +2098,7 @@ function mailboxForUser(userId?: string): {
       status: connection.status,
     };
   }
-  const sessionUser = currentServerSessionUser();
-  const user =
-    db.list("users").find((u) => u.id === userId) ??
-    (sessionUser?.id === userId ? sessionUser : undefined);
+  const user = db.list("users").find((u) => u.id === userId);
   if (!user) return {};
   const account = user.businessEmail ?? user.email;
   return {
@@ -2260,10 +2252,8 @@ const liveMailboxDeliveryInFlight = new Set<string>();
 
 function scheduleLiveMailboxDelivery(row: Communication, job: MailboxOutboxJob) {
   if (!shouldAttemptLiveMailboxDelivery(row, job)) return;
-  const sessionUser = currentServerSessionUser();
   const sender = row.createdById
-    ? db.list("users").find((user) => user.id === row.createdById) ??
-      (sessionUser?.id === row.createdById ? sessionUser : undefined)
+    ? db.list("users").find((user) => user.id === row.createdById)
     : undefined;
   if (!sender && !serverSessionHeaders().authorization) {
     markOutboxFailedLocal(job.id, "Sign in again to send this email.");
@@ -8972,21 +8962,16 @@ export const api = {
         mailProvider: inferMailProvider(businessEmail),
         phone,
         branchId,
-        generatedPassword: input.password,
         passwordUpdatedAt: nowIso(),
         profileCompleted: true,
       });
       return { ok: true, user, agency };
     },
-    // Regenerate a single user's password. Returns the new value so master
-    // can copy it; the previous value is replaced atomically.
+    // Password resets are server-issued, one-time email flows. Browser state
+    // must never mint or retain a readable password.
     regeneratePassword(id: string): string | null {
-      const next = generatePassword();
-      const updated = db.update("users", id, {
-        generatedPassword: next,
-        passwordUpdatedAt: nowIso(),
-      });
-      return updated ? next : null;
+      void id;
+      return null;
     },
     // Auto-provision staff accounts for an agency. Skips roles that already
     // have at least the planned count (idempotent — safe to call again to
@@ -9011,14 +8996,12 @@ export const api = {
         for (let i = have; i < want; i++) {
           const seq = i + 1;
           const username = generateUsername(role, agencyName, seq);
-          const password = generatePassword();
           const user: User = {
             id: uid("user"),
             tenantId,
             role,
             email: `${username}@${slug}.example`,
             username,
-            generatedPassword: password,
             passwordUpdatedAt: nowIso(),
             // Placeholder name until the staff member completes their
             // profile on first login.
@@ -9077,14 +9060,12 @@ export const api = {
       for (let i = 0; i < safeCount; i++) {
         const seq = startSeq + i;
         const username = generateUsername(role, agencyName, seq);
-        const password = generatePassword();
         const user: User = {
           id: uid("user"),
           tenantId,
           role,
           email: `${username}@${slug}.example`,
           username,
-          generatedPassword: password,
           passwordUpdatedAt: nowIso(),
           name: `${staffRoleLabel(role)} #${seq} - ${agencyName}`,
           profileCompleted: false,

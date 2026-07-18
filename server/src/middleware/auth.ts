@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import jwt, { type JwtPayload } from "jsonwebtoken";
+import { databaseConfigured, prisma } from "../services/prisma.js";
 
 // Auth + tenant scoping middleware.
 //
@@ -13,6 +14,7 @@ export type AuthContext = {
   tenantId: string | null;
   branchId?: string | null;
   permissions: string[];
+  authVersion: number;
 };
 
 declare global {
@@ -29,11 +31,56 @@ declare global {
 const PLATFORM_ROLES = new Set(["platform_owner", "platform_admin", "master_admin"]);
 const AGENCY_ADMIN_ROLES = new Set(["agency_owner", "agency_admin", "manager"]);
 
-export function requireAuth(req: Request, res: Response, next: NextFunction) {
+export async function requireAuth(req: Request, res: Response, next: NextFunction) {
   const auth = authenticateRequest(req);
-  if (!auth) return res.status(401).json({ error: "unauthorized" });
-  req.auth = auth;
-  next();
+  if (!auth) return res.status(401).json({ ok: false, reason: "no_session", error: "no_session" });
+  if (!bearerToken(req)) {
+    req.auth = auth;
+    return next();
+  }
+  const validation = await validateAuthContext(auth);
+  if (!validation.ok) {
+    return res.status(validation.status).json({ ok: false, reason: validation.reason, error: validation.reason });
+  }
+  req.auth = validation.auth;
+  return next();
+}
+
+export async function validateAuthContext(auth: AuthContext): Promise<
+  | { ok: true; auth: AuthContext }
+  | { ok: false; status: number; reason: "no_session" | "account_disabled" | "agency_inactive" | "server_unreachable" }
+> {
+  if (!databaseConfigured()) return { ok: false, status: 503, reason: "server_unreachable" };
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: auth.userId },
+      include: { agency: true },
+    });
+    if (!user || user.authVersion !== auth.authVersion) {
+      return { ok: false, status: 401, reason: "no_session" };
+    }
+    if (["banned", "deleted", "inactive"].includes(user.status)) {
+      return { ok: false, status: 403, reason: "account_disabled" };
+    }
+    if (user.role !== "master_admin" && !user.agency?.active) {
+      return { ok: false, status: 403, reason: "agency_inactive" };
+    }
+    const tenantId = user.role === "master_admin" ? null : user.tenantId;
+    if (user.role !== auth.role || tenantId !== auth.tenantId) {
+      return { ok: false, status: 401, reason: "no_session" };
+    }
+    return {
+      ok: true,
+      auth: {
+        ...auth,
+        tenantId,
+        branchId: user.branchId,
+        authVersion: user.authVersion,
+      },
+    };
+  } catch {
+    return { ok: false, status: 503, reason: "server_unreachable" };
+  }
 }
 
 export function requireRole(...roles: string[]) {
@@ -148,7 +195,8 @@ function authFromPayload(payload: JwtPayload): AuthContext | null {
   const userId = stringClaim(payload.userId) || stringClaim(payload.sub);
   const role = stringClaim(payload.role);
   const tenantId = stringClaim(payload.tenantId) || stringClaim(payload.agencyId) || null;
-  if (!userId || !role) return null;
+  const authVersion = integerClaim(payload.authVersion);
+  if (!userId || !role || authVersion === null) return null;
   if (!PLATFORM_ROLES.has(role) && !tenantId) return null;
   return {
     userId,
@@ -156,6 +204,7 @@ function authFromPayload(payload: JwtPayload): AuthContext | null {
     tenantId,
     branchId: stringClaim(payload.branchId) || null,
     permissions: arrayClaim(payload.permissions),
+    authVersion,
   };
 }
 
@@ -180,6 +229,7 @@ function devHeaderAuth(req: Request): AuthContext | null {
       .split(",")
       .map((item) => item.trim())
       .filter(Boolean),
+    authVersion: 0,
   };
 }
 
@@ -220,4 +270,8 @@ function stringClaim(value: unknown): string | null {
 
 function arrayClaim(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function integerClaim(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
 }

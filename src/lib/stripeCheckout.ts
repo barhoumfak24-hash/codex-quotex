@@ -1,5 +1,6 @@
 import { apiBaseUrl } from "@/lib/apiBase";
 import type { SoftwareSale } from "@/types";
+import { currentServerSessionToken } from "@/lib/serverSession";
 
 export type StripeCheckoutSessionResponse = {
   ok: boolean;
@@ -109,10 +110,7 @@ function stripeHeaders(): HeadersInit {
     "content-type": "application/json",
   };
   if (typeof window === "undefined") return headers;
-  const token =
-    window.localStorage.getItem("quotex.authToken") ||
-    window.localStorage.getItem("quotex.jwt") ||
-    "";
+  const token = currentServerSessionToken() ?? "";
   if (token) headers.authorization = `Bearer ${token}`;
   return headers;
 }

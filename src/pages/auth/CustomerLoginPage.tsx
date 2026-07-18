@@ -1,6 +1,6 @@
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useState } from "react";
-import { Building2 } from "lucide-react";
+import { Building2, LoaderCircle } from "lucide-react";
 import { AuthShell } from "./AuthShell";
 import { Modal } from "@/components/ui/Modal";
 import { api } from "@/lib/api";
@@ -181,6 +181,7 @@ export function CustomerLoginPage() {
             id="password"
             className="input"
             type="password"
+            required
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder="Your password"
@@ -188,7 +189,8 @@ export function CustomerLoginPage() {
           />
         </div>
         {error && <div className="text-xs text-rose-600">{error}</div>}
-        <button type="submit" className="btn-primary w-full" disabled={submitting}>
+        <button type="submit" className="btn-primary flex w-full items-center justify-center gap-2" disabled={submitting}>
+          {submitting && <LoaderCircle className="h-4 w-4 animate-spin" aria-hidden="true" />}
           {submitting ? "Signing in..." : "Sign in"}
         </button>
         <button
@@ -219,15 +221,11 @@ function ForgotPasswordModal({
   open: boolean;
   onClose: () => void;
   initialEmail: string;
-  onReset: (email: string) => { tempPassword: string } | null;
+  onReset: (email: string) => Promise<{ ok: true } | { ok: false; reason: string }>;
 }) {
   const [email, setEmail] = useState(initialEmail);
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<
-    | { kind: "ok"; tempPassword: string }
-    | { kind: "error"; message: string }
-    | null
-  >(null);
+  const [result, setResult] = useState<{ kind: "ok" } | { kind: "error"; message: string } | null>(null);
 
   function reset() {
     setEmail(initialEmail);
@@ -235,17 +233,19 @@ function ForgotPasswordModal({
     setResult(null);
   }
 
-  function submit() {
+  async function submit() {
     setBusy(true);
     try {
-      const out = onReset(email.trim());
-      if (!out) {
+      const out = await onReset(email.trim());
+      if (!out.ok) {
         setResult({
           kind: "error",
-          message: "No customer account found for that email.",
+          message: out.reason === "rate_limited"
+            ? "Too many requests. Wait one minute and try again."
+            : "Reset instructions could not be sent right now. Please try again.",
         });
       } else {
-        setResult({ kind: "ok", tempPassword: out.tempPassword });
+        setResult({ kind: "ok" });
       }
     } finally {
       setBusy(false);
@@ -315,16 +315,8 @@ function ForgotPasswordModal({
         {result?.kind === "ok" && (
           <div className="space-y-3">
             <div className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-900">
-              Temporary password set. Use it to sign in now and then change it from
-              your profile page.
+              If an account exists for that email, password reset instructions have been sent.
             </div>
-            <div className="rounded-md border border-ink-100 bg-ink-50/60 p-3 font-mono text-sm text-center select-all">
-              {result.tempPassword}
-            </div>
-            <p className="text-[11px] text-ink-500">
-              Sign in with this temporary password and change it from your portal
-              Profile page.
-            </p>
             <div className="flex items-center justify-end gap-2">
               <button
                 type="button"

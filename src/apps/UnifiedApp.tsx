@@ -10,6 +10,7 @@ import { CustomerLoginPage } from "@/pages/auth/CustomerLoginPage";
 import { CustomerSignupPage } from "@/pages/auth/CustomerSignupPage";
 import { EmployeeLoginPage } from "@/pages/auth/EmployeeLoginPage";
 import { MasterLoginPage } from "@/pages/auth/MasterLoginPage";
+import { PasswordResetPage } from "@/pages/auth/PasswordResetPage";
 import { QuoteStartGate } from "@/pages/auth/QuoteStartGate";
 
 import { ClientQuestionnairePage } from "@/pages/customer/ClientQuestionnairePage";
@@ -124,6 +125,7 @@ export function UnifiedApp() {
       <Route path="/software" element={<SoftwareEntryPage />} />
       <Route path="/employee/login" element={<EmployeeLoginPage />} />
       <Route path="/master/login" element={<MasterLoginPage />} />
+      <Route path="/reset-password" element={<PasswordResetPage />} />
       <Route path="/quote/start" element={<QuoteStartGate />} />
       <Route path="/agency/quote/start" element={<QuoteStartGate />} />
       <Route path="/customer/questionnaire/:sessionId" element={<ClientQuestionnairePage />} />

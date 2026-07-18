@@ -6,7 +6,7 @@
 
 import * as seed from "./seed";
 import { apiBaseUrl, cloudStateSyncEnabled, envValue } from "./apiBase";
-import { currentServerSessionRole, currentServerSessionToken, serverSessionHeaders } from "./serverSession";
+import { currentServerSessionClaims, currentServerSessionRole, currentServerSessionToken, serverSessionHeaders } from "./serverSession";
 import { isLargeInlineDataUrl, storeStateBlob } from "./stateBlobs";
 import {
   generateAgencyCode,
@@ -2036,10 +2036,7 @@ export const db = {
     arr.splice(idx, 1);
     if (table !== "deletedRows") {
       const deletedAt = nowIso();
-      const actorId =
-        typeof window === "undefined"
-          ? undefined
-          : window.localStorage.getItem("quotex.auth.userId.v1") ?? undefined;
+      const actorId = currentServerSessionClaims()?.userId;
       const tenantId =
         typeof removedRow.tenantId === "string"
           ? removedRow.tenantId

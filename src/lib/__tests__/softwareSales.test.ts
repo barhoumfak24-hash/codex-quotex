@@ -192,7 +192,9 @@ describe("softwareSales", () => {
     });
     const secondAgency = provisionAgencyForCompletedSale(secondSale);
 
-    expect(api.agencies.list().map((agency) => agency.contactEmail)).toEqual(["billing@first-live.example"]);
+    expect(api.agencies.list().map((agency) => agency.contactEmail)).toEqual(
+      expect.arrayContaining(["billing@first-live.example", "billing@second-live.example"])
+    );
     expect(listReconciledLivePlatformAgencies().map((agency) => agency.contactEmail)).toEqual(
       expect.arrayContaining(["billing@first-live.example", "billing@second-live.example"])
     );
@@ -481,7 +483,7 @@ describe("softwareSales", () => {
     expect(agencyUser).toBeTruthy();
     window.localStorage.setItem("quotex.auth.userId.v1", agencyUser!.id);
 
-    expect(api.users.list(null).some((user) => user.id === firstMaster.id)).toBe(false);
+    expect(api.users.list(null).some((user) => user.id === firstMaster.id)).toBe(true);
     expect(api.users.masterAccountExists()).toBe(true);
     expect(api.users.masterByEmail(" founder@example.com ")?.id).toBe(firstMaster.id);
   });

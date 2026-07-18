@@ -80,6 +80,7 @@ describe("employee login repair", () => {
       status: "inactive",
       passwordHash: testScryptHash(password),
       passwordChangedAt: new Date(),
+      authVersion: 0,
       mfaEnabled: false,
       profile: {},
       permissions: {},
@@ -92,7 +93,7 @@ describe("employee login repair", () => {
     const { authRoutes } = await import("../routes/auth.js");
     const { prisma } = await import("../services/prisma.js");
 
-    vi.spyOn(prisma.user, "findFirst").mockResolvedValueOnce(inactiveUser as any);
+    vi.spyOn(prisma.user, "findMany").mockResolvedValueOnce([inactiveUser] as any);
     let currentStatus = "inactive";
     vi.spyOn(prisma.user, "update").mockImplementation(async ({ data }: any) => {
       if (data.status) currentStatus = data.status;
@@ -162,6 +163,7 @@ describe("employee login repair", () => {
       status: "inactive",
       passwordHash: testScryptHash("current-server-password"),
       passwordChangedAt: new Date(),
+      authVersion: 0,
       mfaEnabled: false,
       profile: {},
       permissions: {},
@@ -174,7 +176,7 @@ describe("employee login repair", () => {
     const { authRoutes } = await import("../routes/auth.js");
     const { prisma } = await import("../services/prisma.js");
 
-    vi.spyOn(prisma.user, "findFirst").mockResolvedValueOnce(inactiveUser as any);
+    vi.spyOn(prisma.user, "findMany").mockResolvedValueOnce([inactiveUser] as any);
     const updateSpy = vi.spyOn(prisma.user, "update");
 
     const layer = (authRoutes as any).stack.find((candidate: any) => candidate.route?.path === "/employee/login");
@@ -233,6 +235,7 @@ describe("employee login repair", () => {
       status: "active",
       passwordHash: "created-hash",
       passwordChangedAt: new Date(),
+      authVersion: 0,
       mfaEnabled: false,
       profile: {},
       permissions: {},
