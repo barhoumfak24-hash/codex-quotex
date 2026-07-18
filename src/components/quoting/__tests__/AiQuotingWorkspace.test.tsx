@@ -393,6 +393,8 @@ describe("AiQuotingWorkspace component", () => {
 
     const vinInput = host.querySelector<HTMLInputElement>('input[placeholder="17-character VIN"]');
     expect(vinInput).toBeTruthy();
+    await typeInto(vinInput!, "1hgcm82633a00435");
+    expect(buttonByText(host, /^Add asset$/i).disabled).toBe(true);
     await typeInto(vinInput!, "1hgcm82633a004352");
     expect(buttonByText(host, /^Add asset$/i).disabled).toBe(false);
     await click(buttonByText(host, /^Add asset$/i));

@@ -18,7 +18,7 @@ import {
   QuoteWorkflowProgress,
 } from "@/components/quoting/AiQuotingWorkspace";
 import { api } from "@/lib/api";
-import { deriveAssetLabel } from "@/lib/assetLabels";
+import { deriveAssetLabel, vinValidationIssue } from "@/lib/assetLabels";
 import { assetLookupQuestion } from "@/lib/assetLookup";
 import {
   assetDisplayName,
@@ -45,9 +45,8 @@ import type {
 // =====================================================================
 // Client-side wrapper around AiQuotingWorkspace. Clients usually have
 // 1+ existing assets to re-quote; this card adds an asset picker so
-// the agent can choose which line the AI runs against. Falls back to
-// a "new business" entry form (asset type + estimated value) when
-// the client has no assets on file yet.
+// the agent can choose which line the AI runs against. New assets ask
+// only for the address or lookup identifier that AI mapping needs.
 // =====================================================================
 
 type AssetCategoryOption = Pick<
@@ -313,6 +312,13 @@ function ContactQuotingCard({
     customer?.mailingAddress;
   const newAssetLookupMissing =
     showNewAssetForm && !!newAssetLookupQuestion && !newAssetLookupValue.trim();
+  const newAssetLookupIssue =
+    showNewAssetForm &&
+    newAssetLookupQuestion &&
+    newAssetLookupValue.trim() &&
+    isVinInputField(newAssetLookupQuestion)
+      ? vinValidationIssue(normalizeVinFieldValue(newAssetLookupQuestion, newAssetLookupValue))
+      : null;
   const intakeWarnings: string[] = [];
   const setupLineLabel =
     selectedLineOfBusiness === "personal"
@@ -369,7 +375,12 @@ function ContactQuotingCard({
   }
 
   function createNewAsset() {
-    if (!assetCreationCategory || !newAssetLookupQuestion || newAssetLookupMissing) return;
+    if (
+      !assetCreationCategory ||
+      !newAssetLookupQuestion ||
+      newAssetLookupMissing ||
+      newAssetLookupIssue
+    ) return;
     const details = newAssetCategoryDetails;
     const label =
       deriveAssetLabel(assetCreationCategory.assetType, details) ||
@@ -546,6 +557,11 @@ function ContactQuotingCard({
                   {newAssetLookupQuestion.label} is required.
                 </div>
               )}
+              {newAssetLookupIssue && (
+                <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+                  {newAssetLookupIssue}
+                </div>
+              )}
               <div className="mt-3 flex justify-end gap-2">
                 <button
                   type="button"
@@ -558,7 +574,7 @@ function ContactQuotingCard({
                   type="button"
                   className="btn-primary text-sm"
                   onClick={createNewAsset}
-                  disabled={newAssetLookupMissing}
+                  disabled={newAssetLookupMissing || !!newAssetLookupIssue}
                 >
                   <Plus className="h-3.5 w-3.5" />
                   Add asset

@@ -428,6 +428,12 @@ const YACHT_FIELDS: QuoteAssetDetailField[] = [
 ];
 
 const JEWELRY_FIELDS: QuoteAssetDetailField[] = [
+  {
+    key: "assetIdentifier",
+    label: "Serial, appraisal, or inventory ID",
+    inputType: "text",
+    publicHints: ["serial", "asset id", "inventory id", "appraisal number"],
+  },
   { key: "itemType", label: "Item type", inputType: "text", required: true, publicHints: ["item type"] },
   {
     key: "itemDescription",
@@ -465,6 +471,12 @@ const JEWELRY_FIELDS: QuoteAssetDetailField[] = [
 ];
 
 const UMBRELLA_FIELDS: QuoteAssetDetailField[] = [
+  {
+    key: "assetIdentifier",
+    label: "Policy or exposure reference",
+    inputType: "text",
+    publicHints: ["policy number", "reference", "asset id"],
+  },
   {
     key: "primaryResidenceAddress",
     label: "Primary residence address",
@@ -647,20 +659,23 @@ const QUOTE_ASSET_DETAIL_KEY_ALIASES: Partial<Record<AssetType, Record<string, s
     cruisingArea: ["navigationArea", "navigationTerritory"],
   },
   jewelry: {
+    assetIdentifier: ["serialNumber", "inventoryId", "appraisalNumber", "referenceNumber"],
     appraisedValue: ["value", "estimatedValue", "scheduledValue"],
     itemDescription: ["description"],
     appraisalDate: ["valuationDate"],
   },
   umbrella_liability: {
+    assetIdentifier: ["policyNumber", "exposureReference", "referenceNumber"],
     primaryResidenceAddress: ["address", "mailingAddress", "propertyAddress", "riskAddress"],
     requestedLimit: ["limit", "coverageLimit", "estimatedValue"],
   },
   full_portfolio: {
-    primaryAddress: ["address", "mailingAddress", "propertyAddress", "riskAddress"],
+    primaryAddress: ["address", "mailingAddress", "propertyAddress", "riskAddress", "primaryResidenceAddress"],
     totalInsuredValue: ["value", "estimatedValue", "portfolioValue"],
   },
   other: {
     location: ["address", "propertyAddress", "riskAddress", "premisesAddress"],
+    identifier: ["assetIdentifier", "serialNumber", "registration", "referenceNumber"],
     requestedCoverage: ["coverage", "limit"],
   },
 };

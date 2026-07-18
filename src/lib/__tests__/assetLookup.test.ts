@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { assetLookupQuestion } from "../assetLookup";
+import { cleanQuoteAssetDetails } from "../quoteAssetIntake";
 import type { CategoryQuestion } from "@/types";
 
 const addressQuestion: CategoryQuestion = {
@@ -71,5 +72,22 @@ describe("assetLookupQuestion", () => {
       label: "Asset address or ID number",
       required: true,
     });
+  });
+
+  it("keeps generic asset identifiers for later AI mapping", () => {
+    expect(
+      cleanQuoteAssetDetails("jewelry", { assetIdentifier: "APP-2026-1042" })
+    ).toMatchObject({ assetIdentifier: "APP-2026-1042" });
+    expect(
+      cleanQuoteAssetDetails("other", { assetIdentifier: "PARCEL-44-901" })
+    ).toMatchObject({ identifier: "PARCEL-44-901" });
+  });
+
+  it("normalizes the selected full-portfolio address without losing it", () => {
+    expect(
+      cleanQuoteAssetDetails("full_portfolio", {
+        primaryResidenceAddress: "901 McDonald Dr, Northville, MI 48167",
+      })
+    ).toMatchObject({ primaryAddress: "901 McDonald Dr, Northville, MI 48167" });
   });
 });

@@ -3550,12 +3550,23 @@ function publicLookupSeedForQuotePrep(
     return details.vin ? { vin: details.vin, ...targets } : {};
   }
   if (assetType === "yacht") {
+    const hin = details.hin ?? details.hullId ?? details.hullIdentificationNumber;
     const make = details.make ?? details.builder;
     const model = details.model;
     const year = details.year;
-    return make || model || year ? { make, model, year, ...targets } : {};
+    return hin || make || model || year ? { hin, make, model, year, ...targets } : {};
   }
-  return {};
+  if (assetType === "jewelry" || assetType === "umbrella_liability") {
+    const assetIdentifier = details.assetIdentifier;
+    return assetIdentifier ? { assetIdentifier, ...targets } : {};
+  }
+  if (assetType === "full_portfolio") {
+    const primaryAddress = details.primaryAddress ?? details.primaryResidenceAddress ?? address;
+    return primaryAddress ? { address: primaryAddress, ...targets } : {};
+  }
+  const assetIdentifier = details.identifier ?? details.assetIdentifier;
+  const location = details.location ?? address;
+  return assetIdentifier || location ? { assetIdentifier, address: location, ...targets } : {};
 }
 
 function applyEnrichmentToQuotePrep(
