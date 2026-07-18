@@ -17,23 +17,33 @@ type RateLimitRow = {
 };
 
 const memoryBuckets = new Map<string, RateLimitEntry>();
+const DEFAULT_POSTGRES_RETRY_MS = 30_000;
+let postgresRetryAfter = 0;
+let postgresFallbackLogged = false;
 
 function limiter(name: string, limit: number, windowMs = 60_000): RequestHandler {
   return async (req, res, next) => {
-    if (!useGlobalRateLimitStore()) {
+    if (!useGlobalRateLimitStore() || Date.now() < postgresRetryAfter) {
       return applyMemoryRateLimit(req, res, next, name, limit, windowMs);
     }
 
     try {
       const allowed = await applyPostgresRateLimit(req, res, name, limit, windowMs);
+      if (postgresFallbackLogged) {
+        console.info("[rate-limit] postgres store recovered");
+      }
+      postgresRetryAfter = 0;
+      postgresFallbackLogged = false;
       if (allowed) return next();
       return;
     } catch (error) {
       console.error("[rate-limit] postgres store failed", error);
-      if (process.env.RATE_LIMIT_FAIL_OPEN === "true") {
-        return applyMemoryRateLimit(req, res, next, name, limit, windowMs);
+      postgresRetryAfter = Date.now() + envLimit("RATE_LIMIT_STORE_RETRY_MS", DEFAULT_POSTGRES_RETRY_MS);
+      if (!postgresFallbackLogged) {
+        console.warn("[rate-limit] using the in-memory fallback while the postgres store recovers");
+        postgresFallbackLogged = true;
       }
-      return res.status(503).json({ error: "rate_limit_unavailable" });
+      return applyMemoryRateLimit(req, res, next, name, limit, windowMs);
     }
   };
 }
@@ -139,4 +149,10 @@ function cleanupExpiredMemoryBuckets(now: number) {
   for (const [key, entry] of memoryBuckets) {
     if (entry.resetAt <= now) memoryBuckets.delete(key);
   }
+}
+
+export function resetRateLimitStateForTests() {
+  memoryBuckets.clear();
+  postgresRetryAfter = 0;
+  postgresFallbackLogged = false;
 }
