@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { Router, type Request } from "express";
 import { z } from "zod";
 import { authenticateRequest, type AuthContext } from "../middleware/auth.js";
@@ -71,12 +72,37 @@ stateRoutes.put("/:stateId", async (req, res, next) => {
         revision: current?.revision ?? null,
       });
     }
+    const currentScoped = scopeStateSnapshotForAuth(current?.snapshot ?? null, access.auth);
+    if (current && isDeepStrictEqual(currentScoped.snapshot, parsed.data.snapshot)) {
+      return res.json({
+        ok: true,
+        unchanged: true,
+        scoped: currentScoped.scoped,
+        snapshot: currentScoped.snapshot,
+        updatedAt: current.updated_at,
+        revision: current.revision,
+      });
+    }
     const snapshot = mergeStateSnapshotForAuth(
       current?.snapshot ?? {},
       parsed.data.snapshot,
       access.auth
     );
     const baseRevision = parsed.data.baseRevision;
+
+    // Polling clients can submit an already-current scoped snapshot. Treat it
+    // as a successful save without creating a new revision or recovery copy.
+    if (current && isDeepStrictEqual(current.snapshot, snapshot)) {
+      const scoped = scopeStateSnapshotForAuth(current.snapshot, access.auth);
+      return res.json({
+        ok: true,
+        unchanged: true,
+        scoped: scoped.scoped,
+        snapshot: scoped.snapshot,
+        updatedAt: current.updated_at,
+        revision: current.revision,
+      });
+    }
 
     const result = await writeRemoteState(id, snapshot, baseRevision);
     if (!result.ok) {

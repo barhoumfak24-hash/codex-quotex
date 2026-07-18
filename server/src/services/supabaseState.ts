@@ -5,6 +5,8 @@
 // Supabase so the app can run against a real backend before every
 // domain route is normalized into Prisma handlers.
 
+import { isDeepStrictEqual } from "node:util";
+
 const DEFAULT_TABLE = "quotex_app_state";
 
 export interface RemoteStateRow {
@@ -113,6 +115,9 @@ export async function writeRemoteState(
   assertConfigured();
   if (baseRevision === undefined) {
     const current = await readRemoteState(id);
+    if (current && isDeepStrictEqual(current.snapshot, snapshot)) {
+      return { ok: true, row: current };
+    }
     return writeRemoteState(id, snapshot, current?.revision ?? null);
   }
 

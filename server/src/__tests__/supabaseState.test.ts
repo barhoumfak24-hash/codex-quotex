@@ -13,6 +13,29 @@ afterEach(() => {
 });
 
 describe("Supabase state compare-and-swap", () => {
+  it("does not write or advance the revision when the snapshot is unchanged", async () => {
+    const current = {
+      id: "app_state:default",
+      snapshot: { customers: [{ id: "customer_1", name: "Alex" }] },
+      revision: 12,
+      updated_at: "2026-07-17T12:00:00.000Z",
+    };
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === "GET") return jsonResponse([current]);
+      return jsonResponse([], 500);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await writeRemoteState(
+      "app_state:default",
+      { customers: [{ name: "Alex", id: "customer_1" }] }
+    );
+
+    expect(result).toEqual({ ok: true, row: current });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls.some((call) => call[1]?.method === "PATCH")).toBe(false);
+  });
+
   it("does not create a missing row after a numeric revision PATCH misses", async () => {
     const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       if (init?.method === "PATCH") return jsonResponse([]);

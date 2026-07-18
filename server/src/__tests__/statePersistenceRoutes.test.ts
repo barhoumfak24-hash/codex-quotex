@@ -3,6 +3,7 @@ import jwt from "jsonwebtoken";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { stateRoutes } from "../routes/state.js";
 import { stateBlobRoutes } from "../routes/stateBlobs.js";
+import { scopeStateSnapshotForAuth } from "../services/stateSnapshotScope.js";
 
 const nativeFetch = globalThis.fetch;
 
@@ -142,6 +143,36 @@ describe("state persistence routes", () => {
       { id: "customer_a", userId: "customer_user_a", tenantId: "agency_a", name: "Updated A" },
       { id: "customer_b", userId: "customer_user_b", tenantId: "agency_b", name: "Customer B" },
     ]);
+  });
+
+  it("acknowledges an unchanged tenant snapshot without issuing a Supabase PATCH", async () => {
+    const supabaseFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      if ((init?.method ?? "GET") === "GET") return jsonResponse([stateRow()]);
+      return jsonResponse([], 500);
+    });
+    installSupabaseFetch(supabaseFetch);
+    const scoped = scopeStateSnapshotForAuth(stateRow().snapshot, {
+      userId: "user_a",
+      role: "agent",
+      tenantId: "agency_a",
+      permissions: [],
+    }).snapshot;
+
+    const response = await requestRoute(stateRoutes, "/default", {
+      method: "PUT",
+      headers: {
+        "content-type": "application/json",
+        ...authHeaders("agent", "agency_a", "user_a"),
+      },
+      body: JSON.stringify({
+        baseRevision: 7,
+        snapshot: scoped,
+      }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true, unchanged: true, revision: 7 });
+    expect(supabaseFetch.mock.calls.some((call) => (call[1]?.method ?? "GET") === "PATCH")).toBe(false);
   });
 });
 
