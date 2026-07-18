@@ -119,7 +119,7 @@ describe("AiQuotingWorkspace component", () => {
           aiSummary: "No reliable values",
         },
       ],
-    } as QuotingSession;
+    } as unknown as QuotingSession;
 
     await act(async () => {
       root.render(<PublicFields session={session} />);
