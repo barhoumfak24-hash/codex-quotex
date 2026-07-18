@@ -41,6 +41,18 @@ async function click(button: HTMLButtonElement) {
   });
 }
 
+async function typeInto(input: HTMLInputElement, value: string) {
+  await act(async () => {
+    const valueSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype,
+      "value"
+    )?.set;
+    valueSetter?.call(input, value);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await Promise.resolve();
+  });
+}
+
 async function openAiWorkspace(host: HTMLElement) {
   await click(buttonByText(host, /(Start|Continue) quote flow/i));
   expect(host.querySelector('[role="dialog"]')?.textContent).toContain("AI quoting workspace");
@@ -355,6 +367,45 @@ describe("AiQuotingWorkspace component", () => {
 
     const workspaceText = host.querySelector('[role="dialog"]')?.textContent ?? "";
     expect(workspaceText).toContain("Selected: Primary Home + Luxury Vehicle");
+
+    await act(async () => {
+      root.unmount();
+    });
+    host.remove();
+  });
+
+  it("asks for only the asset lookup identifier when creating an asset", async () => {
+    const { api, customer, host, root } = await renderClientQuotingCard();
+    const existingAssetIds = new Set(api.assets.listByCustomer(customer.id).map((asset) => asset.id));
+    vi.spyOn(api.assets, "upgradeVehicleLabelFromVin").mockImplementation(async () => undefined);
+
+    await openAiWorkspace(host);
+    await click(buttonByText(host, /Personal lines/i));
+    await click(buttonByText(host, /^Luxury Vehicle/));
+    await click(buttonByText(host, /Create new asset/i));
+
+    const dialogText = host.querySelector('[role="dialog"]')?.textContent ?? "";
+    expect(dialogText).toContain("VIN");
+    expect(dialogText).not.toContain("Estimated value");
+    expect(dialogText).not.toContain("Year, make, model, and stated value");
+    expect(dialogText).not.toContain("Primary use");
+    expect(buttonByText(host, /^Add asset$/i).disabled).toBe(true);
+
+    const vinInput = host.querySelector<HTMLInputElement>('input[placeholder="17-character VIN"]');
+    expect(vinInput).toBeTruthy();
+    await typeInto(vinInput!, "1hgcm82633a004352");
+    expect(buttonByText(host, /^Add asset$/i).disabled).toBe(false);
+    await click(buttonByText(host, /^Add asset$/i));
+
+    const createdAsset = api.assets
+      .listByCustomer(customer.id)
+      .find((asset) => !existingAssetIds.has(asset.id));
+    expect(createdAsset).toMatchObject({
+      type: "luxury_vehicle",
+      estimatedValue: 0,
+      details: { vin: "1HGCM82633A004352" },
+    });
+    expect(Object.keys(createdAsset?.details ?? {})).toEqual(["vin"]);
 
     await act(async () => {
       root.unmount();

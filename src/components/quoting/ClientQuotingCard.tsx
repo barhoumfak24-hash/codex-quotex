@@ -19,6 +19,7 @@ import {
 } from "@/components/quoting/AiQuotingWorkspace";
 import { api } from "@/lib/api";
 import { deriveAssetLabel } from "@/lib/assetLabels";
+import { assetLookupQuestion } from "@/lib/assetLookup";
 import {
   assetDisplayName,
   assetDisplaySubtitleLabel,
@@ -88,27 +89,6 @@ const FALLBACK_ASSET_CATEGORY_OPTIONS: AssetCategoryOption[] = [
   },
   { id: "fallback_other", label: "Other", lineOfBusiness: "commercial", assetType: "other" },
 ];
-
-function cleanCategoryQuestionAnswers(
-  questions: CategoryQuestion[],
-  answers: Record<string, string>
-): Record<string, string> {
-  const allowedKeys = new Set(questions.map((question) => question.key));
-  return Object.fromEntries(
-    Object.entries(answers).filter(
-      ([key, value]) => allowedKeys.has(key) && value.trim().length > 0
-    )
-  );
-}
-
-function missingRequiredCategoryQuestions(
-  questions: CategoryQuestion[],
-  answers: Record<string, string>
-): CategoryQuestion[] {
-  return questions.filter(
-    (question) => question.required && !(answers[question.key] ?? "").trim()
-  );
-}
 
 function primaryCategoryQuestionAddress(
   questions: CategoryQuestion[],
@@ -255,12 +235,6 @@ function ContactQuotingCard({
   const [assetSearch, setAssetSearch] = useState("");
   const [showNewAssetForm, setShowNewAssetForm] = useState(false);
   const [prospectDraftAssets, setProspectDraftAssets] = useState<Asset[]>([]);
-  const [newAssetValue, setNewAssetValue] = useState<string>(() => {
-    const value = existing?.estimatedValue ?? prospect?.estimatedValue;
-    return typeof value === "number" && Number.isFinite(value) && value > 0
-      ? String(value)
-      : "";
-  });
   const [newAssetDetails, setNewAssetDetails] = useState<Record<string, string>>({});
   const assetCategoryOptions = useMemo<AssetCategoryOption[]>(() => {
     const linkedCategories = api.categories.listActiveForTenant(tenantId);
@@ -309,18 +283,23 @@ function ContactQuotingCard({
     () => (assetCreationCategory ? categoryQuestionnaire(assetCreationCategory) : []),
     [assetCreationCategory?.id]
   );
+  const newAssetLookupQuestion = useMemo(
+    () =>
+      assetCreationCategory
+        ? assetLookupQuestion(assetCreationCategory.assetType, newAssetDetailQuestions)
+        : undefined,
+    [assetCreationCategory?.assetType, newAssetDetailQuestions]
+  );
+  const newAssetLookupValue = newAssetLookupQuestion
+    ? newAssetDetails[newAssetLookupQuestion.key] ?? ""
+    : "";
   const newAssetCategoryDetails =
-    showNewAssetForm && assetCreationCategory
-      ? cleanCategoryQuestionAnswers(newAssetDetailQuestions, newAssetDetails)
+    showNewAssetForm && newAssetLookupQuestion && newAssetLookupValue.trim()
+      ? { [newAssetLookupQuestion.key]: newAssetLookupValue.trim() }
       : {};
-  const parsedNewAssetValue = Number(newAssetValue);
-  const newAssetEstimatedValue =
-    Number.isFinite(parsedNewAssetValue) && parsedNewAssetValue > 0
-      ? parsedNewAssetValue
-      : undefined;
   const estimatedValue = pickedAsset
     ? pickedAsset.estimatedValue
-    : existing?.estimatedValue ?? newAssetEstimatedValue ?? prospect?.estimatedValue;
+    : existing?.estimatedValue ?? prospect?.estimatedValue;
   const assetDetails = pickedAsset
     ? cleanQuoteAssetDetails(assetType, pickedAsset.details)
     : newAssetCategoryDetails;
@@ -332,12 +311,8 @@ function ContactQuotingCard({
     primaryQuoteAssetAddress(assetType, assetDetails) ??
     prospectiveQuoteAddress ??
     customer?.mailingAddress;
-  const newAssetMissingQuestions = showNewAssetForm && assetCreationCategory
-    ? missingRequiredCategoryQuestions(newAssetDetailQuestions, newAssetDetails)
-    : [];
-  const newAssetMissingQuestionKeys = new Set(
-    newAssetMissingQuestions.map((question) => question.key)
-  );
+  const newAssetLookupMissing =
+    showNewAssetForm && !!newAssetLookupQuestion && !newAssetLookupValue.trim();
   const intakeWarnings: string[] = [];
   const setupLineLabel =
     selectedLineOfBusiness === "personal"
@@ -394,13 +369,8 @@ function ContactQuotingCard({
   }
 
   function createNewAsset() {
-    if (!assetCreationCategory || newAssetMissingQuestions.length > 0) return;
+    if (!assetCreationCategory || !newAssetLookupQuestion || newAssetLookupMissing) return;
     const details = newAssetCategoryDetails;
-    const parsedEstimatedValue = Number(newAssetValue);
-    const estimatedAssetValue =
-      Number.isFinite(parsedEstimatedValue) && parsedEstimatedValue > 0
-        ? parsedEstimatedValue
-        : 0;
     const label =
       deriveAssetLabel(assetCreationCategory.assetType, details) ||
       `New ${assetCreationCategory.label}`;
@@ -411,7 +381,7 @@ function ContactQuotingCard({
           customerId: customerIdForAsset,
           type: assetCreationCategory.assetType,
           label,
-          estimatedValue: estimatedAssetValue,
+          estimatedValue: 0,
           details,
           status: "pending",
         })
@@ -421,7 +391,7 @@ function ContactQuotingCard({
           customerId: "",
           type: assetCreationCategory.assetType,
           label,
-          estimatedValue: estimatedAssetValue,
+          estimatedValue: 0,
           details: {
             ...details,
             prospectId: prospect?.id,
@@ -438,14 +408,12 @@ function ContactQuotingCard({
     setSelectedAssetIds((current) => [asset.id, ...current.filter((id) => id !== asset.id)]);
     setShowNewAssetForm(false);
     setNewAssetDetails({});
-    setNewAssetValue("");
     refresh();
   }
 
   function cancelNewAsset() {
     setShowNewAssetForm(false);
     setNewAssetDetails({});
-    setNewAssetValue("");
   }
 
   function resetImplementedQuote() {
@@ -559,60 +527,45 @@ function ContactQuotingCard({
       ) : null}
 
       {showNewAssetForm && assetCreationCategory && (
-        <div className="space-y-3">
-          <div>
-            <label className="label">Estimated value</label>
-            <input
-              type="number"
-              className="input"
-              value={newAssetValue}
-              onChange={(e) => setNewAssetValue(e.target.value)}
-            />
-          </div>
-
-          <div className="rounded-md border border-ink-100 bg-white p-3">
-            <div className="mb-3">
-              <div className="text-xs font-semibold uppercase tracking-wider text-ink-500">
-                Lookup details
+        <div className="rounded-md border border-ink-100 bg-white p-3">
+          {newAssetLookupQuestion && (
+            <>
+              <div className="mb-3">
+                <div className="text-xs font-semibold uppercase tracking-wider text-ink-500">
+                  Lookup details
+                </div>
               </div>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              {newAssetDetailQuestions.map((question) => (
-                <CategoryQuestionDetailField
-                  key={question.key}
-                  question={question}
-                  value={newAssetDetails[question.key] ?? ""}
-                  onChange={(value) => setNewAssetDetail(question.key, value)}
-                  missing={newAssetMissingQuestionKeys.has(question.key)}
-                />
-              ))}
-            </div>
-            {newAssetMissingQuestions.length > 0 && (
-              <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
-                {newAssetMissingQuestions
-                  .map((question) => `${question.label} is required.`)
-                  .join(" ")}
+              <CategoryQuestionDetailField
+                question={newAssetLookupQuestion}
+                value={newAssetLookupValue}
+                onChange={(value) => setNewAssetDetail(newAssetLookupQuestion.key, value)}
+                missing={newAssetLookupMissing}
+              />
+              {newAssetLookupMissing && (
+                <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
+                  {newAssetLookupQuestion.label} is required.
+                </div>
+              )}
+              <div className="mt-3 flex justify-end gap-2">
+                <button
+                  type="button"
+                  className="btn-outline text-sm"
+                  onClick={cancelNewAsset}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary text-sm"
+                  onClick={createNewAsset}
+                  disabled={newAssetLookupMissing}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  Add asset
+                </button>
               </div>
-            )}
-            <div className="mt-3 flex justify-end gap-2">
-              <button
-                type="button"
-                className="btn-outline text-sm"
-                onClick={cancelNewAsset}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="btn-primary text-sm"
-                onClick={createNewAsset}
-                disabled={newAssetMissingQuestions.length > 0}
-              >
-                <Plus className="h-3.5 w-3.5" />
-                Add asset
-              </button>
-            </div>
-          </div>
+            </>
+          )}
         </div>
       )}
 
@@ -655,155 +608,6 @@ function ContactQuotingCard({
       }
     >
       {!standalone && <CardHeader title="AI quoting workspace" />}
-
-      {false && !existing && (
-        <div key="quote-setup" className="rounded-md border border-ink-100 bg-ink-50/40 p-3 mb-4 space-y-3">
-          <div>
-            <label className="label">Policy type / line</label>
-            <div className="grid gap-2 sm:grid-cols-2">
-              {(["personal", "commercial"] as const).map((line) => {
-                const active = selectedLineOfBusiness === line;
-                const Icon = line === "personal" ? User : Building2;
-                return (
-                  <button
-                    key={line}
-                    type="button"
-                    className={`rounded-md border px-3 py-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-gold-300 ${
-                      active
-                        ? "border-gold-400 bg-gold-50 text-ink-900 shadow-sm"
-                        : "border-ink-200 bg-white text-ink-700 hover:border-gold-300"
-                    }`}
-                    onClick={() => {
-                      setSelectedLineOfBusiness(line);
-                      setSelectedNewCategoryIds([]);
-                      setSelectedAssetIds([]);
-                      setNewAssetDetails({});
-                      setAssetCategorySearch("");
-                      setAssetSearch("");
-                      setShowNewAssetForm(false);
-                    }}
-                  >
-                    <span className="flex items-center gap-2 text-sm font-semibold">
-                      <Icon className="h-4 w-4 text-gold-700" />
-                      {line === "personal" ? "Personal lines" : "Commercial lines"}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {false && (
-            <>
-          {selectedNewCategory ? (
-          <div>
-            <label className="label">Asset</label>
-            <AssetMultiSelectPicker
-              assets={matchingAssets}
-              selectedIds={selectedAssetIds}
-              search={assetSearch}
-              onSearchChange={setAssetSearch}
-              onToggle={toggleAsset}
-              onMakePrimary={makePrimaryAsset}
-              onCreateNew={() => setShowNewAssetForm((value) => !value)}
-              creatingNew={showNewAssetForm}
-            />
-            {false && (
-              <select className="hidden" value="" onChange={() => undefined}>
-              {matchingAssets.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {assetDisplayName(a)} · {assetDisplaySubtitleLabel(a.type)} ·{" "}
-                  {fmt.money(a.estimatedValue)}
-                </option>
-              ))}
-              <option value="new">— New asset —</option>
-            </select>
-            )}
-            {matchingAssets.length === 0 && (
-              <div className="mt-2 rounded-md border border-ink-100 bg-white px-3 py-2 text-xs text-ink-500">
-                No matching assets.
-              </div>
-            )}
-          </div>
-          ) : null}
-          {showNewAssetForm && selectedNewCategory && (
-            <div className="space-y-3">
-              <div>
-                <label className="label">Estimated value</label>
-                <input
-                  type="number"
-                  className="input"
-                  value={newAssetValue}
-                  onChange={(e) => setNewAssetValue(e.target.value)}
-                />
-              </div>
-
-              <div className="rounded-md border border-ink-100 bg-white p-3">
-                <div className="mb-3">
-                  <div className="text-xs font-semibold uppercase tracking-wider text-ink-500">
-                    Lookup details
-                  </div>
-                </div>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {newAssetDetailQuestions.map((question) => (
-                    <CategoryQuestionDetailField
-                      key={question.key}
-                      question={question}
-                      value={newAssetDetails[question.key] ?? ""}
-                      onChange={(value) => setNewAssetDetail(question.key, value)}
-                      missing={newAssetMissingQuestionKeys.has(question.key)}
-                    />
-                  ))}
-                </div>
-                {newAssetMissingQuestions.length > 0 && (
-                  <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
-                    {newAssetMissingQuestions
-                      .map((question) => `${question.label} is required.`)
-                      .join(" ")}
-                  </div>
-                )}
-                <div className="mt-3 flex justify-end">
-                  <button
-                    type="button"
-                    className="btn-primary text-sm"
-                    onClick={createNewAsset}
-                    disabled={newAssetMissingQuestions.length > 0}
-                  >
-                    <Plus className="h-3.5 w-3.5" />
-                    Add asset
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-          {selectedNewCategory?.lineOfBusiness === "personal" && isNoAssetSelection && (
-            <div className="rounded-md border border-ink-100 bg-white px-3 py-2 text-xs text-ink-500">
-              Asset required.
-            </div>
-          )}
-          {selectedLineOfBusiness && (
-            <div className="rounded-md border border-blue-100 bg-blue-50/60 px-3 py-2 text-xs text-blue-950">
-              <div className="font-semibold">Workflow setup summary</div>
-              <dl className="mt-2 grid gap-1 sm:grid-cols-3">
-                <div>
-                  <dt className="text-blue-700">Line</dt>
-                  <dd className="font-medium text-ink-900">{setupLineLabel}</dd>
-                </div>
-                <div>
-                  <dt className="text-blue-700">Category</dt>
-                  <dd className="font-medium text-ink-900">{setupCategoryLabel}</dd>
-                </div>
-                <div>
-                  <dt className="text-blue-700">Asset</dt>
-                  <dd className="font-medium text-ink-900">{setupAssetLabel}</dd>
-                </div>
-              </dl>
-            </div>
-          )}
-            </>
-          )}
-        </div>
-      )}
 
       {shouldCollapseImplementedWorkspace ? (
         <div className="rounded-md border border-emerald-200 bg-emerald-50 px-4 py-3">
