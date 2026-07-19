@@ -58,7 +58,10 @@ import {
   staffRoleLabel,
 } from "@/lib/roles";
 import { subscribeToDbChanges } from "@/lib/db";
-import { summarizeQuotingWorkflow } from "@/lib/quotingWorkflows";
+import {
+  newestOpenQuotingSessionsPerContact,
+  summarizeQuotingWorkflow,
+} from "@/lib/quotingWorkflows";
 import { isRoutingAssignmentTask } from "@/lib/taskFilters";
 import type {
   AssetType,
@@ -105,6 +108,7 @@ type DropEdge = "before" | "after";
 
 interface QuotingWorkflowRow {
   id: string;
+  contactKey: string;
   kind: "ai_session" | "incomplete_customer_quote";
   summary: QuotingWorkflowSummary;
   contactName: string;
@@ -323,8 +327,11 @@ export function TasksPage() {
     ? api.tasks.listOpen(agency.id).filter((t) => t.awaitingManagerAssignment)
     : [];
 
-  const aiWorkflowRows = api.quoting
-    .listByTenant(agency.id)
+  const tenantQuotingSessions = api.quoting.listByTenant(agency.id);
+  const visibleOpenSessionIds = new Set(
+    newestOpenQuotingSessionsPerContact(tenantQuotingSessions).map((session) => session.id)
+  );
+  const aiWorkflowRows = tenantQuotingSessions
     .map((session): QuotingWorkflowRow | null => {
       const summary = summarizeQuotingWorkflow(session);
       const customer = session.customerId ? api.customers.get(session.customerId) : undefined;
@@ -354,6 +361,11 @@ export function TasksPage() {
         ?.implementedAt;
       return {
         id: session.id,
+        contactKey: customer
+          ? `customer:${customer.id}`
+          : prospect
+          ? `prospect:${prospect.id}`
+          : `session:${session.id}`,
         kind: "ai_session",
         summary,
         contactName,
@@ -368,7 +380,9 @@ export function TasksPage() {
     })
     .filter((row): row is QuotingWorkflowRow => !!row);
 
-  const activeAiWorkflowRows = aiWorkflowRows.filter((row) => !row.summary.isClosed);
+  const activeAiWorkflowRows = aiWorkflowRows.filter(
+    (row) => !row.summary.isClosed && visibleOpenSessionIds.has(row.id)
+  );
   const completedWorkflowRows = aiWorkflowRows
     .filter((row) => row.summary.isClosed)
     .sort((a, b) => {
@@ -379,6 +393,14 @@ export function TasksPage() {
 
   const incompleteWorkflowRows = api.quotes
     .listIncompleteWorkflows(agency.id)
+    .filter((quote) => !visibleOpenSessionIds.has(quote.quoteSessionId ?? ""))
+    .filter((quote) => {
+      const contactHasOpenSession = tenantQuotingSessions.some(
+        (session) =>
+          visibleOpenSessionIds.has(session.id) && session.customerId === quote.customerId
+      );
+      return !contactHasOpenSession;
+    })
     .map((quote): QuotingWorkflowRow | null => {
       const customer = api.customers.get(quote.customerId);
       if (!api.customers.canSee(customer, viewer)) return null;
@@ -395,6 +417,7 @@ export function TasksPage() {
       const stoppedAt = quote.currentStep ?? "quote intake";
       return {
         id: quote.id,
+        contactKey: `customer:${quote.customerId}`,
         kind: "incomplete_customer_quote",
         quote,
         task: quote.recoveryTaskId ? api.tasks.get(quote.recoveryTaskId) : undefined,
@@ -424,12 +447,18 @@ export function TasksPage() {
     })
     .filter((row): row is QuotingWorkflowRow => !!row);
 
+  const seenWorkflowContacts = new Set<string>();
   const workflowRows = [...incompleteWorkflowRows, ...activeAiWorkflowRows]
     .sort((a, b) => {
       if (a.summary.sortPriority !== b.summary.sortPriority) {
         return a.summary.sortPriority - b.summary.sortPriority;
       }
       return a.updatedAt < b.updatedAt ? 1 : -1;
+    })
+    .filter((row) => {
+      if (seenWorkflowContacts.has(row.contactKey)) return false;
+      seenWorkflowContacts.add(row.contactKey);
+      return true;
     });
 
   // Sort order:

@@ -1,6 +1,9 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
-import { summarizeQuotingWorkflow } from "../quotingWorkflows";
+import {
+  newestOpenQuotingSessionsPerContact,
+  summarizeQuotingWorkflow,
+} from "../quotingWorkflows";
 import type { QuotingSession } from "@/types";
 
 function session(overrides: Partial<QuotingSession>): QuotingSession {
@@ -93,5 +96,82 @@ describe("summarizeQuotingWorkflow", () => {
 
     expect(summary.stage).toBe("Policy implemented");
     expect(summary.isClosed).toBe(true);
+  });
+});
+
+describe("newestOpenQuotingSessionsPerContact", () => {
+  it("keeps only the newest open flow per client without dropping other clients", () => {
+    const older = session({
+      id: "qs_older",
+      customerId: "customer_one",
+      updatedAt: "2026-06-01T12:00:00.000Z",
+    });
+    const newer = session({
+      id: "qs_newer",
+      customerId: "customer_one",
+      updatedAt: "2026-06-01T13:00:00.000Z",
+    });
+    const otherClient = session({
+      id: "qs_other",
+      customerId: "customer_two",
+      updatedAt: "2026-06-01T12:30:00.000Z",
+    });
+
+    expect(
+      newestOpenQuotingSessionsPerContact([older, otherClient, newer]).map((row) => row.id)
+    ).toEqual(["qs_newer", "qs_other"]);
+  });
+
+  it("allows a new open flow after an older flow has been implemented", () => {
+    const implemented = session({
+      id: "qs_implemented",
+      customerId: "customer_one",
+      updatedAt: "2026-06-01T14:00:00.000Z",
+      quotes: [
+        {
+          carrierId: "carrier_one",
+          premium: 12000,
+          confidence: 0.9,
+          score: 0.92,
+          fitReason: "Strong appetite",
+          apiStatus: "simulated",
+          implementation: {
+            status: "implemented",
+            policyId: "policy_one",
+            carrierReference: "REF-1",
+            implementedAt: "2026-06-01T14:00:00.000Z",
+            implementedById: "user_agent",
+            mode: "manual_workflow",
+          },
+        },
+      ],
+    });
+    const next = session({
+      id: "qs_next",
+      customerId: "customer_one",
+      updatedAt: "2026-06-01T15:00:00.000Z",
+    });
+
+    expect(newestOpenQuotingSessionsPerContact([implemented, next]).map((row) => row.id)).toEqual([
+      "qs_next",
+    ]);
+  });
+
+  it("does not count document-only ACORD work as an open quote flow", () => {
+    const quoteFlow = session({
+      id: "qs_quote_flow",
+      customerId: "customer_one",
+      updatedAt: "2026-06-01T13:00:00.000Z",
+    });
+    const documentOnly = session({
+      id: "qs_document_only",
+      customerId: "customer_one",
+      updatedAt: "2026-06-01T14:00:00.000Z",
+      aiSummary: "ACORD documents initialized from the client Documents card.",
+    });
+
+    expect(newestOpenQuotingSessionsPerContact([quoteFlow, documentOnly]).map((row) => row.id)).toEqual([
+      "qs_quote_flow",
+    ]);
   });
 });

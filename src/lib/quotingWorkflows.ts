@@ -16,6 +16,44 @@ export interface QuotingWorkflowSummary {
   sortPriority: number;
 }
 
+export function quotingWorkflowContactKey(
+  session: Pick<QuotingSession, "id" | "customerId" | "prospectId">
+): string {
+  if (session.customerId) return `customer:${session.customerId}`;
+  if (session.prospectId) return `prospect:${session.prospectId}`;
+  return `session:${session.id}`;
+}
+
+export function isQuotingWorkflowOpen(session: QuotingSession): boolean {
+  return !session.quotes.some((quote) => !!quote.implementation?.policyId);
+}
+
+export function isDocumentOnlyAcordSession(session: QuotingSession): boolean {
+  return (
+    session.lineOfBusiness === "commercial" &&
+    session.aiSummary === "ACORD documents initialized from the client Documents card."
+  );
+}
+
+export function newestOpenQuotingSessionsPerContact(
+  sessions: QuotingSession[]
+): QuotingSession[] {
+  const seen = new Set<string>();
+  return [...sessions]
+    .filter((session) => !isDocumentOnlyAcordSession(session) && isQuotingWorkflowOpen(session))
+    .sort((a, b) => {
+      const aStamp = a.updatedAt || a.createdAt;
+      const bStamp = b.updatedAt || b.createdAt;
+      return aStamp < bStamp ? 1 : aStamp > bStamp ? -1 : 0;
+    })
+    .filter((session) => {
+      const key = quotingWorkflowContactKey(session);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+}
+
 export function summarizeQuotingWorkflow(session: QuotingSession): QuotingWorkflowSummary {
   const submissions = session.commercialCarrierSubmissions ?? [];
   const acceptedCount = submissions.filter(

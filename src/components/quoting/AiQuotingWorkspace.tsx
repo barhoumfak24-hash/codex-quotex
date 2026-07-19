@@ -1483,11 +1483,13 @@ function WorkflowStepIcons({
   currentStep,
   totalSteps,
   completedStepNumbers = [],
+  wrap = true,
 }: {
   steps: WorkflowStepDefinition[];
   currentStep: number;
   totalSteps?: number;
   completedStepNumbers?: number[];
+  wrap?: boolean;
 }) {
   const visibleSteps = steps.slice(0, totalSteps ?? steps.length);
   const total = visibleSteps.length;
@@ -1495,7 +1497,7 @@ function WorkflowStepIcons({
 
   return (
     <div
-      className="flex max-w-full flex-wrap items-center gap-1 py-1"
+      className={`flex max-w-full items-center gap-1 py-1 ${wrap ? "flex-wrap" : "flex-nowrap"}`}
       aria-label={`Workflow progress: step ${currentStep} of ${total}`}
     >
       {visibleSteps.map((step, index) => {
@@ -1599,16 +1601,19 @@ export function QuoteWorkflowProgress({ session }: { session: QuotingSession }) 
       : personalFlowPage(session);
 
   return (
-    <div className="flex max-w-full flex-wrap items-center gap-2">
+    <div className="flex min-w-max items-center gap-2">
       <WorkflowStepIcons
         steps={steps}
         currentStep={page.step}
         totalSteps={page.total}
         completedStepNumbers={workflowCompletedStepNumbers(session)}
+        wrap={false}
       />
-      <Badge tone="info">
-        Step {page.step} of {page.total}
-      </Badge>
+      <span className="shrink-0">
+        <Badge tone="info">
+          Step {page.step} of {page.total}
+        </Badge>
+      </span>
     </div>
   );
 }

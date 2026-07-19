@@ -195,6 +195,9 @@ describe("AiQuotingWorkspace component", () => {
     expect(host.textContent).toContain("Carrier ranking");
     expect(host.textContent).toContain("Step 3 of 4");
     expect(host.querySelector('[aria-label="Questionnaire: current"]')).toBeTruthy();
+    expect(host.querySelector('[aria-label^="Workflow progress"]')?.className).toContain(
+      "flex-nowrap"
+    );
     expect(
       host.querySelector(`a[href="/employee/clients/${customer.id}/quote-flow"]`)?.textContent
     ).toContain("Continue quote flow");

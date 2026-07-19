@@ -448,7 +448,7 @@ function ContactQuotingCard({
 
     return (
       <Card id="ai-quoting-workspace" className="relative">
-        <div className="grid gap-4 xl:grid-cols-[minmax(300px,auto)_minmax(0,1fr)_auto] xl:items-center">
+        <div className="grid gap-4 xl:grid-cols-[minmax(340px,1fr)_auto_minmax(280px,1fr)] xl:items-center">
           <div className="flex min-w-0 items-center gap-4">
             <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md border border-gold-200 bg-gold-50 text-gold-700">
               <ClipboardList className="h-6 w-6" aria-hidden="true" />
@@ -463,7 +463,7 @@ function ContactQuotingCard({
               </p>
             </div>
           </div>
-          <div className="min-w-0 overflow-x-auto py-1">
+          <div className="min-w-0 overflow-x-auto py-1 xl:justify-self-center">
             {existing ? <QuoteWorkflowProgress session={existing} /> : null}
           </div>
           <Link

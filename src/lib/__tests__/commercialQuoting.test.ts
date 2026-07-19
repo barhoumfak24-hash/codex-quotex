@@ -61,37 +61,35 @@ describe("commercial quoting session", () => {
     "base-annual-revenue": "2400000",
   };
 
-  it("opens the most recently worked quote session for a customer", async () => {
+  it("reuses one open quote session when the same client is started twice", async () => {
     const { api } = await import("../api");
-    const { db } = await import("../db");
     const agency = api.agencies.list()[0];
     const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
     const customer = api.customers.list(agency.id)[0];
-    const olderWorkedSession = await api.quoting.startSession({
+    const input = {
       tenantId: agency.id,
       customerId: customer.id,
       createdById: agent.id,
-      assetType: "other",
+      assetType: "other" as const,
       contactName: "Coastal Logistics LLC",
       estimatedValue: 2_500_000,
-      lineOfBusiness: "commercial",
-    });
-    await api.quoting.startSession({
-      tenantId: agency.id,
-      customerId: customer.id,
-      createdById: agent.id,
+      lineOfBusiness: "commercial" as const,
+    };
+    const [first, second] = await Promise.all([
+      api.quoting.startSession(input),
+      api.quoting.startSession(input),
+    ]);
+    const third = await api.quoting.startSession({
+      ...input,
       assetType: "coastal_home",
-      contactName: customer.name,
-      estimatedValue: 1_000_000,
       lineOfBusiness: "personal",
     });
 
-    db.update("quotingSessions", olderWorkedSession.id, {
-      commercialApplicationSentAt: "2099-01-01T00:00:00.000Z",
-      updatedAt: "2099-01-01T00:00:00.000Z",
-    });
-
-    expect(api.quoting.getForCustomer(customer.id)?.id).toBe(olderWorkedSession.id);
+    expect(second.id).toBe(first.id);
+    expect(third.id).toBe(first.id);
+    expect(
+      api.quoting.listByTenant(agency.id).filter((session) => session.customerId === customer.id)
+    ).toHaveLength(1);
   });
 
   it("prepares the structured commercial questionnaire after the ACORD fill audit", async () => {

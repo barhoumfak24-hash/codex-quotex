@@ -98,6 +98,7 @@ import {
   vinValidationIssue,
 } from "./assetLabels";
 import { isLockingMasterAccount } from "./masterAccount";
+import { isDocumentOnlyAcordSession, isQuotingWorkflowOpen } from "./quotingWorkflows";
 import { agencyMonthlyPriceUsd, TIER_LIMITS } from "./tiers";
 import {
   buildDocumentTemplateFields,
@@ -4884,18 +4885,23 @@ function visibleQuotingQuestions(session: QuotingSession): QuotingQuestion[] {
   return questions.filter((q) => q.round === "second_round");
 }
 
-function isDocumentOnlyAcordSession(session: QuotingSession): boolean {
-  return (
-    session.lineOfBusiness === "commercial" &&
-    session.aiSummary === "ACORD documents initialized from the client Documents card."
-  );
-}
-
 function sortQuotingSessionsByWorkRecency(a: QuotingSession, b: QuotingSession): number {
   const aStamp = a.updatedAt || a.createdAt;
   const bStamp = b.updatedAt || b.createdAt;
   if (aStamp !== bStamp) return aStamp < bStamp ? 1 : -1;
   return a.createdAt < b.createdAt ? 1 : -1;
+}
+
+const quotingSessionStartsInFlight = new Map<string, Promise<QuotingSession>>();
+
+function quotingSessionStartKey(input: {
+  tenantId: string;
+  customerId?: string;
+  prospectId?: string;
+}): string | null {
+  if (input.customerId) return `${input.tenantId}:customer:${input.customerId}`;
+  if (input.prospectId) return `${input.tenantId}:prospect:${input.prospectId}`;
+  return null;
 }
 
 function commercialApplicationSentAtForSession(session: QuotingSession): string | undefined {
@@ -15977,8 +15983,8 @@ export const api = {
           (session) =>
             session.quoteRequestId === input.quoteRequestId ||
             (session.customerId === input.customerId &&
-              session.categoryId === input.categoryId &&
-              session.status !== "complete")
+              !isDocumentOnlyAcordSession(session) &&
+              isQuotingWorkflowOpen(session))
         );
       const preservedResponses = Object.fromEntries(
         Object.entries(existing?.questionnaireResponses ?? {}).filter(
@@ -16138,6 +16144,27 @@ export const api = {
       lineOfBusiness?: QuotingLineOfBusiness;
       selectedAcordTemplateIds?: string[];
     }): Promise<QuotingSession> {
+      const startKey = quotingSessionStartKey(input);
+      const existingOpenSession = startKey
+        ? db
+            .list("quotingSessions")
+            .filter(
+              (session) =>
+                session.tenantId === input.tenantId &&
+                !isDocumentOnlyAcordSession(session) &&
+                (input.customerId
+                  ? session.customerId === input.customerId
+                  : session.prospectId === input.prospectId) &&
+                isQuotingWorkflowOpen(session)
+            )
+            .sort(sortQuotingSessionsByWorkRecency)[0]
+        : undefined;
+      if (existingOpenSession) return ensureQuotingSessionConsistency(existingOpenSession);
+
+      const inFlightStart = startKey ? quotingSessionStartsInFlight.get(startKey) : undefined;
+      if (inFlightStart) return inFlightStart;
+
+      const startPromise = (async () => {
       const {
         aiPreparePublicFields,
         aiInferLineOfBusiness,
@@ -16416,6 +16443,16 @@ export const api = {
         return this.runQuotes(activeRow.id);
       }
       return activeRow;
+      })();
+
+      if (startKey) quotingSessionStartsInFlight.set(startKey, startPromise);
+      try {
+        return await startPromise;
+      } finally {
+        if (startKey && quotingSessionStartsInFlight.get(startKey) === startPromise) {
+          quotingSessionStartsInFlight.delete(startKey);
+        }
+      }
     },
     async runAcordAiMapping(sessionId: string): Promise<QuotingSession | null> {
       const session = this.get(sessionId);
