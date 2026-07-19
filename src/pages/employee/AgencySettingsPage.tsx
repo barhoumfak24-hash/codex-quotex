@@ -1698,8 +1698,15 @@ function MarketingSenderCard({
   const [companyEmail, setCompanyEmail] = useState(agency.contactEmail);
   const [companyPassword, setCompanyPassword] = useState("");
   const [savingCredentials, setSavingCredentials] = useState(false);
+  const [senderLocked, setSenderLocked] = useState(true);
   const localMailbox = api.mailboxes.agencyMarketing(agency.id);
   const mailbox = serverMailbox ?? localMailbox;
+
+  function resetCredentialDraft() {
+    setCompanyEmail(mailbox?.address ?? agency.contactEmail);
+    setCompanyPassword("");
+    setError(null);
+  }
 
   useEffect(() => {
     if (!user) return;
@@ -1712,7 +1719,7 @@ function MarketingSenderCard({
       );
       if (connected) {
         api.mailboxes.cacheConnection(connected);
-        setCompanyEmail(connected.address);
+        if (senderLocked) setCompanyEmail(connected.address);
       }
       setServerMailbox(connected);
       setError(null);
@@ -1720,11 +1727,12 @@ function MarketingSenderCard({
     return () => {
       active = false;
     };
-  }, [agency.id, user?.id]);
+  }, [agency.id, senderLocked, user?.id]);
 
   useEffect(() => {
-    if (!serverMailbox?.address) setCompanyEmail(agency.contactEmail);
-  }, [agency.contactEmail, serverMailbox?.address]);
+    if (!senderLocked) return;
+    setCompanyEmail(serverMailbox?.address ?? localMailbox?.address ?? agency.contactEmail);
+  }, [agency.contactEmail, localMailbox?.address, senderLocked, serverMailbox?.address]);
 
   async function saveCredentials() {
     if (!user || savingCredentials) return;
@@ -1752,6 +1760,7 @@ function MarketingSenderCard({
     setServerMailbox(result.connection);
     setCompanyEmail(result.connection.address);
     setNotice("Company email saved. AI marketing campaigns will use this sender.");
+    setSenderLocked(true);
     onChanged?.();
   }
 
@@ -1759,7 +1768,51 @@ function MarketingSenderCard({
     <Card>
       <CardHeader
         title="AI marketing sender"
-        subtitle="AI marketing campaigns use this company email. Other messages continue to use the logged-in staff member's email."
+        subtitle={
+          senderLocked
+            ? "Locked. AI marketing campaigns use this company email."
+            : "Update the company email used for AI marketing campaigns."
+        }
+        action={
+          editable && user ? (
+            senderLocked ? (
+              <button
+                type="button"
+                className="btn-ghost text-xs"
+                onClick={() => {
+                  resetCredentialDraft();
+                  setNotice(null);
+                  setSenderLocked(false);
+                }}
+              >
+                <Pencil className="h-3.5 w-3.5" /> Edit sender
+              </button>
+            ) : (
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  className="btn-ghost text-xs"
+                  onClick={() => {
+                    resetCredentialDraft();
+                    setSenderLocked(true);
+                  }}
+                  disabled={savingCredentials}
+                >
+                  <X className="h-3.5 w-3.5" /> Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn-gold text-xs"
+                  onClick={() => void saveCredentials()}
+                  disabled={savingCredentials || !companyEmail.trim() || !companyPassword}
+                >
+                  {savingCredentials ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
+                  {savingCredentials ? "Saving" : "Save"}
+                </button>
+              </div>
+            )
+          ) : null
+        }
       />
 
       {notice ? (
@@ -1775,38 +1828,41 @@ function MarketingSenderCard({
       ) : null}
 
       {editable && user ? (
-        <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
+        <div className="mt-4 grid gap-3 md:grid-cols-2">
           <label className="block">
             <span className="form-label">Email</span>
             <input
-              className="input-base mt-1 w-full"
+              className={`${lockedInputClass(senderLocked)} mt-1 w-full`}
               type="email"
               autoComplete="email"
               value={companyEmail}
               onChange={(event) => setCompanyEmail(event.target.value)}
               placeholder="marketing@agency.com"
+              disabled={senderLocked}
+              tabIndex={senderLocked ? -1 : 0}
             />
           </label>
           <label className="block">
             <span className="form-label">Password</span>
             <input
-              className="input-base mt-1 w-full"
+              className={`${lockedInputClass(senderLocked)} mt-1 w-full`}
               type="password"
               autoComplete="current-password"
               value={companyPassword}
               onChange={(event) => setCompanyPassword(event.target.value)}
-              placeholder={mailbox?.authMode === "smtp_imap" ? "Replace saved password" : "Enter password"}
+              placeholder={
+                senderLocked
+                  ? mailbox?.authMode === "smtp_imap"
+                    ? "Saved securely"
+                    : "No password saved"
+                  : mailbox?.authMode === "smtp_imap"
+                    ? "Replace saved password"
+                    : "Enter password"
+              }
+              disabled={senderLocked}
+              tabIndex={senderLocked ? -1 : 0}
             />
           </label>
-          <button
-            type="button"
-            className="btn-primary h-11 whitespace-nowrap"
-            onClick={() => void saveCredentials()}
-            disabled={savingCredentials || !companyEmail.trim() || !companyPassword}
-          >
-            {savingCredentials ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-            {savingCredentials ? "Saving" : "Save"}
-          </button>
         </div>
       ) : null}
 
