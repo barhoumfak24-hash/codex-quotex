@@ -852,14 +852,8 @@ export function AgencySettingsPage() {
   const staffUsers = api.users
     .list(agency.id)
     .filter((u) => u.role === "agent" || u.role === "manager" || u.role === "csr");
-  const securityUsers = api.users
-    .list(agency.id)
-    .filter((u) => u.role !== "master_admin")
-    .sort((a, b) => a.name.localeCompare(b.name));
   const activeStaffUsers = staffUsers.filter((u) => u.active);
   const disabledStaffUsers = staffUsers.filter((u) => !u.active);
-  const securityIncidents = api.security.listIncidents(agency.id);
-  const activeSecurityBans = api.security.listBans(agency.id, true).filter((ban) => ban.kind === "user");
   const managerCount = activeStaffUsers.filter((u) => u.role === "manager").length;
   const agentCount = activeStaffUsers.filter((u) => u.role === "agent" || u.role === "csr").length;
   const branches = api.branches.listByAgency(agency.id);
@@ -1302,15 +1296,6 @@ export function AgencySettingsPage() {
         currentUserId={user?.id}
         notice={staffNotice}
         onChangeAccess={changeStaffAccess}
-      />
-
-      <SecurityControlsCard
-        agencyId={agency.id}
-        users={securityUsers}
-        currentUserId={user?.id}
-        incidents={securityIncidents}
-        activeBans={activeSecurityBans}
-        onChanged={() => setRev((r) => r + 1)}
       />
 
       <div className="grid gap-4 lg:grid-cols-3">
