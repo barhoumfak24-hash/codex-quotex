@@ -203,6 +203,9 @@ describe("AiQuotingWorkspace component", () => {
       host.querySelector('[aria-label^="Workflow progress"]')?.closest(".overflow-x-auto")
     ).toBeTruthy();
     expect(
+      host.querySelector('[aria-label^="Workflow progress"]')?.closest('[class*="lg:grid-cols-"]')
+    ).toBeTruthy();
+    expect(
       host.querySelector(`a[href="/employee/clients/${customer.id}/quote-flow"]`)?.textContent
     ).toContain("Continue quote flow");
 
