@@ -96,7 +96,7 @@ describe("marketing.composeAiCampaign", () => {
     ).toBe(true);
   });
 
-  it("uses the current agency contact email instead of a stale connected marketing mailbox", async () => {
+  it("uses the separately configured company marketing mailbox", async () => {
     const { api } = await import("../api");
     const { db } = await import("../db");
     const agency = api.agencies.list()[0];
@@ -122,14 +122,14 @@ describe("marketing.composeAiCampaign", () => {
     const payload = JSON.parse(String(request?.body));
     expect(payload).toMatchObject({
       senderMode: "agency_marketing",
-      replyTo: agency.contactEmail,
+      replyTo: "old-marketing@example.com",
+      connectionId: mailbox!.id,
     });
-    expect(payload.connectionId).toBeUndefined();
     const receipt = api.marketing
       .listMessages(agency.id)
       .find((message) => message.campaignId === out.campaign.id);
-    expect(receipt?.fromEmail).toBe(agency.contactEmail.toLowerCase());
-    expect(receipt?.mailboxConnectionId).toBeUndefined();
+    expect(receipt?.fromEmail).toBe("old-marketing@example.com");
+    expect(receipt?.mailboxConnectionId).toBe(mailbox!.id);
   });
 
   it("combines all clients + all prospects in the recipient count", async () => {

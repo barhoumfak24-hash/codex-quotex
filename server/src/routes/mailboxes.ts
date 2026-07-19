@@ -8,7 +8,11 @@ import {
   mailboxOAuthReadiness,
   type MailboxOAuthProvider,
 } from "../services/mailboxOAuth.js";
-import { isMailboxFallbackSafeError, sendMailboxEmail } from "../services/mailboxProvider.js";
+import {
+  isMailboxFallbackSafeError,
+  saveAgencyMarketingSmtpCredential,
+  sendMailboxEmail,
+} from "../services/mailboxProvider.js";
 import { listMailboxDiagnostics, listMailboxSyncStatus, syncMailboxMessages } from "../services/mailboxSync.js";
 import { emailDeliveryConfiguration, sendEmail } from "../services/email.js";
 import { prisma } from "../services/prisma.js";
@@ -47,6 +51,11 @@ const sendSchema = z.object({
 const syncSchema = z.object({
   connectionId: z.string().optional(),
   maxResults: z.number().int().min(1).max(50).optional(),
+});
+const agencyMarketingCredentialSchema = z.object({
+  email: emailSchema,
+  password: z.string().min(1).max(1024),
+  provider: z.enum(["auto", "google", "microsoft", "yahoo", "apple", "zoho"]).default("auto"),
 });
 
 mailboxesRoutes.get("/oauth/readiness", (_req, res) => {
@@ -124,6 +133,43 @@ mailboxesRoutes.post("/oauth/:provider/start", async (req, res, next) => {
   }
 });
 
+mailboxesRoutes.post("/agency-marketing/credentials", async (req, res) => {
+  try {
+    if (!req.auth?.tenantId) return res.status(403).json({ ok: false, error: "tenant_required" });
+    if (!["agency_owner", "agency_admin", "manager"].includes(req.auth.role)) {
+      return res.status(403).json({ ok: false, error: "manager_required" });
+    }
+    const parsed = agencyMarketingCredentialSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+    const agency = await prisma.agency.findFirst({
+      where: { id: req.auth.tenantId, active: true },
+      select: { name: true },
+    });
+    if (!agency) return res.status(404).json({ ok: false, error: "agency_not_found" });
+
+    const connection = await saveAgencyMarketingSmtpCredential({
+      tenantId: req.auth.tenantId,
+      updatedById: req.auth.userId,
+      agencyName: agency.name,
+      ...parsed.data,
+    });
+    return res.json({
+      ok: true,
+      connection: {
+        ...connection,
+        tokenVaultRef: connection.tokenVaultRef ? "server-managed" : null,
+      },
+      passwordConfigured: true,
+    });
+  } catch (error) {
+    return res.status(422).json({
+      ok: false,
+      error: "agency_marketing_mailbox_rejected",
+      message: error instanceof Error ? error.message : "The company mailbox could not be configured.",
+    });
+  }
+});
+
 mailboxesRoutes.post("/send", async (req, res, next) => {
   try {
     if (!req.auth?.tenantId) return res.status(403).json({ ok: false, error: "tenant_required" });
@@ -149,6 +195,8 @@ mailboxesRoutes.post("/send", async (req, res, next) => {
         ownerType,
         expectedAddress: identity.email,
         ...parsed.data,
+        senderName: identity.name,
+        replyTo: identity.email,
       });
       return res.json({ ok: true, result });
     } catch (mailboxError) {
@@ -303,14 +351,29 @@ async function resolveTransactionalIdentity(input: {
   ownerType: "staff" | "agency_marketing";
 }): Promise<{ name: string; email: string }> {
   if (input.ownerType === "agency_marketing") {
-    const agency = await prisma.agency.findFirst({
-      where: { id: input.tenantId, active: true },
-      select: { name: true, contactEmail: true },
-    });
-    if (!agency || !emailSchema.safeParse(agency.contactEmail).success) {
+    const [agency, connectedMailbox] = await Promise.all([
+      prisma.agency.findFirst({
+        where: { id: input.tenantId, active: true },
+        select: { name: true, contactEmail: true },
+      }),
+      prisma.mailboxConnection.findFirst({
+        where: {
+          tenantId: input.tenantId,
+          ownerType: "agency_marketing",
+          status: "connected",
+        },
+        orderBy: { updatedAt: "desc" },
+        select: { address: true, displayName: true },
+      }),
+    ]);
+    const email = connectedMailbox?.address.trim() || agency?.contactEmail.trim() || "";
+    if (!agency || !emailSchema.safeParse(email).success) {
       throw new Error("The agency contact email is unavailable.");
     }
-    return { name: agency.name.trim() || "Insurance agency", email: agency.contactEmail.trim() };
+    return {
+      name: connectedMailbox?.displayName?.trim() || agency.name.trim() || "Insurance agency",
+      email,
+    };
   }
 
   const user = await prisma.user.findFirst({

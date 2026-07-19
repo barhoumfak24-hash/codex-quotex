@@ -2123,13 +2123,15 @@ function agencyMarketingSender(tenantId: string): {
       (row) =>
         row.tenantId === tenantId &&
         row.ownerType === "agency_marketing" &&
-        row.status !== "disabled" &&
-        normalizeEmail(row.address) === agencyContactEmail
+        row.status !== "disabled"
     );
+  const mailboxEmail = normalizeEmail(mailbox?.address);
   return {
     fromName: agency?.name.trim() || mailbox?.displayName || "Your Insurance Concierge",
-    fromEmail: agencyContactEmail || undefined,
-    provider: mailbox?.provider ?? (agencyContactEmail ? inferMailProvider(agencyContactEmail) : undefined),
+    fromEmail: mailboxEmail || agencyContactEmail || undefined,
+    provider:
+      mailbox?.provider ??
+      (mailboxEmail || agencyContactEmail ? inferMailProvider(mailboxEmail || agencyContactEmail) : undefined),
     connectionId: mailbox?.id,
     status: mailbox?.status ?? (agencyContactEmail ? "needs_auth" : undefined),
   };
@@ -9112,6 +9114,17 @@ export const api = {
             mailbox.status !== "disabled"
         );
     },
+    cacheConnection(connection: ConnectedMailbox): ConnectedMailbox {
+      const existing = db.list("connectedMailboxes").find((mailbox) => mailbox.id === connection.id);
+      if (existing) {
+        return db.update("connectedMailboxes", existing.id, {
+          ...connection,
+          updatedAt: connection.updatedAt || nowIso(),
+        }) ?? connection;
+      }
+      db.insert("connectedMailboxes", connection);
+      return connection;
+    },
     resolveStaffSender(userId: string) {
       return mailboxForUser(userId);
     },
@@ -9147,7 +9160,11 @@ export const api = {
       const missing: string[] = [];
       if (!mailbox.tokenVaultRef) missing.push("Add an encrypted token vault reference.");
       if (!mailbox.scopes.includes("send")) missing.push("Grant send permission.");
-      if (!mailbox.scopes.includes("read") && !mailbox.scopes.includes("sync")) {
+      if (
+        mailbox.authMode !== "smtp_imap" &&
+        !mailbox.scopes.includes("read") &&
+        !mailbox.scopes.includes("sync")
+      ) {
         missing.push("Grant read or sync permission for mailbox mirroring.");
       }
       if (mailbox.status !== "connected") missing.push("Complete provider authorization.");

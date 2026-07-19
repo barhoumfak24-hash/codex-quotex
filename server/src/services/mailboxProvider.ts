@@ -1,5 +1,7 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { resolveMx } from "node:dns/promises";
 import { Prisma } from "@prisma/client";
+import nodemailer from "nodemailer";
 import { prisma } from "./prisma.js";
 
 export type MailboxSendAttachment = {
@@ -15,12 +17,14 @@ export type MailboxSendInput = {
   ownerType?: "staff" | "agency_marketing";
   connectionId?: string;
   expectedAddress?: string;
+  senderName?: string;
   to: string[];
   cc?: string[];
   bcc?: string[];
   subject?: string;
   text?: string;
   html?: string;
+  replyTo?: string;
   replyToMessageIdHeader?: string;
   references?: string[];
   externalThreadId?: string;
@@ -28,7 +32,7 @@ export type MailboxSendInput = {
 };
 
 export type MailboxSendResult = {
-  provider: "google" | "microsoft";
+  provider: "google" | "microsoft" | "smtp";
   externalMessageId?: string;
   externalThreadId?: string;
   externalUrl?: string;
@@ -57,7 +61,7 @@ type TokenVaultRow = {
   encrypted_payload: Prisma.JsonValue;
 };
 
-export type TokenPayload = {
+export type OAuthTokenPayload = {
   provider: "google" | "microsoft";
   accessToken: string;
   refreshToken?: string;
@@ -69,6 +73,42 @@ export type TokenPayload = {
   email?: string;
   connectedAt?: string;
   syncCursor?: MailboxSyncCursor;
+};
+
+type SmtpTokenPayload = {
+  provider: "smtp";
+  username: string;
+  password: string;
+  host: string;
+  port: number;
+  secure: boolean;
+  connectedAt: string;
+};
+
+export type TokenPayload = OAuthTokenPayload | SmtpTokenPayload;
+
+export type AgencyMarketingCredentialProvider =
+  | "auto"
+  | "google"
+  | "microsoft"
+  | "yahoo"
+  | "apple"
+  | "zoho";
+
+export type SafeMailboxConnection = {
+  id: string;
+  tenantId: string;
+  userId: null;
+  ownerType: "agency_marketing";
+  provider: "smtp";
+  address: string;
+  displayName: string;
+  status: "connected";
+  authMode: "smtp_imap";
+  scopes: ["send"];
+  tokenVaultRef: string;
+  connectedAt: string;
+  updatedAt: string;
 };
 
 type ProviderConfig = {
@@ -114,7 +154,7 @@ export async function sendMailboxEmail(input: MailboxSendInput): Promise<Mailbox
       throw new Error("Mailbox is not connected. Reconnect the staff mailbox before live sending.");
     }
     const token = await readMailboxToken(connection);
-    freshToken = await ensureFreshToken(connection, token);
+    freshToken = token.provider === "smtp" ? token : await ensureFreshToken(connection, token);
   } catch (error) {
     throw new MailboxFallbackSafeError(error instanceof Error ? error.message : "Mailbox is unavailable.");
   }
@@ -125,27 +165,138 @@ export async function sendMailboxEmail(input: MailboxSendInput): Promise<Mailbox
   if (freshToken.provider === "microsoft") {
     return sendMicrosoftMail(connection, freshToken, input);
   }
+  if (freshToken.provider === "smtp") {
+    return sendSmtpMail(connection, freshToken, input);
+  }
   throw new MailboxFallbackSafeError(`Unsupported mailbox provider: ${connection.provider}.`);
+}
+
+export async function saveAgencyMarketingSmtpCredential(input: {
+  tenantId: string;
+  updatedById: string;
+  agencyName: string;
+  email: string;
+  password: string;
+  provider: AgencyMarketingCredentialProvider;
+}): Promise<SafeMailboxConnection> {
+  const email = normalizeMailboxAddress(input.email);
+  const password = input.password.trim();
+  if (!email || !password) throw new Error("Company email and email password are required.");
+
+  const smtp = await resolveSmtpConfiguration(email, input.provider);
+  const transporter = createSmtpTransport({
+    provider: "smtp",
+    username: email,
+    password,
+    host: smtp.host,
+    port: smtp.port,
+    secure: smtp.secure,
+    connectedAt: new Date().toISOString(),
+  });
+  try {
+    await transporter.verify();
+  } catch (error) {
+    throw new Error(smtpCredentialError(error));
+  } finally {
+    transporter.close();
+  }
+
+  const now = new Date();
+  const connectionId = `mailbox_smtp_${input.tenantId}_agency_marketing`;
+  const vaultId = `mailbox_token_${connectionId}`;
+  const tokenVaultRef = `mailbox-token:${vaultId}`;
+  const encryptedPayload = encryptTokenPayload({
+    provider: "smtp",
+    username: email,
+    password,
+    host: smtp.host,
+    port: smtp.port,
+    secure: smtp.secure,
+    connectedAt: now.toISOString(),
+  });
+
+  await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    await tx.$executeRaw`
+      UPDATE mailbox_connections
+      SET status = 'disabled', updated_at = ${now}
+      WHERE tenant_id = ${input.tenantId}
+        AND owner_type = 'agency_marketing'
+        AND id <> ${connectionId}
+    `;
+    await tx.$executeRaw`
+      INSERT INTO mailbox_connections (
+        id, tenant_id, user_id, owner_type, provider, address, display_name,
+        status, auth_mode, scopes, token_vault_ref, connected_at, updated_at, updated_by_id
+      ) VALUES (
+        ${connectionId}, ${input.tenantId}, NULL, 'agency_marketing', 'smtp', ${email},
+        ${input.agencyName.trim() || email}, 'connected', 'smtp_imap', ${JSON.stringify(["send"])}::jsonb,
+        ${tokenVaultRef}, ${now}, ${now}, ${input.updatedById}
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        address = excluded.address,
+        display_name = excluded.display_name,
+        status = excluded.status,
+        auth_mode = excluded.auth_mode,
+        scopes = excluded.scopes,
+        token_vault_ref = excluded.token_vault_ref,
+        connected_at = excluded.connected_at,
+        updated_at = excluded.updated_at,
+        updated_by_id = excluded.updated_by_id,
+        last_error = NULL
+    `;
+    await tx.$executeRaw`
+      INSERT INTO mailbox_token_vault (
+        id, tenant_id, connection_id, provider, encrypted_payload, encryption_key_ref, created_at, updated_at
+      ) VALUES (
+        ${vaultId}, ${input.tenantId}, ${connectionId}, 'smtp', ${JSON.stringify(encryptedPayload)}::jsonb,
+        ${env("MAILBOX_TOKEN_KEY_REF") || "env:MAILBOX_TOKEN_ENCRYPTION_KEY"}, ${now}, ${now}
+      )
+      ON CONFLICT (connection_id) DO UPDATE SET
+        provider = excluded.provider,
+        encrypted_payload = excluded.encrypted_payload,
+        encryption_key_ref = excluded.encryption_key_ref,
+        updated_at = excluded.updated_at
+    `;
+  });
+
+  return {
+    id: connectionId,
+    tenantId: input.tenantId,
+    userId: null,
+    ownerType: "agency_marketing",
+    provider: "smtp",
+    address: email,
+    displayName: input.agencyName.trim() || email,
+    status: "connected",
+    authMode: "smtp_imap",
+    scopes: ["send"],
+    tokenVaultRef,
+    connectedAt: now.toISOString(),
+    updatedAt: now.toISOString(),
+  };
 }
 
 export async function readFreshMailboxToken(input: MailboxConnectionLookupInput): Promise<{
   connection: MailboxConnectionRow;
-  token: TokenPayload;
+  token: OAuthTokenPayload;
 }> {
   const connection = await resolveMailboxConnection(input);
   if (connection.status !== "connected") {
     throw new Error("Mailbox is not connected. Reconnect the staff mailbox before syncing.");
   }
   const token = await readMailboxToken(connection);
+  if (token.provider === "smtp") {
+    throw new Error("Password-based campaign mailboxes are send-only and do not support inbox sync.");
+  }
   return { connection, token: await ensureFreshToken(connection, token) };
 }
 
 export async function writeMailboxSyncCursor(
   connection: MailboxConnectionRow,
-  token: TokenPayload,
+  token: OAuthTokenPayload,
   cursor: MailboxSyncCursor
-): Promise<TokenPayload> {
-  const next: TokenPayload = {
+): Promise<OAuthTokenPayload> {
+  const next: OAuthTokenPayload = {
     ...token,
     syncCursor: {
       ...(token.syncCursor ?? {}),
@@ -238,7 +389,7 @@ async function readMailboxToken(connection: MailboxConnectionRow): Promise<Token
   return decryptTokenPayload(row.encrypted_payload);
 }
 
-async function ensureFreshToken(connection: MailboxConnectionRow, token: TokenPayload): Promise<TokenPayload> {
+async function ensureFreshToken(connection: MailboxConnectionRow, token: OAuthTokenPayload): Promise<OAuthTokenPayload> {
   if (!token.expiresAt || Date.parse(token.expiresAt) - Date.now() > 90_000) return token;
   if (!token.refreshToken) {
     await markConnectionError(connection.id, "Mailbox token expired and no refresh token is available.");
@@ -277,7 +428,7 @@ async function ensureFreshToken(connection: MailboxConnectionRow, token: TokenPa
     throw new Error(message);
   }
 
-  const next: TokenPayload = {
+  const next: OAuthTokenPayload = {
     ...token,
     accessToken: json.access_token,
     refreshToken: json.refresh_token ?? token.refreshToken,
@@ -299,7 +450,7 @@ async function ensureFreshToken(connection: MailboxConnectionRow, token: TokenPa
   return next;
 }
 
-async function writeMailboxToken(connection: MailboxConnectionRow, token: TokenPayload) {
+async function writeMailboxToken(connection: MailboxConnectionRow, token: OAuthTokenPayload) {
   await prisma.$executeRaw`
     UPDATE mailbox_token_vault
     SET encrypted_payload = ${JSON.stringify(encryptTokenPayload(token))}::jsonb,
@@ -311,7 +462,7 @@ async function writeMailboxToken(connection: MailboxConnectionRow, token: TokenP
 
 async function sendGoogleMail(
   connection: MailboxConnectionRow,
-  token: TokenPayload,
+  token: OAuthTokenPayload,
   input: MailboxSendInput
 ): Promise<MailboxSendResult> {
   const raw = buildMimeMessage({
@@ -361,7 +512,7 @@ async function sendGoogleMail(
 
 async function sendMicrosoftMail(
   connection: MailboxConnectionRow,
-  token: TokenPayload,
+  token: OAuthTokenPayload,
   input: MailboxSendInput
 ): Promise<MailboxSendResult> {
   const createRes = await fetch("https://graph.microsoft.com/v1.0/me/messages", {
@@ -418,6 +569,120 @@ async function sendMicrosoftMail(
     rfc822MessageId: sent?.internetMessageId ?? created.internetMessageId,
     messageIdHeader: sent?.internetMessageId ?? created.internetMessageId,
   };
+}
+
+async function sendSmtpMail(
+  connection: MailboxConnectionRow,
+  token: SmtpTokenPayload,
+  input: MailboxSendInput
+): Promise<MailboxSendResult> {
+  const transporter = createSmtpTransport(token);
+  try {
+    const result = await transporter.sendMail({
+      from: formatNamedAddress(input.senderName, connection.address),
+      to: input.to,
+      cc: input.cc,
+      bcc: input.bcc,
+      replyTo: input.replyTo || connection.address,
+      subject: input.subject || "A message from your insurance agency",
+      text: input.text,
+      html: input.html,
+      inReplyTo: input.replyToMessageIdHeader,
+      references: input.references,
+      attachments: (input.attachments ?? []).map((attachment) => ({
+        filename: attachment.fileName || "attachment",
+        contentType: attachment.fileType || "application/octet-stream",
+        content: Buffer.from(attachmentContentBase64(attachment), "base64"),
+      })),
+    });
+    await markConnectionSent(connection.id).catch(() => undefined);
+    return {
+      provider: "smtp",
+      status: "sent",
+      externalMessageId: result.messageId || undefined,
+      rfc822MessageId: result.messageId || undefined,
+      messageIdHeader: result.messageId || undefined,
+    };
+  } catch (error) {
+    const message = smtpCredentialError(error);
+    await markConnectionError(connection.id, message).catch(() => undefined);
+    throw new MailboxFallbackSafeError(message);
+  } finally {
+    transporter.close();
+  }
+}
+
+function createSmtpTransport(token: SmtpTokenPayload) {
+  return nodemailer.createTransport({
+    host: token.host,
+    port: token.port,
+    secure: token.secure,
+    requireTLS: !token.secure,
+    auth: { user: token.username, pass: token.password },
+    connectionTimeout: 15_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 30_000,
+  });
+}
+
+async function resolveSmtpConfiguration(
+  email: string,
+  provider: AgencyMarketingCredentialProvider
+): Promise<{ host: string; port: number; secure: boolean }> {
+  let resolvedProvider = provider;
+  const domain = email.split("@")[1]?.toLowerCase() ?? "";
+  if (resolvedProvider === "auto") {
+    resolvedProvider = providerFromDomain(domain) ?? (await providerFromMx(domain)) ?? "auto";
+  }
+  if (resolvedProvider === "google") return { host: "smtp.gmail.com", port: 465, secure: true };
+  if (resolvedProvider === "microsoft") return { host: "smtp.office365.com", port: 587, secure: false };
+  if (resolvedProvider === "yahoo") return { host: "smtp.mail.yahoo.com", port: 465, secure: true };
+  if (resolvedProvider === "apple") return { host: "smtp.mail.me.com", port: 587, secure: false };
+  if (resolvedProvider === "zoho") return { host: "smtp.zoho.com", port: 465, secure: true };
+  if (!domain || !/^[a-z0-9.-]+$/.test(domain)) throw new Error("Enter a valid company email address.");
+  return { host: `smtp.${domain}`, port: 587, secure: false };
+}
+
+function providerFromDomain(domain: string): Exclude<AgencyMarketingCredentialProvider, "auto"> | undefined {
+  if (["gmail.com", "googlemail.com"].includes(domain)) return "google";
+  if (["outlook.com", "hotmail.com", "live.com", "msn.com"].includes(domain)) return "microsoft";
+  if (["yahoo.com", "ymail.com", "rocketmail.com"].includes(domain)) return "yahoo";
+  if (["icloud.com", "me.com", "mac.com"].includes(domain)) return "apple";
+  if (["zoho.com", "zohomail.com"].includes(domain)) return "zoho";
+  return undefined;
+}
+
+async function providerFromMx(
+  domain: string
+): Promise<Exclude<AgencyMarketingCredentialProvider, "auto"> | undefined> {
+  if (!domain) return undefined;
+  try {
+    const exchanges = (await resolveMx(domain)).map((row) => row.exchange.toLowerCase()).join(" ");
+    if (/google|googlemail/.test(exchanges)) return "google";
+    if (/outlook|protection\.outlook|microsoft/.test(exchanges)) return "microsoft";
+    if (/yahoodns|yahoo/.test(exchanges)) return "yahoo";
+    if (/icloud/.test(exchanges)) return "apple";
+    if (/zoho/.test(exchanges)) return "zoho";
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function smtpCredentialError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : "The mailbox provider rejected the connection.";
+  if (/auth|credential|password|535|5\.7\.8/i.test(raw)) {
+    return "The company mailbox rejected those credentials. Use the mailbox provider's app password when required.";
+  }
+  if (/timeout|timed out|connect|enotfound|econn/i.test(raw)) {
+    return "The company mailbox could not be reached. Check the email provider and try again.";
+  }
+  return "The company mailbox could not be verified. Check the email and app password, then try again.";
+}
+
+function formatNamedAddress(name: string | undefined, email: string): string {
+  const cleanName = (name ?? "").replace(/[\r\n<>]/g, " ").replace(/\s{2,}/g, " ").trim();
+  return cleanName ? `"${cleanName.replace(/"/g, "'")}" <${email}>` : email;
 }
 
 async function readMicrosoftSentMessage(
@@ -650,6 +915,12 @@ function decryptTokenPayload(value: Prisma.JsonValue): TokenPayload {
   decipher.setAuthTag(tag);
   const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString("utf8");
   const parsed = JSON.parse(plaintext) as Partial<TokenPayload>;
+  if (parsed.provider === "smtp") {
+    if (!parsed.username || !parsed.password || !parsed.host || !parsed.port) {
+      throw new Error("Encrypted SMTP mailbox credentials are incomplete.");
+    }
+    return parsed as SmtpTokenPayload;
+  }
   if (parsed.provider !== "google" && parsed.provider !== "microsoft") {
     throw new Error("Mailbox token payload has an unsupported provider.");
   }

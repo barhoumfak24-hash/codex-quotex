@@ -12,9 +12,11 @@ const mocks = vi.hoisted(() => ({
   emailDeliveryConfiguration: vi.fn(),
   listMailboxConnections: vi.fn(),
   isMailboxFallbackSafeError: vi.fn(),
+  saveAgencyMarketingSmtpCredential: vi.fn(),
   userFindUnique: vi.fn(),
   userFindFirst: vi.fn(),
   agencyFindFirst: vi.fn(),
+  mailboxConnectionFindFirst: vi.fn(),
 }));
 
 vi.mock("../services/mailboxOAuth.js", async () => {
@@ -27,6 +29,7 @@ vi.mock("../services/mailboxOAuth.js", async () => {
 vi.mock("../services/mailboxProvider.js", () => ({
   sendMailboxEmail: mocks.sendMailboxEmail,
   isMailboxFallbackSafeError: mocks.isMailboxFallbackSafeError,
+  saveAgencyMarketingSmtpCredential: mocks.saveAgencyMarketingSmtpCredential,
 }));
 
 vi.mock("../services/prisma.js", () => ({
@@ -34,6 +37,7 @@ vi.mock("../services/prisma.js", () => ({
   prisma: {
     user: { findUnique: mocks.userFindUnique, findFirst: mocks.userFindFirst },
     agency: { findFirst: mocks.agencyFindFirst },
+    mailboxConnection: { findFirst: mocks.mailboxConnectionFindFirst },
   },
 }));
 
@@ -63,9 +67,11 @@ beforeEach(() => {
   mocks.emailDeliveryConfiguration.mockReset();
   mocks.listMailboxConnections.mockReset();
   mocks.isMailboxFallbackSafeError.mockReset();
+  mocks.saveAgencyMarketingSmtpCredential.mockReset();
   mocks.userFindUnique.mockReset();
   mocks.userFindFirst.mockReset();
   mocks.agencyFindFirst.mockReset();
+  mocks.mailboxConnectionFindFirst.mockReset();
   mocks.emailDeliveryConfiguration.mockReturnValue({
     configured: true,
     provider: "sendgrid",
@@ -89,6 +95,7 @@ beforeEach(() => {
     name: "Palm Coast Private Client",
     contactEmail: "contact@palmcoast.example",
   });
+  mocks.mailboxConnectionFindFirst.mockResolvedValue(null);
 });
 
 afterEach(() => {
@@ -96,6 +103,55 @@ afterEach(() => {
 });
 
 describe("mailbox delivery routes", () => {
+  it("stores an agency campaign mailbox through the protected credential service without returning its password", async () => {
+    mocks.saveAgencyMarketingSmtpCredential.mockResolvedValue({
+      id: "mailbox_smtp_tenant_mail_agency_marketing",
+      tenantId: "tenant_mail",
+      userId: null,
+      ownerType: "agency_marketing",
+      provider: "smtp",
+      address: "marketing@agency.example",
+      displayName: "Palm Coast Private Client",
+      status: "connected",
+      authMode: "smtp_imap",
+      scopes: ["send"],
+      tokenVaultRef: "mailbox-token:mailbox_token_1",
+      connectedAt: "2026-07-18T12:00:00.000Z",
+      updatedAt: "2026-07-18T12:00:00.000Z",
+    });
+
+    const response = await postMailbox(
+      "/agency-marketing/credentials",
+      {
+        email: "marketing@agency.example",
+        password: "app-password-value",
+        provider: "auto",
+      },
+      staffToken()
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(body).toMatchObject({
+      ok: true,
+      passwordConfigured: true,
+      connection: {
+        address: "marketing@agency.example",
+        ownerType: "agency_marketing",
+        status: "connected",
+      },
+    });
+    expect(JSON.stringify(body)).not.toContain("app-password-value");
+    expect(mocks.saveAgencyMarketingSmtpCredential).toHaveBeenCalledWith({
+      tenantId: "tenant_mail",
+      updatedById: "user_mail",
+      agencyName: "Palm Coast Private Client",
+      email: "marketing@agency.example",
+      password: "app-password-value",
+      provider: "auto",
+    });
+  });
+
   it("reports the authenticated staff member's real email capability", async () => {
     mocks.listMailboxConnections.mockResolvedValue([
       { id: "mailbox_1", userId: "user_mail", status: "connected" },

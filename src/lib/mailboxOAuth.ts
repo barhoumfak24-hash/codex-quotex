@@ -4,6 +4,13 @@ import { currentServerSessionToken } from "@/lib/serverSession";
 
 export type MailboxOAuthProvider = "google" | "microsoft";
 export type MailboxOAuthOwnerType = "staff" | "agency_marketing";
+export type AgencyMarketingCredentialProvider =
+  | "auto"
+  | "google"
+  | "microsoft"
+  | "yahoo"
+  | "apple"
+  | "zoho";
 
 export type MailboxOAuthStartResult =
   | {
@@ -67,6 +74,49 @@ export async function startMailboxOAuth(input: {
   const json = (await res.json().catch(() => null)) as MailboxOAuthStartResult | null;
   if (json) return json;
   return { ok: false, error: "mailbox_oauth_failed", message: `${res.status} ${res.statusText}` };
+}
+
+export async function saveAgencyMarketingCredentials(input: {
+  user: User;
+  tenantId: string;
+  email: string;
+  password: string;
+  provider?: AgencyMarketingCredentialProvider;
+}): Promise<
+  | { ok: true; connection: ConnectedMailbox; passwordConfigured: true }
+  | { ok: false; error?: string; message?: string }
+> {
+  const res = await fetch(`${apiBaseUrl()}/mailboxes/agency-marketing/credentials`, {
+    method: "POST",
+    headers: authHeaders(input.user, input.tenantId),
+    body: JSON.stringify({
+      email: input.email.trim(),
+      password: input.password,
+      provider: input.provider ?? "auto",
+    }),
+  });
+  const json = (await res.json().catch(() => null)) as
+    | {
+        ok: true;
+        connection: ServerMailboxConnection;
+        passwordConfigured: true;
+      }
+    | { ok: false; error?: string; message?: string }
+    | null;
+  if (!res.ok || !json?.ok) {
+    return {
+      ok: false,
+      error: json && "error" in json ? json.error : "agency_marketing_mailbox_failed",
+      message:
+        (json && "message" in json && json.message) ||
+        `Company mailbox setup failed with ${res.status} ${res.statusText}.`,
+    };
+  }
+  return {
+    ok: true,
+    connection: toConnectedMailbox(json.connection),
+    passwordConfigured: true,
+  };
 }
 
 export async function listMailboxConnections(input: {

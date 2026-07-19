@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFreshMailboxToken, writeMailboxSyncCursor, type TokenPayload } from "./mailboxProvider.js";
+import { readFreshMailboxToken, writeMailboxSyncCursor, type OAuthTokenPayload } from "./mailboxProvider.js";
 import { prisma } from "./prisma.js";
 
 export type MailboxSyncInput = {
@@ -1157,7 +1157,7 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
-function normalizeTokenScopes(token: TokenPayload): string[] {
+function normalizeTokenScopes(token: OAuthTokenPayload): string[] {
   return (token.scope ?? "")
     .split(/[,\s]+/)
     .map((item) => item.trim())
