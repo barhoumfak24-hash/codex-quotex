@@ -464,7 +464,7 @@ function ContactQuotingCard({
                 AI Quoting Workspace
               </h3>
               <p className="mt-1 truncate text-sm text-ink-500">
-                {lineLabel} - {existing ? "Quote flow in progress" : "Ready to start"}
+                {lineLabel} - {existing ? "In progress" : "Ready to start"}
               </p>
             </div>
           </div>
