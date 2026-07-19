@@ -184,23 +184,6 @@ export async function saveAgencyMarketingSmtpCredential(input: {
   if (!email || !password) throw new Error("Company email and email password are required.");
 
   const smtp = await resolveSmtpConfiguration(email, input.provider);
-  const transporter = createSmtpTransport({
-    provider: "smtp",
-    username: email,
-    password,
-    host: smtp.host,
-    port: smtp.port,
-    secure: smtp.secure,
-    connectedAt: new Date().toISOString(),
-  });
-  try {
-    await transporter.verify();
-  } catch (error) {
-    throw new Error(smtpCredentialError(error));
-  } finally {
-    transporter.close();
-  }
-
   const now = new Date();
   const connectionId = `mailbox_smtp_${input.tenantId}_agency_marketing`;
   const vaultId = `mailbox_token_${connectionId}`;

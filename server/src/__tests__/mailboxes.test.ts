@@ -125,7 +125,6 @@ describe("mailbox delivery routes", () => {
       {
         email: "marketing@agency.example",
         password: "app-password-value",
-        provider: "auto",
       },
       staffToken()
     );

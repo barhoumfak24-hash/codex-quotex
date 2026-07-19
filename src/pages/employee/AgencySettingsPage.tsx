@@ -41,13 +41,9 @@ import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
 import { subscribeToDbChanges } from "@/lib/db";
 import { fmt } from "@/lib/format";
-import { mailboxUrl, mailProviderLabel } from "@/lib/mailProvider";
 import {
   listMailboxConnections,
   saveAgencyMarketingCredentials,
-  startMailboxOAuth,
-  type AgencyMarketingCredentialProvider,
-  type MailboxOAuthProvider,
 } from "@/lib/mailboxOAuth";
 import {
   SOFTWARE_USER_MONTHLY_PRICE_USD,
@@ -1698,28 +1694,19 @@ function MarketingSenderCard({
 }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [connecting, setConnecting] = useState<MailboxOAuthProvider | null>(null);
   const [serverMailbox, setServerMailbox] = useState<ConnectedMailbox | undefined>();
   const [companyEmail, setCompanyEmail] = useState(agency.contactEmail);
   const [companyPassword, setCompanyPassword] = useState("");
-  const [credentialProvider, setCredentialProvider] = useState<AgencyMarketingCredentialProvider>("auto");
   const [savingCredentials, setSavingCredentials] = useState(false);
   const localMailbox = api.mailboxes.agencyMarketing(agency.id);
   const mailbox = serverMailbox ?? localMailbox;
-  const sender = api.mailboxes.resolveAgencyMarketingSender(agency.id);
-  const address = mailbox?.address ?? sender.fromEmail ?? agency.contactEmail;
-  const provider = mailbox?.provider ?? sender.provider ?? "other";
-  const requirements = api.mailboxes.productionRequirements(mailbox);
 
   useEffect(() => {
     if (!user) return;
     let active = true;
     void listMailboxConnections({ user, tenantId: agency.id, mineOnly: false }).then((result) => {
       if (!active) return;
-      if (!result.ok) {
-        setError(result.message ?? "Agency mailbox status could not be loaded.");
-        return;
-      }
+      if (!result.ok) return;
       const connected = result.connections.find(
         (connection) => connection.ownerType === "agency_marketing" && connection.status === "connected"
       );
@@ -1730,10 +1717,6 @@ function MarketingSenderCard({
       setServerMailbox(connected);
       setError(null);
     });
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("mailbox") === "connected" && params.get("owner") === "agency_marketing") {
-      setNotice("Agency campaign mailbox connected. New campaigns will send from this address.");
-    }
     return () => {
       active = false;
     };
@@ -1743,30 +1726,11 @@ function MarketingSenderCard({
     if (!serverMailbox?.address) setCompanyEmail(agency.contactEmail);
   }, [agency.contactEmail, serverMailbox?.address]);
 
-  async function connect(providerName: MailboxOAuthProvider) {
-    if (!user || connecting) return;
-    setConnecting(providerName);
-    setError(null);
-    const result = await startMailboxOAuth({
-      provider: providerName,
-      user,
-      tenantId: agency.id,
-      ownerType: "agency_marketing",
-      redirectAfter: "/employee/settings",
-    });
-    if (!result.ok) {
-      setError(result.message ?? "Agency mailbox connection could not be started.");
-      setConnecting(null);
-      return;
-    }
-    window.location.assign(result.authorizationUrl);
-  }
-
   async function saveCredentials() {
     if (!user || savingCredentials) return;
     const email = companyEmail.trim();
     if (!email || !companyPassword) {
-      setError("Enter the company campaign email and its email password or app password.");
+      setError("Enter the company email and password.");
       return;
     }
     setSavingCredentials(true);
@@ -1777,63 +1741,26 @@ function MarketingSenderCard({
       tenantId: agency.id,
       email,
       password: companyPassword,
-      provider: credentialProvider,
     });
     setCompanyPassword("");
     setSavingCredentials(false);
     if (!result.ok) {
-      setError(result.message ?? "The company campaign mailbox could not be verified.");
+      setError(result.message ?? "The company email could not be saved. Try again.");
       return;
     }
     api.mailboxes.cacheConnection(result.connection);
     setServerMailbox(result.connection);
     setCompanyEmail(result.connection.address);
-    setNotice("Company campaign mailbox verified and ready for AI marketing campaigns.");
+    setNotice("Company email saved. AI marketing campaigns will use this sender.");
     onChanged?.();
   }
 
   return (
     <Card>
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <CardHeader
-          title="AI marketing sender"
-          subtitle="Company campaigns send from the agency main contact email. Direct client, prospect, holder, and carrier emails send from the logged-in staff mailbox."
-        />
-        <div className="flex flex-wrap items-center gap-2">
-          {editable && user ? (
-            <>
-              <button
-                type="button"
-                className="btn-outline text-xs"
-                onClick={() => void connect("google")}
-                disabled={Boolean(connecting)}
-              >
-                {connecting === "google" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Mail className="h-3.5 w-3.5" />}
-                Connect Google
-              </button>
-              <button
-                type="button"
-                className="btn-outline text-xs"
-                onClick={() => void connect("microsoft")}
-                disabled={Boolean(connecting)}
-              >
-                {connecting === "microsoft" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Mail className="h-3.5 w-3.5" />}
-                Connect Microsoft
-              </button>
-            </>
-          ) : null}
-          {address ? (
-            <a
-              className="btn-outline text-xs"
-              href={mailboxUrl(address, provider)}
-              target="_blank"
-              rel="noreferrer"
-            >
-              <Mail className="h-3.5 w-3.5" /> Open mailbox
-            </a>
-          ) : null}
-        </div>
-      </div>
+      <CardHeader
+        title="AI marketing sender"
+        subtitle="AI marketing campaigns use this company email. Other messages continue to use the logged-in staff member's email."
+      />
 
       {notice ? (
         <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
@@ -1848,102 +1775,47 @@ function MarketingSenderCard({
       ) : null}
 
       {editable && user ? (
-        <div className="mt-4 rounded-md border border-ink-100 bg-white p-4">
-          <div className="text-sm font-semibold text-ink-900">Company campaign mailbox</div>
-          <div className="mt-1 text-sm text-ink-600">
-            AI marketing campaigns use this mailbox. The password is encrypted on the server and is never displayed again.
-          </div>
-          <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_220px_auto] md:items-end">
-            <label className="block">
-              <span className="form-label">Company email</span>
-              <input
-                className="input-base mt-1 w-full"
-                type="email"
-                autoComplete="email"
-                value={companyEmail}
-                onChange={(event) => setCompanyEmail(event.target.value)}
-                placeholder="marketing@agency.com"
-              />
-            </label>
-            <label className="block">
-              <span className="form-label">Email password / app password</span>
-              <input
-                className="input-base mt-1 w-full"
-                type="password"
-                autoComplete="current-password"
-                value={companyPassword}
-                onChange={(event) => setCompanyPassword(event.target.value)}
-                placeholder={mailbox?.authMode === "smtp_imap" ? "Replace saved password" : "Enter password"}
-              />
-            </label>
-            <label className="block">
-              <span className="form-label">Email provider</span>
-              <select
-                className="input-base mt-1 w-full"
-                value={credentialProvider}
-                onChange={(event) => setCredentialProvider(event.target.value as AgencyMarketingCredentialProvider)}
-              >
-                <option value="auto">Auto-detect</option>
-                <option value="google">Google Workspace / Gmail</option>
-                <option value="microsoft">Microsoft 365 / Outlook</option>
-                <option value="yahoo">Yahoo Mail</option>
-                <option value="apple">iCloud Mail</option>
-                <option value="zoho">Zoho Mail</option>
-              </select>
-            </label>
-            <button
-              type="button"
-              className="btn-primary h-11 whitespace-nowrap"
-              onClick={() => void saveCredentials()}
-              disabled={savingCredentials || !companyEmail.trim() || !companyPassword}
-            >
-              {savingCredentials ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-              {savingCredentials ? "Verifying" : "Save mailbox"}
-            </button>
-          </div>
-          <div className="mt-3 text-xs text-ink-500">
-            Google, Microsoft, Yahoo, and iCloud accounts may require an app password. OAuth connection above remains available and is recommended when supported.
-          </div>
+        <div className="mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] md:items-end">
+          <label className="block">
+            <span className="form-label">Email</span>
+            <input
+              className="input-base mt-1 w-full"
+              type="email"
+              autoComplete="email"
+              value={companyEmail}
+              onChange={(event) => setCompanyEmail(event.target.value)}
+              placeholder="marketing@agency.com"
+            />
+          </label>
+          <label className="block">
+            <span className="form-label">Password</span>
+            <input
+              className="input-base mt-1 w-full"
+              type="password"
+              autoComplete="current-password"
+              value={companyPassword}
+              onChange={(event) => setCompanyPassword(event.target.value)}
+              placeholder={mailbox?.authMode === "smtp_imap" ? "Replace saved password" : "Enter password"}
+            />
+          </label>
+          <button
+            type="button"
+            className="btn-primary h-11 whitespace-nowrap"
+            onClick={() => void saveCredentials()}
+            disabled={savingCredentials || !companyEmail.trim() || !companyPassword}
+          >
+            {savingCredentials ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+            {savingCredentials ? "Saving" : "Save"}
+          </button>
         </div>
       ) : null}
 
-      {editable && mailbox?.status !== "connected" ? (
-        <div className="mt-3 rounded-md border border-gold-200 bg-gold-50 px-3 py-2 text-sm text-ink-700">
-          Connect a company campaign mailbox before sending AI marketing campaigns.
-        </div>
-      ) : null}
-
-      <div className="mt-4 grid gap-3 md:grid-cols-4">
-        <div className="rounded-md border border-ink-100 bg-white p-3">
-          <div className="text-[11px] uppercase tracking-wider text-ink-500">From name</div>
-          <div className="mt-1 truncate text-sm font-semibold text-ink-900">{sender.fromName}</div>
-        </div>
-        <div className="rounded-md border border-ink-100 bg-white p-3">
-          <div className="text-[11px] uppercase tracking-wider text-ink-500">From email</div>
-          <div className="mt-1 truncate text-sm font-semibold text-ink-900">{address}</div>
-        </div>
-        <div className="rounded-md border border-ink-100 bg-white p-3">
-          <div className="text-[11px] uppercase tracking-wider text-ink-500">Provider</div>
+      {!editable ? (
+        <div className="mt-4">
+          <div className="form-label">Email</div>
           <div className="mt-1 text-sm font-semibold text-ink-900">
-            {mailbox?.authMode === "smtp_imap" ? "Password-secured email" : mailProviderLabel(provider)}
+            {mailbox?.address ?? agency.contactEmail}
           </div>
-        </div>
-        <div className="rounded-md border border-ink-100 bg-white p-3">
-          <div className="text-[11px] uppercase tracking-wider text-ink-500">Status</div>
-          <div className="mt-1 text-sm font-semibold capitalize text-ink-900">
-            {(mailbox?.status ?? sender.status ?? "needs_auth").replace(/_/g, " ")}
-          </div>
-        </div>
-      </div>
-
-      {requirements.length > 0 ? (
-        <div className="mt-4 rounded-md border border-gold-200 bg-gold-50 px-3 py-2 text-sm text-ink-700">
-          <div className="font-semibold text-ink-900">Production requirements</div>
-          <ul className="mt-1 list-disc space-y-1 pl-5">
-            {requirements.map((item) => (
-              <li key={item}>{item}</li>
-            ))}
-          </ul>
         </div>
       ) : null}
     </Card>

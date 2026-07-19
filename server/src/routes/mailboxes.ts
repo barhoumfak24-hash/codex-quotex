@@ -55,7 +55,6 @@ const syncSchema = z.object({
 const agencyMarketingCredentialSchema = z.object({
   email: emailSchema,
   password: z.string().min(1).max(1024),
-  provider: z.enum(["auto", "google", "microsoft", "yahoo", "apple", "zoho"]).default("auto"),
 });
 
 mailboxesRoutes.get("/oauth/readiness", (_req, res) => {
@@ -152,6 +151,7 @@ mailboxesRoutes.post("/agency-marketing/credentials", async (req, res) => {
       updatedById: req.auth.userId,
       agencyName: agency.name,
       ...parsed.data,
+      provider: "auto",
     });
     return res.json({
       ok: true,

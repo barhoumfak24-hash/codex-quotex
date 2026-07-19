@@ -4,14 +4,6 @@ import { currentServerSessionToken } from "@/lib/serverSession";
 
 export type MailboxOAuthProvider = "google" | "microsoft";
 export type MailboxOAuthOwnerType = "staff" | "agency_marketing";
-export type AgencyMarketingCredentialProvider =
-  | "auto"
-  | "google"
-  | "microsoft"
-  | "yahoo"
-  | "apple"
-  | "zoho";
-
 export type MailboxOAuthStartResult =
   | {
       ok: true;
@@ -81,7 +73,6 @@ export async function saveAgencyMarketingCredentials(input: {
   tenantId: string;
   email: string;
   password: string;
-  provider?: AgencyMarketingCredentialProvider;
 }): Promise<
   | { ok: true; connection: ConnectedMailbox; passwordConfigured: true }
   | { ok: false; error?: string; message?: string }
@@ -92,7 +83,6 @@ export async function saveAgencyMarketingCredentials(input: {
     body: JSON.stringify({
       email: input.email.trim(),
       password: input.password,
-      provider: input.provider ?? "auto",
     }),
   });
   const json = (await res.json().catch(() => null)) as
