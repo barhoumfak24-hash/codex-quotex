@@ -1780,7 +1780,11 @@ function usePostgresStepUpStore(): boolean {
 
 async function ensureManagerStepUpTable(): Promise<void> {
   if (!usePostgresStepUpStore()) return;
-  managerStepUpTableReady ??= (async () => {
+  if (managerStepUpTableReady) {
+    await managerStepUpTableReady;
+    return;
+  }
+  const initialization = (async () => {
     await prisma.$executeRawUnsafe(`
       CREATE TABLE IF NOT EXISTS public.manager_step_up_challenges (
         id TEXT PRIMARY KEY,
@@ -1809,6 +1813,10 @@ async function ensureManagerStepUpTable(): Promise<void> {
       ALTER TABLE public.manager_step_up_challenges ENABLE ROW LEVEL SECURITY
     `);
     await prisma.$executeRawUnsafe(`
+      REVOKE ALL ON TABLE public.manager_step_up_challenges
+      FROM PUBLIC, anon, authenticated
+    `);
+    await prisma.$executeRawUnsafe(`
       DO $$
       BEGIN
         IF NOT EXISTS (
@@ -1820,6 +1828,7 @@ async function ensureManagerStepUpTable(): Promise<void> {
         ) THEN
           CREATE POLICY manager_step_up_challenges_deny_browser_roles
             ON public.manager_step_up_challenges
+            AS RESTRICTIVE
             FOR ALL TO anon, authenticated
             USING (false)
             WITH CHECK (false);
@@ -1828,7 +1837,13 @@ async function ensureManagerStepUpTable(): Promise<void> {
       $$
     `);
   })();
-  await managerStepUpTableReady;
+  managerStepUpTableReady = initialization;
+  try {
+    await initialization;
+  } catch (error) {
+    if (managerStepUpTableReady === initialization) managerStepUpTableReady = null;
+    throw error;
+  }
 }
 
 async function saveManagerChallenge(challenge: ManagerStepUpChallenge): Promise<void> {

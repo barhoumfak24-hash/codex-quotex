@@ -22,6 +22,9 @@ describe("service-only RLS hardening", () => {
 
     expect(migrationSql).toContain("manager_step_up_challenges_deny_browser_roles");
     expect(migrationSql).toContain("prisma_migrations_deny_browser_roles");
+    expect(migrationSql.match(/REVOKE ALL ON TABLE/gi)).toHaveLength(2);
+    expect(migrationSql.match(/FROM PUBLIC, anon, authenticated/gi)).toHaveLength(2);
+    expect(migrationSql.match(/AS RESTRICTIVE/gi)).toHaveLength(2);
     expect(migrationSql.match(/FOR ALL TO anon, authenticated/gi)).toHaveLength(2);
     expect(migrationSql.match(/USING \(false\)/gi)).toHaveLength(2);
     expect(migrationSql.match(/WITH CHECK \(false\)/gi)).toHaveLength(2);
@@ -33,8 +36,11 @@ describe("service-only RLS hardening", () => {
       "ALTER TABLE public.manager_step_up_challenges ENABLE ROW LEVEL SECURITY"
     );
     expect(authRoute).toContain("manager_step_up_challenges_deny_browser_roles");
+    expect(authRoute).toContain("REVOKE ALL ON TABLE public.manager_step_up_challenges");
+    expect(authRoute).toContain("AS RESTRICTIVE");
     expect(authRoute).toContain("FOR ALL TO anon, authenticated");
     expect(authRoute).toContain("USING (false)");
     expect(authRoute).toContain("WITH CHECK (false)");
+    expect(authRoute).toContain("managerStepUpTableReady = null");
   });
 });
