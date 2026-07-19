@@ -448,31 +448,34 @@ function ContactQuotingCard({
 
     return (
       <Card id="ai-quoting-workspace" className="relative">
-        <div className="grid gap-4 xl:grid-cols-[minmax(340px,1fr)_auto_minmax(280px,1fr)] xl:items-center">
-          <div className="flex min-w-0 items-center gap-4">
-            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md border border-gold-200 bg-gold-50 text-gold-700">
-              <ClipboardList className="h-6 w-6" aria-hidden="true" />
-            </div>
-            <div className="min-w-0">
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-gold-700">
-                AI quoting workspace
+        <div className="space-y-4">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 items-center gap-4">
+              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md border border-gold-200 bg-gold-50 text-gold-700">
+                <ClipboardList className="h-6 w-6" aria-hidden="true" />
               </div>
-              <h3 className="mt-1 text-lg font-semibold text-ink-900">AI Quoting Workspace</h3>
-              <p className="mt-1 text-sm text-ink-500">
-                {lineLabel} - {existing ? "Quote flow in progress" : "Ready to start"}
-              </p>
+              <div className="min-w-0">
+                <h3 className="truncate text-lg font-semibold text-ink-900">
+                  AI Quoting Workspace
+                </h3>
+                <p className="mt-1 truncate text-sm text-ink-500">
+                  {lineLabel} - {existing ? "Quote flow in progress" : "Ready to start"}
+                </p>
+              </div>
             </div>
+            <Link
+              to={quoteFlowPath}
+              className="btn-primary inline-flex w-fit shrink-0 whitespace-nowrap text-sm sm:self-center"
+            >
+              {existing ? "Continue quote flow" : "Start quote flow"}
+              <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+            </Link>
           </div>
-          <div className="min-w-0 overflow-x-auto py-1 xl:justify-self-center">
-            {existing ? <QuoteWorkflowProgress session={existing} /> : null}
-          </div>
-          <Link
-            to={quoteFlowPath}
-            className="btn-primary inline-flex w-fit whitespace-nowrap text-sm xl:justify-self-end"
-          >
-            {existing ? "Continue quote flow" : "Start quote flow"}
-            <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
-          </Link>
+          {existing ? (
+            <div className="min-w-0 overflow-x-auto py-1">
+              <QuoteWorkflowProgress session={existing} />
+            </div>
+          ) : null}
         </div>
       </Card>
     );

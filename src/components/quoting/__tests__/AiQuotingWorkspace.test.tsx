@@ -55,7 +55,7 @@ async function typeInto(input: HTMLInputElement, value: string) {
 
 async function openAiWorkspace(host: HTMLElement) {
   await click(buttonByText(host, /(Start|Continue) quote flow/i));
-  expect(host.querySelector('[role="dialog"]')?.textContent).toContain("AI quoting workspace");
+  expect(host.querySelector('[role="dialog"]')?.textContent).toContain("AI Quoting Workspace");
 }
 
 async function renderClientQuotingCard(
@@ -154,6 +154,7 @@ describe("AiQuotingWorkspace component", () => {
     });
 
     expect(host.textContent).toContain("AI Quoting Workspace");
+    expect(host.textContent?.match(/AI Quoting Workspace/g)).toHaveLength(1);
     expect(host.textContent).toContain("Setup pending - Ready to start");
     expect(host.textContent).not.toContain("Workflow setup summary");
     expect(host.querySelector('aside[aria-label^="Quote workflow steps"]')).toBeNull();
@@ -198,6 +199,9 @@ describe("AiQuotingWorkspace component", () => {
     expect(host.querySelector('[aria-label^="Workflow progress"]')?.className).toContain(
       "flex-nowrap"
     );
+    expect(
+      host.querySelector('[aria-label^="Workflow progress"]')?.closest(".overflow-x-auto")
+    ).toBeTruthy();
     expect(
       host.querySelector(`a[href="/employee/clients/${customer.id}/quote-flow"]`)?.textContent
     ).toContain("Continue quote flow");
@@ -334,7 +338,7 @@ describe("AiQuotingWorkspace component", () => {
     await click(startButton);
 
     expect(api.quoting.getForCustomer(customer.id)?.lineOfBusiness).toBe("commercial");
-    expect(host.querySelector('[role="dialog"]')?.textContent).toContain("AI quoting workspace");
+    expect(host.querySelector('[role="dialog"]')?.textContent).toContain("AI Quoting Workspace");
     expect(host.textContent).toContain("Map known data onto the selected ACORD document");
     expect(host.textContent).toContain("ACORD application workspace");
 
@@ -644,7 +648,7 @@ describe("AiQuotingWorkspace component", () => {
       messageIds.every((messageId) => deliveredMessages.get(messageId)?.deliveryStatus === "sent")
     ).toBe(true);
     expect(host.textContent).not.toContain("Review the ACORD and handle the remaining fields");
-    expect(host.querySelector('[role="dialog"]')?.textContent).toContain("AI quoting workspace");
+    expect(host.querySelector('[role="dialog"]')?.textContent).toContain("AI Quoting Workspace");
 
     await act(async () => {
       root.unmount();

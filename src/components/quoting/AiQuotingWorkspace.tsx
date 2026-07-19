@@ -1790,9 +1790,6 @@ function AiWorkspaceFullScreen({
             <div className="flex min-w-0 items-center justify-center gap-3">
               <AiWorkspaceLogoMark />
               <div className="min-w-0">
-                <div className="text-[10px] font-semibold uppercase tracking-wider text-gold-700">
-                  AI quoting workspace
-                </div>
                 <h2
                   id="ai-workspace-fullscreen-title"
                   className="truncate text-lg font-semibold text-ink-950"
