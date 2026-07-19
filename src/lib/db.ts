@@ -37,6 +37,7 @@ import type {
   CarrierDownload,
   CarrierRunnerJob,
   CarrierContact,
+  CarrierEmailProcessing,
   ConnectedMailbox,
   CategoryAgencyLink,
   Claim,
@@ -80,12 +81,12 @@ import type {
 
 // Bump this whenever DbShape gets a new table that older localStorage caches
 // won't have, so visitors automatically get the fresh seed.
-const STORAGE_KEY = "quotex.db.v32";
+const STORAGE_KEY = "quotex.db.v33";
 const CRITICAL_STORAGE_KEY = `${STORAGE_KEY}.critical`;
 const QUOTE_WORKFLOW_STORAGE_KEY = `${STORAGE_KEY}.quote-workflows`;
 const LOCAL_HISTORY_PREFIX = `${STORAGE_KEY}.history`;
 const LOCAL_HISTORY_LIMIT = 5;
-const LEGACY_KEYS = ["quotex.db.v1", "quotex.db.v2", "quotex.db.v3", "quotex.db.v4", "quotex.db.v5", "quotex.db.v6", "quotex.db.v7", "quotex.db.v8", "quotex.db.v9", "quotex.db.v10", "quotex.db.v11", "quotex.db.v12", "quotex.db.v13", "quotex.db.v14", "quotex.db.v15", "quotex.db.v16", "quotex.db.v17", "quotex.db.v18", "quotex.db.v19", "quotex.db.v20", "quotex.db.v21", "quotex.db.v22", "quotex.db.v23", "quotex.db.v24", "quotex.db.v25", "quotex.db.v26", "quotex.db.v27", "quotex.db.v28", "quotex.db.v29", "quotex.db.v30", "quotex.db.v31"];
+const LEGACY_KEYS = ["quotex.db.v1", "quotex.db.v2", "quotex.db.v3", "quotex.db.v4", "quotex.db.v5", "quotex.db.v6", "quotex.db.v7", "quotex.db.v8", "quotex.db.v9", "quotex.db.v10", "quotex.db.v11", "quotex.db.v12", "quotex.db.v13", "quotex.db.v14", "quotex.db.v15", "quotex.db.v16", "quotex.db.v17", "quotex.db.v18", "quotex.db.v19", "quotex.db.v20", "quotex.db.v21", "quotex.db.v22", "quotex.db.v23", "quotex.db.v24", "quotex.db.v25", "quotex.db.v26", "quotex.db.v27", "quotex.db.v28", "quotex.db.v29", "quotex.db.v30", "quotex.db.v31", "quotex.db.v32"];
 // Every table that can contain agency-entered or workflow-generated data is
 // treated as recoverable. Refreshing, deploying a new bundle, or bumping the
 // local schema version must never silently fall back to seed data and hide real
@@ -117,6 +118,7 @@ const CRITICAL_TABLES: (keyof DbShape)[] = [
   "quotingSessions",
   "importBatches",
   "communications",
+  "carrierEmailProcessing",
   "connectedMailboxes",
   "documents",
   "notes",
@@ -243,6 +245,7 @@ interface DbShape {
   claims: Claim[];
   notes: Note[];
   communications: Communication[];
+  carrierEmailProcessing: CarrierEmailProcessing[];
   connectedMailboxes: ConnectedMailbox[];
   mailboxOutbox: MailboxOutboxJob[];
   audit: AuditLog[];
@@ -299,6 +302,7 @@ function freshSeed(): DbShape {
     claims: structuredClone(seed.SEED_CLAIMS),
     notes: structuredClone(seed.SEED_NOTES),
     communications: structuredClone(seed.SEED_COMMUNICATIONS),
+    carrierEmailProcessing: [],
     connectedMailboxes: [],
     mailboxOutbox: [],
     audit: [],

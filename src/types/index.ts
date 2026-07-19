@@ -2088,6 +2088,29 @@ export interface Communication {
   createdById?: string;
 }
 
+export type CarrierEmailProcessingOutcome =
+  | "matched_processed"
+  | "manual_review"
+  | "ignored";
+
+export interface CarrierEmailProcessing {
+  id: string;
+  tenantId: string;
+  communicationId: string;
+  outcome: CarrierEmailProcessingOutcome;
+  matchedSessionId?: string;
+  matchedSubmissionId?: string;
+  candidateSubmissionIds?: string[];
+  matchReason: string;
+  classification?: CommercialCarrierSubmissionQuote["outcome"];
+  parseConfidence?: number;
+  processedAt: string;
+  reprocessedFrom?: string;
+  assignedById?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 // =====================================================================
 // Internal staff messaging. Lives separately from Communications
 // (which are agency ↔ customer) and MarketingMessages (which are
@@ -2198,6 +2221,7 @@ export interface CommercialCarrierSubmissionQuote {
   declineReason?: string;
   supplementalAttachmentIds?: string[];
   evidenceSnippets?: string[];
+  responseDeadline?: string;
   parsedAt: string;
   confidence: number;
 }
@@ -2234,6 +2258,7 @@ export interface CommercialCarrierSubmission {
   quote?: CommercialCarrierSubmissionQuote;
   parseConfidence?: number;
   agentReviewReason?: string;
+  responseDeadline?: string;
   deliveryFailureReason?: string;
 }
 

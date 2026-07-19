@@ -233,6 +233,7 @@ export async function syncCommunicationsFromLiveMailbox(input: {
     }
 
     let imported = 0;
+    const mirroredCommunicationIds: string[] = [];
     for (const message of json.result.messages) {
       const mirrored = api.mailbox.mirrorExternalEmail({
         ...message,
@@ -241,8 +242,17 @@ export async function syncCommunicationsFromLiveMailbox(input: {
         mailboxAccount: message.mailboxAccount || json.result.mailboxAccount,
         provider: message.provider || json.result.provider,
       });
-      if (mirrored) imported += 1;
+      if (mirrored) {
+        imported += 1;
+        mirroredCommunicationIds.push(mirrored.id);
+      }
     }
+    await api.quoting.processInboundCarrierCommunications(
+      input.tenantId,
+      mirroredCommunicationIds.length > 0
+        ? { communicationIds: mirroredCommunicationIds }
+        : undefined
+    );
     return {
       ok: true,
       imported,

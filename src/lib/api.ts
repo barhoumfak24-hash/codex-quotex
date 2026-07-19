@@ -13,6 +13,7 @@ import {
   aiGeneratePersonalQuestionnaire,
   aiGenerateCommercialQuestionnaire,
   aiMapAcordFields,
+  aiParseCarrierReply,
 } from "./ai";
 import { ACORD_FORM_CATALOG, type AcordFormSeed } from "./seed";
 import {
@@ -115,6 +116,12 @@ import {
 } from "./acordQuestionnaires";
 import { fillAcordFromClientDossier } from "./acordAiFillEngine";
 import {
+  buildAcroFormFillPlan,
+  bytesToPdfDataUrl,
+  extractAcroFormFields,
+  fillPdfAcroForm,
+} from "./pdfAcroForm";
+import {
   aiEvidenceAllowsQuestionnairePrefill,
   aiEvidenceAllowsDocumentAutofill,
   evaluateAiProductionGate,
@@ -141,6 +148,7 @@ import type {
   CarrierAgencyLink,
   CarrierAppetite,
   CarrierContact,
+  CarrierEmailProcessing,
   CarrierDownload,
   CarrierDownloadChange,
   CarrierDownloadDocumentPayload,
@@ -6663,6 +6671,101 @@ function parseCommercialCarrierReplyFromCommunication(
   };
 }
 
+async function parseCommercialCarrierReplyWithAi(
+  communication: Communication,
+  submission: CommercialCarrierSubmission
+): Promise<ReturnType<typeof parseCommercialCarrierReplyFromCommunication>> {
+  const attachmentIdsByName = new Map(
+    (communication.attachments ?? []).map((attachment) => [attachment.fileName.toLowerCase(), attachment.id])
+  );
+  const parsed = await aiParseCarrierReply({
+    submission: {
+      submissionId: submission.submissionId,
+      carrierId: submission.carrierId,
+      status: submission.status,
+      policyType: submission.quote?.policyType,
+    },
+    email: {
+      subject: communication.subject,
+      text: communication.body,
+      html: communication.bodyHtml,
+      attachments: (communication.attachments ?? []).map((attachment) => ({
+        id: attachment.id,
+        fileName: attachment.fileName,
+        fileType: attachment.fileType,
+        description: attachment.description,
+      })),
+    },
+  });
+  const parsedAt = nowIso();
+  const supplementalAttachmentIds = uniqueStrings([
+    ...(communication.attachments ?? [])
+      .filter((attachment) =>
+        /pdf|supplement|application|questionnaire|loss.?run/i.test(
+          `${attachment.fileName} ${attachment.fileType} ${attachment.description ?? ""}`
+        )
+      )
+      .map((attachment) => attachment.id),
+    ...parsed.supplementalAttachmentNames.map((name) => attachmentIdsByName.get(name.toLowerCase())),
+  ]);
+  const requiresReview = parsed.requiresAgentReview || parsed.confidence < 0.72;
+  const status: CommercialCarrierSubmission["status"] = requiresReview
+    ? "agent_review"
+    : parsed.outcome === "declined"
+    ? "declined"
+    : parsed.outcome === "more_info_required"
+    ? supplementalAttachmentIds.length > 0
+      ? "needs_supplemental"
+      : "needs_client_info"
+    : parsed.outcome === "accepted" || parsed.outcome === "quoted"
+    ? "accepted"
+    : "agent_review";
+  const firstPremium = currencyStringToNumber(parsed.premiums[0]);
+  const missingFields =
+    parsed.requestedItems.length > 0
+      ? parsed.requestedItems
+      : status === "needs_supplemental"
+      ? (communication.attachments ?? [])
+          .filter((attachment) => supplementalAttachmentIds.includes(attachment.id))
+          .map((attachment) => `Complete ${attachment.fileName}`)
+      : undefined;
+  return {
+    status,
+    premiumEstimate: firstPremium,
+    finalPremium: status === "accepted" ? firstPremium : undefined,
+    declinedReason: parsed.declineReason,
+    underwriterNotes: uniqueStrings([
+      ...parsed.carrierNotes,
+      ...parsed.conditions,
+      ...parsed.nextSteps,
+    ]).join(" "),
+    missingFields,
+    agentReviewReason:
+      status === "agent_review"
+        ? parsed.agentReviewReason ?? "Carrier reply requires agent review before the workflow advances."
+        : undefined,
+    quote: {
+      outcome: parsed.outcome,
+      policyType: parsed.policyType,
+      coverages: parsed.coverages,
+      limits: parsed.limits,
+      premiums: parsed.premiums,
+      deductibles: parsed.deductibles,
+      terms: parsed.terms,
+      carrierNotes: parsed.carrierNotes,
+      conditions: parsed.conditions,
+      nextSteps: parsed.nextSteps,
+      requestedItems: parsed.requestedItems,
+      supplementalAttachmentIds,
+      declineReason: parsed.declineReason,
+      evidenceSnippets: parsed.evidenceSnippets,
+      responseDeadline: parsed.responseDeadline,
+      parsedAt,
+      confidence: parsed.confidence,
+    },
+  };
+}
+
 function commercialCarrierReplyQuestions(
   submission: CommercialCarrierSubmission,
   carrierName: string
@@ -6684,33 +6787,69 @@ function commercialCarrierReplyQuestions(
     }));
 }
 
-function communicationMatchesCommercialSubmission(
+type CommercialSubmissionMatchReason =
+  | "carrier_submission_id"
+  | "thread_id"
+  | "external_thread_id"
+  | "rfc822_reply_chain"
+  | "literal_submission_id";
+
+function normalizeMailIdentifier(value: string | undefined): string {
+  return (value ?? "").trim().replace(/^<|>$/g, "").toLowerCase();
+}
+
+function commercialSubmissionMessageIdentifiers(
+  submission: CommercialCarrierSubmission
+): Set<string> {
+  const messageIds = uniqueStrings([
+    ...(submission.applicationMessageIds ?? []),
+    ...(submission.supplementalMessageIds ?? []),
+  ]);
+  const messages = db.list("communications").filter((row) => messageIds.includes(row.id));
+  return new Set(
+    messages
+      .flatMap((row) => [row.rfc822MessageId, row.messageIdHeader, row.externalMessageId])
+      .map(normalizeMailIdentifier)
+      .filter(Boolean)
+  );
+}
+
+function commercialSubmissionMatchReason(
   session: QuotingSession,
   submission: CommercialCarrierSubmission,
   communication: Communication
-): boolean {
+): CommercialSubmissionMatchReason | null {
   const submissionId =
     submission.submissionId ?? commercialSubmissionStableId(session, submission.carrierId);
-  if (communication.carrierSubmissionId === submissionId) return true;
+  if (communication.carrierSubmissionId === submissionId) return "carrier_submission_id";
   if (communication.threadId && commercialSubmissionThreadIds(submission).has(communication.threadId)) {
-    return true;
+    return "thread_id";
   }
   if (
     communication.externalThreadId &&
     commercialSubmissionExternalThreadIds(submission).has(communication.externalThreadId)
   ) {
-    return true;
+    return "external_thread_id";
   }
-  if (
-    communication.carrierContactId &&
-    (submission.underwriterContactIds ?? []).includes(communication.carrierContactId)
-  ) {
-    const contact = contactForQuotingSession(session);
-    const haystack = [communication.subject ?? "", communication.body].join(" ").toLowerCase();
-    const contactName = (contact?.name ?? "").toLowerCase();
-    return haystack.includes(submissionId.toLowerCase()) || (!!contactName && haystack.includes(contactName));
+  const knownMessageIds = commercialSubmissionMessageIdentifiers(submission);
+  const replyChainIds = uniqueStrings([
+    communication.inReplyToHeader,
+    ...(communication.references ?? []),
+  ]).map(normalizeMailIdentifier);
+  if (replyChainIds.some((id) => knownMessageIds.has(id))) {
+    return "rfc822_reply_chain";
   }
-  return false;
+  const haystack = [communication.subject ?? "", communication.body].join(" ").toLowerCase();
+  if (haystack.includes(submissionId.toLowerCase())) return "literal_submission_id";
+  return null;
+}
+
+function communicationMatchesCommercialSubmission(
+  session: QuotingSession,
+  submission: CommercialCarrierSubmission,
+  communication: Communication
+): boolean {
+  return commercialSubmissionMatchReason(session, submission, communication) !== null;
 }
 
 function linkInboundCarrierCommunicationToSubmission(row: Communication): Communication {
@@ -6723,16 +6862,475 @@ function linkInboundCarrierCommunicationToSubmission(row: Communication): Commun
         session.lineOfBusiness === "commercial" &&
         (session.commercialCarrierSubmissions?.length ?? 0) > 0
     );
-  for (const session of sessions) {
-    const match = (session.commercialCarrierSubmissions ?? []).find((submission) =>
-      communicationMatchesCommercialSubmission(session, submission, row)
-    );
-    if (match) {
-      const submissionId = match.submissionId ?? commercialSubmissionStableId(session, match.carrierId);
-      return db.update("communications", row.id, { carrierSubmissionId: submissionId }) ?? row;
-    }
+  const matches = sessions.flatMap((session) =>
+    (session.commercialCarrierSubmissions ?? []).flatMap((submission) =>
+      commercialSubmissionMatchReason(session, submission, row)
+        ? [{ session, submission }]
+        : []
+    )
+  );
+  if (matches.length === 1) {
+    const { session, submission } = matches[0];
+    const submissionId = submission.submissionId ?? commercialSubmissionStableId(session, submission.carrierId);
+    return db.update("communications", row.id, { carrierSubmissionId: submissionId }) ?? row;
   }
   return row;
+}
+
+type CommercialSubmissionMatch = {
+  session: QuotingSession;
+  submission: CommercialCarrierSubmission;
+  reason: CommercialSubmissionMatchReason;
+};
+
+function commercialSubmissionMatchesForCommunication(
+  tenantId: string,
+  communication: Communication
+): CommercialSubmissionMatch[] {
+  if (communication.tenantId !== tenantId || communication.direction !== "inbound") return [];
+  return db
+    .list("quotingSessions")
+    .filter(
+      (session) =>
+        session.tenantId === tenantId &&
+        session.lineOfBusiness === "commercial" &&
+        (session.commercialCarrierSubmissions?.length ?? 0) > 0
+    )
+    .flatMap((session) =>
+      (session.commercialCarrierSubmissions ?? []).flatMap((submission) => {
+        const reason = commercialSubmissionMatchReason(session, submission, communication);
+        return reason ? [{ session, submission, reason }] : [];
+      })
+    );
+}
+
+function manualReviewCandidatesForCommunication(
+  tenantId: string,
+  communication: Communication
+): CommercialSubmissionMatch[] {
+  if (!communication.carrierContactId) return [];
+  return db
+    .list("quotingSessions")
+    .filter(
+      (session) =>
+        session.tenantId === tenantId &&
+        session.lineOfBusiness === "commercial" &&
+        (session.commercialCarrierSubmissions?.length ?? 0) > 0
+    )
+    .flatMap((session) =>
+      (session.commercialCarrierSubmissions ?? [])
+        .filter((submission) =>
+          (submission.underwriterContactIds ?? []).includes(communication.carrierContactId ?? "")
+        )
+        .map((submission) => ({
+          session,
+          submission,
+          reason: "literal_submission_id" as CommercialSubmissionMatchReason,
+        }))
+    );
+}
+
+function carrierEmailProcessingId(tenantId: string, communicationId: string): string {
+  return `carrier_email_${tenantId}_${communicationId}`;
+}
+
+function upsertCarrierEmailProcessing(
+  input: Omit<CarrierEmailProcessing, "id" | "createdAt" | "updatedAt">
+): CarrierEmailProcessing {
+  const existing = db
+    .list("carrierEmailProcessing")
+    .find(
+      (row) =>
+        row.tenantId === input.tenantId && row.communicationId === input.communicationId
+    );
+  const updatedAt = nowIso();
+  if (existing) {
+    return (
+      db.update("carrierEmailProcessing", existing.id, {
+        ...input,
+        updatedAt,
+      }) ?? existing
+    );
+  }
+  const row: CarrierEmailProcessing = {
+    ...input,
+    id: carrierEmailProcessingId(input.tenantId, input.communicationId),
+    createdAt: updatedAt,
+    updatedAt,
+  };
+  db.insert("carrierEmailProcessing", row);
+  return row;
+}
+
+type StagedCarrierSupplementals = {
+  documentIds: string[];
+  missingFields: string[];
+  auditNotes: string[];
+  resolvedLossRun: boolean;
+};
+
+function attachmentPdfSource(attachment: CommunicationAttachment): string | undefined {
+  if (attachment.dataUrl) return attachment.dataUrl;
+  const linkedDocument = attachment.documentId
+    ? db.list("documents").find((document) => document.id === attachment.documentId)
+    : undefined;
+  return linkedDocument?.downloadUrl ?? linkedDocument?.storagePath ?? attachment.storagePath;
+}
+
+async function readPdfBytes(source: string | undefined): Promise<Uint8Array | null> {
+  if (!source) return null;
+  try {
+    if (source.startsWith("data:")) {
+      const comma = source.indexOf(",");
+      if (comma < 0) return null;
+      const metadata = source.slice(0, comma);
+      const payload = source.slice(comma + 1);
+      const binary = metadata.includes(";base64")
+        ? globalThis.atob(payload)
+        : decodeURIComponent(payload);
+      return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    }
+    if (!/^https?:\/\//i.test(source)) return null;
+    const response = await fetch(source);
+    if (!response.ok) return null;
+    return new Uint8Array(await response.arrayBuffer());
+  } catch {
+    return null;
+  }
+}
+
+async function stageCarrierRequestedSupplementals(input: {
+  session: QuotingSession;
+  submission: CommercialCarrierSubmission;
+  communication: Communication;
+  parsed: Awaited<ReturnType<typeof parseCommercialCarrierReplyWithAi>>;
+}): Promise<StagedCarrierSupplementals> {
+  if (
+    input.parsed.status !== "needs_supplemental" &&
+    input.parsed.status !== "needs_client_info"
+  ) {
+    return { documentIds: [], missingFields: [], auditNotes: [], resolvedLossRun: false };
+  }
+  const requestedIds = new Set(input.parsed.quote.supplementalAttachmentIds ?? []);
+  const attachments = (input.communication.attachments ?? []).filter(
+    (attachment) =>
+      attachment.fileType === "application/pdf" &&
+      (requestedIds.size === 0 || requestedIds.has(attachment.id))
+  );
+  const documentIds: string[] = [];
+  const missingFields: string[] = [];
+  const auditNotes: string[] = [];
+  const updatedAttachments = [...(input.communication.attachments ?? [])];
+  const requestedText = [
+    ...(input.parsed.quote.requestedItems ?? []),
+    ...(input.parsed.missingFields ?? []),
+    input.communication.subject ?? "",
+  ].join(" ");
+  let resolvedLossRun = false;
+
+  if (/\bloss[ -]?runs?\b/i.test(requestedText) && input.session.customerId) {
+    const { buildLossRunReport, lossRunAttachment } = await import("./lossRuns");
+    const report = buildLossRunReport(input.session.customerId);
+    if (report) {
+      const attachment = lossRunAttachment(report);
+      const document = api.documents.create({
+        tenantId: input.session.tenantId,
+        uploadedById: input.session.createdById,
+        fileName: attachment.fileName,
+        fileType: attachment.fileType,
+        documentName: attachment.description,
+        type: "claim_document",
+        visibility: "employee_only",
+        status: "approved",
+        customerId: input.session.customerId,
+        quoteRequestId: input.session.id,
+        lineOfBusiness: "commercial",
+        storagePath: `generated://loss-run/${input.session.id}/${input.communication.id}`,
+        templateFields: {
+          "Source carrier email ID": input.communication.id,
+          "Generated from recorded claims": String(report.rows.length),
+          "Open claims": String(report.openCount),
+          "Claims in review": String(report.inReviewCount),
+          "Closed claims": String(report.closedCount),
+          "Value sources": "QuoteX recorded claims, policies, carriers, and assets",
+        },
+      });
+      documentIds.push(document.id);
+      resolvedLossRun = true;
+      auditNotes.push(
+        `${attachment.fileName}: generated from ${report.rows.length} recorded claim${
+          report.rows.length === 1 ? "" : "s"
+        }; staged for agent review.`
+      );
+    }
+  }
+
+  for (const attachment of attachments) {
+    const bytes = await readPdfBytes(attachmentPdfSource(attachment));
+    if (!bytes) {
+      const note = `${attachment.fileName} needs manual handling because its PDF bytes were not available from the synced email.`;
+      missingFields.push(note);
+      auditNotes.push(note);
+      continue;
+    }
+    let acroFields: ReturnType<typeof extractAcroFormFields>;
+    try {
+      acroFields = extractAcroFormFields(bytes);
+    } catch {
+      acroFields = [];
+    }
+    if (acroFields.length === 0) {
+      const detected = detectFillableDocumentFields({
+        fileName: attachment.fileName,
+        fileType: attachment.fileType,
+        type: "carrier_supplemental",
+      });
+      const note = `${attachment.fileName} needs manual handling because no editable PDF fields were found (${detected.detection.reason}).`;
+      missingFields.push(note);
+      auditNotes.push(note);
+      continue;
+    }
+    const template = {
+      templateId: attachment.sourceDocumentId ?? attachment.documentId ?? attachment.id,
+      fileName: attachment.fileName,
+      documentName: attachment.description ?? attachment.fileName,
+      type: "carrier_supplemental",
+      autoFilledFieldCount: 0,
+      missingFieldCount: 0,
+    } satisfies CommercialAcordTemplateSelection;
+    const filled = fillAcordFromClientDossier({
+      template,
+      dossier: clientAcordFillDossier(
+        input.session,
+        input.session.questionnaireResponses ?? {}
+      ),
+      kind: "supplemental",
+    });
+    const plan = buildAcroFormFillPlan(filled.fields, acroFields);
+    if (plan.filledFieldCount === 0) {
+      const note = `${attachment.fileName} has editable fields, but Quotex found no verified values safe to insert.`;
+      missingFields.push(note, ...plan.missingFields);
+      auditNotes.push(note);
+      continue;
+    }
+    const completedBytes = fillPdfAcroForm(bytes, plan.values);
+    const completedDataUrl = bytesToPdfDataUrl(completedBytes);
+    const document = api.documents.create({
+      tenantId: input.session.tenantId,
+      uploadedById: input.session.createdById,
+      fileName: attachment.fileName.replace(/\.pdf$/i, "-completed.pdf"),
+      fileType: "application/pdf",
+      documentName: `Completed carrier supplemental - ${attachment.fileName}`,
+      type: "completed_carrier_supplemental",
+      visibility: "employee_only",
+      status: "approved",
+      customerId: input.session.customerId,
+      quoteRequestId: input.session.id,
+      lineOfBusiness: "commercial",
+      storagePath: `generated://carrier-supplemental/${input.communication.id}/${attachment.id}`,
+      downloadUrl: completedDataUrl,
+      templateFields: {
+        ...filled.fields,
+        "Source carrier email ID": input.communication.id,
+        "Source attachment ID": attachment.id,
+        "Filled field count": String(plan.filledFieldCount),
+        "Remaining blank field count": String(plan.missingFields.length),
+        "Value sources": Array.from(new Set(plan.mappings.map((mapping) => mapping.source))).join(", "),
+      },
+    });
+    documentIds.push(document.id);
+    missingFields.push(...plan.missingFields);
+    auditNotes.push(
+      `${attachment.fileName}: ${plan.filledFieldCount} field${
+        plan.filledFieldCount === 1 ? "" : "s"
+      } filled, ${plan.missingFields.length} remaining.`
+    );
+    const attachmentIndex = updatedAttachments.findIndex((candidate) => candidate.id === attachment.id);
+    if (attachmentIndex >= 0) {
+      updatedAttachments[attachmentIndex] = {
+        ...attachment,
+        documentId: document.id,
+        dataUrl: completedDataUrl,
+        filledFieldCount: plan.filledFieldCount,
+        filledFields: filled.fields,
+        fieldMappings: plan.mappings.map((mapping) => ({
+          sourceLabel: mapping.sourceLabel,
+          targetField: mapping.targetField,
+          value: mapping.value,
+          source: mapping.source,
+        })),
+      };
+    }
+  }
+  if (documentIds.length > 0) {
+    db.update("communications", input.communication.id, { attachments: updatedAttachments });
+  }
+  return {
+    documentIds: uniqueStrings(documentIds),
+    missingFields: uniqueStrings(missingFields),
+    auditNotes,
+    resolvedLossRun,
+  };
+}
+
+async function applyInboundCarrierReply(input: {
+  tenantId: string;
+  sessionId: string;
+  submissionId: string;
+  communicationId: string;
+  matchReason: string;
+}): Promise<QuotingSession | null> {
+  const session = api.quoting.get(input.sessionId);
+  const communication = db
+    .list("communications")
+    .find(
+      (row) =>
+        row.id === input.communicationId &&
+        row.tenantId === input.tenantId &&
+        row.direction === "inbound"
+    );
+  if (!session || session.tenantId !== input.tenantId || !communication) return null;
+  const submissions = session.commercialCarrierSubmissions ?? [];
+  const submissionIndex = submissions.findIndex(
+    (candidate) =>
+      (candidate.submissionId ?? commercialSubmissionStableId(session, candidate.carrierId)) ===
+      input.submissionId
+  );
+  if (submissionIndex < 0) return null;
+  const submission = {
+    ...submissions[submissionIndex],
+    submissionId: input.submissionId,
+  };
+  if ((submission.replyCommunicationIds ?? []).includes(communication.id)) return session;
+
+  const linkedCommunication =
+    communication.carrierSubmissionId === input.submissionId
+      ? communication
+      : db.update("communications", communication.id, {
+          carrierSubmissionId: input.submissionId,
+        }) ?? communication;
+  const parsed = await parseCommercialCarrierReplyWithAi(linkedCommunication, submission);
+  const carrier = db.list("carriers").find((candidate) => candidate.id === submission.carrierId);
+  const processedAt = nowIso();
+  const stagedSupplementals = await stageCarrierRequestedSupplementals({
+    session,
+    submission,
+    communication: linkedCommunication,
+    parsed,
+  });
+  const parsedMissingFields = uniqueStrings([
+    ...(parsed.missingFields ?? []).filter(
+      (field) => !(stagedSupplementals.resolvedLossRun && /\bloss[ -]?runs?\b/i.test(field))
+    ),
+    ...stagedSupplementals.missingFields,
+  ]);
+  const nextSubmission: CommercialCarrierSubmission = {
+    ...submission,
+    status: parsed.status,
+    responseAt: processedAt,
+    acceptedAt: parsed.status === "accepted" ? processedAt : submission.acceptedAt,
+    responseDeadline: parsed.quote.responseDeadline,
+    replyCommunicationIds: uniqueStrings([
+      ...(submission.replyCommunicationIds ?? []),
+      linkedCommunication.id,
+    ]),
+    quote: parsed.quote,
+    parseConfidence: parsed.quote.confidence,
+    premiumEstimate: parsed.premiumEstimate ?? submission.premiumEstimate,
+    finalPremium: parsed.finalPremium ?? submission.finalPremium,
+    declinedReason: parsed.declinedReason,
+    underwriterNotes: parsed.underwriterNotes,
+    missingFields: parsedMissingFields,
+    supplementalDocumentIds: uniqueStrings([
+      ...(submission.supplementalDocumentIds ?? []),
+      ...stagedSupplementals.documentIds,
+    ]),
+    agentReviewReason: parsed.agentReviewReason,
+    aiRationale:
+      parsed.status === "agent_review"
+        ? parsed.agentReviewReason ?? "Carrier reply needs agent review before the workflow advances."
+        : `Carrier reply parsed from inbound message ${linkedCommunication.id}; outcome ${parsed.quote.outcome}.`,
+  };
+  const nextSubmissions = submissions.map((candidate, index) =>
+    index === submissionIndex ? nextSubmission : candidate
+  );
+  let questions = session.questionnaireQuestions ?? [];
+  const missingFields = new Set(session.missingFields ?? []);
+  if (parsedMissingFields.length) {
+    parsedMissingFields.forEach((field) => missingFields.add(field));
+    questions = appendUniqueQuestions(
+      questions,
+      commercialCarrierReplyQuestions(nextSubmission, carrier?.name ?? "Carrier")
+    );
+  }
+  const hasMissingInfo = nextSubmissions.some(
+    (candidate) =>
+      candidate.status === "needs_client_info" || candidate.status === "needs_supplemental"
+  );
+  const hasAgentReview = nextSubmissions.some((candidate) => candidate.status === "agent_review");
+  const quotedCarrierCount = nextSubmissions.filter(
+    (candidate) =>
+      candidate.status === "accepted" &&
+      Boolean(candidate.finalPremium ?? candidate.premiumEstimate)
+  ).length;
+  const updated = db.update("quotingSessions", session.id, {
+    commercialCarrierSubmissions: nextSubmissions,
+    questionnaireQuestions: questions,
+    missingFields: Array.from(missingFields),
+    status: hasMissingInfo ? "awaiting_reply" : quotedCarrierCount > 0 ? "quoting" : session.status,
+    aiSummary: hasAgentReview
+      ? "One or more carrier replies need agent review before Quotex advances the workflow."
+      : hasMissingInfo
+      ? "Carrier replies were parsed and supplemental missing fields are ready for agent review."
+      : quotedCarrierCount > 0
+      ? `Carrier replies were parsed with ${quotedCarrierCount} quoted market${
+          quotedCarrierCount === 1 ? "" : "s"
+        } ready for ranking.`
+      : "Carrier replies were parsed and the workflow is waiting for more explicit carrier outcomes.",
+    updatedAt: processedAt,
+  });
+  if (!updated) return null;
+
+  logQuotingWorkflowProgress(updated, {
+    message:
+      parsed.status === "agent_review"
+        ? `${carrier?.name ?? "Carrier"} reply needs agent review.`
+        : `${carrier?.name ?? "Carrier"} carrier reply captured.`,
+    detail:
+      parsed.status === "declined"
+        ? parsed.declinedReason ?? "Carrier declined without a stated reason."
+        : parsed.status === "needs_client_info" || parsed.status === "needs_supplemental"
+        ? `${parsedMissingFields.length} supplemental item${
+            parsedMissingFields.length === 1 ? "" : "s"
+          } captured from the carrier reply.${
+            stagedSupplementals.auditNotes.length > 0
+              ? ` ${stagedSupplementals.auditNotes.join(" ")}`
+              : ""
+          }`
+        : parsed.status === "accepted"
+        ? parsed.finalPremium
+          ? `Quoted premium captured from the carrier reply: ${fmt.money(parsed.finalPremium)}.`
+          : "Carrier reply indicates this market can proceed; no premium was stated."
+        : parsed.agentReviewReason ?? "Carrier reply is ambiguous.",
+    createdAt: processedAt,
+    createdById: "ai",
+    communicationId: linkedCommunication.id,
+  });
+  upsertCarrierEmailProcessing({
+    tenantId: input.tenantId,
+    communicationId: linkedCommunication.id,
+    outcome: "matched_processed",
+    matchedSessionId: session.id,
+    matchedSubmissionId: input.submissionId,
+    matchReason: input.matchReason,
+    classification: parsed.quote.outcome,
+    parseConfidence: parsed.quote.confidence,
+    processedAt,
+  });
+  if (!hasMissingInfo && !hasAgentReview && quotedCarrierCount > 0) {
+    return api.quoting.runQuotes(session.id);
+  }
+  return updated;
 }
 
 function logCommercialCarrierEmailStatus(input: {
@@ -16853,130 +17451,156 @@ export const api = {
           : []);
       return buildCommercialUnderwriterEmailDrafts(sessionForPreview, responses, kind, targets);
     },
-    readCommercialCarrierResponses(sessionId: string): QuotingSession | null {
-      const session = this.get(sessionId);
-      if (!session || session.lineOfBusiness !== "commercial") return session ?? null;
-      const submissions = session.commercialCarrierSubmissions ?? [];
-      const pendingSubmissions = submissions.filter(
-        (submission) =>
-          submission.status === "awaiting_response" ||
-          submission.status === "application_sent" ||
-          submission.status === "supplemental_sent"
+    listCarrierEmailProcessing(
+      tenantId: string,
+      outcome?: CarrierEmailProcessing["outcome"]
+    ): CarrierEmailProcessing[] {
+      return db
+        .list("carrierEmailProcessing")
+        .filter(
+          (row) => row.tenantId === tenantId && (!outcome || row.outcome === outcome)
+        )
+        .sort((left, right) => (left.processedAt < right.processedAt ? 1 : -1));
+    },
+    async processInboundCarrierCommunications(
+      tenantId: string,
+      options: {
+        communicationIds?: string[];
+        sessionId?: string;
+        force?: boolean;
+      } = {}
+    ): Promise<{
+      processed: number;
+      review: number;
+      ignored: number;
+    }> {
+      const selectedIds = options.communicationIds
+        ? new Set(options.communicationIds)
+        : null;
+      const existingByCommunicationId = new Map(
+        this.listCarrierEmailProcessing(tenantId).map((row) => [row.communicationId, row])
       );
-      if (pendingSubmissions.length === 0) return session;
-
       const inbound = db
         .list("communications")
-        .filter((communication) => communication.tenantId === session.tenantId && communication.direction === "inbound");
-      const updatedAt = nowIso();
-      let changed = false;
-      let questions = session.questionnaireQuestions ?? [];
-      const missingFields = new Set(session.missingFields ?? []);
-      const nextSubmissions = submissions.map((submission) => {
-        if (!pendingSubmissions.some((pending) => pending.carrierId === submission.carrierId)) {
-          return submission;
-        }
-        const submissionId =
-          submission.submissionId ?? commercialSubmissionStableId(session, submission.carrierId);
-        const replies = inbound.filter(
+        .filter(
           (communication) =>
-            communicationMatchesCommercialSubmission(session, { ...submission, submissionId }, communication) &&
-            !(submission.replyCommunicationIds ?? []).includes(communication.id)
-        );
-        if (replies.length === 0) return { ...submission, submissionId };
-        let current: CommercialCarrierSubmission = { ...submission, submissionId };
-        for (const reply of replies) {
-          const linkedReply =
-            reply.carrierSubmissionId === submissionId
-              ? reply
-              : db.update("communications", reply.id, { carrierSubmissionId: submissionId }) ?? reply;
-          const parsed = parseCommercialCarrierReplyFromCommunication(linkedReply, current);
-          const carrier = db.list("carriers").find((candidate) => candidate.id === current.carrierId);
-          current = {
-            ...current,
-            status: parsed.status,
-            responseAt: updatedAt,
-            acceptedAt: parsed.status === "accepted" ? updatedAt : current.acceptedAt,
-            replyCommunicationIds: uniqueStrings([
-              ...(current.replyCommunicationIds ?? []),
-              linkedReply.id,
-            ]),
-            quote: parsed.quote,
-            parseConfidence: parsed.quote.confidence,
-            premiumEstimate: parsed.premiumEstimate ?? current.premiumEstimate,
-            finalPremium: parsed.finalPremium ?? current.finalPremium,
-            declinedReason: parsed.declinedReason,
-            underwriterNotes: parsed.underwriterNotes,
-            missingFields: parsed.missingFields,
-            agentReviewReason: parsed.agentReviewReason,
-            aiRationale:
-              parsed.status === "agent_review"
-                ? parsed.agentReviewReason ?? "Carrier reply needs agent review before the workflow advances."
-                : `Carrier reply parsed from inbound message ${linkedReply.id}; outcome ${parsed.quote.outcome}.`,
-          };
-          if (parsed.missingFields?.length) {
-            parsed.missingFields.forEach((field) => missingFields.add(field));
-            const supplementalQuestions = commercialCarrierReplyQuestions(
-              current,
-              carrier?.name ?? "Carrier"
-            );
-            questions = appendUniqueQuestions(questions, supplementalQuestions);
-          }
-          logQuotingWorkflowProgress(session, {
-            message:
-              parsed.status === "agent_review"
-                ? `${carrier?.name ?? "Carrier"} reply needs agent review.`
-                : `${carrier?.name ?? "Carrier"} carrier reply captured.`,
-            detail:
-              parsed.status === "declined"
-                ? parsed.declinedReason ?? "Carrier declined without a stated reason."
-                : parsed.status === "needs_client_info" || parsed.status === "needs_supplemental"
-                ? `${parsed.missingFields?.length ?? 0} supplemental item${
-                    (parsed.missingFields?.length ?? 0) === 1 ? "" : "s"
-                  } captured from the carrier reply.`
-                : parsed.status === "accepted"
-                ? parsed.finalPremium
-                  ? `Quoted premium captured from the carrier reply: ${fmt.money(parsed.finalPremium)}.`
-                  : "Carrier reply indicates this market can proceed; no premium was stated."
-                : parsed.agentReviewReason ?? "Carrier reply is ambiguous.",
-            createdAt: updatedAt,
-            createdById: "ai",
-            communicationId: linkedReply.id,
+            communication.tenantId === tenantId &&
+            communication.direction === "inbound" &&
+            (!selectedIds || selectedIds.has(communication.id)) &&
+            (options.force || !existingByCommunicationId.has(communication.id))
+        )
+        .sort((left, right) => (left.createdAt > right.createdAt ? 1 : -1));
+      let processed = 0;
+      let review = 0;
+      let ignored = 0;
+      for (const communication of inbound) {
+        const exactMatches = commercialSubmissionMatchesForCommunication(
+          tenantId,
+          communication
+        ).filter((match) => !options.sessionId || match.session.id === options.sessionId);
+        const prior = existingByCommunicationId.get(communication.id);
+        if (exactMatches.length === 1) {
+          const match = exactMatches[0];
+          const submissionId =
+            match.submission.submissionId ??
+            commercialSubmissionStableId(match.session, match.submission.carrierId);
+          const applied = await applyInboundCarrierReply({
+            tenantId,
+            sessionId: match.session.id,
+            submissionId,
+            communicationId: communication.id,
+            matchReason: match.reason,
           });
-          changed = true;
+          if (applied) {
+            processed += 1;
+            continue;
+          }
         }
-        return current;
-      });
-      if (!changed) return session;
-
-      const hasMissingInfo = nextSubmissions.some(
-        (submission) => submission.status === "needs_client_info" || submission.status === "needs_supplemental"
-      );
-      const hasAgentReview = nextSubmissions.some((submission) => submission.status === "agent_review");
-      const quotedCarrierCount = nextSubmissions.filter(
-        (submission) => submission.status === "accepted" && !!(submission.finalPremium ?? submission.premiumEstimate)
-      ).length;
-      const updatedSession = db.update("quotingSessions", sessionId, {
-        commercialCarrierSubmissions: nextSubmissions,
-        questionnaireQuestions: questions,
-        missingFields: Array.from(missingFields),
-        status: hasMissingInfo ? "awaiting_reply" : quotedCarrierCount > 0 ? "quoting" : session.status,
-        aiSummary: hasAgentReview
-          ? "One or more carrier replies need agent review before Quotex advances the workflow."
-          : hasMissingInfo
-          ? "Carrier replies were parsed and supplemental missing fields are ready for agent review."
-          : quotedCarrierCount > 0
-          ? `Carrier replies were parsed with ${quotedCarrierCount} quoted market${
-              quotedCarrierCount === 1 ? "" : "s"
-            } ready for ranking.`
-          : "Carrier replies were parsed and the workflow is waiting for more explicit carrier outcomes.",
-        updatedAt,
-      });
-      if (!updatedSession) return session;
-      if (!hasMissingInfo && !hasAgentReview && quotedCarrierCount > 0) {
-        return this.runQuotes(sessionId);
+        const reviewCandidates =
+          exactMatches.length > 1
+            ? exactMatches
+            : manualReviewCandidatesForCommunication(tenantId, communication).filter(
+                (match) => !options.sessionId || match.session.id === options.sessionId
+              );
+        if (reviewCandidates.length > 0) {
+          upsertCarrierEmailProcessing({
+            tenantId,
+            communicationId: communication.id,
+            outcome: "manual_review",
+            candidateSubmissionIds: uniqueStrings(
+              reviewCandidates.map(
+                (match) =>
+                  match.submission.submissionId ??
+                  commercialSubmissionStableId(match.session, match.submission.carrierId)
+              )
+            ),
+            matchReason:
+              exactMatches.length > 1
+                ? "multiple_deterministic_matches"
+                : "known_underwriter_without_deterministic_identifier",
+            processedAt: nowIso(),
+            reprocessedFrom: prior?.id,
+          });
+          review += 1;
+          continue;
+        }
+        upsertCarrierEmailProcessing({
+          tenantId,
+          communicationId: communication.id,
+          outcome: "ignored",
+          matchReason: options.sessionId
+            ? "no_identifier_for_selected_session"
+            : "not_a_deterministically_matched_carrier_reply",
+          processedAt: nowIso(),
+          reprocessedFrom: prior?.id,
+        });
+        ignored += 1;
       }
-      return updatedSession;
+      return { processed, review, ignored };
+    },
+    async assignCarrierEmailProcessing(input: {
+      processingId: string;
+      sessionId: string;
+      submissionId: string;
+      assignedById: string;
+    }): Promise<CarrierEmailProcessing | null> {
+      const processing = db
+        .list("carrierEmailProcessing")
+        .find((row) => row.id === input.processingId);
+      const session = this.get(input.sessionId);
+      if (!processing || !session || session.tenantId !== processing.tenantId) return null;
+      const submission = (session.commercialCarrierSubmissions ?? []).find(
+        (candidate) =>
+          (candidate.submissionId ?? commercialSubmissionStableId(session, candidate.carrierId)) ===
+          input.submissionId
+      );
+      if (!submission) return null;
+      const applied = await applyInboundCarrierReply({
+        tenantId: processing.tenantId,
+        sessionId: session.id,
+        submissionId: input.submissionId,
+        communicationId: processing.communicationId,
+        matchReason: "agent_assigned_manual_review",
+      });
+      if (!applied) return null;
+      return (
+        db.update("carrierEmailProcessing", processing.id, {
+          outcome: "matched_processed",
+          matchedSessionId: session.id,
+          matchedSubmissionId: input.submissionId,
+          matchReason: "agent_assigned_manual_review",
+          assignedById: input.assignedById,
+          reprocessedFrom: processing.id,
+          processedAt: nowIso(),
+          updatedAt: nowIso(),
+        }) ?? null
+      );
+    },
+    async readCommercialCarrierResponses(sessionId: string): Promise<QuotingSession | null> {
+      const session = this.get(sessionId);
+      if (!session || session.lineOfBusiness !== "commercial") return session ?? null;
+      await this.processInboundCarrierCommunications(session.tenantId, { sessionId });
+      return this.get(sessionId) ?? null;
     },
     confirmCommercialCarrierDelivery(
       sessionId: string,
@@ -17285,7 +17909,8 @@ export const api = {
           if (options?.awaitLiveMailboxDelivery && underwriterEmailCount > 0) {
             return submittedSession;
           }
-          return this.readCommercialCarrierResponses(sessionId) ?? submittedSession;
+          void this.processInboundCarrierCommunications(session.tenantId, { sessionId });
+          return submittedSession;
         }
         const carrierSubmissions = applicationSentAt
           ? session.commercialCarrierSubmissions ?? []

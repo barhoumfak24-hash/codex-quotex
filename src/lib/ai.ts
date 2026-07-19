@@ -2818,6 +2818,7 @@ export interface AiParsedCarrierReply {
   supplementalAttachmentNames: string[];
   declineReason?: string;
   evidenceSnippets: string[];
+  responseDeadline?: string;
   requiresAgentReview: boolean;
   agentReviewReason?: string;
 }
@@ -2862,6 +2863,14 @@ function fallbackParseCarrierReply(input: {
     .map((attachment) => attachment.fileName ?? "Supplemental attachment")
     .filter(Boolean);
   const premiums = extractCurrencyStrings(text);
+  const deadlineMatch = text.match(
+    /(?:need(?:ed)?|required|respond|response|due|provide|send|return|receive)[^.!?\n]{0,60}\bby\s+((?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:,\s*\d{4})?|\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/i
+  );
+  const deadlineDate = deadlineMatch ? new Date(deadlineMatch[1]) : null;
+  const responseDeadline =
+    deadlineDate && Number.isFinite(deadlineDate.getTime())
+      ? deadlineDate.toISOString().slice(0, 10)
+      : undefined;
   const declineEvidence = evidence([
     /\bdeclin(?:e|ed|ing)\b/i,
     /\bno appetite\b/i,
@@ -2905,6 +2914,7 @@ function fallbackParseCarrierReply(input: {
       declineReason: declineEvidence[0],
       evidenceSnippets: declineEvidence,
       requiresAgentReview: false,
+      responseDeadline,
     };
   }
 
@@ -2924,6 +2934,7 @@ function fallbackParseCarrierReply(input: {
       supplementalAttachmentNames: supplementalAttachments,
       evidenceSnippets: [...moreInfoEvidence, ...quoteEvidence].slice(0, 8),
       requiresAgentReview: false,
+      responseDeadline,
     };
   }
 
@@ -2943,6 +2954,7 @@ function fallbackParseCarrierReply(input: {
       supplementalAttachmentNames: [],
       evidenceSnippets: quoteEvidence,
       requiresAgentReview: false,
+      responseDeadline,
     };
   }
 
@@ -2963,6 +2975,7 @@ function fallbackParseCarrierReply(input: {
     supplementalAttachmentNames: supplementalAttachments,
     evidenceSnippets: sentences.slice(0, 4),
     requiresAgentReview: true,
+    responseDeadline,
     agentReviewReason: "Carrier reply did not clearly state quote, decline, or supplemental outcome.",
   };
 }
@@ -3005,6 +3018,10 @@ export async function aiParseCarrierReply(input: {
         ? server.supplementalAttachmentNames
         : [],
       requiresAgentReview: server.requiresAgentReview === true || server.confidence < 0.72,
+      responseDeadline:
+        typeof server.responseDeadline === "string" && /^\d{4}-\d{2}-\d{2}$/.test(server.responseDeadline)
+          ? server.responseDeadline
+          : undefined,
     };
   }
   return fallbackParseCarrierReply(input);

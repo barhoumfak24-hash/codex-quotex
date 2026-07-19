@@ -40,6 +40,7 @@ import {
 } from "@/components/messages/MessageComposer";
 import { RichMessageBody } from "@/components/messages/RichMessageBody";
 import { CommunicationDeliveryStatus } from "@/components/messages/CommunicationDeliveryStatus";
+import { CarrierEmailReviewQueue } from "@/components/messages/CarrierEmailReviewQueue";
 import { positionLabel } from "@/pages/employee/CarrierRecommendationsPage";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
@@ -630,6 +631,13 @@ export function MessagesPage() {
   }
 
   useEffect(() => {
+    if (!agency) return;
+    void api.quoting
+      .processInboundCarrierCommunications(agency.id)
+      .catch((error) => console.error("Carrier-response catch-up failed", error));
+  }, [agency?.id]);
+
+  useEffect(() => {
     if (!agency || !user || mailbox.status !== "connected") return;
     const interval = window.setInterval(() => {
       void refreshMessages({ silent: true });
@@ -662,6 +670,10 @@ export function MessagesPage() {
           Refresh
         </button>
       </div>
+
+      {agency && user && (
+        <CarrierEmailReviewQueue tenantId={agency.id} actorId={user.id} />
+      )}
 
       {mailbox.authMode === "demo" && (
         <div className="rounded-md border border-gold-200 bg-gold-50/60 px-4 py-3 text-xs text-gold-900">

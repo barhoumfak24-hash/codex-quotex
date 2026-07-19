@@ -412,6 +412,12 @@ export function AiQuotingWorkspace({
       ? api.quoting.getForProspect(contact.id)
       : api.quoting.getForCustomer(contact.id);
   useEffect(() => {
+    if (!session?.id) return;
+    void api.quoting
+      .processInboundCarrierCommunications(tenantId, { sessionId: session.id })
+      .catch((error) => console.error("Carrier-response catch-up failed", error));
+  }, [session?.id, tenantId]);
+  useEffect(() => {
     if (lockedLineOfBusiness) {
       setLineOfBusiness(lockedLineOfBusiness);
     }
@@ -2737,7 +2743,7 @@ function QuoteNextAction({
     onChanged?.();
   }
 
-  function continueCommercialSubmission() {
+  async function continueCommercialSubmission() {
     onCommercialMissingFieldsRevealed?.([]);
     if (session.lineOfBusiness === "commercial" && !commercialApplicationSentAt(session)) {
       saveCurrentResponses();
@@ -2747,7 +2753,7 @@ function QuoteNextAction({
     if (hasPendingCarrierResponses) {
       setBusy("next");
       try {
-        api.quoting.readCommercialCarrierResponses(session.id);
+        await api.quoting.readCommercialCarrierResponses(session.id);
         onChanged?.();
       } catch (error) {
         onFailure?.(
@@ -4033,6 +4039,9 @@ function CommercialFlowPanel({
         {submissions.map((submission) => {
           const carrier = api.carriers.get(submission.carrierId);
           const badge = commercialSubmissionBadge(submission.status);
+          const supplementalAudits = (submission.supplementalDocumentIds ?? [])
+            .map((documentId) => api.documents.get(documentId))
+            .filter(Boolean);
           return (
             <li
               key={submission.carrierId}
@@ -4064,6 +4073,33 @@ function CommercialFlowPanel({
                   Premium captured: {submission.quote.premiums.join(", ")}
                 </p>
               ) : null}
+              {submission.responseDeadline && (
+                <p className="mt-2 font-medium text-amber-900">
+                  Carrier response due {fmt.date(submission.responseDeadline)}
+                </p>
+              )}
+              {(submission.quote?.evidenceSnippets ?? []).length > 0 && (
+                <div className="mt-2 text-ink-600">
+                  <span className="font-semibold text-ink-800">Reply evidence:</span>{" "}
+                  {(submission.quote?.evidenceSnippets ?? []).slice(0, 3).join(" ")}
+                  {typeof submission.parseConfidence === "number"
+                    ? ` (${Math.round(submission.parseConfidence * 100)}% confidence)`
+                    : ""}
+                </div>
+              )}
+              {supplementalAudits.length > 0 && (
+                <div className="mt-2 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1.5 text-emerald-950">
+                  <div className="font-semibold">Staged document fill audit</div>
+                  {supplementalAudits.map((document) => (
+                    <div key={document!.id} className="mt-1">
+                      {document!.fileName}: {document!.templateFields?.["Filled field count"] ?? "Generated"} filled, {document!.templateFields?.["Remaining blank field count"] ?? "0"} remaining
+                      {document!.templateFields?.["Value sources"]
+                        ? ` - ${document!.templateFields!["Value sources"]}`
+                        : ""}
+                    </div>
+                  ))}
+                </div>
+              )}
               {(submission.missingFields ?? []).length > 0 && (
                 <ul className="mt-2 list-disc pl-5 text-amber-800">
                   {submission.missingFields!.map((field) => (

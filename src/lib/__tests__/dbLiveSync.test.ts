@@ -55,16 +55,16 @@ describe("db live sync", () => {
     expect(dbStorageKey()).toMatch(/^quotex\.db\.v\d+$/);
   });
 
-  it("migrates v31 into v32 instead of reseeding or deleting live rows", async () => {
+  it("migrates v32 into v33 instead of reseeding or deleting live rows", async () => {
     const { SEED_CUSTOMERS } = await import("../seed");
     const preservedCustomer = {
       ...SEED_CUSTOMERS[0],
-      id: "customer_v31_preserved",
-      name: "V31 Preserved",
-      email: "v31-preserved@example.com",
+      id: "customer_v32_preserved",
+      name: "V32 Preserved",
+      email: "v32-preserved@example.com",
     };
 
-    window.localStorage.setItem("quotex.db.v31", JSON.stringify({ customers: [preservedCustomer] }));
+    window.localStorage.setItem("quotex.db.v32", JSON.stringify({ customers: [preservedCustomer] }));
 
     vi.resetModules();
     const { db } = await import("../db");
@@ -72,8 +72,8 @@ describe("db live sync", () => {
     expect(db.snapshot().customers.some((customer) => customer.id === preservedCustomer.id)).toBe(
       true
     );
-    expect(window.localStorage.getItem("quotex.db.v31")).not.toBeNull();
     expect(window.localStorage.getItem("quotex.db.v32")).not.toBeNull();
+    expect(window.localStorage.getItem("quotex.db.v33")).not.toBeNull();
   });
 
   it("restores client records from the safety snapshot if the main cache is missing", async () => {

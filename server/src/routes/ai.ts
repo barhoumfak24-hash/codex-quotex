@@ -278,15 +278,15 @@ aiRoutes.post("/parse-carrier-reply", async (req, res) => {
     const { submission, email } = req.body ?? {};
     if (!isRecord(email)) return badRequest(res, "email must be an object");
     const cleanEmail = {
-      subject: typeof email.subject === "string" ? email.subject : undefined,
-      text: typeof email.text === "string" ? email.text : undefined,
-      html: typeof email.html === "string" ? email.html : undefined,
+      subject: typeof email.subject === "string" ? email.subject.slice(0, 500) : undefined,
+      text: typeof email.text === "string" ? email.text.slice(0, 24_000) : undefined,
+      html: typeof email.html === "string" ? email.html.slice(0, 8_000) : undefined,
       attachments: Array.isArray(email.attachments)
-        ? email.attachments.filter(isRecord).map((attachment) => ({
+        ? email.attachments.filter(isRecord).slice(0, 20).map((attachment) => ({
             id: typeof attachment.id === "string" ? attachment.id : undefined,
-            fileName: typeof attachment.fileName === "string" ? attachment.fileName : undefined,
-            fileType: typeof attachment.fileType === "string" ? attachment.fileType : undefined,
-            description: typeof attachment.description === "string" ? attachment.description : undefined,
+            fileName: typeof attachment.fileName === "string" ? attachment.fileName.slice(0, 300) : undefined,
+            fileType: typeof attachment.fileType === "string" ? attachment.fileType.slice(0, 120) : undefined,
+            description: typeof attachment.description === "string" ? attachment.description.slice(0, 500) : undefined,
           }))
         : undefined,
     };
