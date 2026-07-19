@@ -448,25 +448,28 @@ function ContactQuotingCard({
 
     return (
       <Card id="ai-quoting-workspace" className="relative">
-        <div className="flex items-start gap-4">
-          <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md border border-gold-200 bg-gold-50 text-gold-700">
-            <ClipboardList className="h-6 w-6" aria-hidden="true" />
-          </div>
-          <div className="min-w-0">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-gold-700">
-              AI quoting workspace
+        <div className="grid gap-4 xl:grid-cols-[minmax(300px,auto)_minmax(0,1fr)_auto] xl:items-center">
+          <div className="flex min-w-0 items-center gap-4">
+            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md border border-gold-200 bg-gold-50 text-gold-700">
+              <ClipboardList className="h-6 w-6" aria-hidden="true" />
             </div>
-            <h3 className="mt-1 text-lg font-semibold text-ink-900">AI Quoting Workspace</h3>
-            <p className="mt-1 text-sm text-ink-500">
-              {lineLabel} - {existing ? "Quote flow in progress" : "Ready to start"}
-            </p>
+            <div className="min-w-0">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-gold-700">
+                AI quoting workspace
+              </div>
+              <h3 className="mt-1 text-lg font-semibold text-ink-900">AI Quoting Workspace</h3>
+              <p className="mt-1 text-sm text-ink-500">
+                {lineLabel} - {existing ? "Quote flow in progress" : "Ready to start"}
+              </p>
+            </div>
           </div>
-        </div>
-        <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
-          <div className="min-w-0 flex-1">
+          <div className="min-w-0 overflow-x-auto py-1">
             {existing ? <QuoteWorkflowProgress session={existing} /> : null}
           </div>
-          <Link to={quoteFlowPath} className="btn-primary inline-flex text-sm">
+          <Link
+            to={quoteFlowPath}
+            className="btn-primary inline-flex w-fit whitespace-nowrap text-sm xl:justify-self-end"
+          >
             {existing ? "Continue quote flow" : "Start quote flow"}
             <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
           </Link>
