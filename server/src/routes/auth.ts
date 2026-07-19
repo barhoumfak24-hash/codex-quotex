@@ -1805,6 +1805,28 @@ async function ensureManagerStepUpTable(): Promise<void> {
       CREATE INDEX IF NOT EXISTS manager_step_up_challenges_expiry_idx
       ON public.manager_step_up_challenges (expires_at)
     `);
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE public.manager_step_up_challenges ENABLE ROW LEVEL SECURITY
+    `);
+    await prisma.$executeRawUnsafe(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1
+          FROM pg_catalog.pg_policies
+          WHERE schemaname = 'public'
+            AND tablename = 'manager_step_up_challenges'
+            AND policyname = 'manager_step_up_challenges_deny_browser_roles'
+        ) THEN
+          CREATE POLICY manager_step_up_challenges_deny_browser_roles
+            ON public.manager_step_up_challenges
+            FOR ALL TO anon, authenticated
+            USING (false)
+            WITH CHECK (false);
+        END IF;
+      END
+      $$
+    `);
   })();
   await managerStepUpTableReady;
 }
