@@ -188,7 +188,7 @@ export async function saveAgencyMarketingSmtpCredential(input: {
   const connectionId = `mailbox_smtp_${input.tenantId}_agency_marketing`;
   const vaultId = `mailbox_token_${connectionId}`;
   const tokenVaultRef = `mailbox-token:${vaultId}`;
-  const encryptedPayload = encryptTokenPayload({
+  const token: SmtpTokenPayload = {
     provider: "smtp",
     username: email,
     password,
@@ -196,7 +196,10 @@ export async function saveAgencyMarketingSmtpCredential(input: {
     port: smtp.port,
     secure: smtp.secure,
     connectedAt: now.toISOString(),
-  });
+  };
+
+  await verifySmtpCredential(token);
+  const encryptedPayload = encryptTokenPayload(token);
 
   await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
     await tx.$executeRaw`
@@ -608,6 +611,17 @@ function createSmtpTransport(token: SmtpTokenPayload) {
   });
 }
 
+async function verifySmtpCredential(token: SmtpTokenPayload) {
+  const transporter = createSmtpTransport(token);
+  try {
+    await transporter.verify();
+  } catch (error) {
+    throw new Error(smtpCredentialError(error));
+  } finally {
+    transporter.close();
+  }
+}
+
 async function resolveSmtpConfiguration(
   email: string,
   provider: AgencyMarketingCredentialProvider
@@ -935,7 +949,8 @@ function encryptionKey(): Buffer {
 async function markConnectionSent(connectionId: string) {
   await prisma.$executeRaw`
     UPDATE mailbox_connections
-    SET last_send_at = now(),
+    SET status = 'connected',
+        last_send_at = now(),
         last_error = NULL,
         updated_at = now()
     WHERE id = ${connectionId}
@@ -945,7 +960,8 @@ async function markConnectionSent(connectionId: string) {
 async function markConnectionError(connectionId: string, error: string) {
   await prisma.$executeRaw`
     UPDATE mailbox_connections
-    SET last_error = ${error.slice(0, 1000)},
+    SET status = 'error',
+        last_error = ${error.slice(0, 1000)},
         updated_at = now()
     WHERE id = ${connectionId}
   `;

@@ -2561,9 +2561,10 @@ function compactMarkdownBlocks(blocks: Array<string | undefined | null>): string
 }
 
 type MarketingCampaignDeliveryResult = {
-  provider?: "google" | "microsoft" | "transactional";
+  provider?: "google" | "microsoft" | "smtp" | "transactional";
   status?: "sent";
   externalMessageId?: string;
+  fallbackReason?: string;
 };
 
 async function deliverMarketingCampaignEmail(input: {
@@ -12630,6 +12631,9 @@ export const api = {
         (input.selectedProspectIds ?? []).forEach((id) => prospectIds.add(id));
       }
       const messageCount = customerIds.size + prospectIds.size;
+      if (messageCount === 0) {
+        throw new Error("Choose at least one client or prospect before sending the campaign.");
+      }
 
       const campaign = this.createCampaign({
         tenantId: input.tenantId,

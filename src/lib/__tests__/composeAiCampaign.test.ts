@@ -37,6 +37,25 @@ afterEach(() => {
 });
 
 describe("marketing.composeAiCampaign", () => {
+  it("does not create a campaign when no recipients are selected", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const beforeCampaigns = api.marketing.listCampaigns(agency.id).length;
+
+    await expect(
+      api.marketing.composeAiCampaign({
+        tenantId: agency.id,
+        name: "Empty audience",
+        channels: ["email"],
+        brief: "This must not create a false sent campaign.",
+        actorId: "user_manager_pc",
+      })
+    ).rejects.toThrow(/at least one client or prospect/i);
+
+    expect(api.marketing.listCampaigns(agency.id)).toHaveLength(beforeCampaigns);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("blocks AI campaign launch without an approving staff user", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];

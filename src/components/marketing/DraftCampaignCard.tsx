@@ -445,6 +445,10 @@ export function DraftCampaignCard({
         actor: approvingUser,
       });
       const scheduled = scheduleMode === "scheduled";
+      if (out.messageCount === 0) {
+        setError("Choose at least one client or prospect before sending the campaign.");
+        return;
+      }
       if (!scheduled && out.failedCount > 0) {
         const failureMessage = `Campaign created, but ${out.failedCount} of ${out.messageCount} email${
           out.messageCount === 1 ? "" : "s"

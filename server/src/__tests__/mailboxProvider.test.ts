@@ -4,17 +4,29 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   queryRaw: vi.fn(),
   executeRaw: vi.fn(),
+  transaction: vi.fn(),
+  createTransport: vi.fn(),
+  verifyTransport: vi.fn(),
+  closeTransport: vi.fn(),
 }));
 
 vi.mock("../services/prisma.js", () => ({
   prisma: {
     $queryRaw: mocks.queryRaw,
     $executeRaw: mocks.executeRaw,
+    $transaction: mocks.transaction,
+  },
+}));
+
+vi.mock("nodemailer", () => ({
+  default: {
+    createTransport: mocks.createTransport,
   },
 }));
 
 import {
   isMailboxFallbackSafeError,
+  saveAgencyMarketingSmtpCredential,
   sendMailboxEmail,
 } from "../services/mailboxProvider.js";
 
@@ -40,6 +52,15 @@ beforeEach(() => {
       }),
     }]);
   mocks.executeRaw.mockReset().mockResolvedValue(1);
+  mocks.transaction.mockReset().mockImplementation(async (callback) =>
+    callback({ $executeRaw: mocks.executeRaw })
+  );
+  mocks.verifyTransport.mockReset().mockResolvedValue(true);
+  mocks.closeTransport.mockReset();
+  mocks.createTransport.mockReset().mockReturnValue({
+    verify: mocks.verifyTransport,
+    close: mocks.closeTransport,
+  });
   vi.stubGlobal("fetch", vi.fn());
 });
 
@@ -154,6 +175,44 @@ describe("Microsoft mailbox send metadata", () => {
 
     expect(isMailboxFallbackSafeError(error)).toBe(true);
     expect(fetchMock()).not.toHaveBeenCalled();
+  });
+});
+
+describe("agency marketing SMTP credentials", () => {
+  it("verifies the mailbox before persisting it as connected", async () => {
+    const connection = await saveAgencyMarketingSmtpCredential({
+      tenantId: "tenant-1",
+      updatedById: "manager-1",
+      agencyName: "Example Agency",
+      email: "marketing@gmail.com",
+      password: "app-password",
+      provider: "auto",
+    });
+
+    expect(mocks.verifyTransport).toHaveBeenCalledTimes(1);
+    expect(mocks.transaction).toHaveBeenCalledTimes(1);
+    expect(connection).toMatchObject({
+      address: "marketing@gmail.com",
+      status: "connected",
+    });
+  });
+
+  it("does not persist credentials when the provider rejects them", async () => {
+    mocks.verifyTransport.mockRejectedValueOnce(new Error("535 5.7.8 Username and Password not accepted"));
+
+    await expect(
+      saveAgencyMarketingSmtpCredential({
+        tenantId: "tenant-1",
+        updatedById: "manager-1",
+        agencyName: "Example Agency",
+        email: "marketing@gmail.com",
+        password: "wrong-password",
+        provider: "auto",
+      })
+    ).rejects.toThrow(/rejected those credentials/i);
+
+    expect(mocks.transaction).not.toHaveBeenCalled();
+    expect(mocks.closeTransport).toHaveBeenCalledTimes(1);
   });
 });
 
