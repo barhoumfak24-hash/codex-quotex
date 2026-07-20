@@ -590,6 +590,23 @@ describe("AiQuotingWorkspace component", () => {
 
   it("leaves ACORD review after sending the commercial application package", async () => {
     const sendFetch = vi.fn().mockImplementation(async (request: RequestInfo | URL) => {
+      if (String(request).includes("/mailboxes/capability")) {
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: async () => ({
+            ok: true,
+            capability: {
+              mailboxConnected: false,
+              transactionalConfigured: true,
+              transactionalProvider: "sendgrid",
+              missingEnvironmentVariables: [],
+              acceptedConfigurations: [],
+            },
+          }),
+        };
+      }
       if (String(request).includes("/mailboxes/sync")) {
         return {
           ok: true,
@@ -679,6 +696,9 @@ describe("AiQuotingWorkspace component", () => {
     });
     expect(host.textContent).toContain("No new verified carrier responses were found");
     expect(host.textContent).toContain("Last checked");
+    expect(
+      sendFetch.mock.calls.some(([request]) => String(request).includes("/mailboxes/sync"))
+    ).toBe(false);
 
     await act(async () => {
       root.unmount();

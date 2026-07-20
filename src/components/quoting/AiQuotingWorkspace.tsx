@@ -49,6 +49,7 @@ import {
 import { fmt } from "@/lib/format";
 import { fileToCommunicationAttachment, formatAttachmentSize } from "@/lib/messageAttachments";
 import {
+  getLiveMailboxCapability,
   sendCommunicationThroughLiveMailbox,
   syncCommunicationsFromLiveMailbox,
 } from "@/lib/liveMailbox";
@@ -4056,20 +4057,31 @@ function CommercialFlowPanel({
     setCheckingResponses(true);
     setResponseCheckNotice(null);
     try {
-      const sync = await syncCommunicationsFromLiveMailbox({
-        tenantId: session.tenantId,
-        user,
-        maxResults: 50,
-      });
-      if (!sync.ok) {
-        setResponseCheckNotice({
-          tone: "warn",
-          message: "The connected mailbox needs attention before responses can be checked.",
+      // QuoteX communications are the source of truth. External mailbox sync is
+      // an optional enhancement and must never block the carrier workflow.
+      await api.quoting.readCommercialCarrierResponses(session.id);
+
+      try {
+        const capability = await getLiveMailboxCapability({
+          tenantId: session.tenantId,
+          user,
+          refresh: true,
         });
-        return;
+        if (capability?.mailboxConnected) {
+          const sync = await syncCommunicationsFromLiveMailbox({
+            tenantId: session.tenantId,
+            user,
+            maxResults: 50,
+          });
+          if (sync.ok) {
+            await api.quoting.readCommercialCarrierResponses(session.id);
+          }
+        }
+      } catch {
+        // The managed QuoteX check above is still complete when a provider is
+        // unavailable or has not been connected for read access.
       }
 
-      await api.quoting.readCommercialCarrierResponses(session.id);
       const responsesAfter = responseCount(api.quoting.get(session.id));
       const newlyMatched = Math.max(0, responsesAfter - responsesBefore);
       setLastResponseCheckAt(new Date().toISOString());
@@ -4081,7 +4093,7 @@ function CommercialFlowPanel({
             }
           : {
               tone: "neutral",
-              message: "Mailbox checked. No new verified carrier responses were found.",
+              message: "QuoteX responses checked. No new verified carrier responses were found.",
             }
       );
       onChanged?.();
@@ -4112,7 +4124,7 @@ function CommercialFlowPanel({
               className="btn-outline inline-flex items-center gap-1.5 text-xs"
               onClick={() => void checkForCarrierResponses()}
               disabled={checkingResponses || responseCheckCoolingDown}
-              title="Check the connected mailbox for verified carrier replies"
+              title="Check QuoteX for verified carrier replies"
             >
               <RefreshCw className={`h-3.5 w-3.5 ${checkingResponses ? "animate-spin" : ""}`} />
               {checkingResponses ? "Checking..." : "Check for responses"}
