@@ -8,6 +8,14 @@
 import { isDeepStrictEqual } from "node:util";
 
 const DEFAULT_TABLE = "quotex_app_state";
+const DEFAULT_REQUEST_TIMEOUT_MS = 8_000;
+
+export class SupabaseStateUnavailableError extends Error {
+  constructor(message = "Supabase state request timed out.") {
+    super(message);
+    this.name = "SupabaseStateUnavailableError";
+  }
+}
 
 export interface RemoteStateRow {
   id: string;
@@ -66,9 +74,27 @@ function headers() {
   };
 }
 
+function requestTimeoutMs(): number {
+  const configured = Number(process.env.SUPABASE_STATE_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_REQUEST_TIMEOUT_MS;
+}
+
+async function supabaseFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), requestTimeoutMs());
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (controller.signal.aborted) throw new SupabaseStateUnavailableError();
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function readRemoteState(id: string): Promise<RemoteStateRow | null> {
   assertConfigured();
-  const res = await fetch(stateUrl(id), {
+  const res = await supabaseFetch(stateUrl(id), {
     method: "GET",
     headers: headers(),
   });
@@ -82,7 +108,7 @@ export async function readRemoteState(id: string): Promise<RemoteStateRow | null
 
 async function insertRemoteState(id: string, snapshot: unknown, revision = 0): Promise<InsertRemoteStateResult> {
   assertConfigured();
-  const res = await fetch(stateUrl(), {
+  const res = await supabaseFetch(stateUrl(), {
     method: "POST",
     headers: {
       ...headers(),
@@ -130,7 +156,7 @@ export async function writeRemoteState(
   }
 
   const nextRevision = baseRevision + 1;
-  const res = await fetch(stateUrl(id, baseRevision), {
+  const res = await supabaseFetch(stateUrl(id, baseRevision), {
     method: "PATCH",
     headers: {
       ...headers(),

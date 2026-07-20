@@ -10,7 +10,7 @@ vi.mock("../services/prisma.js", () => ({
   },
 }));
 
-import { authLimiter, resetRateLimitStateForTests } from "../middleware/rateLimits.js";
+import { authLimiter, resetRateLimitStateForTests, stateSyncLimiter } from "../middleware/rateLimits.js";
 
 function mockRequest(ip: string): Request {
   return {
@@ -51,6 +51,14 @@ async function runLimiter(ip: string) {
   return { next, state };
 }
 
+async function runStateSyncLimiter(ip: string) {
+  const request = mockRequest(ip);
+  const { response, state } = mockResponse();
+  const next = vi.fn() as unknown as NextFunction;
+  await stateSyncLimiter(request, response, next);
+  return { next, state };
+}
+
 beforeEach(() => {
   vi.stubEnv("NODE_ENV", "production");
   vi.stubEnv("RATE_LIMIT_STORE", "postgres");
@@ -65,6 +73,14 @@ afterEach(() => {
 });
 
 describe("rate limit store resilience", () => {
+  it("keeps high-volume state sync counters out of the database pool", async () => {
+    const result = await runStateSyncLimiter("203.0.113.9");
+
+    expect(result.next).toHaveBeenCalledTimes(1);
+    expect(result.state.headers["ratelimit-limit"]).toBe(120);
+    expect(queryRaw).not.toHaveBeenCalled();
+  });
+
   it("keeps authentication available when the postgres counter cannot write", async () => {
     queryRaw.mockRejectedValueOnce(new Error("cannot execute INSERT in a read-only transaction"));
 

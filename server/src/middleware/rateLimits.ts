@@ -26,10 +26,11 @@ function limiter(
   name: string,
   limit: number,
   windowMs = 60_000,
-  identity?: (req: Request) => string
+  identity?: (req: Request) => string,
+  store: "global" | "memory" = "global"
 ): RequestHandler {
   return async (req, res, next) => {
-    if (!useGlobalRateLimitStore() || Date.now() < postgresRetryAfter) {
+    if (store === "memory" || !useGlobalRateLimitStore() || Date.now() < postgresRetryAfter) {
       return applyMemoryRateLimit(req, res, next, name, limit, windowMs, identity);
     }
 
@@ -54,8 +55,11 @@ function limiter(
   };
 }
 
-export const appLimiter = limiter("app", envLimit("RATE_LIMIT_APP_PER_MINUTE", 900));
-export const apiLimiter = limiter("api", envLimit("RATE_LIMIT_API_PER_MINUTE", 300));
+// These broad, high-volume guards run in every serverless instance. Keeping
+// them out of Postgres prevents ordinary traffic from consuming the database
+// pool before authenticated routes can run their real queries.
+export const appLimiter = limiter("app", envLimit("RATE_LIMIT_APP_PER_MINUTE", 900), 60_000, undefined, "memory");
+export const apiLimiter = limiter("api", envLimit("RATE_LIMIT_API_PER_MINUTE", 300), 60_000, undefined, "memory");
 export const authLimiter = limiter("auth", envLimit("RATE_LIMIT_AUTH_PER_MINUTE", 30));
 export const authIpLimiter = limiter("auth-ip", envLimit("RATE_LIMIT_AUTH_IP_PER_MINUTE", 10));
 export const authIdentityLimiter = limiter(
@@ -65,6 +69,13 @@ export const authIdentityLimiter = limiter(
   authIdentifier
 );
 export const publicWorkflowLimiter = limiter("public-workflow", envLimit("RATE_LIMIT_PUBLIC_WORKFLOW_PER_MINUTE", 90));
+export const stateSyncLimiter = limiter(
+  "state-sync",
+  envLimit("RATE_LIMIT_STATE_SYNC_PER_MINUTE", 120),
+  60_000,
+  undefined,
+  "memory"
+);
 export const strictApiLimiter = limiter("strict-api", envLimit("RATE_LIMIT_STRICT_API_PER_MINUTE", 20));
 export const webhookLimiter = limiter("webhook", envLimit("RATE_LIMIT_WEBHOOK_PER_MINUTE", 120));
 export const diagnosticsLimiter = limiter("diagnostics", envLimit("RATE_LIMIT_DIAGNOSTICS_PER_MINUTE", 20));

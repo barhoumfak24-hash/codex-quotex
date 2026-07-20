@@ -18,6 +18,7 @@ import {
   authLimiter,
   diagnosticsLimiter,
   publicWorkflowLimiter,
+  stateSyncLimiter,
   strictApiLimiter,
   webhookLimiter,
 } from "./middleware/rateLimits.js";
@@ -213,7 +214,7 @@ app.use(
 );
 app.use("/api/communications", publicWorkflowLimiter, communicationsRoutes);
 app.use("/api/signing-packets", publicWorkflowLimiter, signingPacketsRoutes);
-app.use("/api/state", publicWorkflowLimiter, stateRoutes);
+app.use("/api/state", stateSyncLimiter, stateRoutes);
 app.use("/api/website", publicWorkflowLimiter, websiteRoutes);
 app.use("/api/stripe", webhookLimiter, stripeRoutes);
 app.use("/api/mailboxes/oauth", authLimiter, mailboxOAuthCallbackRoutes);

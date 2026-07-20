@@ -2,8 +2,13 @@ import { timingSafeEqual } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { Router, type Request } from "express";
 import { z } from "zod";
-import { authenticateRequest, type AuthContext } from "../middleware/auth.js";
-import { readRemoteState, supabaseStateConfigured, writeRemoteState } from "../services/supabaseState.js";
+import { authenticateRequest, validateAuthContext, type AuthContext } from "../middleware/auth.js";
+import {
+  readRemoteState,
+  SupabaseStateUnavailableError,
+  supabaseStateConfigured,
+  writeRemoteState,
+} from "../services/supabaseState.js";
 import {
   mergeStateSnapshotForAuth,
   scopeStateSnapshotForAuth,
@@ -20,8 +25,8 @@ const statePayloadSchema = z.object({
 stateRoutes.get("/:stateId", async (req, res, next) => {
   try {
     res.set("Cache-Control", "no-store, max-age=0");
-    const access = stateAccess(req);
-    if (!access) return res.status(401).json({ error: "unauthorized" });
+    const access = await stateAccess(req);
+    if (!access.ok) return res.status(access.status).json({ error: access.reason });
     if (!supabaseStateConfigured()) return res.status(503).json({ found: false, error: "state_sync_not_configured" });
 
     const stateId = normalizeStateId(req.params.stateId);
@@ -39,6 +44,9 @@ stateRoutes.get("/:stateId", async (req, res, next) => {
       revision: row?.revision ?? null,
     });
   } catch (error) {
+    if (error instanceof SupabaseStateUnavailableError) {
+      return res.status(503).json({ found: false, error: "state_sync_temporarily_unavailable" });
+    }
     next(error);
   }
 });
@@ -46,8 +54,8 @@ stateRoutes.get("/:stateId", async (req, res, next) => {
 stateRoutes.put("/:stateId", async (req, res, next) => {
   try {
     res.set("Cache-Control", "no-store, max-age=0");
-    const access = stateAccess(req);
-    if (!access) return res.status(401).json({ error: "unauthorized" });
+    const access = await stateAccess(req);
+    if (!access.ok) return res.status(access.status).json({ error: access.reason });
     if (!supabaseStateConfigured()) return res.status(503).json({ ok: false, error: "state_sync_not_configured" });
 
     const stateId = normalizeStateId(req.params.stateId);
@@ -125,6 +133,9 @@ stateRoutes.put("/:stateId", async (req, res, next) => {
       revision: result.row.revision,
     });
   } catch (error) {
+    if (error instanceof SupabaseStateUnavailableError) {
+      return res.status(503).json({ ok: false, error: "state_sync_temporarily_unavailable" });
+    }
     next(error);
   }
 });
@@ -137,25 +148,37 @@ function normalizeStateId(value: string | undefined) {
   return value?.trim().replace(/[^a-z0-9-]/gi, "").slice(0, 80) ?? "";
 }
 
-type StateAccess = {
-  auth: AuthContext | null;
-  tokenAccess: boolean;
-};
+type StateAccess =
+  | { ok: true; auth: AuthContext | null; tokenAccess: boolean }
+  | { ok: false; status: number; reason: string };
 
-function stateAccess(req: Request): StateAccess | null {
+async function stateAccess(req: Request): Promise<StateAccess> {
   const auth = authenticateRequest(req);
-  if (auth) return { auth, tokenAccess: false };
+  if (auth) {
+    const validation = await validateAuthContext(auth);
+    if (!validation.ok) {
+      return { ok: false, status: validation.status, reason: validation.reason };
+    }
+    return { ok: true, auth: validation.auth, tokenAccess: false };
+  }
+
+  // Operational state tokens are never accepted by the public production
+  // route because they have no tenant scope. Development keeps the explicit
+  // token path for local migration and route tests only.
+  if (process.env.NODE_ENV === "production") {
+    return { ok: false, status: 401, reason: "unauthorized" };
+  }
 
   const expected = process.env.STATE_SYNC_TOKEN?.trim();
   if (!expected) {
-    return process.env.NODE_ENV === "production" ? null : { auth: null, tokenAccess: true };
+    return { ok: true, auth: null, tokenAccess: true };
   }
   const headerToken = req.header("x-state-sync-token")?.trim();
   const bearer = req.header("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
   if (constantTimeEquals(headerToken ?? "", expected) || constantTimeEquals(bearer ?? "", expected)) {
-    return { auth: null, tokenAccess: true };
+    return { ok: true, auth: null, tokenAccess: true };
   }
-  return null;
+  return { ok: false, status: 401, reason: "unauthorized" };
 }
 
 function constantTimeEquals(received: string, expected: string): boolean {

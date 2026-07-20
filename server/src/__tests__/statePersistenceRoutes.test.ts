@@ -26,7 +26,7 @@ beforeEach(() => {
   vi.stubEnv("JWT_SECRET", "state-persistence-test-secret");
   mocks.userFindUnique.mockReset().mockImplementation(async ({ where }: { where: { id: string } }) => ({
     id: where.id,
-    role: "agent",
+    role: where.id.startsWith("customer_") ? "customer" : where.id === "user_a_2" ? "csr" : "agent",
     tenantId: where.id === "user_b" ? "agency_b" : "agency_a",
     branchId: null,
     authVersion: 0,
@@ -42,6 +42,85 @@ afterEach(() => {
 });
 
 describe("state persistence routes", () => {
+  it("rejects state access immediately when the agency is inactive", async () => {
+    mocks.userFindUnique.mockResolvedValue({
+      id: "user_a",
+      role: "agent",
+      tenantId: "agency_a",
+      branchId: null,
+      authVersion: 0,
+      status: "active",
+      agency: { active: false },
+    });
+    const supabaseFetch = vi.fn(async () => jsonResponse([stateRow()]));
+    installSupabaseFetch(supabaseFetch);
+
+    const response = await requestRoute(stateRoutes, "/default", {
+      headers: authHeaders("agent", "agency_a", "user_a"),
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "agency_inactive" });
+    expect(supabaseFetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects state access immediately when the account is disabled", async () => {
+    mocks.userFindUnique.mockResolvedValue({
+      id: "user_a",
+      role: "agent",
+      tenantId: "agency_a",
+      branchId: null,
+      authVersion: 0,
+      status: "banned",
+      agency: { active: true },
+    });
+    const supabaseFetch = vi.fn(async () => jsonResponse([stateRow()]));
+    installSupabaseFetch(supabaseFetch);
+
+    const response = await requestRoute(stateRoutes, "/default", {
+      headers: authHeaders("agent", "agency_a", "user_a"),
+    });
+
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "account_disabled" });
+    expect(supabaseFetch).not.toHaveBeenCalled();
+  });
+
+  it("does not accept the unscoped operational state token in production", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("STATE_SYNC_TOKEN", "state-sync-test-token");
+    const supabaseFetch = vi.fn(async () => jsonResponse([stateRow()]));
+    installSupabaseFetch(supabaseFetch);
+
+    const response = await requestRoute(stateRoutes, "/default", {
+      headers: { "x-state-sync-token": "state-sync-test-token" },
+    });
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "unauthorized" });
+    expect(supabaseFetch).not.toHaveBeenCalled();
+  });
+
+  it("returns a controlled temporary response when Supabase state times out", async () => {
+    vi.stubEnv("SUPABASE_STATE_TIMEOUT_MS", "5");
+    const supabaseFetch = vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+      })
+    );
+    installSupabaseFetch(supabaseFetch);
+
+    const response = await requestRoute(stateRoutes, "/default", {
+      headers: authHeaders("agent", "agency_a", "user_a"),
+    });
+
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      found: false,
+      error: "state_sync_temporarily_unavailable",
+    });
+  });
+
   it("returns only the authenticated customer's snapshot", async () => {
     const supabaseFetch = vi.fn(async () => jsonResponse([stateRow()]));
     installSupabaseFetch(supabaseFetch);

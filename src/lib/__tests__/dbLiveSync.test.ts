@@ -207,6 +207,32 @@ describe("db live sync", () => {
     );
   });
 
+  it("coalesces concurrent cloud hydrations into one state request", async () => {
+    vi.stubEnv("VITE_STATE_SYNC_MODE", "supabase");
+    let resolveFetch!: (response: Response) => void;
+    const pendingResponse = new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    });
+    const fetchMock = vi.fn(() => pendingResponse);
+    vi.stubGlobal("fetch", fetchMock);
+
+    vi.resetModules();
+    const { db } = await import("../db");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    const first = db.hydrateNow();
+    const second = db.hydrateNow();
+    resolveFetch(
+      new Response(
+        JSON.stringify({ found: true, scoped: true, revision: 1, snapshot: db.snapshot() }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    );
+
+    await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("retries cloud writes after a revision conflict and keeps both rows", async () => {
     const { SEED_CUSTOMERS } = await import("../seed");
     const remoteCustomer = {

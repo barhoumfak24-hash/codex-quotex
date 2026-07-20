@@ -120,6 +120,9 @@ const LEGACY_AUTH_KEYS = [
   "quotex.auth.userId.v1",
 ];
 const AUTH_TIMEOUT_MS = 20_000;
+const SESSION_RETRY_DELAYS_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
+
+type SessionRestoreResult = "complete" | "retry";
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
@@ -155,47 +158,65 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         return { ok: false, reason: "wrong_portal" };
       }
       rememberServerSessionToken(json.token);
-      await hydrateAuthenticatedWorkspace();
       scrubLegacyPasswords();
       const next = mergeServerIdentityWithLocalProfile(serverUser);
       mirrorAuthenticatedUser(next);
       publishUser(next);
+      // Authentication and workspace hydration are separate concerns. A slow
+      // or temporarily unavailable cloud snapshot must never turn valid
+      // credentials into a failed sign-in.
+      void hydrateAuthenticatedWorkspace();
       return { ok: true, user: next };
     },
     [clearSession, publishUser]
   );
 
-  const restoreSession = useCallback(async () => {
+  const restoreSession = useCallback(async (): Promise<SessionRestoreResult> => {
     if (!currentServerSessionToken()) {
       publishUser(null);
-      return;
+      return "complete";
     }
     const response = await authRequest("session", { method: "GET" }, true);
     if (!response.ok) {
-      if (response.reason !== "server_unreachable" && response.reason !== "rate_limited") {
-        forgetServerSessionToken();
+      if (response.reason === "server_unreachable" || response.reason === "rate_limited") {
+        // A temporary outage is not a logout. Keep the signed token and any
+        // already validated in-memory user while the initial session check
+        // remains behind the secure loading screen and retries.
+        return "retry";
       }
+      forgetServerSessionToken();
       publishUser(null);
-      return;
+      return "complete";
     }
     await acceptSession(response.json);
+    return "complete";
   }, [acceptSession, publishUser]);
 
   useEffect(() => {
     removeLegacyAuthStorage();
     scrubLegacyPasswords();
     let cancelled = false;
-    restoreSession()
-      .catch(() => {
-        if (!cancelled) publishUser(null);
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let retryIndex = 0;
+    const restoreWithRetry = async () => {
+      const result = await restoreSession().catch(() => "retry" as const);
+      if (cancelled) return;
+      if (result === "retry") {
+        const delay = SESSION_RETRY_DELAYS_MS[
+          Math.min(retryIndex, SESSION_RETRY_DELAYS_MS.length - 1)
+        ];
+        retryIndex += 1;
+        retryTimer = globalThis.setTimeout(() => void restoreWithRetry(), delay);
+        return;
+      }
+      setLoading(false);
+    };
+    void restoreWithRetry();
     return () => {
       cancelled = true;
+      if (retryTimer) globalThis.clearTimeout(retryTimer);
     };
-  }, [publishUser, restoreSession]);
+  }, [restoreSession]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;

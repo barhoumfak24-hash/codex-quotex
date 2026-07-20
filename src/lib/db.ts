@@ -164,6 +164,8 @@ export type SyncErrorReason =
   | "not_configured"
   | "too_large"
   | "network"
+  | "rate_limited"
+  | "server"
   | "conflict"
   | "local_quota"
   | "unknown";
@@ -1120,6 +1122,8 @@ let remoteDirtyDuringHydrate = false;
 let remoteWriteTimer: ReturnType<typeof setTimeout> | undefined;
 let remoteRetryTimer: ReturnType<typeof setTimeout> | undefined;
 let remoteRetryIndex = 0;
+let remoteHydrateRetryTimer: ReturnType<typeof setTimeout> | undefined;
+let remoteHydrateRetryIndex = 0;
 let remoteRevision: number | null = null;
 let remotePersistPromise: Promise<boolean> | undefined;
 let remoteDirtyDuringPersist = false;
@@ -1128,9 +1132,13 @@ let dbChangeChannel: BroadcastChannel | undefined;
 const DB_CHANGE_CHANNEL = `${STORAGE_KEY}.changes`;
 const DB_INSTANCE_ID = Math.random().toString(36).slice(2);
 const ACTIVE_DB_INSTANCE_KEY = "__quotexActiveDbInstanceId";
-const REMOTE_LIVE_SYNC_INTERVAL_MS = 2500;
+const REMOTE_SYNC_LEASE_KEY = `${STORAGE_KEY}.remote-sync-lease`;
+const REMOTE_LIVE_SYNC_INTERVAL_MS = 30_000;
+const REMOTE_SYNC_LEASE_MS = 45_000;
 const REMOTE_WRITE_DEBOUNCE_MS = 300;
+const REMOTE_REQUEST_TIMEOUT_MS = 15_000;
 const REMOTE_RETRY_DELAYS_MS = [1000, 2000, 5000, 15000, 60000];
+const REMOTE_HYDRATE_RETRY_DELAYS_MS = [2000, 5000, 15000, 30000, 60000];
 const REMOTE_SNAPSHOT_WARN_BYTES = 1.5 * 1024 * 1024;
 const LOCAL_CACHE_INLINE_DATA_URL_WARN_BYTES = 150_000;
 
@@ -1196,10 +1204,76 @@ function setSyncStatus(next: Omit<SyncStatus, "updatedAt">) {
 
 function syncFailureReason(status: number, fallback: SyncErrorReason = "unknown"): SyncErrorReason {
   if (status === 401 || status === 403) return "unauthorized";
+  if (status === 429) return "rate_limited";
   if (status === 409) return "conflict";
   if (status === 413) return "too_large";
   if (status === 503) return "not_configured";
+  if (status >= 500) return "server";
   return fallback;
+}
+
+function retryAfterMs(headerValue: string | null): number {
+  if (!headerValue) return 0;
+  const seconds = Number(headerValue);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const date = Date.parse(headerValue);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : 0;
+}
+
+function browserIsOffline() {
+  return typeof navigator !== "undefined" && navigator.onLine === false;
+}
+
+async function remoteFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => controller.abort(), REMOTE_REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    globalThis.clearTimeout(timeout);
+  }
+}
+
+function claimRemoteSyncLease(now = Date.now()): boolean {
+  if (typeof window === "undefined") return true;
+  try {
+    const current = JSON.parse(window.localStorage.getItem(REMOTE_SYNC_LEASE_KEY) ?? "null") as
+      | { instanceId?: string; expiresAt?: number }
+      | null;
+    if (
+      current?.instanceId &&
+      current.instanceId !== DB_INSTANCE_ID &&
+      typeof current.expiresAt === "number" &&
+      current.expiresAt > now
+    ) {
+      return false;
+    }
+    window.localStorage.setItem(
+      REMOTE_SYNC_LEASE_KEY,
+      JSON.stringify({ instanceId: DB_INSTANCE_ID, expiresAt: now + REMOTE_SYNC_LEASE_MS })
+    );
+    const confirmed = JSON.parse(window.localStorage.getItem(REMOTE_SYNC_LEASE_KEY) ?? "null") as
+      | { instanceId?: string }
+      | null;
+    return confirmed?.instanceId === DB_INSTANCE_ID;
+  } catch {
+    // The lease is an optimization. Storage restrictions must not disable sync.
+    return true;
+  }
+}
+
+function releaseRemoteSyncLease() {
+  if (typeof window === "undefined") return;
+  try {
+    const current = JSON.parse(window.localStorage.getItem(REMOTE_SYNC_LEASE_KEY) ?? "null") as
+      | { instanceId?: string }
+      | null;
+    if (current?.instanceId === DB_INSTANCE_ID) {
+      window.localStorage.removeItem(REMOTE_SYNC_LEASE_KEY);
+    }
+  } catch {
+    /* best effort */
+  }
 }
 
 function isNewerIso(candidate: string | undefined, current: string | undefined) {
@@ -1465,8 +1539,9 @@ async function hydrateFromRemote(options: { force?: boolean; merge?: boolean } =
       };
       waitForCurrentHydration();
     });
-    if (options.force) return hydrateFromRemote(options);
-    return;
+    // Coalesce concurrent forced refreshes. Re-running here used to turn every
+    // caller into another sequential GET after the active request finished.
+    return remoteLoadedOk;
   }
   if (
     !isActiveDbInstance() ||
@@ -1498,19 +1573,28 @@ async function hydrateFromRemote(options: { force?: boolean; merge?: boolean } =
     setSyncStatus({ status: "saving", message: "Connecting cloud state." });
   }
   try {
-    const res = await fetch(`${remoteApiBase()}/state/${encodeURIComponent(remoteStateId())}`, {
+    const res = await remoteFetch(`${remoteApiBase()}/state/${encodeURIComponent(remoteStateId())}`, {
       method: "GET",
       headers: remoteHeaders(),
     });
     if (!res.ok) {
-      const reason = syncFailureReason(res.status);
+      const payload = (await res.json().catch(() => null)) as { error?: string } | null;
+      const reason = payload?.error === "state_sync_temporarily_unavailable"
+        ? "server"
+        : syncFailureReason(res.status);
       remoteLoadedOk = false;
       remoteHydrated = false;
       setSyncStatus({
         status: "error",
         reason,
-        message: `Cloud state could not be loaded (${res.status}).`,
+        message: payload?.error === "state_sync_temporarily_unavailable"
+          ? "Cloud state is temporarily unavailable. Retrying automatically."
+          : `Cloud state could not be loaded (${res.status}).`,
       });
+      scheduleRemoteHydrateRetry(
+        reason,
+        retryAfterMs((res.headers as Headers | undefined)?.get?.("retry-after") ?? null)
+      );
       return;
     }
     const payload = (await res.json()) as { found?: boolean; scoped?: boolean; snapshot?: unknown; revision?: number };
@@ -1519,6 +1603,7 @@ async function hydrateFromRemote(options: { force?: boolean; merge?: boolean } =
     const replaceCustomerSeed = firstSuccessfulHydration && currentServerSessionRole() === "customer";
     remoteLoadedOk = true;
     remoteHydrated = true;
+    clearRemoteHydrateRetry();
     if (typeof payload.revision === "number") remoteRevision = payload.revision;
     const remote = normalizeRemoteSnapshot(payload.snapshot);
     if (!payload.found || !remote) {
@@ -1545,9 +1630,40 @@ async function hydrateFromRemote(options: { force?: boolean; merge?: boolean } =
     remoteLoadedOk = false;
     remoteHydrated = false;
     setSyncStatus({ status: "error", reason: "network", message: "Cloud state could not be loaded." });
+    scheduleRemoteHydrateRetry("network");
   } finally {
     remoteHydrating = false;
   }
+}
+
+function clearRemoteHydrateRetry() {
+  if (remoteHydrateRetryTimer) clearTimeout(remoteHydrateRetryTimer);
+  remoteHydrateRetryTimer = undefined;
+  remoteHydrateRetryIndex = 0;
+}
+
+function scheduleRemoteHydrateRetry(reason: SyncErrorReason, minimumDelayMs = 0) {
+  if (
+    !remoteSyncEnabled() ||
+    typeof window === "undefined" ||
+    reason === "unauthorized" ||
+    reason === "not_configured" ||
+    reason === "too_large"
+  ) {
+    return;
+  }
+  const backoff = REMOTE_HYDRATE_RETRY_DELAYS_MS[
+    Math.min(remoteHydrateRetryIndex, REMOTE_HYDRATE_RETRY_DELAYS_MS.length - 1)
+  ];
+  const delay = Math.max(backoff, minimumDelayMs);
+  remoteHydrateRetryIndex += 1;
+  if (remoteHydrateRetryTimer) clearTimeout(remoteHydrateRetryTimer);
+  remoteHydrateRetryTimer = setTimeout(() => {
+    remoteHydrateRetryTimer = undefined;
+    if (!isActiveDbInstance() || browserIsOffline() || !currentServerSessionToken()) return;
+    if (!claimRemoteSyncLease()) return;
+    void hydrateFromRemote({ force: true, merge: true });
+  }, delay);
 }
 
 function scheduleRemotePersist(
@@ -1571,14 +1687,15 @@ function clearRemoteRetry() {
   remoteRetryIndex = 0;
 }
 
-function scheduleRemoteRetry(reason: SyncErrorReason, message: string) {
+function scheduleRemoteRetry(reason: SyncErrorReason, message: string, minimumDelayMs = 0) {
   if (!remoteSyncEnabled() || typeof window === "undefined" || reason === "too_large") return;
-  const delay = REMOTE_RETRY_DELAYS_MS[Math.min(remoteRetryIndex, REMOTE_RETRY_DELAYS_MS.length - 1)];
+  const backoff = REMOTE_RETRY_DELAYS_MS[Math.min(remoteRetryIndex, REMOTE_RETRY_DELAYS_MS.length - 1)];
+  const delay = Math.max(backoff, minimumDelayMs);
   remoteRetryIndex += 1;
   if (remoteRetryTimer) clearTimeout(remoteRetryTimer);
   remoteRetryTimer = setTimeout(() => {
     remoteRetryTimer = undefined;
-    if (!isActiveDbInstance()) return;
+    if (!isActiveDbInstance() || browserIsOffline()) return;
     void persistRemote();
   }, delay);
   setSyncStatus({
@@ -1755,7 +1872,7 @@ async function persistRemoteInner(options: { keepalive?: boolean; attempt?: numb
   }
   setSyncStatus({ status: "saving", message: "Saving changes." });
   try {
-    const res = await fetch(`${remoteApiBase()}/state/${encodeURIComponent(remoteStateId())}`, {
+    const res = await remoteFetch(`${remoteApiBase()}/state/${encodeURIComponent(remoteStateId())}`, {
       method: "PUT",
       headers: remoteHeaders(),
       body,
@@ -1787,10 +1904,16 @@ async function persistRemoteInner(options: { keepalive?: boolean; attempt?: numb
       return false;
     }
     if (!res.ok) {
-      const reason = syncFailureReason(res.status);
+      const reason = payload?.error === "state_sync_temporarily_unavailable"
+        ? "server"
+        : syncFailureReason(res.status);
       const message = payload?.error ? `Cloud save failed: ${payload.error}.` : `Cloud save failed: ${res.status}.`;
       setSyncStatus({ status: "error", reason, message });
-      scheduleRemoteRetry(reason, message);
+      scheduleRemoteRetry(
+        reason,
+        message,
+        retryAfterMs((res.headers as Headers | undefined)?.get?.("retry-after") ?? null)
+      );
       return false;
     }
     if (typeof payload?.revision === "number") remoteRevision = payload.revision;
@@ -1931,6 +2054,19 @@ void hydrateFromRemote({ merge: true });
 function startExternalSync() {
   if (typeof window === "undefined" || externalSyncStarted) return;
   externalSyncStarted = true;
+  const syncRemoteIfLeader = () => {
+    if (
+      !isActiveDbInstance() ||
+      !remoteSyncEnabled() ||
+      !currentServerSessionToken() ||
+      browserIsOffline() ||
+      document.visibilityState === "hidden" ||
+      !claimRemoteSyncLease()
+    ) {
+      return;
+    }
+    void hydrateFromRemote({ force: true, merge: true });
+  };
   window.addEventListener("storage", (event) => {
     if (!isActiveDbInstance()) return;
     if (event.key !== STORAGE_KEY || !event.newValue) return;
@@ -1953,10 +2089,11 @@ function startExternalSync() {
     applyLocalStorageSnapshot("broadcast");
   });
   if (remoteSyncEnabled()) {
-    window.setInterval(() => {
-      if (!isActiveDbInstance()) return;
-      void hydrateFromRemote({ force: true, merge: true });
-    }, REMOTE_LIVE_SYNC_INTERVAL_MS);
+    // BroadcastChannel handles same-browser updates immediately. Only one
+    // visible tab polls the server for cross-device changes.
+    window.setInterval(syncRemoteIfLeader, REMOTE_LIVE_SYNC_INTERVAL_MS);
+    window.addEventListener("focus", syncRemoteIfLeader);
+    window.addEventListener("online", syncRemoteIfLeader);
   } else {
     setSyncStatus({
       status: "local-only",
@@ -1973,9 +2110,13 @@ function startExternalSync() {
     }
     void persistRemote({ keepalive: true });
   };
-  window.addEventListener("pagehide", flushPendingRemoteWrite);
+  window.addEventListener("pagehide", () => {
+    flushPendingRemoteWrite();
+    releaseRemoteSyncLease();
+  });
   window.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") flushPendingRemoteWrite();
+    else syncRemoteIfLeader();
   });
 }
 

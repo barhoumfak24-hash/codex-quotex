@@ -18,6 +18,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   document.body.innerHTML = "";
 });
 
@@ -189,6 +190,7 @@ describe("agency deactivation auth guard", () => {
     });
 
     expect(auth!.user).toBeNull();
+    expect(auth!.loading).toBe(true);
     expect(window.localStorage.getItem("quotex.authToken")).toBe("cached-server-token");
 
     await act(async () => {
@@ -468,6 +470,151 @@ describe("agency deactivation auth guard", () => {
     await act(async () => {
       root?.unmount();
     });
+    fetchSpy.mockRestore();
+  });
+
+  it("admits a valid staff session without waiting for cloud hydration", async () => {
+    vi.stubEnv("VITE_STATE_SYNC_MODE", "supabase");
+    const agency = api.agencies.create({
+      name: "Fast Auth Agency",
+      contactEmail: "owner@fast-auth.example",
+      phone: "517-294-2671",
+      address: "",
+      website: "",
+      serviceAreas: [],
+      tier: "minimum",
+      allowedUsers: 10,
+      allowedProspectsPerMonth: 100,
+      allowedAiMessagesPerMonth: 500,
+      allowedCarriers: 10,
+    });
+    const manager = api.users.create({
+      tenantId: agency.id,
+      role: "manager",
+      email: "manager@fast-auth.example",
+      businessEmail: "manager@fast-auth.example",
+      name: "Fast Auth Manager",
+      generatedPassword: "same-password-123",
+      profileCompleted: true,
+      staffAccessStatus: "active",
+    });
+    const fetchSpy = mockCanonicalAuth(manager, agency);
+    let finishHydration!: (value: boolean) => void;
+    const hydration = new Promise<boolean>((resolve) => {
+      finishHydration = resolve;
+    });
+    const hydrateSpy = vi.spyOn(db, "hydrateNow").mockReturnValue(hydration);
+
+    const harness = document.createElement("div");
+    document.body.appendChild(harness);
+    let root: Root | null = null;
+    let auth: ReturnType<typeof useAuth> | null = null;
+    function Probe() {
+      auth = useAuth();
+      return null;
+    }
+
+    await act(async () => {
+      root = createRoot(harness);
+      root.render(
+        <AuthProvider>
+          <Probe />
+        </AuthProvider>
+      );
+    });
+
+    let result: { ok: boolean } | undefined;
+    await act(async () => {
+      result = await Promise.race([
+        auth!.signInStaff(manager.email, "same-password-123"),
+        new Promise<never>((_, reject) =>
+          window.setTimeout(() => reject(new Error("sign-in waited for hydration")), 100)
+        ),
+      ]);
+    });
+
+    expect(result?.ok).toBe(true);
+    expect((auth!.user as User | null)?.id).toBe(manager.id);
+    expect(hydrateSpy).toHaveBeenCalledTimes(1);
+
+    finishHydration(true);
+    await act(async () => {
+      await Promise.resolve();
+      root?.unmount();
+    });
+    fetchSpy.mockRestore();
+  });
+
+  it("recovers a cached session automatically after a temporary throttle", async () => {
+    vi.useFakeTimers();
+    const master: User = {
+      id: "master_session_retry",
+      tenantId: null,
+      role: "master_admin",
+      email: "founder-retry@quotexinsurance.com",
+      name: "Founder Retry",
+      generatedPassword: "",
+      active: true,
+      profileCompleted: true,
+      createdAt: new Date().toISOString(),
+    };
+    window.localStorage.setItem("quotex.authToken", "cached-server-token");
+    const fetchSpy = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ ok: false, reason: "rate_limited" }), {
+          status: 429,
+          headers: { "content-type": "application/json" },
+        })
+      )
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            ok: true,
+            token: "refreshed-server-token",
+            user: {
+              id: master.id,
+              tenantId: null,
+              role: master.role,
+              email: master.email,
+              name: master.name,
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } }
+        )
+      );
+
+    const harness = document.createElement("div");
+    document.body.appendChild(harness);
+    let root: Root | null = null;
+    let auth: ReturnType<typeof useAuth> | null = null;
+    function Probe() {
+      auth = useAuth();
+      return null;
+    }
+
+    await act(async () => {
+      root = createRoot(harness);
+      root.render(
+        <AuthProvider>
+          <Probe />
+        </AuthProvider>
+      );
+    });
+    expect(auth!.loading).toBe(true);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(auth!.loading).toBe(false);
+    expect((auth!.user as User | null)?.id).toBe(master.id);
+    expect(window.localStorage.getItem("quotex.authToken")).toBe("refreshed-server-token");
+
+    await act(async () => {
+      root?.unmount();
+    });
+    vi.useRealTimers();
     fetchSpy.mockRestore();
   });
 
