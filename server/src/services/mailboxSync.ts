@@ -948,7 +948,7 @@ async function readGraphMessagePages(initialUrl: URL, accessToken: string): Prom
   while (nextLink) {
     if (seenLinks.has(nextLink)) throw new Error("Microsoft Graph returned a repeated continuation link.");
     seenLinks.add(nextLink);
-    const list = await providerJson<GraphMessageList>(nextLink, accessToken);
+    const list: GraphMessageList = await providerJson<GraphMessageList>(nextLink, accessToken);
     messages.push(...(list.value ?? []));
     nextLink = list["@odata.nextLink"];
   }
