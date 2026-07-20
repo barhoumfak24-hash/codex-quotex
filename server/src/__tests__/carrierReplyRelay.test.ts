@@ -24,6 +24,7 @@ import {
   carrierReplyRelayReadiness,
   createCarrierReplyRoute,
   ingestCarrierReply,
+  recordCarrierReplyRouteUnavailable,
   recordCarrierReplyIngress,
   verifyInboundWebhookSecret,
 } from "../services/carrierReplyRelay.js";
@@ -106,6 +107,43 @@ describe("carrier reply relay", () => {
 
     expect(replyAddress).toBeNull();
     expect(mocks.auditCreate).not.toHaveBeenCalled();
+  });
+
+  it("records why a carrier reply route could not be armed", async () => {
+    await recordCarrierReplyRouteUnavailable({
+      tenantId: "tenant-1",
+      userId: "user-1",
+      mailboxAccount: "agent@example.com",
+      context: {
+        communicationId: "communication-1",
+        customerId: "customer-1",
+        carrierSubmissionId: "submission-1",
+      },
+      readiness: {
+        configured: true,
+        domain: "reply.quotexinsurance.com",
+        active: false,
+        reason: "mx_not_routed",
+        checkedAt: "2026-07-20T00:00:00.000Z",
+      },
+    });
+
+    expect(mocks.auditCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        tenantId: "tenant-1",
+        actorId: "user-1",
+        action: "mailbox.reply_route.unavailable",
+        entityType: "mailbox_reply_route",
+        entityId: "communication-1",
+        metadata: expect.objectContaining({
+          communicationId: "communication-1",
+          carrierSubmissionId: "submission-1",
+          mailboxAccount: "agent@example.com",
+          domain: "reply.quotexinsurance.com",
+          reason: "mx_not_routed",
+        }),
+      }),
+    });
   });
 
   it("records ignored webhook deliveries without storing message contents", async () => {

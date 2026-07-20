@@ -153,6 +153,35 @@ export async function createCarrierReplyRoute(input: {
   return replyAddress;
 }
 
+export async function recordCarrierReplyRouteUnavailable(input: {
+  tenantId: string;
+  userId: string;
+  mailboxAccount: string;
+  context?: CarrierReplyContext;
+  readiness?: Pick<RelayReadiness, "configured" | "domain" | "active" | "reason" | "checkedAt"> | null;
+}) {
+  if (!input.context?.communicationId) return;
+
+  await prisma.auditLog.create({
+    data: {
+      id: `audit_${randomUUID()}`,
+      tenantId: input.tenantId,
+      actorId: input.userId,
+      action: "mailbox.reply_route.unavailable",
+      entityType: "mailbox_reply_route",
+      entityId: input.context.communicationId,
+      metadata: jsonValue({
+        ...input.context,
+        mailboxAccount: input.mailboxAccount,
+        configured: input.readiness?.configured ?? false,
+        domain: input.readiness?.domain ?? null,
+        reason: input.readiness?.reason ?? "not_configured",
+        checkedAt: input.readiness?.checkedAt ?? new Date().toISOString(),
+      }),
+    },
+  });
+}
+
 export async function ingestCarrierReply(input: InboundCarrierReply): Promise<
   | { status: "linked"; communicationId: string; tenantId: string; userId: string }
   | { status: "deduped"; communicationId: string; tenantId: string; userId: string }

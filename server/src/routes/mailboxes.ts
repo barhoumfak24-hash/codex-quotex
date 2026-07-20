@@ -25,6 +25,7 @@ import {
   carrierReplyRelayConfiguration,
   carrierReplyRelayReadiness,
   createCarrierReplyRoute,
+  recordCarrierReplyRouteUnavailable,
 } from "../services/carrierReplyRelay.js";
 
 export const mailboxesRoutes = Router();
@@ -243,6 +244,15 @@ mailboxesRoutes.post("/send", async (req, res, next) => {
       context: parsed.data.replyContext,
       relayActive: carrierReplyReadiness?.active === true,
     });
+    if (parsed.data.replyContext && !carrierReplyTo) {
+      await recordCarrierReplyRouteUnavailable({
+        tenantId: req.auth.tenantId,
+        userId: req.auth.userId,
+        mailboxAccount: identity.email,
+        context: parsed.data.replyContext,
+        readiness: carrierReplyReadiness,
+      });
+    }
     const effectiveReplyTo = carrierReplyTo ?? identity.email;
     try {
       const result = await sendMailboxEmail({

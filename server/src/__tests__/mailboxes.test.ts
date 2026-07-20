@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   agencyFindFirst: vi.fn(),
   mailboxConnectionFindFirst: vi.fn(),
   createCarrierReplyRoute: vi.fn(),
+  recordCarrierReplyRouteUnavailable: vi.fn(),
   carrierReplyRelayConfiguration: vi.fn(),
   carrierReplyRelayReadiness: vi.fn(),
 }));
@@ -59,6 +60,7 @@ vi.mock("../services/email.js", () => ({
 
 vi.mock("../services/carrierReplyRelay.js", () => ({
   createCarrierReplyRoute: mocks.createCarrierReplyRoute,
+  recordCarrierReplyRouteUnavailable: mocks.recordCarrierReplyRouteUnavailable,
   carrierReplyRelayConfiguration: mocks.carrierReplyRelayConfiguration,
   carrierReplyRelayReadiness: mocks.carrierReplyRelayReadiness,
 }));
@@ -85,6 +87,7 @@ beforeEach(() => {
   mocks.agencyFindFirst.mockReset();
   mocks.mailboxConnectionFindFirst.mockReset();
   mocks.createCarrierReplyRoute.mockReset().mockResolvedValue(null);
+  mocks.recordCarrierReplyRouteUnavailable.mockReset().mockResolvedValue(undefined);
   mocks.carrierReplyRelayConfiguration.mockReset().mockReturnValue({
     configured: true,
     domain: "reply.quotexinsurance.com",
@@ -380,6 +383,7 @@ describe("mailbox delivery routes", () => {
       context: replyContext,
       relayActive: true,
     });
+    expect(mocks.recordCarrierReplyRouteUnavailable).not.toHaveBeenCalled();
     expect(mocks.sendMailboxEmail).toHaveBeenCalledWith(
       expect.objectContaining({
         to: ["underwriter@carrier.example"],
@@ -418,6 +422,13 @@ describe("mailbox delivery routes", () => {
     expect(mocks.createCarrierReplyRoute).toHaveBeenCalledWith(
       expect.objectContaining({ relayActive: false })
     );
+    expect(mocks.recordCarrierReplyRouteUnavailable).toHaveBeenCalledWith({
+      tenantId: "tenant_mail",
+      userId: "user_mail",
+      mailboxAccount: "abe@example.com",
+      context: replyContext,
+      readiness: expect.objectContaining({ active: false, reason: "mx_not_routed" }),
+    });
     expect(mocks.sendMailboxEmail).toHaveBeenCalledWith(
       expect.objectContaining({ replyTo: "abe@example.com" })
     );
