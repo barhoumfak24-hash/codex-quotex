@@ -704,7 +704,9 @@ describe("AiQuotingWorkspace component", () => {
     await act(async () => {
       await new Promise((resolve) => window.setTimeout(resolve, 0));
     });
-    expect(host.textContent).toContain("Connect a readable mailbox in Account settings");
+    expect(host.textContent).toContain("QuoteX responses checked. No new verified carrier responses were found.");
+    expect(host.textContent).not.toContain("Connect inbox");
+    expect(host.textContent).not.toContain("Connect a readable mailbox");
     expect(host.textContent).toContain("Last checked");
     expect(
       sendFetch.mock.calls.some(([request]) => String(request).includes("/mailboxes/sync"))

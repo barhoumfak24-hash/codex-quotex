@@ -54,8 +54,6 @@ import {
   sendCommunicationThroughLiveMailbox,
   syncCommunicationsFromLiveMailbox,
 } from "@/lib/liveMailbox";
-import { startMailboxOAuth, type MailboxOAuthProvider } from "@/lib/mailboxOAuth";
-import { inferMailProvider } from "@/lib/mailProvider";
 import { categoryQuotingQuestions } from "@/lib/categoryQuestionnaires";
 import { type AiGatewayFailureDetail } from "@/lib/aiGateway";
 import { carrierPortalRunnerStatus } from "@/lib/carrierPortalPlaybooks";
@@ -154,13 +152,6 @@ function preserveWindowScroll<T>(action: () => T): T {
     scheduleRestore();
     throw error;
   }
-}
-
-function mailboxOAuthProviderFor(user: QuotexUser): MailboxOAuthProvider | null {
-  const provider = user.mailProvider ?? inferMailProvider(user.email);
-  if (provider === "gmail") return "google";
-  if (provider === "outlook") return "microsoft";
-  return null;
 }
 
 function quoteWorkspaceFailure(message: string, error: unknown): AiGatewayFailureDetail {
@@ -4021,8 +4012,6 @@ function CommercialFlowPanel({
     tone: "success" | "neutral" | "warn";
     message: string;
   } | null>(null);
-  const [responseMailboxConnectProvider, setResponseMailboxConnectProvider] =
-    useState<MailboxOAuthProvider | null>(null);
   const responseCheckCooldownTimer = useRef<number | null>(null);
   const responseCheckInFlight = useRef(false);
   const submissions = session.commercialCarrierSubmissions ?? [];
@@ -4139,9 +4128,7 @@ function CommercialFlowPanel({
     setCheckingResponses(true);
     responseCheckInFlight.current = true;
     setResponseCheckNotice(null);
-    setResponseMailboxConnectProvider(null);
     try {
-      let mailboxWarning: string | null = null;
       let responsesNeedingReview = 0;
 
       // First replay messages already imported by the scheduled mailbox job.
@@ -4153,8 +4140,7 @@ function CommercialFlowPanel({
         limit: 500,
         quotingSessionId: session.id,
       });
-      if (!replay.ok) mailboxWarning = replay.message;
-      else responsesNeedingReview += replay.review;
+      if (replay.ok) responsesNeedingReview += replay.review;
       await api.quoting.readCommercialCarrierResponses(session.id);
 
       try {
@@ -4173,19 +4159,10 @@ function CommercialFlowPanel({
           if (sync.ok) {
             responsesNeedingReview += sync.review;
             await api.quoting.readCommercialCarrierResponses(session.id);
-          } else {
-            mailboxWarning = sync.message;
           }
-        } else if (!capability.carrierReplyRelayActive) {
-          const provider = mailboxOAuthProviderFor(user);
-          setResponseMailboxConnectProvider(provider);
-          mailboxWarning = provider
-            ? `Connect ${provider === "google" ? "Google" : "Microsoft"} inbox access so QuoteX can detect carrier replies.`
-            : "Connect a readable mailbox in Account settings so QuoteX can detect carrier replies.";
         }
       } catch (error) {
-        mailboxWarning =
-          error instanceof Error ? error.message : "The connected mailbox could not be checked.";
+        console.error("Carrier response live mailbox check failed", error);
       }
 
       const responsesAfter = responseCount(api.quoting.get(session.id));
@@ -4202,11 +4179,6 @@ function CommercialFlowPanel({
               tone: "warn",
               message: `${responsesNeedingReview} carrier email${responsesNeedingReview === 1 ? " was" : "s were"} received and need${responsesNeedingReview === 1 ? "s" : ""} confirmation before the quote flow is updated.`,
             }
-          : mailboxWarning
-          ? {
-              tone: "warn",
-              message: mailboxWarning,
-            }
           : {
               tone: "neutral",
               message: "QuoteX responses checked. No new verified carrier responses were found.",
@@ -4221,32 +4193,6 @@ function CommercialFlowPanel({
         setResponseCheckCoolingDown(false);
         responseCheckCooldownTimer.current = null;
       }, 8_000);
-    }
-  }
-
-  async function connectResponseMailbox() {
-    const provider = responseMailboxConnectProvider;
-    const user = api.users.get(userId);
-    if (!provider || !user) return;
-    setCheckingResponses(true);
-    try {
-      const result = await startMailboxOAuth({
-        provider,
-        user,
-        tenantId: session.tenantId,
-        ownerType: "staff",
-        redirectAfter: `${window.location.pathname}${window.location.search}${window.location.hash}`,
-      });
-      if (!result.ok) {
-        setResponseCheckNotice({
-          tone: "warn",
-          message: result.message || "Mailbox connection could not be started.",
-        });
-        return;
-      }
-      window.location.assign(result.authorizationUrl);
-    } finally {
-      setCheckingResponses(false);
     }
   }
 
@@ -4295,16 +4241,6 @@ function CommercialFlowPanel({
         >
           <div className="flex flex-wrap items-center gap-2">
             <span>{responseCheckNotice?.message ?? "Mailbox checked."}</span>
-            {responseMailboxConnectProvider && responseCheckNotice?.tone === "warn" && (
-              <button
-                type="button"
-                className="btn-outline bg-white text-xs"
-                onClick={() => void connectResponseMailbox()}
-                disabled={checkingResponses}
-              >
-                Connect inbox
-              </button>
-            )}
           </div>
           {lastResponseCheckAt && (
             <span className="shrink-0 text-ink-500">
