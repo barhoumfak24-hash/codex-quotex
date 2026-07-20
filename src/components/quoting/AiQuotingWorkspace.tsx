@@ -4146,9 +4146,9 @@ function CommercialFlowPanel({
               ? api.carrierContacts.get(communication.carrierContactId)
               : undefined;
             const participantEmail =
-              carrierContact?.email ??
               communication.externalRecipientEmail ??
-              communication.to?.[0];
+              communication.to?.[0] ??
+              carrierContact?.email;
             const hasRecoveryKey = Boolean(
               communication.subject && participantEmail && communication.createdAt
             );

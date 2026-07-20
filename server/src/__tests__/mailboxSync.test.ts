@@ -243,6 +243,53 @@ describe("mailbox sync reliability", () => {
     });
   });
 
+  it("recovers an exact Gmail reply when a stale non-Gmail thread id is stored on the outbound message", async () => {
+    mocks.readFreshMailboxToken.mockResolvedValue(googleConnection());
+    fetchMock().mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/threads/transactional-thread-1")) {
+        return jsonResponse({ error: { message: "Invalid thread id." } }, 400);
+      }
+      if (url.pathname.endsWith("/messages") && url.searchParams.has("q")) {
+        expect(url.searchParams.get("q")).toContain("from:gbnhone@gmail.com");
+        return jsonResponse({ messages: [{ id: "carrier-reply-after-stale-thread" }] });
+      }
+      if (url.pathname.endsWith("/messages/carrier-reply-after-stale-thread")) {
+        return jsonResponse(gmailInboundReply(
+          "carrier-reply-after-stale-thread",
+          "gmail-thread-recovered",
+          "<unavailable-fallback-message-id@example.com>",
+          {
+            from: "GBN Hone <gbnhone@gmail.com>",
+            subject: "Re: Commercial application package - Fictional Insured",
+            sentAt: "2026-07-19T23:59:00.000Z",
+            body: "The coverage has been approved. Annual Premium: $4,850.",
+          }
+        ));
+      }
+      throw new Error(`Unexpected Gmail request: ${url.toString()}`);
+    });
+
+    const result = await syncMailboxReplyMessages({
+      tenantId: "tenant-1",
+      userId: "user-1",
+      targets: [{
+        externalThreadId: "transactional-thread-1",
+        subject: "Commercial application package - Fictional Insured",
+        participantEmail: "gbnhone@gmail.com",
+        sentAt: "2026-07-19T21:56:30.375Z",
+        carrierSubmissionId: "submission-great-lakes",
+      }],
+    });
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]).toMatchObject({
+      externalMessageId: "carrier-reply-after-stale-thread",
+      direction: "inbound",
+      carrierSubmissionId: "submission-great-lakes",
+    });
+  });
+
   it("does not recover a same-subject Gmail message from a different sender", async () => {
     mocks.readFreshMailboxToken.mockResolvedValue(googleConnection());
     fetchMock().mockImplementation(async (input: string | URL | Request) => {

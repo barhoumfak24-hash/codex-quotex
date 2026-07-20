@@ -767,7 +767,17 @@ async function syncGmailReplyMessages(
       `https://gmail.googleapis.com/gmail/v1/users/me/threads/${encodeURIComponent(threadId)}`
     );
     url.searchParams.set("format", "full");
-    const thread = await providerJson<GmailThreadResponse>(url.toString(), accessToken);
+    let thread: GmailThreadResponse;
+    try {
+      thread = await providerJson<GmailThreadResponse>(url.toString(), accessToken);
+    } catch (error) {
+      // Outbound messages sent before OAuth was connected can carry a
+      // transactional-provider thread id. Gmail correctly rejects that id;
+      // the exact subject/sender/time recovery pass below can still find the
+      // reply in the connected mailbox.
+      if (isMissingGmailItemError(error)) continue;
+      throw error;
+    }
     for (const rawMessage of thread.messages ?? []) {
       if (rawMessage.error) continue;
       const message = normalizeGmailMessage(connectionId, mailboxAccount, rawMessage);
@@ -804,7 +814,14 @@ async function readGmailMessagesById(ids: Iterable<string>, accessToken: string)
     Array.from(new Set(Array.from(ids).filter(Boolean))).map(async (id) => {
       const url = new URL(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}`);
       url.searchParams.set("format", "full");
-      return providerJson<GmailMessage>(url.toString(), accessToken);
+      try {
+        return await providerJson<GmailMessage>(url.toString(), accessToken);
+      } catch (error) {
+        if (isMissingGmailItemError(error)) {
+          return { id, error: { message: "Gmail message is no longer available." } };
+        }
+        throw error;
+      }
     })
   );
 }
@@ -1183,6 +1200,10 @@ class MailboxProviderHttpError extends Error {
 
 function isExpiredGmailHistoryError(error: unknown): boolean {
   return error instanceof MailboxProviderHttpError && error.status === 404;
+}
+
+function isMissingGmailItemError(error: unknown): boolean {
+  return error instanceof MailboxProviderHttpError && (error.status === 400 || error.status === 404);
 }
 
 function findGmailBody(part: GmailPart | undefined, mimeType: string): string {

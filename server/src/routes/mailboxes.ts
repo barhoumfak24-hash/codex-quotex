@@ -359,6 +359,12 @@ mailboxesRoutes.post("/sync/replies", async (req, res, next) => {
     res.json({ ok: true, result });
   } catch (error) {
     if (error instanceof Error) {
+      console.error("Mailbox reply sync failed", {
+        tenantId: req.auth?.tenantId,
+        userId: req.auth?.userId,
+        name: error.name,
+        message: error.message,
+      });
       return res.status(502).json({
         ok: false,
         error: "mailbox_reply_sync_failed",
