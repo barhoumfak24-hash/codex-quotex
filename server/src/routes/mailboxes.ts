@@ -13,7 +13,12 @@ import {
   saveAgencyMarketingSmtpCredential,
   sendMailboxEmail,
 } from "../services/mailboxProvider.js";
-import { listMailboxDiagnostics, listMailboxSyncStatus, syncMailboxMessages } from "../services/mailboxSync.js";
+import {
+  listMailboxDiagnostics,
+  listMailboxSyncStatus,
+  listPersistedMailboxMessages,
+  syncMailboxMessages,
+} from "../services/mailboxSync.js";
 import { emailDeliveryConfiguration, sendEmail } from "../services/email.js";
 import { prisma } from "../services/prisma.js";
 
@@ -52,6 +57,9 @@ const syncSchema = z.object({
   connectionId: z.string().optional(),
   maxResults: z.number().int().min(1).max(50).optional(),
 });
+const replaySchema = z.object({
+  limit: z.number().int().min(1).max(500).optional(),
+});
 const agencyMarketingCredentialSchema = z.object({
   email: emailSchema,
   password: z.string().min(1).max(1024),
@@ -83,16 +91,35 @@ mailboxesRoutes.get("/capability", async (req, res, next) => {
       userId: req.auth.userId,
     });
     const transactional = emailDeliveryConfiguration();
+    const readableConnections = connections.filter(connectionCanReadInbox);
     res.json({
       ok: true,
       capability: {
         mailboxConnected: connections.some((connection) => connection.status === "connected"),
+        inboxSyncConnected: readableConnections.length > 0,
+        inboxSyncProvider: readableConnections[0]?.provider ?? null,
         transactionalConfigured: transactional.configured,
         transactionalProvider: transactional.provider,
         missingEnvironmentVariables: transactional.missingEnvironmentVariables,
         acceptedConfigurations: transactional.acceptedConfigurations,
       },
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+mailboxesRoutes.post("/replay", async (req, res, next) => {
+  try {
+    if (!req.auth?.tenantId) return res.status(403).json({ ok: false, error: "tenant_required" });
+    const parsed = replaySchema.safeParse(req.body ?? {});
+    if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+    const messages = await listPersistedMailboxMessages({
+      tenantId: req.auth.tenantId,
+      userId: req.auth.userId,
+      limit: parsed.data.limit,
+    });
+    return res.json({ ok: true, messages });
   } catch (error) {
     next(error);
   }
@@ -235,7 +262,18 @@ mailboxesRoutes.post("/sync", async (req, res, next) => {
       connectionId: parsed.data.connectionId,
       maxResults: parsed.data.maxResults,
     });
-    res.json({ ok: true, result });
+    const replayed = await listPersistedMailboxMessages({
+      tenantId: req.auth.tenantId,
+      userId: req.auth.userId,
+      limit: 250,
+    });
+    const byProviderMessage = new Map(
+      [...result.messages, ...replayed].map((message) => [
+        `${message.mailboxConnectionId}:${message.externalMessageId}`,
+        message,
+      ])
+    );
+    res.json({ ok: true, result: { ...result, messages: [...byProviderMessage.values()] } });
   } catch (error) {
     if (error instanceof Error) {
       return res.status(502).json({
@@ -273,6 +311,23 @@ mailboxesRoutes.get("/diagnostics", async (req, res, next) => {
     next(error);
   }
 });
+
+function connectionCanReadInbox(connection: {
+  status?: string;
+  authMode?: string;
+  provider?: string;
+  scopes?: unknown[];
+}) {
+  if (connection.status !== "connected" || connection.authMode !== "oauth") return false;
+  const scopes = (connection.scopes ?? [])
+    .filter((scope): scope is string => typeof scope === "string")
+    .map((scope) => scope.toLowerCase());
+  return scopes.some((scope) =>
+    connection.provider === "google"
+      ? scope.includes("gmail.readonly") || scope.includes("gmail.modify")
+      : scope === "mail.read" || scope === "mail.readwrite"
+  );
+}
 
 async function sendWithTransactionalFallback(
   input: z.infer<typeof sendSchema>,

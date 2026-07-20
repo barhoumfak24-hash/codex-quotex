@@ -6,6 +6,7 @@ import { issueSessionJwt } from "../routes/auth.js";
 const mocks = vi.hoisted(() => ({
   sendMailboxEmail: vi.fn(),
   syncMailboxMessages: vi.fn(),
+  listPersistedMailboxMessages: vi.fn(),
   listMailboxSyncStatus: vi.fn(),
   listMailboxDiagnostics: vi.fn(),
   sendEmail: vi.fn(),
@@ -43,6 +44,7 @@ vi.mock("../services/prisma.js", () => ({
 
 vi.mock("../services/mailboxSync.js", () => ({
   syncMailboxMessages: mocks.syncMailboxMessages,
+  listPersistedMailboxMessages: mocks.listPersistedMailboxMessages,
   listMailboxSyncStatus: mocks.listMailboxSyncStatus,
   listMailboxDiagnostics: mocks.listMailboxDiagnostics,
 }));
@@ -61,6 +63,7 @@ beforeEach(() => {
   vi.stubEnv("JWT_AUDIENCE", "");
   mocks.sendMailboxEmail.mockReset();
   mocks.syncMailboxMessages.mockReset();
+  mocks.listPersistedMailboxMessages.mockReset();
   mocks.listMailboxSyncStatus.mockReset();
   mocks.listMailboxDiagnostics.mockReset();
   mocks.sendEmail.mockReset();
@@ -80,6 +83,7 @@ beforeEach(() => {
     acceptedConfigurations: [["SENDGRID_API_KEY", "EMAIL_FROM or SENDGRID_FROM_EMAIL"]],
   });
   mocks.listMailboxConnections.mockResolvedValue([]);
+  mocks.listPersistedMailboxMessages.mockResolvedValue([]);
   mocks.isMailboxFallbackSafeError.mockReturnValue(true);
   mocks.userFindUnique.mockResolvedValue({
     id: "user_mail",
@@ -153,7 +157,14 @@ describe("mailbox delivery routes", () => {
 
   it("reports the authenticated staff member's real email capability", async () => {
     mocks.listMailboxConnections.mockResolvedValue([
-      { id: "mailbox_1", userId: "user_mail", status: "connected" },
+      {
+        id: "mailbox_1",
+        userId: "user_mail",
+        status: "connected",
+        authMode: "oauth",
+        provider: "google",
+        scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+      },
     ]);
 
     const response = await getMailbox("/capability", staffToken());
@@ -163,6 +174,8 @@ describe("mailbox delivery routes", () => {
       ok: true,
       capability: {
         mailboxConnected: true,
+        inboxSyncConnected: true,
+        inboxSyncProvider: "google",
         transactionalConfigured: true,
         transactionalProvider: "sendgrid",
         missingEnvironmentVariables: [],
@@ -171,6 +184,60 @@ describe("mailbox delivery routes", () => {
     expect(mocks.listMailboxConnections).toHaveBeenCalledWith({
       tenantId: "tenant_mail",
       userId: "user_mail",
+    });
+  });
+
+  it("does not claim inbox access for a send-only mailbox connection", async () => {
+    mocks.listMailboxConnections.mockResolvedValue([
+      {
+        id: "mailbox_send_only",
+        userId: "user_mail",
+        status: "connected",
+        authMode: "oauth",
+        provider: "google",
+        scopes: ["https://www.googleapis.com/auth/gmail.send"],
+      },
+    ]);
+
+    const response = await getMailbox("/capability", staffToken());
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      capability: {
+        mailboxConnected: true,
+        inboxSyncConnected: false,
+        inboxSyncProvider: null,
+      },
+    });
+  });
+
+  it("replays inbound messages already imported by the scheduled mailbox sync", async () => {
+    mocks.listPersistedMailboxMessages.mockResolvedValue([
+      {
+        mailboxAccount: "agent@example.com",
+        mailboxConnectionId: "mailbox_conn_1",
+        provider: "gmail",
+        externalMessageId: "persisted_reply_1",
+        from: "underwriter@carrier.example",
+        to: ["agent@example.com"],
+        subject: "Re: application",
+        body: "We can quote this account.",
+        direction: "inbound",
+      },
+    ]);
+
+    const response = await postMailbox("/replay", { limit: 100 }, staffToken());
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      messages: [{ externalMessageId: "persisted_reply_1", direction: "inbound" }],
+    });
+    expect(mocks.listPersistedMailboxMessages).toHaveBeenCalledWith({
+      tenantId: "tenant_mail",
+      userId: "user_mail",
+      limit: 100,
     });
   });
 

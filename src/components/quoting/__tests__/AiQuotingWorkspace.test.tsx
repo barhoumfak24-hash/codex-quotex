@@ -590,6 +590,14 @@ describe("AiQuotingWorkspace component", () => {
 
   it("leaves ACORD review after sending the commercial application package", async () => {
     const sendFetch = vi.fn().mockImplementation(async (request: RequestInfo | URL) => {
+      if (String(request).includes("/mailboxes/replay")) {
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: async () => ({ ok: true, messages: [] }),
+        };
+      }
       if (String(request).includes("/mailboxes/capability")) {
         return {
           ok: true,
@@ -599,6 +607,8 @@ describe("AiQuotingWorkspace component", () => {
             ok: true,
             capability: {
               mailboxConnected: false,
+              inboxSyncConnected: false,
+              inboxSyncProvider: null,
               transactionalConfigured: true,
               transactionalProvider: "sendgrid",
               missingEnvironmentVariables: [],
@@ -694,7 +704,7 @@ describe("AiQuotingWorkspace component", () => {
     await act(async () => {
       await new Promise((resolve) => window.setTimeout(resolve, 0));
     });
-    expect(host.textContent).toContain("No new verified carrier responses were found");
+    expect(host.textContent).toContain("Connect a readable mailbox in Account settings");
     expect(host.textContent).toContain("Last checked");
     expect(
       sendFetch.mock.calls.some(([request]) => String(request).includes("/mailboxes/sync"))

@@ -6792,10 +6792,19 @@ type CommercialSubmissionMatchReason =
   | "thread_id"
   | "external_thread_id"
   | "rfc822_reply_chain"
+  | "known_underwriter_subject"
   | "literal_submission_id";
 
 function normalizeMailIdentifier(value: string | undefined): string {
   return (value ?? "").trim().replace(/^<|>$/g, "").toLowerCase();
+}
+
+function normalizeReplySubject(value: string | undefined): string {
+  return (value ?? "")
+    .trim()
+    .replace(/^\s*((re|fw|fwd)\s*:\s*)+/i, "")
+    .replace(/\s+/g, " ")
+    .toLowerCase();
 }
 
 function commercialSubmissionMessageIdentifiers(
@@ -6838,6 +6847,22 @@ function commercialSubmissionMatchReason(
   ]).map(normalizeMailIdentifier);
   if (replyChainIds.some((id) => knownMessageIds.has(id))) {
     return "rfc822_reply_chain";
+  }
+  const knownUnderwriter = Boolean(
+    communication.carrierContactId &&
+      (submission.underwriterContactIds ?? []).includes(communication.carrierContactId)
+  );
+  const replySubject = normalizeReplySubject(communication.subject);
+  if (knownUnderwriter && replySubject) {
+    const messageIds = uniqueStrings([
+      ...(submission.applicationMessageIds ?? []),
+      ...(submission.supplementalMessageIds ?? []),
+    ]);
+    const subjectMatches = db
+      .list("communications")
+      .filter((row) => messageIds.includes(row.id))
+      .some((row) => normalizeReplySubject(row.subject) === replySubject);
+    if (subjectMatches) return "known_underwriter_subject";
   }
   const haystack = [communication.subject ?? "", communication.body].join(" ").toLowerCase();
   if (haystack.includes(submissionId.toLowerCase())) return "literal_submission_id";
@@ -14644,6 +14669,7 @@ export const api = {
       tenantId: string;
       mailboxUserId: string;
       mailboxAccount?: string;
+      mailboxConnectionId?: string;
       provider?: MailProvider;
       externalMessageId: string;
       externalThreadId?: string;
@@ -14773,7 +14799,7 @@ export const api = {
         mailboxOrigin: "provider_sync",
         mailboxAccount,
         mailboxProvider: provider,
-        mailboxConnectionId: userMailbox.connectionId,
+        mailboxConnectionId: input.mailboxConnectionId ?? userMailbox.connectionId,
         deliveryStatus: direction === "inbound" ? "received" : "synced",
         externalMessageId: input.externalMessageId,
         externalThreadId: input.externalThreadId,
@@ -14781,14 +14807,15 @@ export const api = {
         createdAt: input.sentAt ?? nowIso(),
       };
       db.insert("communications", row);
-      if (userMailbox.connectionId) {
-        db.update("connectedMailboxes", userMailbox.connectionId, {
+      const mailboxConnectionId = input.mailboxConnectionId ?? userMailbox.connectionId;
+      if (mailboxConnectionId) {
+        db.update("connectedMailboxes", mailboxConnectionId, {
           lastSyncAt: nowIso(),
           updatedAt: nowIso(),
         });
       }
       if (direction === "outbound") {
-        markMailboxSent(userMailbox.connectionId);
+        markMailboxSent(mailboxConnectionId);
         reconcileOutboxFromProviderMessage(row);
       }
       const linkedRow = direction === "inbound" ? linkInboundCarrierCommunicationToSubmission(row) : row;
@@ -17483,22 +17510,36 @@ export const api = {
       const inbound = db
         .list("communications")
         .filter(
-          (communication) =>
-            communication.tenantId === tenantId &&
-            communication.direction === "inbound" &&
-            (!selectedIds || selectedIds.has(communication.id)) &&
-            (options.force || !existingByCommunicationId.has(communication.id))
+          (communication) => {
+            const prior = existingByCommunicationId.get(communication.id);
+            const canRecheckForSelectedSession =
+              Boolean(options.sessionId) && prior?.outcome !== "matched_processed";
+            return (
+              communication.tenantId === tenantId &&
+              communication.direction === "inbound" &&
+              (!selectedIds || selectedIds.has(communication.id)) &&
+              (options.force || !prior || canRecheckForSelectedSession)
+            );
+          }
         )
         .sort((left, right) => (left.createdAt > right.createdAt ? 1 : -1));
       let processed = 0;
       let review = 0;
       let ignored = 0;
       for (const communication of inbound) {
-        const exactMatches = commercialSubmissionMatchesForCommunication(
+        const allExactMatches = commercialSubmissionMatchesForCommunication(
           tenantId,
           communication
-        ).filter((match) => !options.sessionId || match.session.id === options.sessionId);
+        );
+        const exactMatches = allExactMatches.filter(
+          (match) => !options.sessionId || match.session.id === options.sessionId
+        );
         const prior = existingByCommunicationId.get(communication.id);
+        if (options.sessionId && allExactMatches.length > 0 && exactMatches.length === 0) {
+          // This is a deterministic reply for a different quote flow. A
+          // session-scoped check must leave it entirely untouched.
+          continue;
+        }
         if (exactMatches.length === 1) {
           const match = exactMatches[0];
           const submissionId =
@@ -17544,13 +17585,15 @@ export const api = {
           review += 1;
           continue;
         }
+        // A check for one quote flow must never consume a reply that belongs
+        // to another flow. Leave it untouched so the correct session (or the
+        // tenant-wide mailbox processor) can match it later.
+        if (options.sessionId) continue;
         upsertCarrierEmailProcessing({
           tenantId,
           communicationId: communication.id,
           outcome: "ignored",
-          matchReason: options.sessionId
-            ? "no_identifier_for_selected_session"
-            : "not_a_deterministically_matched_carrier_reply",
+          matchReason: "not_a_deterministically_matched_carrier_reply",
           processedAt: nowIso(),
           reprocessedFrom: prior?.id,
         });

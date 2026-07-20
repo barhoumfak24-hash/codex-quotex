@@ -1650,6 +1650,104 @@ describe("commercial quoting session", () => {
     expect(api.quoting.listCarrierEmailProcessing(agencyB.id)).toHaveLength(0);
   });
 
+  it("does not consume another client's carrier reply when one quote flow checks first", async () => {
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((user) => user.role === "agent")!;
+    const customerA = api.customers.list(agency.id)[0];
+    const customerB = {
+      ...customerA,
+      id: "customer_same_tenant_reply_b",
+      name: "Second Commercial Client",
+      email: "second-commercial-client@example.com",
+    };
+    db.insert("customers", customerB);
+    const carrier = api.carriers.list()[0];
+    const contact = api.carrierContacts.create({
+      tenantId: agency.id,
+      carrierId: carrier.id,
+      name: "Portfolio Underwriter",
+      position: "underwriter",
+      email: "portfolio-underwriter@carrier.example",
+    });
+    const sessionA = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customerA.id,
+      createdById: agent.id,
+      assetType: "other",
+      contactName: customerA.name,
+      estimatedValue: 1_000_000,
+      lineOfBusiness: "commercial",
+    });
+    const sessionB = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customerB.id,
+      createdById: agent.id,
+      assetType: "other",
+      contactName: customerB.name,
+      estimatedValue: 1_000_000,
+      lineOfBusiness: "commercial",
+    });
+    db.update("quotingSessions", sessionA.id, {
+      commercialCarrierSubmissions: [{
+        submissionId: "submission_same_tenant_a",
+        carrierId: carrier.id,
+        status: "awaiting_response",
+        score: 0.9,
+        fitReason: "Test fit",
+        aiRationale: "Awaiting response.",
+        underwriterContactIds: [contact.id],
+      }],
+    });
+    db.update("quotingSessions", sessionB.id, {
+      commercialCarrierSubmissions: [{
+        submissionId: "submission_same_tenant_b",
+        carrierId: carrier.id,
+        status: "awaiting_response",
+        score: 0.9,
+        fitReason: "Test fit",
+        aiRationale: "Awaiting response.",
+        underwriterContactIds: [contact.id],
+      }],
+    });
+    const reply = api.communications.create({
+      tenantId: agency.id,
+      carrierContactId: contact.id,
+      carrierSubmissionId: "submission_same_tenant_b",
+      channel: "email",
+      direction: "inbound",
+      subject: "Re: Second Commercial Client application",
+      body: "Accepted. We can quote this account at an annual premium of $8,900.",
+      createdById: "carrier",
+    });
+
+    await api.quoting.readCommercialCarrierResponses(sessionA.id);
+
+    expect(api.quoting.get(sessionA.id)?.commercialCarrierSubmissions?.[0].status).toBe(
+      "awaiting_response"
+    );
+    expect(api.quoting.get(sessionB.id)?.commercialCarrierSubmissions?.[0].status).toBe(
+      "awaiting_response"
+    );
+    expect(
+      api.quoting
+        .listCarrierEmailProcessing(agency.id)
+        .some((row) => row.communicationId === reply.id)
+    ).toBe(false);
+
+    await api.quoting.readCommercialCarrierResponses(sessionB.id);
+
+    expect(api.quoting.get(sessionB.id)?.commercialCarrierSubmissions?.[0].status).toBe("accepted");
+    expect(api.quoting.listCarrierEmailProcessing(agency.id)).toContainEqual(
+      expect.objectContaining({
+        communicationId: reply.id,
+        matchedSessionId: sessionB.id,
+        outcome: "matched_processed",
+      })
+    );
+  });
+
   it("routes a name-only underwriter reply to manual review without mutating the quote flow", async () => {
     const { api } = await import("../api");
     const { db } = await import("../db");
@@ -1719,6 +1817,80 @@ describe("commercial quoting session", () => {
       status: "accepted",
       replyCommunicationIds: [reply.id],
     });
+  });
+
+  it("matches a known underwriter reply by the exact sent subject when provider headers are missing", async () => {
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((user) => user.role === "agent")!;
+    const customer = api.customers.list(agency.id)[0];
+    const carrier = api.carriers.list()[0];
+    const contact = api.carrierContacts.create({
+      tenantId: agency.id,
+      carrierId: carrier.id,
+      name: "Reply Subject Underwriter",
+      position: "underwriter",
+      email: "reply-subject@carrier.example",
+    });
+    const session = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: agent.id,
+      assetType: "other",
+      contactName: customer.name,
+      estimatedValue: 1_000_000,
+      lineOfBusiness: "commercial",
+    });
+    const sent = api.communications.create({
+      tenantId: agency.id,
+      carrierContactId: contact.id,
+      channel: "email",
+      direction: "outbound",
+      subject: `Commercial application package - ${customer.name}`,
+      body: "Please review the attached application.",
+      createdById: agent.id,
+    });
+    db.update("quotingSessions", session.id, {
+      commercialCarrierSubmissions: [{
+        submissionId: "submission_subject_match",
+        carrierId: carrier.id,
+        status: "awaiting_response",
+        score: 0.8,
+        fitReason: "Test fit",
+        aiRationale: "Awaiting response.",
+        underwriterContactIds: [contact.id],
+        applicationMessageIds: [sent.id],
+      }],
+    });
+    const reply = api.communications.create({
+      tenantId: agency.id,
+      carrierContactId: contact.id,
+      channel: "email",
+      direction: "inbound",
+      subject: `Re: Commercial application package - ${customer.name}`,
+      body: "Accepted. Annual premium is $9,800.",
+      createdById: "carrier",
+    });
+
+    const result = await api.quoting.processInboundCarrierCommunications(agency.id, {
+      communicationIds: [reply.id],
+      sessionId: session.id,
+    });
+
+    expect(reply.carrierSubmissionId).toBe("submission_subject_match");
+    expect(result.processed).toBe(1);
+    expect(api.quoting.get(session.id)?.commercialCarrierSubmissions?.[0]).toMatchObject({
+      status: "accepted",
+      replyCommunicationIds: [reply.id],
+    });
+    expect(api.quoting.listCarrierEmailProcessing(agency.id)).toContainEqual(
+      expect.objectContaining({
+        communicationId: reply.id,
+        matchReason: "carrier_submission_id",
+        outcome: "matched_processed",
+      })
+    );
   });
 
   it("applies the same carrier email exactly once even when it is reprocessed", async () => {

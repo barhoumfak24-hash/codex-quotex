@@ -23,6 +23,7 @@ vi.mock("../services/prisma.js", () => ({
 }));
 
 import {
+  listPersistedMailboxMessages,
   listMailboxDiagnostics,
   pollDueMailboxConnections,
   syncMailboxMessages,
@@ -45,6 +46,21 @@ afterEach(() => {
 });
 
 describe("mailbox sync reliability", () => {
+  it("replays persisted inbound mail only for the authenticated staff mailbox", async () => {
+    await listPersistedMailboxMessages({
+      tenantId: "tenant-1",
+      userId: "user-1",
+      limit: 25,
+    });
+
+    expect(mocks.queryRaw).toHaveBeenCalledTimes(1);
+    const query = mocks.queryRaw.mock.calls[0];
+    expect(sqlText(query)).toContain("FROM mailbox_connections AS mailbox_connection");
+    expect(sqlText(query)).toContain("mailbox_connection.user_id =");
+    expect(query).toContain("tenant-1");
+    expect(query).toContain("user-1");
+  });
+
   it("drains every Gmail history page before persisting and advancing the history cursor", async () => {
     mocks.readFreshMailboxToken.mockResolvedValue(googleConnection("history-old"));
     fetchMock().mockImplementation(async (input: string | URL | Request) => {

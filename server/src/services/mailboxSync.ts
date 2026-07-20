@@ -52,6 +52,29 @@ export type SyncedMailboxAttachment = {
   storagePath?: string;
 };
 
+type PersistedMailboxMessageRow = {
+  mailbox: unknown;
+  external_recipient_email: string | null;
+  customer_email: string | null;
+  direction: string;
+  subject: string | null;
+  body: string;
+  body_html: string | null;
+  raw_mime_ref: string | null;
+  message_id_header: string | null;
+  in_reply_to_header: string | null;
+  reference_headers: unknown;
+  to_recipients: unknown;
+  cc_recipients: unknown;
+  bcc_recipients: unknown;
+  attachments: unknown;
+  snippet: string | null;
+  is_read: boolean;
+  mailbox_labels: unknown;
+  sent_at: Date | null;
+  created_at: Date;
+};
+
 type GmailListResponse = {
   messages?: { id: string; threadId?: string }[];
   nextPageToken?: string;
@@ -204,6 +227,95 @@ export async function syncMailboxMessages(input: MailboxSyncInput): Promise<{
   }
   await markConnectionSynced(connection.id);
   return { connectionId: connection.id, mailboxAccount: connection.address, provider: "outlook", messages, importSummary };
+}
+
+export async function listPersistedMailboxMessages(input: {
+  tenantId: string;
+  userId: string;
+  limit?: number;
+}): Promise<SyncedMailboxMessage[]> {
+  const limit = Math.min(Math.max(input.limit ?? 250, 1), 500);
+  const rows = await prisma.$queryRaw<PersistedMailboxMessageRow[]>`
+    SELECT
+      communication.mailbox,
+      communication.external_recipient_email,
+      customer.email AS customer_email,
+      communication.direction,
+      communication.subject,
+      communication.body,
+      communication.body_html,
+      communication.raw_mime_ref,
+      communication.message_id_header,
+      communication.in_reply_to_header,
+      communication.reference_headers,
+      communication.to_recipients,
+      communication.cc_recipients,
+      communication.bcc_recipients,
+      communication.attachments,
+      communication.snippet,
+      communication.is_read,
+      communication.mailbox_labels,
+      communication.sent_at,
+      communication.created_at
+    FROM communications AS communication
+    LEFT JOIN customer_profiles AS customer
+      ON customer.id = communication.customer_id
+      AND customer.tenant_id = communication.tenant_id
+    WHERE communication.tenant_id = ${input.tenantId}
+      AND communication.channel = 'email'
+      AND communication.direction = 'inbound'
+      AND communication.mailbox->>'origin' = 'provider_sync'
+      AND COALESCE(communication.mailbox->>'externalMessageId', '') <> ''
+      AND EXISTS (
+        SELECT 1
+        FROM mailbox_connections AS mailbox_connection
+        WHERE mailbox_connection.id = communication.mailbox->>'connectionId'
+          AND mailbox_connection.tenant_id = ${input.tenantId}
+          AND mailbox_connection.user_id = ${input.userId}
+      )
+    ORDER BY COALESCE(communication.sent_at, communication.created_at) DESC
+    LIMIT ${limit}
+  `;
+
+  return rows.flatMap((row) => {
+    const mailbox = asRecord(row.mailbox);
+    const mailboxAccount = stringValue(mailbox.account);
+    const externalMessageId = stringValue(mailbox.externalMessageId);
+    const from = row.external_recipient_email ?? row.customer_email ?? "";
+    if (!mailboxAccount || !externalMessageId || !from) return [];
+    const providerValue = stringValue(mailbox.provider).toLowerCase();
+    const provider: "gmail" | "outlook" =
+      providerValue === "microsoft" || providerValue === "outlook" ? "outlook" : "gmail";
+    const to = stringArray(row.to_recipients);
+    return [{
+      mailboxAccount,
+      mailboxConnectionId: stringValue(mailbox.connectionId),
+      provider,
+      externalMessageId,
+      externalThreadId: optionalString(mailbox.externalThreadId),
+      externalUrl: optionalString(mailbox.externalUrl),
+      from,
+      to: to.length > 0 ? to : [mailboxAccount],
+      cc: stringArray(row.cc_recipients),
+      bcc: stringArray(row.bcc_recipients),
+      subject: row.subject ?? undefined,
+      body: row.body,
+      bodyHtml: row.body_html ?? undefined,
+      rawMimeRef: row.raw_mime_ref ?? optionalString(mailbox.rawMimeRef),
+      rfc822MessageId: optionalString(mailbox.rfc822MessageId),
+      messageIdHeader: row.message_id_header ?? undefined,
+      inReplyToHeader: row.in_reply_to_header ?? undefined,
+      references: stringArray(row.reference_headers),
+      attachments: Array.isArray(row.attachments)
+        ? (row.attachments as SyncedMailboxAttachment[])
+        : [],
+      snippet: row.snippet ?? undefined,
+      isRead: row.is_read,
+      mailboxLabels: stringArray(row.mailbox_labels),
+      sentAt: (row.sent_at ?? row.created_at).toISOString(),
+      direction: "inbound" as const,
+    }];
+  });
 }
 
 export async function syncDueMailboxConnections(input: { maxConnections?: number; maxResults?: number } = {}) {
@@ -1155,6 +1267,21 @@ async function markConnectionError(connectionId: string, message: string) {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function optionalString(value: unknown): string | undefined {
+  const result = stringValue(value);
+  return result || undefined;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
 }
 
 function normalizeTokenScopes(token: OAuthTokenPayload): string[] {

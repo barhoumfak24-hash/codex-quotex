@@ -20,6 +20,8 @@ type LiveProviderResult = {
 
 export type LiveMailboxCapability = {
   mailboxConnected: boolean;
+  inboxSyncConnected?: boolean;
+  inboxSyncProvider?: string | null;
   transactionalConfigured: boolean;
   transactionalProvider: string;
   missingEnvironmentVariables: string[];
@@ -186,6 +188,7 @@ export async function syncCommunicationsFromLiveMailbox(input: {
   user: User;
   connectionId?: string;
   maxResults?: number;
+  quotingSessionId?: string;
 }): Promise<
   | {
       ok: true;
@@ -194,6 +197,9 @@ export async function syncCommunicationsFromLiveMailbox(input: {
       serverUpdated?: number;
       serverDeduped?: number;
       serverFailed?: number;
+      processed: number;
+      review: number;
+      ignored: number;
     }
   | { ok: false; message: string }
 > {
@@ -232,34 +238,23 @@ export async function syncCommunicationsFromLiveMailbox(input: {
       };
     }
 
-    let imported = 0;
-    const mirroredCommunicationIds: string[] = [];
-    for (const message of json.result.messages) {
-      const mirrored = api.mailbox.mirrorExternalEmail({
-        ...message,
-        tenantId: input.tenantId,
-        mailboxUserId: input.user.id,
-        mailboxAccount: message.mailboxAccount || json.result.mailboxAccount,
-        provider: message.provider || json.result.provider,
-      });
-      if (mirrored) {
-        imported += 1;
-        mirroredCommunicationIds.push(mirrored.id);
-      }
-    }
-    await api.quoting.processInboundCarrierCommunications(
+    const mirrored = await mirrorSyncedMailboxMessages(
       input.tenantId,
-      mirroredCommunicationIds.length > 0
-        ? { communicationIds: mirroredCommunicationIds }
-        : undefined
+      input.user,
+      json.result.messages,
+      input.quotingSessionId
     );
+    if (!mirrored.ok) return mirrored;
     return {
       ok: true,
-      imported,
+      imported: mirrored.imported,
       serverImported: json.result.importSummary?.imported,
       serverUpdated: json.result.importSummary?.updated,
       serverDeduped: json.result.importSummary?.deduped,
       serverFailed: json.result.importSummary?.failed,
+      processed: mirrored.processed,
+      review: mirrored.review,
+      ignored: mirrored.ignored,
     };
   } catch (error) {
     return {
@@ -325,6 +320,7 @@ export async function getLiveMailboxSyncStatus(input: {
 
 type SyncedMailboxMessage = {
   mailboxAccount: string;
+  mailboxConnectionId: string;
   provider: "gmail" | "outlook";
   externalMessageId: string;
   externalThreadId?: string;
@@ -386,4 +382,83 @@ function authHeaders(user: User, tenantId: string): HeadersInit {
   };
   if (user.branchId) headers["x-branch-id"] = user.branchId;
   return headers;
+}
+
+export async function replayPersistedMailboxCommunications(input: {
+  tenantId: string;
+  user: User;
+  limit?: number;
+  quotingSessionId?: string;
+}): Promise<
+  | { ok: true; imported: number; processed: number; review: number; ignored: number }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${apiBaseUrl()}/mailboxes/replay`, {
+      method: "POST",
+      headers: authHeaders(input.user, input.tenantId),
+      body: JSON.stringify({ limit: input.limit ?? 250 }),
+    });
+    const json = (await response.json().catch(() => null)) as
+      | { ok: true; messages: SyncedMailboxMessage[] }
+      | { ok: false; message?: string }
+      | null;
+    if (!response.ok || !json?.ok) {
+      return {
+        ok: false,
+        message:
+          (json && "message" in json && json.message) ||
+          `Saved mailbox messages could not be checked (${response.status}).`,
+      };
+    }
+    return await mirrorSyncedMailboxMessages(
+      input.tenantId,
+      input.user,
+      json.messages,
+      input.quotingSessionId
+    );
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : "Saved mailbox messages could not be checked.",
+    };
+  }
+}
+
+async function mirrorSyncedMailboxMessages(
+  tenantId: string,
+  user: User,
+  messages: SyncedMailboxMessage[],
+  quotingSessionId?: string
+): Promise<
+  | { ok: true; imported: number; processed: number; review: number; ignored: number }
+  | { ok: false; message: string }
+> {
+  try {
+    let imported = 0;
+    const mirroredCommunicationIds: string[] = [];
+    for (const message of messages) {
+      const mirrored = api.mailbox.mirrorExternalEmail({
+        ...message,
+        tenantId,
+        mailboxUserId: user.id,
+      });
+      if (!mirrored) continue;
+      imported += 1;
+      mirroredCommunicationIds.push(mirrored.id);
+    }
+
+    const processing = mirroredCommunicationIds.length > 0
+      ? await api.quoting.processInboundCarrierCommunications(tenantId, {
+        communicationIds: mirroredCommunicationIds,
+        sessionId: quotingSessionId,
+      })
+      : { processed: 0, review: 0, ignored: 0 };
+    return { ok: true, imported, ...processing };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : "Mailbox messages could not be imported.",
+    };
+  }
 }

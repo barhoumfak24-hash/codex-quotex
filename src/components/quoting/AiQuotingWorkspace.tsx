@@ -50,9 +50,12 @@ import { fmt } from "@/lib/format";
 import { fileToCommunicationAttachment, formatAttachmentSize } from "@/lib/messageAttachments";
 import {
   getLiveMailboxCapability,
+  replayPersistedMailboxCommunications,
   sendCommunicationThroughLiveMailbox,
   syncCommunicationsFromLiveMailbox,
 } from "@/lib/liveMailbox";
+import { startMailboxOAuth, type MailboxOAuthProvider } from "@/lib/mailboxOAuth";
+import { inferMailProvider } from "@/lib/mailProvider";
 import { categoryQuotingQuestions } from "@/lib/categoryQuestionnaires";
 import { type AiGatewayFailureDetail } from "@/lib/aiGateway";
 import { carrierPortalRunnerStatus } from "@/lib/carrierPortalPlaybooks";
@@ -73,6 +76,7 @@ import type {
   QuotingLineOfBusiness,
   QuotingQuestion,
   QuotingSession,
+  User as QuotexUser,
 } from "@/types";
 
 function scrollParentFor(element: HTMLElement | null): HTMLElement | null {
@@ -150,6 +154,13 @@ function preserveWindowScroll<T>(action: () => T): T {
     scheduleRestore();
     throw error;
   }
+}
+
+function mailboxOAuthProviderFor(user: QuotexUser): MailboxOAuthProvider | null {
+  const provider = user.mailProvider ?? inferMailProvider(user.email);
+  if (provider === "gmail") return "google";
+  if (provider === "outlook") return "microsoft";
+  return null;
 }
 
 function quoteWorkspaceFailure(message: string, error: unknown): AiGatewayFailureDetail {
@@ -4010,6 +4021,8 @@ function CommercialFlowPanel({
     tone: "success" | "neutral" | "warn";
     message: string;
   } | null>(null);
+  const [responseMailboxConnectProvider, setResponseMailboxConnectProvider] =
+    useState<MailboxOAuthProvider | null>(null);
   const responseCheckCooldownTimer = useRef<number | null>(null);
   const submissions = session.commercialCarrierSubmissions ?? [];
   const applicationSentAt = commercialApplicationSentAt(session);
@@ -4056,9 +4069,22 @@ function CommercialFlowPanel({
 
     setCheckingResponses(true);
     setResponseCheckNotice(null);
+    setResponseMailboxConnectProvider(null);
     try {
-      // QuoteX communications are the source of truth. External mailbox sync is
-      // an optional enhancement and must never block the carrier workflow.
+      let mailboxWarning: string | null = null;
+      let responsesNeedingReview = 0;
+
+      // First replay messages already imported by the scheduled mailbox job.
+      // The server and browser use different persistence layers, so this bridge
+      // is required before the quote-flow matcher can see those replies.
+      const replay = await replayPersistedMailboxCommunications({
+        tenantId: session.tenantId,
+        user,
+        limit: 500,
+        quotingSessionId: session.id,
+      });
+      if (!replay.ok) mailboxWarning = replay.message;
+      else responsesNeedingReview += replay.review;
       await api.quoting.readCommercialCarrierResponses(session.id);
 
       try {
@@ -4067,19 +4093,29 @@ function CommercialFlowPanel({
           user,
           refresh: true,
         });
-        if (capability?.mailboxConnected) {
+        if (capability.inboxSyncConnected) {
           const sync = await syncCommunicationsFromLiveMailbox({
             tenantId: session.tenantId,
             user,
             maxResults: 50,
+            quotingSessionId: session.id,
           });
           if (sync.ok) {
+            responsesNeedingReview += sync.review;
             await api.quoting.readCommercialCarrierResponses(session.id);
+          } else {
+            mailboxWarning = sync.message;
           }
+        } else {
+          const provider = mailboxOAuthProviderFor(user);
+          setResponseMailboxConnectProvider(provider);
+          mailboxWarning = provider
+            ? `Connect ${provider === "google" ? "Google" : "Microsoft"} inbox access so QuoteX can detect carrier replies.`
+            : "Connect a readable mailbox in Account settings so QuoteX can detect carrier replies.";
         }
-      } catch {
-        // The managed QuoteX check above is still complete when a provider is
-        // unavailable or has not been connected for read access.
+      } catch (error) {
+        mailboxWarning =
+          error instanceof Error ? error.message : "The connected mailbox could not be checked.";
       }
 
       const responsesAfter = responseCount(api.quoting.get(session.id));
@@ -4090,6 +4126,16 @@ function CommercialFlowPanel({
           ? {
               tone: "success",
               message: `${newlyMatched} new carrier response${newlyMatched === 1 ? " was" : "s were"} verified and added.`,
+            }
+          : responsesNeedingReview > 0
+          ? {
+              tone: "warn",
+              message: `${responsesNeedingReview} carrier email${responsesNeedingReview === 1 ? " was" : "s were"} received and need${responsesNeedingReview === 1 ? "s" : ""} confirmation before the quote flow is updated.`,
+            }
+          : mailboxWarning
+          ? {
+              tone: "warn",
+              message: mailboxWarning,
             }
           : {
               tone: "neutral",
@@ -4104,6 +4150,32 @@ function CommercialFlowPanel({
         setResponseCheckCoolingDown(false);
         responseCheckCooldownTimer.current = null;
       }, 8_000);
+    }
+  }
+
+  async function connectResponseMailbox() {
+    const provider = responseMailboxConnectProvider;
+    const user = api.users.get(userId);
+    if (!provider || !user) return;
+    setCheckingResponses(true);
+    try {
+      const result = await startMailboxOAuth({
+        provider,
+        user,
+        tenantId: session.tenantId,
+        ownerType: "staff",
+        redirectAfter: `${window.location.pathname}${window.location.search}${window.location.hash}`,
+      });
+      if (!result.ok) {
+        setResponseCheckNotice({
+          tone: "warn",
+          message: result.message || "Mailbox connection could not be started.",
+        });
+        return;
+      }
+      window.location.assign(result.authorizationUrl);
+    } finally {
+      setCheckingResponses(false);
     }
   }
 
@@ -4150,7 +4222,19 @@ function CommercialFlowPanel({
           }`}
           aria-live="polite"
         >
-          <span>{responseCheckNotice?.message ?? "Mailbox checked."}</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span>{responseCheckNotice?.message ?? "Mailbox checked."}</span>
+            {responseMailboxConnectProvider && responseCheckNotice?.tone === "warn" && (
+              <button
+                type="button"
+                className="btn-outline bg-white text-xs"
+                onClick={() => void connectResponseMailbox()}
+                disabled={checkingResponses}
+              >
+                Connect inbox
+              </button>
+            )}
+          </div>
           {lastResponseCheckAt && (
             <span className="shrink-0 text-ink-500">
               Last checked {fmt.dateTime(lastResponseCheckAt)}
