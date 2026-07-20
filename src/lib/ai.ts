@@ -2892,7 +2892,22 @@ function fallbackParseCarrierReply(input: {
     /\bproposal\b/i,
     /\bbind(?:able|ing)?\b/i,
   ]);
+  const approvalEvidence = evidence([
+    /\bapprov(?:e|ed|al)\b/i,
+    /\bcan proceed\b/i,
+    /\bwe can consider\b/i,
+    /\baccepted\b/i,
+    /\bappetite\b/i,
+  ]);
+  const bindingConditionEvidence = evidence([
+    /\brequired prior to bind(?:ing)?\b/i,
+    /\bsubject to\b/i,
+    /\bto bind\b/i,
+    /\bbinding (?:condition|requirement|subjectiv)/i,
+    /\bcoverage is not bound\b/i,
+  ]);
   const requestedItems = moreInfoEvidence
+    .filter((line) => !bindingConditionEvidence.includes(line))
     .map((line) => line.replace(/^(please|we|carrier|underwriter)\s+/i, "").trim())
     .filter((line) => line.length > 8)
     .slice(0, 8);
@@ -2913,6 +2928,26 @@ function fallbackParseCarrierReply(input: {
       supplementalAttachmentNames: [],
       declineReason: declineEvidence[0],
       evidenceSnippets: declineEvidence,
+      requiresAgentReview: false,
+      responseDeadline,
+    };
+  }
+
+  if (premiums.length > 0 && (approvalEvidence.length > 0 || quoteEvidence.length > 0)) {
+    return {
+      outcome: "quoted",
+      confidence: approvalEvidence.length > 0 ? 0.92 : 0.8,
+      coverages: [],
+      limits: Array.from(new Set(text.match(/\$?\d[\d,]*(?:,\d{3})*(?:\s?(?:limit|coverage|occurrence|aggregate))/gi) ?? [])).slice(0, 8),
+      premiums,
+      deductibles: Array.from(new Set(text.match(/\$?\d[\d,]*(?:,\d{3})*(?:\s?(?:deductible|ded))/gi) ?? [])).slice(0, 8),
+      terms: [],
+      carrierNotes: [...approvalEvidence, ...quoteEvidence].slice(0, 8),
+      conditions: bindingConditionEvidence,
+      nextSteps: [...bindingConditionEvidence, ...evidence([/\bnext step\b/i, /\bsubject to\b/i, /\bunderwriting\b/i])].slice(0, 8),
+      requestedItems: [],
+      supplementalAttachmentNames: [],
+      evidenceSnippets: [...approvalEvidence, ...quoteEvidence, ...bindingConditionEvidence].slice(0, 8),
       requiresAgentReview: false,
       responseDeadline,
     };

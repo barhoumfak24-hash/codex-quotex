@@ -6571,7 +6571,24 @@ function parseCommercialCarrierReplyFromCommunication(
     /\bproposal\b/i,
     /\bbind(?:able|ing)?\b/i,
   ]);
-  const requestedItems = moreInfoEvidence
+  const approvalEvidence = carrierReplyEvidence(text, [
+    /\bapprov(?:e|ed|al)\b/i,
+    /\bcan proceed\b/i,
+    /\bwe can consider\b/i,
+    /\baccepted\b/i,
+    /\bappetite\b/i,
+  ]);
+  const bindingConditionEvidence = carrierReplyEvidence(text, [
+    /\brequired prior to bind(?:ing)?\b/i,
+    /\bsubject to\b/i,
+    /\bto bind\b/i,
+    /\bbinding (?:condition|requirement|subjectiv)/i,
+    /\bcoverage is not bound\b/i,
+  ]);
+  const preQuoteInformationEvidence = moreInfoEvidence.filter(
+    (line) => !bindingConditionEvidence.includes(line)
+  );
+  const requestedItems = preQuoteInformationEvidence
     .map((line) => line.replace(/^(please|we|carrier|underwriter)\s+/i, "").trim())
     .filter((line) => line.length > 8)
     .slice(0, 8);
@@ -6595,6 +6612,30 @@ function parseCommercialCarrierReplyFromCommunication(
         declineReason: declineEvidence[0],
         evidenceSnippets: declineEvidence,
       } as CommercialCarrierSubmissionQuote,
+    };
+  }
+
+  // A carrier can approve and price a risk while listing subjectivities that
+  // must be satisfied before binding. Those are quote conditions, not a
+  // request for missing underwriting data and must not reopen the questionnaire.
+  if (premiums.length > 0 && (approvalEvidence.length > 0 || quoteEvidence.length > 0)) {
+    const acceptedEvidence = uniqueStrings([...approvalEvidence, ...quoteEvidence]);
+    return {
+      status: "accepted",
+      premiumEstimate: firstPremium,
+      finalPremium: firstPremium,
+      underwriterNotes: uniqueStrings([...acceptedEvidence, ...bindingConditionEvidence]).join(" "),
+      quote: {
+        outcome: "quoted",
+        premiums,
+        limits,
+        deductibles,
+        carrierNotes: acceptedEvidence,
+        nextSteps: uniqueStrings([...bindingConditionEvidence, ...nextSteps]),
+        evidenceSnippets: uniqueStrings([...acceptedEvidence, ...bindingConditionEvidence]),
+        parsedAt,
+        confidence: approvalEvidence.length > 0 ? 0.92 : 0.8,
+      },
     };
   }
 
@@ -6626,40 +6667,14 @@ function parseCommercialCarrierReplyFromCommunication(
     };
   }
 
-  if (premiums.length > 0 && quoteEvidence.length > 0) {
+  if (approvalEvidence.length > 0) {
     return {
       status: "accepted",
-      premiumEstimate: firstPremium,
-      finalPremium: firstPremium,
-      underwriterNotes: quoteEvidence.join(" "),
-      quote: {
-        outcome: "quoted",
-        premiums,
-        limits,
-        deductibles,
-        carrierNotes: quoteEvidence,
-        nextSteps,
-        evidenceSnippets: quoteEvidence,
-        parsedAt,
-        confidence: 0.8,
-      },
-    };
-  }
-
-  const acceptedEvidence = carrierReplyEvidence(text, [
-    /\bcan proceed\b/i,
-    /\bwe can consider\b/i,
-    /\baccepted\b/i,
-    /\bappetite\b/i,
-  ]);
-  if (acceptedEvidence.length > 0) {
-    return {
-      status: "accepted",
-      underwriterNotes: acceptedEvidence.join(" "),
+      underwriterNotes: approvalEvidence.join(" "),
       quote: {
         outcome: "accepted",
-        carrierNotes: acceptedEvidence,
-        evidenceSnippets: acceptedEvidence,
+        carrierNotes: approvalEvidence,
+        evidenceSnippets: approvalEvidence,
         parsedAt,
         confidence: 0.74,
       },

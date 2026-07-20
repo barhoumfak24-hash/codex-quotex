@@ -197,6 +197,88 @@ describe("mailbox sync reliability", () => {
     });
   });
 
+  it("recovers a Gmail carrier reply by exact subject, sender, and send time when the outbound fallback has no provider IDs", async () => {
+    mocks.readFreshMailboxToken.mockResolvedValue(googleConnection());
+    fetchMock().mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/messages") && url.searchParams.has("q")) {
+        expect(url.searchParams.get("q")).toContain("from:gbnhone@gmail.com");
+        expect(url.searchParams.get("q")).toContain('subject:"commercial application package - fictional insured"');
+        return jsonResponse({ messages: [{ id: "carrier-reply-recovered" }] });
+      }
+      if (url.pathname.endsWith("/messages/carrier-reply-recovered")) {
+        return jsonResponse(gmailInboundReply(
+          "carrier-reply-recovered",
+          "gmail-thread-recovered",
+          "<unavailable-fallback-message-id@example.com>",
+          {
+            from: "GBN Hone <gbnhone@gmail.com>",
+            subject: "Re: Commercial application package - Fictional Insured",
+            sentAt: "2026-07-19T23:59:00.000Z",
+            body: "The coverage has been approved. Annual Premium: $4,850. Required Prior to Binding: signed ACORD applications.",
+          }
+        ));
+      }
+      throw new Error(`Unexpected Gmail request: ${url.toString()}`);
+    });
+
+    const result = await syncMailboxReplyMessages({
+      tenantId: "tenant-1",
+      userId: "user-1",
+      targets: [{
+        subject: "Commercial application package - Fictional Insured",
+        participantEmail: "gbnhone@gmail.com",
+        sentAt: "2026-07-19T21:56:30.375Z",
+        carrierSubmissionId: "submission-great-lakes",
+      }],
+    });
+
+    expect(result.targetsChecked).toBe(1);
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]).toMatchObject({
+      externalMessageId: "carrier-reply-recovered",
+      direction: "inbound",
+      subject: "Re: Commercial application package - Fictional Insured",
+      carrierSubmissionId: "submission-great-lakes",
+    });
+  });
+
+  it("does not recover a same-subject Gmail message from a different sender", async () => {
+    mocks.readFreshMailboxToken.mockResolvedValue(googleConnection());
+    fetchMock().mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/messages") && url.searchParams.has("q")) {
+        return jsonResponse({ messages: [{ id: "unrelated-reply" }] });
+      }
+      if (url.pathname.endsWith("/messages/unrelated-reply")) {
+        return jsonResponse(gmailInboundReply(
+          "unrelated-reply",
+          "gmail-thread-unrelated",
+          "<other@example.com>",
+          {
+            from: "Other Sender <other@example.com>",
+            subject: "Re: Commercial application package - Fictional Insured",
+            sentAt: "2026-07-19T23:59:00.000Z",
+          }
+        ));
+      }
+      throw new Error(`Unexpected Gmail request: ${url.toString()}`);
+    });
+
+    const result = await syncMailboxReplyMessages({
+      tenantId: "tenant-1",
+      userId: "user-1",
+      targets: [{
+        subject: "Commercial application package - Fictional Insured",
+        participantEmail: "gbnhone@gmail.com",
+        sentAt: "2026-07-19T21:56:30.375Z",
+      }],
+    });
+
+    expect(result.targetsChecked).toBe(1);
+    expect(result.messages).toHaveLength(0);
+  });
+
   it("checks the exact Microsoft conversation recorded on the sent carrier email", async () => {
     mocks.readFreshMailboxToken.mockResolvedValue(microsoftConnection("unused-delta-link"));
     fetchMock().mockImplementation(async (input: string | URL | Request) => {
@@ -331,23 +413,35 @@ function gmailMessage(id: string) {
   };
 }
 
-function gmailInboundReply(id: string, threadId: string, inReplyTo: string) {
+function gmailInboundReply(
+  id: string,
+  threadId: string,
+  inReplyTo: string,
+  overrides: {
+    from?: string;
+    subject?: string;
+    sentAt?: string;
+    body?: string;
+  } = {}
+) {
+  const body = overrides.body ?? "We can quote this account.";
   return {
     id,
     threadId,
     labelIds: ["INBOX", "UNREAD"],
-    snippet: "We can quote this account.",
-    internalDate: "1767229200000",
+    snippet: body,
+    internalDate: String(new Date(overrides.sentAt ?? "2026-01-01T01:00:00.000Z").getTime()),
     payload: {
       mimeType: "text/plain",
       headers: [
-        { name: "From", value: "underwriter@carrier.example" },
+        { name: "From", value: overrides.from ?? "underwriter@carrier.example" },
         { name: "To", value: "agent@example.com" },
+        ...(overrides.subject ? [{ name: "Subject", value: overrides.subject }] : []),
         { name: "Message-ID", value: `<${id}@carrier.example>` },
         { name: "In-Reply-To", value: inReplyTo },
         { name: "References", value: inReplyTo },
       ],
-      body: { data: Buffer.from("We can quote this account.", "utf8").toString("base64url") },
+      body: { data: Buffer.from(body, "utf8").toString("base64url") },
     },
   };
 }

@@ -76,8 +76,15 @@ const replyTargetSchema = z.object({
   externalThreadId: z.string().trim().min(1).max(500).optional(),
   rfc822MessageId: z.string().trim().min(1).max(998).optional(),
   sentAt: z.string().datetime().optional(),
-}).refine((target) => Boolean(target.externalThreadId || target.rfc822MessageId), {
-  message: "A provider thread ID or Message-ID is required.",
+  subject: z.string().trim().min(1).max(998).optional(),
+  participantEmail: emailSchema.optional(),
+  carrierSubmissionId: z.string().trim().min(1).max(200).optional(),
+}).refine((target) => Boolean(
+  target.externalThreadId ||
+  target.rfc822MessageId ||
+  (target.subject && target.participantEmail && target.sentAt)
+), {
+  message: "A provider ID or an exact subject, participant, and send time is required.",
 });
 const replySyncSchema = z.object({
   connectionId: z.string().optional(),

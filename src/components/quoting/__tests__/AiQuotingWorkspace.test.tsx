@@ -4,7 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { QuotingSession } from "../../../types";
-import { PublicFields } from "../AiQuotingWorkspace";
+import { carrierResponseCheckNotice, PublicFields } from "../AiQuotingWorkspace";
 import { ClientQuotingCard } from "../ClientQuotingCard";
 
 beforeEach(async () => {
@@ -57,6 +57,33 @@ async function openAiWorkspace(host: HTMLElement) {
   await click(buttonByText(host, /(Start|Continue) quote flow/i));
   expect(host.querySelector('[role="dialog"]')?.textContent).toContain("AI Quoting Workspace");
 }
+
+describe("carrier response check notices", () => {
+  it("does not claim there was no reply when the provider check did not complete", () => {
+    const notice = carrierResponseCheckNotice({
+      newlyMatched: 0,
+      responsesNeedingReview: 0,
+      exactTargetsChecked: 0,
+      exactReplyTargetCount: 1,
+    });
+
+    expect(notice.tone).toBe("warn");
+    expect(notice.message).toContain("could not verify carrier responses");
+    expect(notice.message).not.toContain("No new verified replies");
+  });
+
+  it("reports no reply only after an exact provider thread was checked", () => {
+    const notice = carrierResponseCheckNotice({
+      newlyMatched: 0,
+      responsesNeedingReview: 0,
+      exactTargetsChecked: 1,
+      exactReplyTargetCount: 1,
+    });
+
+    expect(notice.tone).toBe("neutral");
+    expect(notice.message).toBe("Checked 1 sent carrier email thread. No new verified replies were found.");
+  });
+});
 
 async function renderClientQuotingCard(
   setup?: (ctx: {

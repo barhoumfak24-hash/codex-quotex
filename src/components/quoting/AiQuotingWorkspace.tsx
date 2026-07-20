@@ -49,7 +49,6 @@ import {
 import { fmt } from "@/lib/format";
 import { fileToCommunicationAttachment, formatAttachmentSize } from "@/lib/messageAttachments";
 import {
-  getLiveMailboxCapability,
   replayPersistedMailboxCommunications,
   sendCommunicationThroughLiveMailbox,
   syncExactCarrierRepliesFromLiveMailbox,
@@ -4137,15 +4136,40 @@ function CommercialFlowPanel({
           .filter((communication) => sentMessageIds.has(communication.id))
           .flatMap((communication) => {
             const rfc822MessageId = communication.rfc822MessageId ?? communication.messageIdHeader;
-            if (!communication.externalThreadId && !rfc822MessageId) return [];
+            const submission = submissions.find((candidate) =>
+              [
+                ...(candidate.applicationMessageIds ?? []),
+                ...(candidate.supplementalMessageIds ?? []),
+              ].includes(communication.id)
+            );
+            const carrierContact = communication.carrierContactId
+              ? api.carrierContacts.get(communication.carrierContactId)
+              : undefined;
+            const participantEmail =
+              carrierContact?.email ??
+              communication.externalRecipientEmail ??
+              communication.to?.[0];
+            const hasRecoveryKey = Boolean(
+              communication.subject && participantEmail && communication.createdAt
+            );
+            if (!communication.externalThreadId && !rfc822MessageId && !hasRecoveryKey) return [];
             const target = {
               mailboxConnectionId: communication.mailboxConnectionId,
               externalThreadId: communication.externalThreadId,
               rfc822MessageId,
               sentAt: communication.createdAt,
+              subject: communication.subject,
+              participantEmail,
+              carrierSubmissionId: submission?.submissionId ?? communication.carrierSubmissionId,
             };
             return [[
-              `${target.mailboxConnectionId ?? ""}|${target.externalThreadId ?? ""}|${target.rfc822MessageId ?? ""}`,
+              [
+                target.mailboxConnectionId ?? "",
+                target.externalThreadId ?? "",
+                target.rfc822MessageId ?? "",
+                target.subject ?? "",
+                target.participantEmail ?? "",
+              ].join("|"),
               target,
             ] as const];
           })
@@ -4171,13 +4195,8 @@ function CommercialFlowPanel({
       if (replay.ok) responsesNeedingReview += replay.review;
       await api.quoting.readCommercialCarrierResponses(session.id);
 
-      try {
-        const capability = await getLiveMailboxCapability({
-          tenantId: session.tenantId,
-          user,
-          refresh: true,
-        });
-        if (capability.inboxSyncConnected && exactReplyTargets.length > 0) {
+      if (exactReplyTargets.length > 0) {
+        try {
           const sync = await syncExactCarrierRepliesFromLiveMailbox({
             tenantId: session.tenantId,
             user,
@@ -4189,31 +4208,21 @@ function CommercialFlowPanel({
             responsesNeedingReview += sync.review;
             await api.quoting.readCommercialCarrierResponses(session.id);
           }
+        } catch (error) {
+          console.error("Carrier response live mailbox check failed", error);
         }
-      } catch (error) {
-        console.error("Carrier response live mailbox check failed", error);
       }
 
       const responsesAfter = responseCount(api.quoting.get(session.id));
       const newlyMatched = Math.max(0, responsesAfter - responsesBefore);
       setLastResponseCheckAt(new Date().toISOString());
       setResponseCheckNotice(
-        newlyMatched > 0
-          ? {
-              tone: "success",
-              message: `${newlyMatched} new carrier response${newlyMatched === 1 ? " was" : "s were"} verified and added.`,
-            }
-          : responsesNeedingReview > 0
-          ? {
-              tone: "warn",
-              message: `${responsesNeedingReview} carrier email${responsesNeedingReview === 1 ? " was" : "s were"} received and need${responsesNeedingReview === 1 ? "s" : ""} confirmation before the quote flow is updated.`,
-            }
-          : {
-              tone: "neutral",
-              message: exactTargetsChecked > 0
-                ? `Checked ${exactTargetsChecked} sent carrier email thread${exactTargetsChecked === 1 ? "" : "s"}. No new verified replies were found.`
-                : "No new verified replies have reached Quotex for the carrier emails sent from this quote flow.",
-            }
+        carrierResponseCheckNotice({
+          newlyMatched,
+          responsesNeedingReview,
+          exactTargetsChecked,
+          exactReplyTargetCount: exactReplyTargets.length,
+        })
       );
       onChanged?.();
     } finally {
@@ -4447,6 +4456,39 @@ function CommercialFlowPanel({
       {page.key === "carrier_review" && carrierAutomation}
     </div>
   );
+}
+
+export function carrierResponseCheckNotice(input: {
+  newlyMatched: number;
+  responsesNeedingReview: number;
+  exactTargetsChecked: number;
+  exactReplyTargetCount: number;
+}): { tone: "success" | "neutral" | "warn"; message: string } {
+  if (input.newlyMatched > 0) {
+    return {
+      tone: "success",
+      message: `${input.newlyMatched} new carrier response${input.newlyMatched === 1 ? " was" : "s were"} verified and added.`,
+    };
+  }
+  if (input.responsesNeedingReview > 0) {
+    return {
+      tone: "warn",
+      message: `${input.responsesNeedingReview} carrier email${input.responsesNeedingReview === 1 ? " was" : "s were"} received and need${input.responsesNeedingReview === 1 ? "s" : ""} confirmation before the quote flow is updated.`,
+    };
+  }
+  if (input.exactTargetsChecked > 0) {
+    return {
+      tone: "neutral",
+      message: `Checked ${input.exactTargetsChecked} sent carrier email thread${input.exactTargetsChecked === 1 ? "" : "s"}. No new verified replies were found.`,
+    };
+  }
+  return {
+    tone: "warn",
+    message:
+      input.exactReplyTargetCount > 0
+        ? "Quotex could not verify carrier responses from the sending mailbox. A reply may exist even though it is not visible here yet."
+        : "Quotex could not verify carrier responses because the sent email is not linked to its provider thread.",
+  };
 }
 
 function personalFlowPage(session: QuotingSession): {

@@ -1202,6 +1202,71 @@ describe("commercial quoting session", () => {
     expect(read.quotes[0]?.premium).toBe(18450);
   });
 
+  it("treats an approved priced reply with pre-binding conditions as a quote", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const customer = api.customers.list(agency.id)[0];
+    const session = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: agent.id,
+      assetType: "other",
+      contactName: "Fictional Insured",
+      estimatedValue: 500_000,
+      lineOfBusiness: "commercial",
+    });
+    const selectedCarrierId = api.quoting
+      .recommendCommercialCarriers(session.id, commercialAnswers)
+      .find((row) => row.underwriterContacts.some((contact) => !!contact.email))!.carrierId;
+    const submitted = api.quoting.submitQuestionnaireResponses(
+      session.id,
+      commercialAnswers,
+      { id: agent.id, name: agent.name, role: "agent" },
+      {
+        selectedCommercialCarrierIds: [selectedCarrierId],
+        commercialCarrierEmailDrafts: api.quoting.previewCommercialCarrierEmails(
+          session.id,
+          commercialAnswers,
+          "application",
+          [selectedCarrierId]
+        ),
+      }
+    )!;
+    const submission = submitted.commercialCarrierSubmissions![0];
+    api.communications.create({
+      tenantId: agency.id,
+      carrierContactId: submission.underwriterContactIds![0],
+      channel: "email",
+      direction: "inbound",
+      threadId: submission.applicationThreadIds![0],
+      carrierSubmissionId: submission.submissionId,
+      subject: "Re: Commercial application package - Fictional Insured",
+      body: [
+        "The coverage has been approved based on the information submitted, subject to the following terms:",
+        "Carrier: Great Lakes Commercial Insurance Company",
+        "Policy Type: Businessowners Policy, including Commercial General Liability and Commercial Property",
+        "Proposed Effective Date: August 1, 2026",
+        "Annual Premium: $4,850",
+        "General Liability: $1,000,000 per occurrence / $2,000,000 aggregate",
+        "Commercial Property: $500,000",
+        "Property Deductible: $2,500",
+        "Commission: 15%",
+        "Required Prior to Binding: Signed ACORD applications, five years of currently valued loss runs, confirmation of monitored alarm systems, and payment of the initial premium deposit.",
+        "Coverage is not bound until written confirmation has been issued by underwriting.",
+      ].join("\n"),
+      createdById: "carrier",
+    });
+
+    const read = (await api.quoting.readCommercialCarrierResponses(session.id))!;
+    const parsed = read.commercialCarrierSubmissions![0];
+    expect(parsed.status).toBe("accepted");
+    expect(parsed.finalPremium).toBe(4850);
+    expect(parsed.quote?.outcome).toBe("quoted");
+    expect(parsed.missingFields ?? []).toHaveLength(0);
+    expect(parsed.quote?.nextSteps?.join(" ")).toMatch(/Required Prior to Binding/i);
+  });
+
   it("routes ambiguous inbound carrier replies to agent review instead of guessing", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];

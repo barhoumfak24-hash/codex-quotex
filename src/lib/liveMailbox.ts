@@ -272,6 +272,9 @@ export type ExactCarrierReplyTarget = {
   externalThreadId?: string;
   rfc822MessageId?: string;
   sentAt?: string;
+  subject?: string;
+  participantEmail?: string;
+  carrierSubmissionId?: string;
 };
 
 export async function syncExactCarrierRepliesFromLiveMailbox(input: {
@@ -296,7 +299,8 @@ export async function syncExactCarrierRepliesFromLiveMailbox(input: {
 > {
   const groups = new Map<string, ExactCarrierReplyTarget[]>();
   for (const target of input.targets) {
-    if (!target.externalThreadId && !target.rfc822MessageId) continue;
+    const hasRecoveryKey = Boolean(target.subject && target.participantEmail && target.sentAt);
+    if (!target.externalThreadId && !target.rfc822MessageId && !hasRecoveryKey) continue;
     const key = target.mailboxConnectionId ?? "";
     groups.set(key, [...(groups.get(key) ?? []), target]);
   }
@@ -333,10 +337,13 @@ export async function syncExactCarrierRepliesFromLiveMailbox(input: {
         headers: authHeaders(input.user, input.tenantId),
         body: JSON.stringify({
           connectionId: connectionId || undefined,
-          targets: targets.map(({ externalThreadId, rfc822MessageId, sentAt }) => ({
+          targets: targets.map(({ externalThreadId, rfc822MessageId, sentAt, subject, participantEmail, carrierSubmissionId }) => ({
             externalThreadId,
             rfc822MessageId,
             sentAt,
+            subject,
+            participantEmail,
+            carrierSubmissionId,
           })),
         }),
       });

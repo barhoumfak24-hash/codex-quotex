@@ -13,6 +13,9 @@ export type MailboxReplyTarget = {
   externalThreadId?: string;
   rfc822MessageId?: string;
   sentAt?: string;
+  subject?: string;
+  participantEmail?: string;
+  carrierSubmissionId?: string;
 };
 
 export type MailboxReplySyncInput = {
@@ -768,7 +771,28 @@ async function syncGmailReplyMessages(
     for (const rawMessage of thread.messages ?? []) {
       if (rawMessage.error) continue;
       const message = normalizeGmailMessage(connectionId, mailboxAccount, rawMessage);
-      if (message.direction !== "inbound" || !matchesReplyTarget(message, resolvedTargets)) continue;
+      const matchedTarget = replyTargetForMessage(message, resolvedTargets);
+      if (message.direction !== "inbound" || !matchedTarget) continue;
+      message.carrierSubmissionId = matchedTarget.carrierSubmissionId;
+      messages.set(message.externalMessageId, message);
+    }
+  }
+
+  // Transactional fallback sends do not receive Gmail thread IDs. Recover
+  // those replies with a deliberately narrow query and then verify the exact
+  // normalized subject, counterparty address, and send timestamp locally.
+  for (const target of targets.filter(isRecoveryReplyTarget)) {
+    const listUrl = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
+    listUrl.searchParams.set("maxResults", "20");
+    listUrl.searchParams.set("q", gmailRecoveryQuery(target));
+    const list = await providerJson<GmailListResponse>(listUrl.toString(), accessToken);
+    const rows = await readGmailMessagesById((list.messages ?? []).map((row) => row.id), accessToken);
+    for (const row of rows) {
+      if (row.error) continue;
+      const message = normalizeGmailMessage(connectionId, mailboxAccount, row);
+      const matchedTarget = replyTargetForMessage(message, [target]);
+      if (message.direction !== "inbound" || !matchedTarget) continue;
+      message.carrierSubmissionId = matchedTarget.carrierSubmissionId;
       messages.set(message.externalMessageId, message);
     }
   }
@@ -923,7 +947,26 @@ async function syncMicrosoftReplyMessages(
     const rows = await readGraphMessagePages(listUrl, accessToken);
     for (const row of rows) {
       const message = await normalizeGraphMessage(connectionId, mailboxAccount, accessToken, row);
-      if (message.direction !== "inbound" || !matchesReplyTarget(message, resolvedTargets)) continue;
+      const matchedTarget = replyTargetForMessage(message, resolvedTargets);
+      if (message.direction !== "inbound" || !matchedTarget) continue;
+      message.carrierSubmissionId = matchedTarget.carrierSubmissionId;
+      messages.set(message.externalMessageId, message);
+    }
+  }
+
+  for (const target of targets.filter(isRecoveryReplyTarget)) {
+    const sentTime = Date.parse(target.sentAt ?? "");
+    if (!Number.isFinite(sentTime)) continue;
+    const since = new Date(sentTime - 300_000).toISOString();
+    const rows = await readGraphMessagePages(
+      graphMessageListUrl(`receivedDateTime ge ${since}`, 100),
+      accessToken
+    );
+    for (const row of rows) {
+      const message = await normalizeGraphMessage(connectionId, mailboxAccount, accessToken, row);
+      const matchedTarget = replyTargetForMessage(message, [target]);
+      if (message.direction !== "inbound" || !matchedTarget) continue;
+      message.carrierSubmissionId = matchedTarget.carrierSubmissionId;
       messages.set(message.externalMessageId, message);
     }
   }
@@ -1019,14 +1062,33 @@ function uniqueReplyTargets(targets: MailboxReplyTarget[]): MailboxReplyTarget[]
   for (const target of targets) {
     const externalThreadId = target.externalThreadId?.trim() || undefined;
     const rfc822MessageId = target.rfc822MessageId?.trim() || undefined;
-    if (!externalThreadId && !rfc822MessageId) continue;
-    const key = `${externalThreadId ?? ""}|${canonicalMessageId(rfc822MessageId)}|${target.sentAt ?? ""}`;
-    unique.set(key, { externalThreadId, rfc822MessageId, sentAt: target.sentAt });
+    const subject = target.subject?.trim() || undefined;
+    const participantEmail = normalizeEmail(target.participantEmail);
+    const sentAt = target.sentAt?.trim() || undefined;
+    if (!externalThreadId && !rfc822MessageId && !(subject && participantEmail && sentAt)) continue;
+    const key = [
+      externalThreadId ?? "",
+      canonicalMessageId(rfc822MessageId),
+      normalizeReplySubject(subject),
+      participantEmail,
+      sentAt ?? "",
+    ].join("|");
+    unique.set(key, {
+      externalThreadId,
+      rfc822MessageId,
+      sentAt,
+      subject,
+      participantEmail: participantEmail || undefined,
+      carrierSubmissionId: target.carrierSubmissionId?.trim() || undefined,
+    });
   }
   return [...unique.values()];
 }
 
-function matchesReplyTarget(message: SyncedMailboxMessage, targets: MailboxReplyTarget[]): boolean {
+function replyTargetForMessage(
+  message: SyncedMailboxMessage,
+  targets: MailboxReplyTarget[]
+): MailboxReplyTarget | undefined {
   const replyMessageIds = new Set(
     [message.inReplyToHeader, ...(message.references ?? [])]
       .map(canonicalMessageId)
@@ -1034,16 +1096,51 @@ function matchesReplyTarget(message: SyncedMailboxMessage, targets: MailboxReply
   );
   for (const target of targets) {
     const targetMessageId = canonicalMessageId(target.rfc822MessageId);
-    if (targetMessageId && replyMessageIds.has(targetMessageId)) return true;
-    if (!target.externalThreadId || message.externalThreadId !== target.externalThreadId) continue;
-    if (!target.sentAt || !message.sentAt) return true;
-    const targetTime = Date.parse(target.sentAt);
-    const messageTime = Date.parse(message.sentAt);
-    if (!Number.isFinite(targetTime) || !Number.isFinite(messageTime) || messageTime >= targetTime - 300_000) {
-      return true;
+    if (targetMessageId && replyMessageIds.has(targetMessageId)) return target;
+    if (target.externalThreadId && message.externalThreadId === target.externalThreadId) {
+      if (!target.sentAt || !message.sentAt) return target;
+      const targetTime = Date.parse(target.sentAt);
+      const messageTime = Date.parse(message.sentAt);
+      if (!Number.isFinite(targetTime) || !Number.isFinite(messageTime) || messageTime >= targetTime - 300_000) {
+        return target;
+      }
+    }
+    if (!isRecoveryReplyTarget(target)) continue;
+    if (normalizeReplySubject(message.subject) !== normalizeReplySubject(target.subject)) continue;
+    if (normalizeEmail(message.from) !== normalizeEmail(target.participantEmail)) continue;
+    const targetTime = Date.parse(target.sentAt ?? "");
+    const messageTime = Date.parse(message.sentAt ?? "");
+    if (Number.isFinite(targetTime) && Number.isFinite(messageTime) && messageTime >= targetTime - 300_000) {
+      return target;
     }
   }
-  return false;
+  return undefined;
+}
+
+function isRecoveryReplyTarget(target: MailboxReplyTarget): boolean {
+  return Boolean(target.subject?.trim() && normalizeEmail(target.participantEmail) && target.sentAt?.trim());
+}
+
+function normalizeReplySubject(value?: string): string {
+  return (value ?? "")
+    .trim()
+    .replace(/^(?:(?:re|fw|fwd)\s*:\s*)+/i, "")
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+function gmailRecoveryQuery(target: MailboxReplyTarget): string {
+  const subject = normalizeReplySubject(target.subject).replace(/([\\"])/g, "\\$1");
+  const sentTime = Date.parse(target.sentAt ?? "");
+  const after = Number.isFinite(sentTime)
+    ? new Date(sentTime - 24 * 60 * 60 * 1000).toISOString().slice(0, 10).replace(/-/g, "/")
+    : undefined;
+  return [
+    "in:anywhere",
+    `from:${normalizeEmail(target.participantEmail)}`,
+    `subject:\"${subject}\"`,
+    after ? `after:${after}` : "",
+  ].filter(Boolean).join(" ");
 }
 
 function canonicalMessageId(value?: string): string {
@@ -1235,6 +1332,9 @@ async function upsertSyncedCommunication(
     rawMimeRef: message.rawMimeRef,
     rfc822MessageId: message.rfc822MessageId ?? message.messageIdHeader,
   };
+  const resolution = message.carrierSubmissionId
+    ? { carrierSubmissionId: message.carrierSubmissionId, matchedBy: "mailbox_reply_target" }
+    : undefined;
 
   if (existing) {
     await prisma.$executeRaw`
@@ -1254,6 +1354,7 @@ async function upsertSyncedCommunication(
           is_read = ${message.isRead ?? false},
           mailbox_labels = ${JSON.stringify(message.mailboxLabels ?? [])}::jsonb,
           mailbox = COALESCE(mailbox, '{}'::jsonb) || ${JSON.stringify(mailbox)}::jsonb,
+          resolution = COALESCE(resolution, '{}'::jsonb) || ${JSON.stringify(resolution ?? {})}::jsonb,
           sent_at = COALESCE(${message.sentAt ? new Date(message.sentAt) : null}, sent_at),
           updated_at = now()
       WHERE id = ${existing.id}
@@ -1292,6 +1393,7 @@ async function upsertSyncedCommunication(
       subject,
       thread_id,
       mailbox,
+      resolution,
       attachments,
       body,
       body_html,
@@ -1323,6 +1425,7 @@ async function upsertSyncedCommunication(
       ${message.subject ?? null},
       ${threadId},
       ${JSON.stringify(mailbox)}::jsonb,
+      ${JSON.stringify(resolution ?? {})}::jsonb,
       ${JSON.stringify(message.attachments ?? [])}::jsonb,
       ${message.body},
       ${message.bodyHtml ?? null},
