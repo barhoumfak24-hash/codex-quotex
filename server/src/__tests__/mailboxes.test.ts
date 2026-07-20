@@ -6,6 +6,7 @@ import { issueSessionJwt } from "../routes/auth.js";
 const mocks = vi.hoisted(() => ({
   sendMailboxEmail: vi.fn(),
   syncMailboxMessages: vi.fn(),
+  syncMailboxReplyMessages: vi.fn(),
   listPersistedMailboxMessages: vi.fn(),
   listMailboxSyncStatus: vi.fn(),
   listMailboxDiagnostics: vi.fn(),
@@ -48,6 +49,7 @@ vi.mock("../services/prisma.js", () => ({
 
 vi.mock("../services/mailboxSync.js", () => ({
   syncMailboxMessages: mocks.syncMailboxMessages,
+  syncMailboxReplyMessages: mocks.syncMailboxReplyMessages,
   listPersistedMailboxMessages: mocks.listPersistedMailboxMessages,
   listMailboxSyncStatus: mocks.listMailboxSyncStatus,
   listMailboxDiagnostics: mocks.listMailboxDiagnostics,
@@ -74,6 +76,7 @@ beforeEach(() => {
   vi.stubEnv("JWT_AUDIENCE", "");
   mocks.sendMailboxEmail.mockReset();
   mocks.syncMailboxMessages.mockReset();
+  mocks.syncMailboxReplyMessages.mockReset();
   mocks.listPersistedMailboxMessages.mockReset();
   mocks.listMailboxSyncStatus.mockReset();
   mocks.listMailboxDiagnostics.mockReset();
@@ -627,6 +630,62 @@ describe("mailbox delivery routes", () => {
       userId: "user_mail",
       connectionId: undefined,
       maxResults: 10,
+    });
+  });
+
+  it("checks only the provider threads recorded on sent carrier emails", async () => {
+    mocks.syncMailboxReplyMessages.mockResolvedValue({
+      connectionId: "mailbox_conn_1",
+      mailboxAccount: "agent@example.com",
+      provider: "gmail",
+      targetsChecked: 1,
+      messages: [
+        {
+          mailboxAccount: "agent@example.com",
+          mailboxConnectionId: "mailbox_conn_1",
+          provider: "gmail",
+          externalMessageId: "gmail_reply_1",
+          externalThreadId: "gmail_thread_1",
+          from: "underwriter@carrier.example",
+          to: ["agent@example.com"],
+          subject: "Re: Commercial application",
+          body: "We can quote this account.",
+          direction: "inbound",
+        },
+      ],
+      importSummary: { imported: 1, updated: 0, deduped: 0, failed: 0 },
+    });
+
+    const response = await postMailbox(
+      "/sync/replies",
+      {
+        connectionId: "mailbox_conn_1",
+        targets: [{
+          externalThreadId: "gmail_thread_1",
+          rfc822MessageId: "<sent-carrier-1@example.com>",
+          sentAt: "2026-07-20T12:00:00.000Z",
+        }],
+      },
+      staffToken()
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      result: {
+        targetsChecked: 1,
+        messages: [{ externalMessageId: "gmail_reply_1", direction: "inbound" }],
+      },
+    });
+    expect(mocks.syncMailboxReplyMessages).toHaveBeenCalledWith({
+      tenantId: "tenant_mail",
+      userId: "user_mail",
+      connectionId: "mailbox_conn_1",
+      targets: [{
+        externalThreadId: "gmail_thread_1",
+        rfc822MessageId: "<sent-carrier-1@example.com>",
+        sentAt: "2026-07-20T12:00:00.000Z",
+      }],
     });
   });
 });

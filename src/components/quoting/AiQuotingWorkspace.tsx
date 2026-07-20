@@ -52,7 +52,7 @@ import {
   getLiveMailboxCapability,
   replayPersistedMailboxCommunications,
   sendCommunicationThroughLiveMailbox,
-  syncCommunicationsFromLiveMailbox,
+  syncExactCarrierRepliesFromLiveMailbox,
 } from "@/lib/liveMailbox";
 import { categoryQuotingQuestions } from "@/lib/categoryQuestionnaires";
 import { type AiGatewayFailureDetail } from "@/lib/aiGateway";
@@ -4124,12 +4124,40 @@ function CommercialFlowPanel({
           submission.status === "agent_review"
       ).length;
     const responsesBefore = responseCount(api.quoting.get(session.id) ?? session);
+    const sentMessageIds = new Set(
+      submissions.flatMap((submission) => [
+        ...(submission.applicationMessageIds ?? []),
+        ...(submission.supplementalMessageIds ?? []),
+      ])
+    );
+    const exactReplyTargets = Array.from(
+      new Map(
+        api.communications
+          .listByTenant(session.tenantId)
+          .filter((communication) => sentMessageIds.has(communication.id))
+          .flatMap((communication) => {
+            const rfc822MessageId = communication.rfc822MessageId ?? communication.messageIdHeader;
+            if (!communication.externalThreadId && !rfc822MessageId) return [];
+            const target = {
+              mailboxConnectionId: communication.mailboxConnectionId,
+              externalThreadId: communication.externalThreadId,
+              rfc822MessageId,
+              sentAt: communication.createdAt,
+            };
+            return [[
+              `${target.mailboxConnectionId ?? ""}|${target.externalThreadId ?? ""}|${target.rfc822MessageId ?? ""}`,
+              target,
+            ] as const];
+          })
+      ).values()
+    );
 
     setCheckingResponses(true);
     responseCheckInFlight.current = true;
     setResponseCheckNotice(null);
     try {
       let responsesNeedingReview = 0;
+      let exactTargetsChecked = 0;
 
       // First replay messages already imported by the scheduled mailbox job.
       // The server and browser use different persistence layers, so this bridge
@@ -4149,14 +4177,15 @@ function CommercialFlowPanel({
           user,
           refresh: true,
         });
-        if (capability.inboxSyncConnected) {
-          const sync = await syncCommunicationsFromLiveMailbox({
+        if (capability.inboxSyncConnected && exactReplyTargets.length > 0) {
+          const sync = await syncExactCarrierRepliesFromLiveMailbox({
             tenantId: session.tenantId,
             user,
-            maxResults: 50,
+            targets: exactReplyTargets,
             quotingSessionId: session.id,
           });
           if (sync.ok) {
+            exactTargetsChecked += sync.targetsChecked;
             responsesNeedingReview += sync.review;
             await api.quoting.readCommercialCarrierResponses(session.id);
           }
@@ -4181,7 +4210,9 @@ function CommercialFlowPanel({
             }
           : {
               tone: "neutral",
-              message: "QuoteX responses checked. No new verified carrier responses were found.",
+              message: exactTargetsChecked > 0
+                ? `Checked ${exactTargetsChecked} sent carrier email thread${exactTargetsChecked === 1 ? "" : "s"}. No new verified replies were found.`
+                : "No new verified replies have reached Quotex for the carrier emails sent from this quote flow.",
             }
       );
       onChanged?.();
@@ -4213,7 +4244,7 @@ function CommercialFlowPanel({
               className="btn-outline inline-flex items-center gap-1.5 text-xs"
               onClick={() => void checkForCarrierResponses()}
               disabled={checkingResponses || responseCheckCoolingDown}
-              title="Check QuoteX for verified carrier replies"
+              title="Check the exact email threads sent from this quote flow for replies"
             >
               <RefreshCw className={`h-3.5 w-3.5 ${checkingResponses ? "animate-spin" : ""}`} />
               {checkingResponses ? "Checking..." : "Check for responses"}

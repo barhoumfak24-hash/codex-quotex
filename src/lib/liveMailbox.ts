@@ -267,6 +267,130 @@ export async function syncCommunicationsFromLiveMailbox(input: {
   }
 }
 
+export type ExactCarrierReplyTarget = {
+  mailboxConnectionId?: string;
+  externalThreadId?: string;
+  rfc822MessageId?: string;
+  sentAt?: string;
+};
+
+export async function syncExactCarrierRepliesFromLiveMailbox(input: {
+  tenantId: string;
+  user: User;
+  targets: ExactCarrierReplyTarget[];
+  quotingSessionId: string;
+}): Promise<
+  | {
+      ok: true;
+      targetsChecked: number;
+      imported: number;
+      serverImported: number;
+      serverUpdated: number;
+      serverDeduped: number;
+      serverFailed: number;
+      processed: number;
+      review: number;
+      ignored: number;
+    }
+  | { ok: false; message: string }
+> {
+  const groups = new Map<string, ExactCarrierReplyTarget[]>();
+  for (const target of input.targets) {
+    if (!target.externalThreadId && !target.rfc822MessageId) continue;
+    const key = target.mailboxConnectionId ?? "";
+    groups.set(key, [...(groups.get(key) ?? []), target]);
+  }
+  if (groups.size === 0) {
+    return {
+      ok: true,
+      targetsChecked: 0,
+      imported: 0,
+      serverImported: 0,
+      serverUpdated: 0,
+      serverDeduped: 0,
+      serverFailed: 0,
+      processed: 0,
+      review: 0,
+      ignored: 0,
+    };
+  }
+
+  const totals = {
+    targetsChecked: 0,
+    imported: 0,
+    serverImported: 0,
+    serverUpdated: 0,
+    serverDeduped: 0,
+    serverFailed: 0,
+    processed: 0,
+    review: 0,
+    ignored: 0,
+  };
+  try {
+    for (const [connectionId, targets] of groups) {
+      const response = await fetch(`${apiBaseUrl()}/mailboxes/sync/replies`, {
+        method: "POST",
+        headers: authHeaders(input.user, input.tenantId),
+        body: JSON.stringify({
+          connectionId: connectionId || undefined,
+          targets: targets.map(({ externalThreadId, rfc822MessageId, sentAt }) => ({
+            externalThreadId,
+            rfc822MessageId,
+            sentAt,
+          })),
+        }),
+      });
+      const json = (await response.json().catch(() => null)) as
+        | {
+            ok: true;
+            result: {
+              targetsChecked?: number;
+              messages: SyncedMailboxMessage[];
+              importSummary?: {
+                imported?: number;
+                updated?: number;
+                deduped?: number;
+                failed?: number;
+              };
+            };
+          }
+        | { ok: false; message?: string }
+        | null;
+      if (!response.ok || !json?.ok) {
+        return {
+          ok: false,
+          message:
+            (json && "message" in json && json.message) ||
+            `Carrier reply check failed with ${response.status} ${response.statusText}.`,
+        };
+      }
+
+      const mirrored = await mirrorSyncedMailboxMessages(
+        input.tenantId,
+        input.user,
+        json.result.messages,
+        input.quotingSessionId
+      );
+      if (!mirrored.ok) return mirrored;
+      totals.targetsChecked += json.result.targetsChecked ?? targets.length;
+      totals.imported += mirrored.imported;
+      totals.serverImported += json.result.importSummary?.imported ?? 0;
+      totals.serverUpdated += json.result.importSummary?.updated ?? 0;
+      totals.serverDeduped += json.result.importSummary?.deduped ?? 0;
+      totals.serverFailed += json.result.importSummary?.failed ?? 0;
+      totals.processed += mirrored.processed;
+      totals.review += mirrored.review;
+      totals.ignored += mirrored.ignored;
+    }
+    return { ok: true, ...totals };
+  } catch (error) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : "Carrier replies could not be checked.",
+    };
+  }
+}
+
 export async function getLiveMailboxSyncStatus(input: {
   tenantId: string;
   user: User;

@@ -606,9 +606,9 @@ describe("AiQuotingWorkspace component", () => {
           json: async () => ({
             ok: true,
             capability: {
-              mailboxConnected: false,
-              inboxSyncConnected: false,
-              inboxSyncProvider: null,
+              mailboxConnected: true,
+              inboxSyncConnected: true,
+              inboxSyncProvider: "google",
               transactionalConfigured: true,
               transactionalProvider: "sendgrid",
               missingEnvironmentVariables: [],
@@ -617,7 +617,7 @@ describe("AiQuotingWorkspace component", () => {
           }),
         };
       }
-      if (String(request).includes("/mailboxes/sync")) {
+      if (String(request).includes("/mailboxes/sync/replies")) {
         return {
           ok: true,
           status: 200,
@@ -627,6 +627,7 @@ describe("AiQuotingWorkspace component", () => {
             result: {
               mailboxAccount: "agent@example.com",
               provider: "gmail",
+              targetsChecked: 1,
               messages: [],
               importSummary: { imported: 0, updated: 0, deduped: 0, failed: 0 },
             },
@@ -704,12 +705,15 @@ describe("AiQuotingWorkspace component", () => {
     await act(async () => {
       await new Promise((resolve) => window.setTimeout(resolve, 0));
     });
-    expect(host.textContent).toContain("QuoteX responses checked. No new verified carrier responses were found.");
+    expect(host.textContent).toContain("Checked 1 sent carrier email thread. No new verified replies were found.");
     expect(host.textContent).not.toContain("Connect inbox");
     expect(host.textContent).not.toContain("Connect a readable mailbox");
     expect(host.textContent).toContain("Last checked");
     expect(
-      sendFetch.mock.calls.some(([request]) => String(request).includes("/mailboxes/sync"))
+      sendFetch.mock.calls.some(([request]) => String(request).includes("/mailboxes/sync/replies"))
+    ).toBe(true);
+    expect(
+      sendFetch.mock.calls.some(([request]) => String(request).endsWith("/mailboxes/sync"))
     ).toBe(false);
 
     await act(async () => {

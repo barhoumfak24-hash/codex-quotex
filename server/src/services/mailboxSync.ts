@@ -9,6 +9,19 @@ export type MailboxSyncInput = {
   maxResults?: number;
 };
 
+export type MailboxReplyTarget = {
+  externalThreadId?: string;
+  rfc822MessageId?: string;
+  sentAt?: string;
+};
+
+export type MailboxReplySyncInput = {
+  tenantId: string;
+  userId: string;
+  connectionId?: string;
+  targets: MailboxReplyTarget[];
+};
+
 export type MailboxSyncImportSummary = {
   imported: number;
   updated: number;
@@ -108,6 +121,13 @@ type GmailMessage = {
   snippet?: string;
   internalDate?: string;
   payload?: GmailPart;
+  error?: { message?: string };
+};
+
+type GmailThreadResponse = {
+  id?: string;
+  historyId?: string;
+  messages?: GmailMessage[];
   error?: { message?: string };
 };
 
@@ -229,6 +249,53 @@ export async function syncMailboxMessages(input: MailboxSyncInput): Promise<{
   }
   await markConnectionSynced(connection.id);
   return { connectionId: connection.id, mailboxAccount: connection.address, provider: "outlook", messages, importSummary };
+}
+
+export async function syncMailboxReplyMessages(input: MailboxReplySyncInput): Promise<{
+  connectionId: string;
+  mailboxAccount: string;
+  provider: "gmail" | "outlook";
+  targetsChecked: number;
+  messages: SyncedMailboxMessage[];
+  importSummary: MailboxSyncImportSummary;
+}> {
+  const targets = uniqueReplyTargets(input.targets);
+  const { connection, token } = await readFreshMailboxToken(input);
+  const provider = token.provider === "google" ? "gmail" : "outlook";
+  if (targets.length === 0) {
+    return {
+      connectionId: connection.id,
+      mailboxAccount: connection.address,
+      provider,
+      targetsChecked: 0,
+      messages: [],
+      importSummary: { imported: 0, updated: 0, deduped: 0, failed: 0 },
+    };
+  }
+
+  const messages = token.provider === "google"
+    ? await syncGmailReplyMessages(
+        connection.id,
+        connection.address,
+        token.accessToken,
+        targets
+      )
+    : await syncMicrosoftReplyMessages(
+        connection.id,
+        connection.address,
+        token.accessToken,
+        targets
+      );
+  const importSummary = await persistSyncedMailboxMessages(connection, messages);
+  await markConnectionSynced(connection.id);
+  return {
+    connectionId: connection.id,
+    mailboxAccount: connection.address,
+    provider,
+    targetsChecked: targets.length,
+    messages,
+    importSummary,
+  };
 }
 
 export async function listPersistedMailboxMessages(input: {
@@ -667,6 +734,47 @@ async function syncGmailMessages(
   };
 }
 
+async function syncGmailReplyMessages(
+  connectionId: string,
+  mailboxAccount: string,
+  accessToken: string,
+  targets: MailboxReplyTarget[]
+): Promise<SyncedMailboxMessage[]> {
+  const resolvedTargets = [...targets];
+  const threadIds = new Set(
+    targets.map((target) => target.externalThreadId?.trim()).filter((value): value is string => Boolean(value))
+  );
+
+  for (const target of targets) {
+    if (target.externalThreadId || !target.rfc822MessageId) continue;
+    const listUrl = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
+    listUrl.searchParams.set("maxResults", "5");
+    listUrl.searchParams.set("q", `rfc822msgid:${bareMessageId(target.rfc822MessageId)}`);
+    const list = await providerJson<GmailListResponse>(listUrl.toString(), accessToken);
+    for (const row of list.messages ?? []) {
+      if (!row.threadId) continue;
+      threadIds.add(row.threadId);
+      resolvedTargets.push({ ...target, externalThreadId: row.threadId });
+    }
+  }
+
+  const messages = new Map<string, SyncedMailboxMessage>();
+  for (const threadId of threadIds) {
+    const url = new URL(
+      `https://gmail.googleapis.com/gmail/v1/users/me/threads/${encodeURIComponent(threadId)}`
+    );
+    url.searchParams.set("format", "full");
+    const thread = await providerJson<GmailThreadResponse>(url.toString(), accessToken);
+    for (const rawMessage of thread.messages ?? []) {
+      if (rawMessage.error) continue;
+      const message = normalizeGmailMessage(connectionId, mailboxAccount, rawMessage);
+      if (message.direction !== "inbound" || !matchesReplyTarget(message, resolvedTargets)) continue;
+      messages.set(message.externalMessageId, message);
+    }
+  }
+  return [...messages.values()];
+}
+
 async function readGmailMessagesById(ids: Iterable<string>, accessToken: string): Promise<GmailMessage[]> {
   return Promise.all(
     Array.from(new Set(Array.from(ids).filter(Boolean))).map(async (id) => {
@@ -781,6 +889,72 @@ async function syncMicrosoftMessages(
   };
 }
 
+async function syncMicrosoftReplyMessages(
+  connectionId: string,
+  mailboxAccount: string,
+  accessToken: string,
+  targets: MailboxReplyTarget[]
+): Promise<SyncedMailboxMessage[]> {
+  const resolvedTargets = [...targets];
+  const conversationIds = new Set(
+    targets.map((target) => target.externalThreadId?.trim()).filter((value): value is string => Boolean(value))
+  );
+
+  for (const target of targets) {
+    if (target.externalThreadId || !target.rfc822MessageId) continue;
+    const rootUrl = graphMessageListUrl(
+      `internetMessageId eq '${escapeODataString(normalizeMessageId(target.rfc822MessageId))}'`,
+      5
+    );
+    const rootMessages = await readGraphMessagePages(rootUrl, accessToken);
+    for (const message of rootMessages) {
+      if (!message.conversationId) continue;
+      conversationIds.add(message.conversationId);
+      resolvedTargets.push({ ...target, externalThreadId: message.conversationId });
+    }
+  }
+
+  const messages = new Map<string, SyncedMailboxMessage>();
+  for (const conversationId of conversationIds) {
+    const listUrl = graphMessageListUrl(
+      `conversationId eq '${escapeODataString(conversationId)}'`,
+      50
+    );
+    const rows = await readGraphMessagePages(listUrl, accessToken);
+    for (const row of rows) {
+      const message = await normalizeGraphMessage(connectionId, mailboxAccount, accessToken, row);
+      if (message.direction !== "inbound" || !matchesReplyTarget(message, resolvedTargets)) continue;
+      messages.set(message.externalMessageId, message);
+    }
+  }
+  return [...messages.values()];
+}
+
+function graphMessageListUrl(filter: string, top: number): URL {
+  const url = new URL("https://graph.microsoft.com/v1.0/me/messages");
+  url.searchParams.set("$filter", filter);
+  url.searchParams.set("$top", String(top));
+  url.searchParams.set(
+    "$select",
+    "id,conversationId,webLink,from,toRecipients,ccRecipients,bccRecipients,subject,body,bodyPreview,receivedDateTime,sentDateTime,isRead,parentFolderId,internetMessageId,internetMessageHeaders,hasAttachments"
+  );
+  return url;
+}
+
+async function readGraphMessagePages(initialUrl: URL, accessToken: string): Promise<GraphMessage[]> {
+  const messages: GraphMessage[] = [];
+  const seenLinks = new Set<string>();
+  let nextLink: string | undefined = initialUrl.toString();
+  while (nextLink) {
+    if (seenLinks.has(nextLink)) throw new Error("Microsoft Graph returned a repeated continuation link.");
+    seenLinks.add(nextLink);
+    const list = await providerJson<GraphMessageList>(nextLink, accessToken);
+    messages.push(...(list.value ?? []));
+    nextLink = list["@odata.nextLink"];
+  }
+  return messages;
+}
+
 async function normalizeGraphMessage(
   connectionId: string,
   mailboxAccount: string,
@@ -838,6 +1012,55 @@ async function graphAttachments(messageId: string, accessToken: string): Promise
         : undefined,
     storagePath: attachment.contentBytes ? undefined : `graph://${messageId}/${attachment.id ?? attachment.name}`,
   }));
+}
+
+function uniqueReplyTargets(targets: MailboxReplyTarget[]): MailboxReplyTarget[] {
+  const unique = new Map<string, MailboxReplyTarget>();
+  for (const target of targets) {
+    const externalThreadId = target.externalThreadId?.trim() || undefined;
+    const rfc822MessageId = target.rfc822MessageId?.trim() || undefined;
+    if (!externalThreadId && !rfc822MessageId) continue;
+    const key = `${externalThreadId ?? ""}|${canonicalMessageId(rfc822MessageId)}|${target.sentAt ?? ""}`;
+    unique.set(key, { externalThreadId, rfc822MessageId, sentAt: target.sentAt });
+  }
+  return [...unique.values()];
+}
+
+function matchesReplyTarget(message: SyncedMailboxMessage, targets: MailboxReplyTarget[]): boolean {
+  const replyMessageIds = new Set(
+    [message.inReplyToHeader, ...(message.references ?? [])]
+      .map(canonicalMessageId)
+      .filter(Boolean)
+  );
+  for (const target of targets) {
+    const targetMessageId = canonicalMessageId(target.rfc822MessageId);
+    if (targetMessageId && replyMessageIds.has(targetMessageId)) return true;
+    if (!target.externalThreadId || message.externalThreadId !== target.externalThreadId) continue;
+    if (!target.sentAt || !message.sentAt) return true;
+    const targetTime = Date.parse(target.sentAt);
+    const messageTime = Date.parse(message.sentAt);
+    if (!Number.isFinite(targetTime) || !Number.isFinite(messageTime) || messageTime >= targetTime - 300_000) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function canonicalMessageId(value?: string): string {
+  return bareMessageId(value ?? "").toLowerCase();
+}
+
+function bareMessageId(value: string): string {
+  return value.trim().replace(/^<|>$/g, "");
+}
+
+function normalizeMessageId(value: string): string {
+  const bare = bareMessageId(value);
+  return bare ? `<${bare}>` : "";
+}
+
+function escapeODataString(value: string): string {
+  return value.replace(/'/g, "''");
 }
 
 async function providerJson<T>(url: string, accessToken: string): Promise<T> {

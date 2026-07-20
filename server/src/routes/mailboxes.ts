@@ -18,6 +18,7 @@ import {
   listMailboxSyncStatus,
   listPersistedMailboxMessages,
   syncMailboxMessages,
+  syncMailboxReplyMessages,
 } from "../services/mailboxSync.js";
 import { emailDeliveryConfiguration, sendEmail } from "../services/email.js";
 import { prisma } from "../services/prisma.js";
@@ -70,6 +71,17 @@ const sendSchema = z.object({
 const syncSchema = z.object({
   connectionId: z.string().optional(),
   maxResults: z.number().int().min(1).max(50).optional(),
+});
+const replyTargetSchema = z.object({
+  externalThreadId: z.string().trim().min(1).max(500).optional(),
+  rfc822MessageId: z.string().trim().min(1).max(998).optional(),
+  sentAt: z.string().datetime().optional(),
+}).refine((target) => Boolean(target.externalThreadId || target.rfc822MessageId), {
+  message: "A provider thread ID or Message-ID is required.",
+});
+const replySyncSchema = z.object({
+  connectionId: z.string().optional(),
+  targets: z.array(replyTargetSchema).min(1).max(100),
 });
 const replaySchema = z.object({
   limit: z.number().int().min(1).max(500).optional(),
@@ -318,6 +330,31 @@ mailboxesRoutes.post("/sync", async (req, res, next) => {
       return res.status(502).json({
         ok: false,
         error: "mailbox_sync_failed",
+        message: error.message,
+      });
+    }
+    next(error);
+  }
+});
+
+mailboxesRoutes.post("/sync/replies", async (req, res, next) => {
+  try {
+    if (!req.auth?.tenantId) return res.status(403).json({ ok: false, error: "tenant_required" });
+    const parsed = replySyncSchema.safeParse(req.body ?? {});
+    if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+
+    const result = await syncMailboxReplyMessages({
+      tenantId: req.auth.tenantId,
+      userId: req.auth.userId,
+      connectionId: parsed.data.connectionId,
+      targets: parsed.data.targets,
+    });
+    res.json({ ok: true, result });
+  } catch (error) {
+    if (error instanceof Error) {
+      return res.status(502).json({
+        ok: false,
+        error: "mailbox_reply_sync_failed",
         message: error.message,
       });
     }

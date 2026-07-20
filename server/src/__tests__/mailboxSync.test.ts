@@ -27,6 +27,7 @@ import {
   listMailboxDiagnostics,
   pollDueMailboxConnections,
   syncMailboxMessages,
+  syncMailboxReplyMessages,
 } from "../services/mailboxSync.js";
 
 beforeEach(() => {
@@ -158,6 +159,74 @@ describe("mailbox sync reliability", () => {
     );
   });
 
+  it("checks the exact Gmail thread recorded on the sent carrier email", async () => {
+    mocks.readFreshMailboxToken.mockResolvedValue(googleConnection());
+    fetchMock().mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/threads/gmail-thread-1")) {
+        return jsonResponse({
+          id: "gmail-thread-1",
+          messages: [
+            gmailMessage("sent-carrier-1"),
+            gmailInboundReply("carrier-reply-1", "gmail-thread-1", "<sent-carrier-1@example.com>"),
+          ],
+        });
+      }
+      throw new Error(`Unexpected Gmail request: ${url.toString()}`);
+    });
+
+    const result = await syncMailboxReplyMessages({
+      tenantId: "tenant-1",
+      userId: "user-1",
+      targets: [{
+        externalThreadId: "gmail-thread-1",
+        rfc822MessageId: "<sent-carrier-1@example.com>",
+        sentAt: "2026-01-01T00:00:00.000Z",
+      }],
+    });
+
+    expect(fetchMock()).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock().mock.calls[0][0])).toContain("/threads/gmail-thread-1");
+    expect(result.targetsChecked).toBe(1);
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]).toMatchObject({
+      externalMessageId: "carrier-reply-1",
+      externalThreadId: "gmail-thread-1",
+      direction: "inbound",
+      inReplyToHeader: "<sent-carrier-1@example.com>",
+    });
+  });
+
+  it("checks the exact Microsoft conversation recorded on the sent carrier email", async () => {
+    mocks.readFreshMailboxToken.mockResolvedValue(microsoftConnection("unused-delta-link"));
+    fetchMock().mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      expect(url.pathname).toBe("/v1.0/me/messages");
+      expect(url.searchParams.get("$filter")).toBe("conversationId eq 'conversation-carrier-1'");
+      return jsonResponse({ value: [graphInboundReply("graph-reply-1", "conversation-carrier-1")] });
+    });
+
+    const result = await syncMailboxReplyMessages({
+      tenantId: "tenant-1",
+      userId: "user-1",
+      targets: [{
+        externalThreadId: "conversation-carrier-1",
+        rfc822MessageId: "<sent-graph-1@example.com>",
+        sentAt: "2026-01-01T00:00:00.000Z",
+      }],
+    });
+
+    expect(fetchMock()).toHaveBeenCalledTimes(1);
+    expect(result.targetsChecked).toBe(1);
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]).toMatchObject({
+      externalMessageId: "graph-reply-1",
+      externalThreadId: "conversation-carrier-1",
+      direction: "inbound",
+      inReplyToHeader: "<sent-graph-1@example.com>",
+    });
+  });
+
   it("reports only token-granted capabilities, not requested connection scopes", async () => {
     mocks.queryRaw.mockImplementation(async (...args: unknown[]) => {
       const sql = sqlText(args);
@@ -262,6 +331,27 @@ function gmailMessage(id: string) {
   };
 }
 
+function gmailInboundReply(id: string, threadId: string, inReplyTo: string) {
+  return {
+    id,
+    threadId,
+    labelIds: ["INBOX", "UNREAD"],
+    snippet: "We can quote this account.",
+    internalDate: "1767229200000",
+    payload: {
+      mimeType: "text/plain",
+      headers: [
+        { name: "From", value: "underwriter@carrier.example" },
+        { name: "To", value: "agent@example.com" },
+        { name: "Message-ID", value: `<${id}@carrier.example>` },
+        { name: "In-Reply-To", value: inReplyTo },
+        { name: "References", value: inReplyTo },
+      ],
+      body: { data: Buffer.from("We can quote this account.", "utf8").toString("base64url") },
+    },
+  };
+}
+
 function graphMessage(id: string) {
   return {
     id,
@@ -275,6 +365,27 @@ function graphMessage(id: string) {
     from: { emailAddress: { address: "agent@example.com" } },
     toRecipients: [{ emailAddress: { address: "client@example.com" } }],
     body: { contentType: "text", content: `Body ${id}` },
+    hasAttachments: false,
+  };
+}
+
+function graphInboundReply(id: string, conversationId: string) {
+  return {
+    id,
+    conversationId,
+    webLink: `https://outlook.office.com/mail/${id}`,
+    subject: "Re: Commercial application package",
+    bodyPreview: "We can quote this account.",
+    receivedDateTime: "2026-01-01T01:00:00.000Z",
+    isRead: false,
+    internetMessageId: `<${id}@carrier.example>`,
+    internetMessageHeaders: [
+      { name: "In-Reply-To", value: "<sent-graph-1@example.com>" },
+      { name: "References", value: "<sent-graph-1@example.com>" },
+    ],
+    from: { emailAddress: { address: "underwriter@carrier.example" } },
+    toRecipients: [{ emailAddress: { address: "agent@example.com" } }],
+    body: { contentType: "text", content: "We can quote this account." },
     hasAttachments: false,
   };
 }
