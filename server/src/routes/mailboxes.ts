@@ -21,6 +21,10 @@ import {
 } from "../services/mailboxSync.js";
 import { emailDeliveryConfiguration, sendEmail } from "../services/email.js";
 import { prisma } from "../services/prisma.js";
+import {
+  carrierReplyRelayConfiguration,
+  createCarrierReplyRoute,
+} from "../services/carrierReplyRelay.js";
 
 export const mailboxesRoutes = Router();
 export const mailboxOAuthCallbackRoutes = Router();
@@ -52,6 +56,14 @@ const sendSchema = z.object({
   references: z.array(z.string().max(998)).max(50).optional(),
   externalThreadId: z.string().max(500).optional(),
   attachments: z.array(attachmentSchema).max(25).optional(),
+  replyContext: z.object({
+    communicationId: z.string().min(1).max(200),
+    threadId: z.string().max(500).optional(),
+    customerId: z.string().max(200).optional(),
+    prospectId: z.string().max(200).optional(),
+    carrierContactId: z.string().max(200).optional(),
+    carrierSubmissionId: z.string().max(200).optional(),
+  }).optional(),
 });
 const syncSchema = z.object({
   connectionId: z.string().optional(),
@@ -91,6 +103,7 @@ mailboxesRoutes.get("/capability", async (req, res, next) => {
       userId: req.auth.userId,
     });
     const transactional = emailDeliveryConfiguration();
+    const carrierReplyRelay = carrierReplyRelayConfiguration();
     const readableConnections = connections.filter(connectionCanReadInbox);
     res.json({
       ok: true,
@@ -98,6 +111,7 @@ mailboxesRoutes.get("/capability", async (req, res, next) => {
         mailboxConnected: connections.some((connection) => connection.status === "connected"),
         inboxSyncConnected: readableConnections.length > 0,
         inboxSyncProvider: readableConnections[0]?.provider ?? null,
+        carrierReplyRelayConfigured: carrierReplyRelay.configured,
         transactionalConfigured: transactional.configured,
         transactionalProvider: transactional.provider,
         missingEnvironmentVariables: transactional.missingEnvironmentVariables,
@@ -215,6 +229,13 @@ mailboxesRoutes.post("/send", async (req, res, next) => {
       userId: req.auth.userId,
       ownerType,
     });
+    const carrierReplyTo = await createCarrierReplyRoute({
+      tenantId: req.auth.tenantId,
+      userId: req.auth.userId,
+      mailboxAccount: identity.email,
+      context: parsed.data.replyContext,
+    });
+    const effectiveReplyTo = carrierReplyTo ?? identity.email;
     try {
       const result = await sendMailboxEmail({
         tenantId: req.auth.tenantId,
@@ -223,7 +244,7 @@ mailboxesRoutes.post("/send", async (req, res, next) => {
         expectedAddress: identity.email,
         ...parsed.data,
         senderName: identity.name,
-        replyTo: identity.email,
+        replyTo: effectiveReplyTo,
       });
       return res.json({ ok: true, result });
     } catch (mailboxError) {
@@ -234,7 +255,7 @@ mailboxesRoutes.post("/send", async (req, res, next) => {
           message: "The mailbox provider did not confirm delivery. Check Sent mail before retrying.",
         });
       }
-      const fallback = await sendWithTransactionalFallback(parsed.data, mailboxError, identity);
+      const fallback = await sendWithTransactionalFallback(parsed.data, mailboxError, identity, effectiveReplyTo);
       if (fallback.ok) return res.json(fallback);
       return res.status(502).json(fallback);
     }
@@ -332,7 +353,8 @@ function connectionCanReadInbox(connection: {
 async function sendWithTransactionalFallback(
   input: z.infer<typeof sendSchema>,
   mailboxError: unknown,
-  identity: { name: string; email: string }
+  identity: { name: string; email: string },
+  replyTo: string
 ): Promise<
   | {
       ok: true;
@@ -358,7 +380,7 @@ async function sendWithTransactionalFallback(
     subject,
     text,
     html,
-    replyTo: identity.email,
+    replyTo,
     headers: transactionalThreadHeaders(input),
     attachments: input.attachments,
     categories:

@@ -784,6 +784,14 @@ export interface MailboxOutboxJob {
   references?: string[];
   externalThreadId?: string;
   attachments?: CommunicationAttachment[];
+  replyContext?: {
+    communicationId: string;
+    threadId?: string;
+    customerId?: string;
+    prospectId?: string;
+    carrierContactId?: string;
+    carrierSubmissionId?: string;
+  };
   idempotencyKey: string;
   status: MailboxOutboxStatus;
   attemptCount: number;
@@ -2044,7 +2052,7 @@ export interface Communication {
   // provider ids so "Open in app" can deep-link directly when the
   // provider exposes a URL, and fall back to a contact/thread search
   // otherwise.
-  mailboxOrigin?: "app" | "provider_sync";
+  mailboxOrigin?: "app" | "provider_sync" | "inbound_relay";
   mailboxAccount?: string;
   mailboxProvider?: MailProvider;
   mailboxConnectionId?: string;

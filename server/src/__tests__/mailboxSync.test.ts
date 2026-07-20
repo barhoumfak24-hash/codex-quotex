@@ -57,6 +57,8 @@ describe("mailbox sync reliability", () => {
     const query = mocks.queryRaw.mock.calls[0];
     expect(sqlText(query)).toContain("FROM mailbox_connections AS mailbox_connection");
     expect(sqlText(query)).toContain("mailbox_connection.user_id =");
+    expect(sqlText(query)).toContain("communication.mailbox->>'origin' = 'inbound_relay'");
+    expect(sqlText(query)).toContain("communication.mailbox->>'userId' =");
     expect(query).toContain("tenant-1");
     expect(query).toContain("user-1");
   });

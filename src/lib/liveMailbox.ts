@@ -22,6 +22,7 @@ export type LiveMailboxCapability = {
   mailboxConnected: boolean;
   inboxSyncConnected?: boolean;
   inboxSyncProvider?: string | null;
+  carrierReplyRelayConfigured?: boolean;
   transactionalConfigured: boolean;
   transactionalProvider: string;
   missingEnvironmentVariables: string[];
@@ -343,6 +344,7 @@ type SyncedMailboxMessage = {
   mailboxLabels?: string[];
   sentAt?: string;
   direction?: "inbound" | "outbound";
+  carrierSubmissionId?: string;
 };
 
 function mailboxPayload(job: MailboxOutboxJob, user: User) {
@@ -360,6 +362,7 @@ function mailboxPayload(job: MailboxOutboxJob, user: User) {
     replyToMessageIdHeader: job.replyToMessageIdHeader,
     references: job.references,
     externalThreadId: job.externalThreadId,
+    replyContext: job.replyContext,
     attachments: (job.attachments ?? []).map(sendableAttachment),
   };
 }

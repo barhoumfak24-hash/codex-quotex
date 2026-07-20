@@ -2194,6 +2194,17 @@ function buildMailboxOutboxJob(row: Communication): MailboxOutboxJob | null {
     references: row.references,
     externalThreadId: row.externalThreadId,
     attachments: row.attachments,
+    replyContext:
+      row.carrierContactId || row.carrierSubmissionId
+        ? {
+            communicationId: row.id,
+            threadId: row.threadId,
+            customerId: row.customerId,
+            prospectId: row.prospectId,
+            carrierContactId: row.carrierContactId,
+            carrierSubmissionId: row.carrierSubmissionId,
+          }
+        : undefined,
     idempotencyKey: `communication:${row.tenantId}:${row.id}`,
     status,
     attemptCount: 0,
@@ -2397,6 +2408,7 @@ function mailboxSendPayload(job: MailboxOutboxJob, user?: User) {
     replyToMessageIdHeader: job.replyToMessageIdHeader,
     references: job.references,
     externalThreadId: job.externalThreadId,
+    replyContext: job.replyContext,
     attachments: (job.attachments ?? []).map((attachment) => ({
       fileName: attachment.fileName,
       fileType: attachment.fileType,
@@ -14692,6 +14704,7 @@ export const api = {
       mailboxLabels?: string[];
       sentAt?: string;
       direction?: "inbound" | "outbound";
+      carrierSubmissionId?: string;
     }): Communication | null {
       const userMailbox = mailboxForUser(input.mailboxUserId);
       const mailboxAccount = input.mailboxAccount ?? userMailbox.account;
@@ -14752,6 +14765,7 @@ export const api = {
           deliveryStatus: direction === "inbound" ? "received" : "synced",
           externalThreadId: input.externalThreadId ?? existing.externalThreadId,
           externalUrl: input.externalUrl ?? existing.externalUrl,
+          carrierSubmissionId: input.carrierSubmissionId ?? existing.carrierSubmissionId,
         }) ?? existing;
         const linkedExisting = direction === "inbound"
           ? linkInboundCarrierCommunicationToSubmission(updatedExisting)
@@ -14804,6 +14818,7 @@ export const api = {
         externalMessageId: input.externalMessageId,
         externalThreadId: input.externalThreadId,
         externalUrl: input.externalUrl,
+        carrierSubmissionId: input.carrierSubmissionId,
         createdAt: input.sentAt ?? nowIso(),
       };
       db.insert("communications", row);

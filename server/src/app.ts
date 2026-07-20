@@ -31,6 +31,7 @@ import { communicationsRoutes } from "./routes/communications.js";
 import { customersRoutes } from "./routes/customers.js";
 import { documentsRoutes } from "./routes/documents.js";
 import { mailboxOAuthCallbackRoutes, mailboxesRoutes } from "./routes/mailboxes.js";
+import { mailboxInboundRoutes } from "./routes/mailboxInbound.js";
 import { marketingRoutes } from "./routes/marketing.js";
 import { masterRoutes } from "./routes/master.js";
 import { notesRoutes } from "./routes/notes.js";
@@ -218,6 +219,7 @@ app.use("/api/state", stateSyncLimiter, stateRoutes);
 app.use("/api/website", publicWorkflowLimiter, websiteRoutes);
 app.use("/api/stripe", webhookLimiter, stripeRoutes);
 app.use("/api/mailboxes/oauth", authLimiter, mailboxOAuthCallbackRoutes);
+app.use("/api/mailboxes/inbound", webhookLimiter, mailboxInboundRoutes);
 
 app.use("/api/tenants", requireAuth, enforceTenantIsolation, tenantsRoutes);
 app.use("/api/mailboxes", requireAuth, enforceTenantIsolation, strictApiLimiter, mailboxesRoutes);

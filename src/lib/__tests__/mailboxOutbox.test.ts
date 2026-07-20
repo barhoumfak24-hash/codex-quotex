@@ -89,6 +89,35 @@ describe("mailbox outbox", () => {
     expect(jobs[0].idempotencyKey).toBe(`communication:${agency.id}:${message.id}`);
   });
 
+  it("adds exact carrier reply context to a carrier submission outbox job", async () => {
+    const { api, agency, customer, user } = await mailboxFixture();
+    const carrierContact = api.carrierContacts.listForTenant(agency.id)[0];
+    if (!carrierContact) throw new Error("Seed fixture is missing a carrier contact.");
+
+    const message = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      carrierContactId: carrierContact.id,
+      carrierSubmissionId: "submission-carrier-1",
+      threadId: "thread-carrier-1",
+      channel: "email",
+      direction: "outbound",
+      subject: "Commercial application",
+      body: "Please review the attached application.",
+      createdById: user.id,
+    });
+
+    expect(api.mailboxOutbox.get(message.outboxJobId!)).toMatchObject({
+      replyContext: {
+        communicationId: message.id,
+        threadId: "thread-carrier-1",
+        customerId: customer.id,
+        carrierContactId: carrierContact.id,
+        carrierSubmissionId: "submission-carrier-1",
+      },
+    });
+  });
+
   it("sends with the authenticated server session when the local user row is unavailable", async () => {
     const { api, agency, customer, user } = await mailboxFixture();
     const { db } = await import("../db");

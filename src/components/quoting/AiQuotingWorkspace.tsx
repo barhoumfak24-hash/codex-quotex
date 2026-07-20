@@ -4024,6 +4024,7 @@ function CommercialFlowPanel({
   const [responseMailboxConnectProvider, setResponseMailboxConnectProvider] =
     useState<MailboxOAuthProvider | null>(null);
   const responseCheckCooldownTimer = useRef<number | null>(null);
+  const responseCheckInFlight = useRef(false);
   const submissions = session.commercialCarrierSubmissions ?? [];
   const applicationSentAt = commercialApplicationSentAt(session);
   const accepted = submissions.filter(
@@ -4044,8 +4045,76 @@ function CommercialFlowPanel({
     []
   );
 
+  useEffect(() => {
+    if (!applicationSentAt || awaitingResponse.length === 0) return;
+    let cancelled = false;
+
+    const replayResponses = async () => {
+      if (
+        cancelled ||
+        document.visibilityState === "hidden" ||
+        responseCheckInFlight.current
+      ) {
+        return;
+      }
+      const user = api.users.get(userId);
+      if (!user) return;
+      const responseCount = (candidate: QuotingSession | undefined) =>
+        (candidate?.commercialCarrierSubmissions ?? []).filter(
+          (submission) =>
+            !!submission.responseAt ||
+            submission.status === "accepted" ||
+            submission.status === "declined" ||
+            submission.status === "needs_supplemental" ||
+            submission.status === "needs_client_info" ||
+            submission.status === "agent_review"
+        ).length;
+      const before = responseCount(api.quoting.get(session.id) ?? session);
+      responseCheckInFlight.current = true;
+      try {
+        const replay = await replayPersistedMailboxCommunications({
+          tenantId: session.tenantId,
+          user,
+          limit: 500,
+          quotingSessionId: session.id,
+        });
+        await api.quoting.readCommercialCarrierResponses(session.id);
+        const after = responseCount(api.quoting.get(session.id));
+        if (cancelled) return;
+        if (after > before) {
+          const newlyMatched = after - before;
+          setLastResponseCheckAt(new Date().toISOString());
+          setResponseCheckNotice({
+            tone: "success",
+            message: `${newlyMatched} new carrier response${newlyMatched === 1 ? " was" : "s were"} verified and added.`,
+          });
+          onChanged?.();
+        } else if (replay.ok && replay.review > 0) {
+          setLastResponseCheckAt(new Date().toISOString());
+          setResponseCheckNotice({
+            tone: "warn",
+            message: `${replay.review} carrier email${replay.review === 1 ? " needs" : "s need"} confirmation before the quote flow is updated.`,
+          });
+          onChanged?.();
+        }
+      } catch {
+        // Automatic checks stay quiet; the manual control provides a user-facing retry.
+      } finally {
+        responseCheckInFlight.current = false;
+      }
+    };
+
+    const firstCheck = window.setTimeout(() => void replayResponses(), 2_000);
+    const interval = window.setInterval(() => void replayResponses(), 20_000);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(firstCheck);
+      window.clearInterval(interval);
+    };
+  }, [applicationSentAt, awaitingResponse.length, onChanged, session, userId]);
+
   async function checkForCarrierResponses() {
-    if (checkingResponses || responseCheckCoolingDown) return;
+    if (checkingResponses || responseCheckCoolingDown || responseCheckInFlight.current) return;
     const user = api.users.get(userId);
     if (!user) {
       setResponseCheckNotice({
@@ -4068,6 +4137,7 @@ function CommercialFlowPanel({
     const responsesBefore = responseCount(api.quoting.get(session.id) ?? session);
 
     setCheckingResponses(true);
+    responseCheckInFlight.current = true;
     setResponseCheckNotice(null);
     setResponseMailboxConnectProvider(null);
     try {
@@ -4106,7 +4176,7 @@ function CommercialFlowPanel({
           } else {
             mailboxWarning = sync.message;
           }
-        } else {
+        } else if (!capability.carrierReplyRelayConfigured) {
           const provider = mailboxOAuthProviderFor(user);
           setResponseMailboxConnectProvider(provider);
           mailboxWarning = provider
@@ -4144,6 +4214,7 @@ function CommercialFlowPanel({
       );
       onChanged?.();
     } finally {
+      responseCheckInFlight.current = false;
       setCheckingResponses(false);
       setResponseCheckCoolingDown(true);
       responseCheckCooldownTimer.current = window.setTimeout(() => {

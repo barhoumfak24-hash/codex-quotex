@@ -41,6 +41,7 @@ export type SyncedMailboxMessage = {
   mailboxLabels?: string[];
   sentAt?: string;
   direction: "inbound" | "outbound";
+  carrierSubmissionId?: string;
 };
 
 export type SyncedMailboxAttachment = {
@@ -54,6 +55,7 @@ export type SyncedMailboxAttachment = {
 
 type PersistedMailboxMessageRow = {
   mailbox: unknown;
+  resolution: unknown;
   external_recipient_email: string | null;
   customer_email: string | null;
   direction: string;
@@ -238,6 +240,7 @@ export async function listPersistedMailboxMessages(input: {
   const rows = await prisma.$queryRaw<PersistedMailboxMessageRow[]>`
     SELECT
       communication.mailbox,
+      communication.resolution,
       communication.external_recipient_email,
       customer.email AS customer_email,
       communication.direction,
@@ -264,14 +267,23 @@ export async function listPersistedMailboxMessages(input: {
     WHERE communication.tenant_id = ${input.tenantId}
       AND communication.channel = 'email'
       AND communication.direction = 'inbound'
-      AND communication.mailbox->>'origin' = 'provider_sync'
+      AND communication.mailbox->>'origin' IN ('provider_sync', 'inbound_relay')
       AND COALESCE(communication.mailbox->>'externalMessageId', '') <> ''
-      AND EXISTS (
-        SELECT 1
-        FROM mailbox_connections AS mailbox_connection
-        WHERE mailbox_connection.id = communication.mailbox->>'connectionId'
-          AND mailbox_connection.tenant_id = ${input.tenantId}
-          AND mailbox_connection.user_id = ${input.userId}
+      AND (
+        (
+          communication.mailbox->>'origin' = 'provider_sync'
+          AND EXISTS (
+            SELECT 1
+            FROM mailbox_connections AS mailbox_connection
+            WHERE mailbox_connection.id = communication.mailbox->>'connectionId'
+              AND mailbox_connection.tenant_id = ${input.tenantId}
+              AND mailbox_connection.user_id = ${input.userId}
+          )
+        )
+        OR (
+          communication.mailbox->>'origin' = 'inbound_relay'
+          AND communication.mailbox->>'userId' = ${input.userId}
+        )
       )
     ORDER BY COALESCE(communication.sent_at, communication.created_at) DESC
     LIMIT ${limit}
@@ -284,6 +296,7 @@ export async function listPersistedMailboxMessages(input: {
     const from = row.external_recipient_email ?? row.customer_email ?? "";
     if (!mailboxAccount || !externalMessageId || !from) return [];
     const providerValue = stringValue(mailbox.provider).toLowerCase();
+    const resolution = asRecord(row.resolution);
     const provider: "gmail" | "outlook" =
       providerValue === "microsoft" || providerValue === "outlook" ? "outlook" : "gmail";
     const to = stringArray(row.to_recipients);
@@ -314,6 +327,7 @@ export async function listPersistedMailboxMessages(input: {
       mailboxLabels: stringArray(row.mailbox_labels),
       sentAt: (row.sent_at ?? row.created_at).toISOString(),
       direction: "inbound" as const,
+      carrierSubmissionId: optionalString(resolution.carrierSubmissionId),
     }];
   });
 }

@@ -18,6 +18,8 @@ const mocks = vi.hoisted(() => ({
   userFindFirst: vi.fn(),
   agencyFindFirst: vi.fn(),
   mailboxConnectionFindFirst: vi.fn(),
+  createCarrierReplyRoute: vi.fn(),
+  carrierReplyRelayConfiguration: vi.fn(),
 }));
 
 vi.mock("../services/mailboxOAuth.js", async () => {
@@ -54,6 +56,11 @@ vi.mock("../services/email.js", () => ({
   emailDeliveryConfiguration: mocks.emailDeliveryConfiguration,
 }));
 
+vi.mock("../services/carrierReplyRelay.js", () => ({
+  createCarrierReplyRoute: mocks.createCarrierReplyRoute,
+  carrierReplyRelayConfiguration: mocks.carrierReplyRelayConfiguration,
+}));
+
 const JWT_SECRET = "test-jwt-secret-with-more-than-32-characters";
 
 beforeEach(() => {
@@ -75,6 +82,12 @@ beforeEach(() => {
   mocks.userFindFirst.mockReset();
   mocks.agencyFindFirst.mockReset();
   mocks.mailboxConnectionFindFirst.mockReset();
+  mocks.createCarrierReplyRoute.mockReset().mockResolvedValue(null);
+  mocks.carrierReplyRelayConfiguration.mockReset().mockReturnValue({
+    configured: true,
+    domain: "reply.quotexinsurance.com",
+    webhookSecretConfigured: true,
+  });
   mocks.emailDeliveryConfiguration.mockReturnValue({
     configured: true,
     provider: "sendgrid",
@@ -176,6 +189,7 @@ describe("mailbox delivery routes", () => {
         mailboxConnected: true,
         inboxSyncConnected: true,
         inboxSyncProvider: "google",
+        carrierReplyRelayConfigured: true,
         transactionalConfigured: true,
         transactionalProvider: "sendgrid",
         missingEnvironmentVariables: [],
@@ -324,6 +338,42 @@ describe("mailbox delivery routes", () => {
       attachments: validSendPayload().attachments,
       categories: ["mailbox-fallback", "user-portal"],
     });
+  });
+
+  it("routes carrier replies through the secure inbound relay", async () => {
+    mocks.createCarrierReplyRoute.mockResolvedValue("reply+opaque-token@reply.quotexinsurance.com");
+    mocks.sendMailboxEmail.mockResolvedValue({
+      provider: "google",
+      status: "sent",
+      externalMessageId: "gmail_carrier_1",
+    });
+    const replyContext = {
+      communicationId: "comm_carrier_1",
+      threadId: "thread_carrier_1",
+      customerId: "customer_1",
+      carrierContactId: "carrier_contact_1",
+      carrierSubmissionId: "submission_1",
+    };
+
+    const response = await postMailbox(
+      "/send",
+      { ...validSendPayload(), to: ["underwriter@carrier.example"], replyContext },
+      staffToken()
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.createCarrierReplyRoute).toHaveBeenCalledWith({
+      tenantId: "tenant_mail",
+      userId: "user_mail",
+      mailboxAccount: "abe@example.com",
+      context: replyContext,
+    });
+    expect(mocks.sendMailboxEmail).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: ["underwriter@carrier.example"],
+        replyTo: "reply+opaque-token@reply.quotexinsurance.com",
+      })
+    );
   });
 
   it("derives the transactional sender from the authenticated staff record", async () => {

@@ -108,6 +108,7 @@ export function validateServerEnv(): EnvValidationResult {
   validateStripe(errors);
   validateMailboxOAuth(errors, warnings, production);
   validateEmailDelivery(errors, warnings, production);
+  validateCarrierReplyRelay(errors, warnings, production);
   validateSentry(errors, warnings, production);
   validateDisasterRecovery(errors, warnings, production);
   validateNoPublicSecrets(errors);
@@ -301,6 +302,19 @@ function validateEmailDelivery(errors: string[], warnings: string[], production:
     "EMAIL_FROM, SENDGRID_FROM_EMAIL, RESEND_FROM_EMAIL, or SMTP_FROM_EMAIL must be set to a verified sender address in production.";
   if (production) errors.push(fromMessage);
   else warnings.push(fromMessage);
+}
+
+function validateCarrierReplyRelay(errors: string[], warnings: string[], production: boolean) {
+  const domain = process.env.INBOUND_REPLY_DOMAIN?.trim().toLowerCase().replace(/^@/, "").replace(/\.$/, "") ?? "";
+  const webhookSecret = process.env.SENDGRID_INBOUND_WEBHOOK_SECRET?.trim() ?? "";
+  const validDomain = /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(domain) && domain.includes(".");
+
+  if (validDomain && webhookSecret.length >= 24) return;
+
+  const message =
+    "Carrier reply detection requires INBOUND_REPLY_DOMAIN and SENDGRID_INBOUND_WEBHOOK_SECRET (at least 24 characters).";
+  if (production) errors.push(message);
+  else warnings.push(`${message} Replies to carrier submissions will not be imported automatically.`);
 }
 
 function validateSentry(errors: string[], warnings: string[], production: boolean) {

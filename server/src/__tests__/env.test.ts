@@ -49,6 +49,9 @@ describe("server environment validation", () => {
     expect(result.errors).toContain(
       "No transactional email provider is configured. Add SENDGRID_API_KEY, RESEND_API_KEY, or SMTP_HOST/SMTP_USER/SMTP_PASS before relying on website forms, invoices, or e-sign emails."
     );
+    expect(result.errors).toContain(
+      "Carrier reply detection requires INBOUND_REPLY_DOMAIN and SENDGRID_INBOUND_WEBHOOK_SECRET (at least 24 characters)."
+    );
     expect(result.warnings).toContain(
       "SENTRY_DSN is not set; server errors will only be available in platform logs. Add Sentry before opening production traffic."
     );
@@ -210,6 +213,8 @@ function stubGoodProductionEnv() {
   vi.stubEnv("EMAIL_PROVIDER", "sendgrid");
   vi.stubEnv("SENDGRID_API_KEY", LONG_SECRET);
   vi.stubEnv("SENDGRID_FROM_EMAIL", "no-reply@example.com");
+  vi.stubEnv("INBOUND_REPLY_DOMAIN", "reply.example.com");
+  vi.stubEnv("SENDGRID_INBOUND_WEBHOOK_SECRET", LONG_SECRET);
   vi.stubEnv("CARRIER_AUTOMATION_ENABLE_LIVE", "false");
   vi.stubEnv("SENTRY_DSN", "https://public@example.sentry.io/123456");
   vi.stubEnv("SENTRY_ENVIRONMENT", "production");

@@ -22,6 +22,8 @@ const REMOTE_PRODUCTION_ENV_SENTINELS = {
   DIAG_TOKEN: "remote-vercel-diag-token-sentinel-value-00000000000",
   CRON_SECRET: "remote-vercel-cron-secret-sentinel-value-00000000000",
   SENDGRID_API_KEY: "remote-vercel-sendgrid-api-key-sentinel-value",
+  INBOUND_REPLY_DOMAIN: "reply.quotexinsurance.com",
+  SENDGRID_INBOUND_WEBHOOK_SECRET: "remote-vercel-inbound-webhook-secret-sentinel-000000",
   RESEND_API_KEY: "remote-vercel-resend-api-key-sentinel-value",
   SMTP_HOST: "smtp.remote-vercel-sentinel.invalid",
   SMTP_USER: "remote-vercel-smtp-user-sentinel",
