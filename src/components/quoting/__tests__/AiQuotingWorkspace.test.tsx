@@ -589,19 +589,37 @@ describe("AiQuotingWorkspace component", () => {
   });
 
   it("leaves ACORD review after sending the commercial application package", async () => {
-    const sendFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      statusText: "OK",
-      json: async () => ({
+    const sendFetch = vi.fn().mockImplementation(async (request: RequestInfo | URL) => {
+      if (String(request).includes("/mailboxes/sync")) {
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: async () => ({
+            ok: true,
+            result: {
+              mailboxAccount: "agent@example.com",
+              provider: "gmail",
+              messages: [],
+              importSummary: { imported: 0, updated: 0, deduped: 0, failed: 0 },
+            },
+          }),
+        };
+      }
+      return {
         ok: true,
-        result: {
-          provider: "google",
-          status: "sent",
-          externalMessageId: "provider-message-1",
-          externalThreadId: "provider-thread-1",
-        },
-      }),
+        status: 200,
+        statusText: "OK",
+        json: async () => ({
+          ok: true,
+          result: {
+            provider: "google",
+            status: "sent",
+            externalMessageId: "provider-message-1",
+            externalThreadId: "provider-thread-1",
+          },
+        }),
+      };
     });
     vi.stubGlobal("fetch", sendFetch);
     const { api, agency, customer, host, root } = await renderClientQuotingCard();
@@ -654,6 +672,13 @@ describe("AiQuotingWorkspace component", () => {
     ).toBe(true);
     expect(host.textContent).not.toContain("Review the ACORD and handle the remaining fields");
     expect(host.querySelector('[role="dialog"]')?.textContent).toContain("AI Quoting Workspace");
+
+    await click(buttonByText(host, /Check for responses/i));
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+    expect(host.textContent).toContain("No new verified carrier responses were found");
+    expect(host.textContent).toContain("Last checked");
 
     await act(async () => {
       root.unmount();

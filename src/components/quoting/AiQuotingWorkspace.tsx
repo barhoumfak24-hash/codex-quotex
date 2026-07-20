@@ -20,6 +20,7 @@ import {
   Mail,
   Paperclip,
   Plus,
+  RefreshCw,
   RotateCcw,
   Save,
   Search,
@@ -47,7 +48,10 @@ import {
 } from "@/lib/emailSignature";
 import { fmt } from "@/lib/format";
 import { fileToCommunicationAttachment, formatAttachmentSize } from "@/lib/messageAttachments";
-import { sendCommunicationThroughLiveMailbox } from "@/lib/liveMailbox";
+import {
+  sendCommunicationThroughLiveMailbox,
+  syncCommunicationsFromLiveMailbox,
+} from "@/lib/liveMailbox";
 import { categoryQuotingQuestions } from "@/lib/categoryQuestionnaires";
 import { type AiGatewayFailureDetail } from "@/lib/aiGateway";
 import { carrierPortalRunnerStatus } from "@/lib/carrierPortalPlaybooks";
@@ -3998,6 +4002,14 @@ function CommercialFlowPanel({
   mappingProgress?: AiMappingProgress | null;
   steps: WorkflowStepDefinition[];
 }) {
+  const [checkingResponses, setCheckingResponses] = useState(false);
+  const [responseCheckCoolingDown, setResponseCheckCoolingDown] = useState(false);
+  const [lastResponseCheckAt, setLastResponseCheckAt] = useState<string | null>(null);
+  const [responseCheckNotice, setResponseCheckNotice] = useState<{
+    tone: "success" | "neutral" | "warn";
+    message: string;
+  } | null>(null);
+  const responseCheckCooldownTimer = useRef<number | null>(null);
   const submissions = session.commercialCarrierSubmissions ?? [];
   const applicationSentAt = commercialApplicationSentAt(session);
   const accepted = submissions.filter(
@@ -4008,6 +4020,81 @@ function CommercialFlowPanel({
   const awaitingResponse = submissions.filter(
     (s) => s.status === "awaiting_response" || s.status === "application_sent"
   );
+
+  useEffect(
+    () => () => {
+      if (responseCheckCooldownTimer.current !== null) {
+        window.clearTimeout(responseCheckCooldownTimer.current);
+      }
+    },
+    []
+  );
+
+  async function checkForCarrierResponses() {
+    if (checkingResponses || responseCheckCoolingDown) return;
+    const user = api.users.get(userId);
+    if (!user) {
+      setResponseCheckNotice({
+        tone: "warn",
+        message: "Sign in again before checking the connected mailbox.",
+      });
+      return;
+    }
+
+    const responseCount = (candidate: QuotingSession | undefined) =>
+      (candidate?.commercialCarrierSubmissions ?? []).filter(
+        (submission) =>
+          !!submission.responseAt ||
+          submission.status === "accepted" ||
+          submission.status === "declined" ||
+          submission.status === "needs_supplemental" ||
+          submission.status === "needs_client_info" ||
+          submission.status === "agent_review"
+      ).length;
+    const responsesBefore = responseCount(api.quoting.get(session.id) ?? session);
+
+    setCheckingResponses(true);
+    setResponseCheckNotice(null);
+    try {
+      const sync = await syncCommunicationsFromLiveMailbox({
+        tenantId: session.tenantId,
+        user,
+        maxResults: 50,
+      });
+      if (!sync.ok) {
+        setResponseCheckNotice({
+          tone: "warn",
+          message: "The connected mailbox needs attention before responses can be checked.",
+        });
+        return;
+      }
+
+      await api.quoting.readCommercialCarrierResponses(session.id);
+      const responsesAfter = responseCount(api.quoting.get(session.id));
+      const newlyMatched = Math.max(0, responsesAfter - responsesBefore);
+      setLastResponseCheckAt(new Date().toISOString());
+      setResponseCheckNotice(
+        newlyMatched > 0
+          ? {
+              tone: "success",
+              message: `${newlyMatched} new carrier response${newlyMatched === 1 ? " was" : "s were"} verified and added.`,
+            }
+          : {
+              tone: "neutral",
+              message: "Mailbox checked. No new verified carrier responses were found.",
+            }
+      );
+      onChanged?.();
+    } finally {
+      setCheckingResponses(false);
+      setResponseCheckCoolingDown(true);
+      responseCheckCooldownTimer.current = window.setTimeout(() => {
+        setResponseCheckCoolingDown(false);
+        responseCheckCooldownTimer.current = null;
+      }, 8_000);
+    }
+  }
+
   const page = commercialFlowPage(session);
   const carrierAutomation = submissions.length > 0 && (
     <div className="space-y-3">
@@ -4019,6 +4106,18 @@ function CommercialFlowPanel({
           {applicationSentAt && (
             <Badge tone="info">Applications sent {fmt.dateTime(applicationSentAt)}</Badge>
           )}
+          {applicationSentAt && (
+            <button
+              type="button"
+              className="btn-outline inline-flex items-center gap-1.5 text-xs"
+              onClick={() => void checkForCarrierResponses()}
+              disabled={checkingResponses || responseCheckCoolingDown}
+              title="Check the connected mailbox for verified carrier replies"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${checkingResponses ? "animate-spin" : ""}`} />
+              {checkingResponses ? "Checking..." : "Check for responses"}
+            </button>
+          )}
           {session.commercialSecondRoundSentAt && session.status !== "complete" && (
             <Badge tone="warn">Second round sent</Badge>
           )}
@@ -4027,6 +4126,26 @@ function CommercialFlowPanel({
           )}
         </div>
       </div>
+
+      {(lastResponseCheckAt || responseCheckNotice) && (
+        <div
+          className={`flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2 text-xs ${
+            responseCheckNotice?.tone === "success"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+              : responseCheckNotice?.tone === "warn"
+              ? "border-amber-200 bg-amber-50 text-amber-900"
+              : "border-ink-100 bg-white text-ink-700"
+          }`}
+          aria-live="polite"
+        >
+          <span>{responseCheckNotice?.message ?? "Mailbox checked."}</span>
+          {lastResponseCheckAt && (
+            <span className="shrink-0 text-ink-500">
+              Last checked {fmt.dateTime(lastResponseCheckAt)}
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="grid gap-2 sm:grid-cols-4">
         <Metric label="Sent" value={submissions.length} />
