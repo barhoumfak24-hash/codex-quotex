@@ -23,6 +23,8 @@ export type LiveMailboxCapability = {
   inboxSyncConnected?: boolean;
   inboxSyncProvider?: string | null;
   carrierReplyRelayConfigured?: boolean;
+  carrierReplyRelayActive?: boolean;
+  carrierReplyRelayReason?: "active" | "not_configured" | "mx_not_routed" | "mx_lookup_failed";
   transactionalConfigured: boolean;
   transactionalProvider: string;
   missingEnvironmentVariables: string[];

@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { resolveMx } from "node:dns/promises";
 import { prisma } from "./prisma.js";
 
 export type CarrierReplyContext = {
@@ -39,6 +40,16 @@ type ReplyRouteMetadata = CarrierReplyContext & {
 
 const ROUTE_ACTION = "mailbox.reply_route.created";
 const ROUTE_TTL_MS = 180 * 24 * 60 * 60 * 1000;
+const RELAY_READINESS_TTL_MS = 5 * 60 * 1000;
+const SENDGRID_INBOUND_MX = "mx.sendgrid.net";
+
+type RelayReadiness = ReturnType<typeof carrierReplyRelayConfiguration> & {
+  active: boolean;
+  reason: "active" | "not_configured" | "mx_not_routed" | "mx_lookup_failed";
+  checkedAt: string;
+};
+
+let relayReadinessCache: { expiresAt: number; value: RelayReadiness } | null = null;
 
 export function carrierReplyRelayConfiguration() {
   const domain = normalizeReplyDomain(process.env.INBOUND_REPLY_DOMAIN);
@@ -48,6 +59,52 @@ export function carrierReplyRelayConfiguration() {
     domain,
     webhookSecretConfigured: webhookSecret.length >= 24,
   };
+}
+
+export async function carrierReplyRelayReadiness(input?: {
+  resolver?: typeof resolveMx;
+  bypassCache?: boolean;
+}): Promise<RelayReadiness> {
+  const configuration = carrierReplyRelayConfiguration();
+  const now = Date.now();
+  if (!input?.bypassCache && !input?.resolver && relayReadinessCache?.expiresAt && relayReadinessCache.expiresAt > now) {
+    return relayReadinessCache.value;
+  }
+
+  let value: RelayReadiness;
+  if (!configuration.configured || !configuration.domain) {
+    value = {
+      ...configuration,
+      active: false,
+      reason: "not_configured",
+      checkedAt: new Date(now).toISOString(),
+    };
+  } else {
+    try {
+      const records = await (input?.resolver ?? resolveMx)(configuration.domain);
+      const routedToSendGrid = records.some(
+        (record) => normalizeMxExchange(record.exchange) === SENDGRID_INBOUND_MX
+      );
+      value = {
+        ...configuration,
+        active: routedToSendGrid,
+        reason: routedToSendGrid ? "active" : "mx_not_routed",
+        checkedAt: new Date(now).toISOString(),
+      };
+    } catch {
+      value = {
+        ...configuration,
+        active: false,
+        reason: "mx_lookup_failed",
+        checkedAt: new Date(now).toISOString(),
+      };
+    }
+  }
+
+  if (!input?.resolver) {
+    relayReadinessCache = { expiresAt: now + RELAY_READINESS_TTL_MS, value };
+  }
+  return value;
 }
 
 export function verifyInboundWebhookSecret(candidate: string): boolean {
@@ -62,9 +119,12 @@ export async function createCarrierReplyRoute(input: {
   mailboxAccount: string;
   provider?: string;
   context?: CarrierReplyContext;
+  relayActive: boolean;
 }): Promise<string | null> {
   const configuration = carrierReplyRelayConfiguration();
-  if (!configuration.configured || !configuration.domain || !input.context?.communicationId) return null;
+  if (!input.relayActive || !configuration.configured || !configuration.domain || !input.context?.communicationId) {
+    return null;
+  }
 
   const token = randomBytes(18).toString("base64url");
   const createdAt = new Date();
@@ -212,6 +272,39 @@ export async function ingestCarrierReply(input: InboundCarrierReply): Promise<
   return { status: "linked", communicationId, tenantId: route.tenantId, userId: metadata.userId };
 }
 
+export async function recordCarrierReplyIngress(input: {
+  payload: InboundCarrierReply;
+  result:
+    | { status: "linked"; communicationId: string; tenantId: string; userId: string }
+    | { status: "deduped"; communicationId: string; tenantId: string; userId: string }
+    | { status: "ignored"; reason: string };
+}) {
+  const recipientFingerprint = createHash("sha256")
+    .update(input.payload.to.map((value) => value.trim().toLowerCase()).sort().join(","))
+    .digest("hex")
+    .slice(0, 24);
+  const linkedResult = input.result.status === "ignored" ? null : input.result;
+  await prisma.auditLog.create({
+    data: {
+      id: `audit_${randomUUID()}`,
+      tenantId: linkedResult?.tenantId ?? null,
+      actorId: linkedResult?.userId ?? "mailbox-inbound",
+      action: `mailbox.inbound.webhook_${input.result.status}`,
+      entityType: "mailbox_inbound_attempt",
+      entityId: linkedResult?.communicationId ?? recipientFingerprint,
+      metadata: jsonValue({
+        status: input.result.status,
+        reason: input.result.status === "ignored" ? input.result.reason : undefined,
+        origin: "sendgrid_inbound_parse",
+        fromDomain: emailDomain(input.payload.from),
+        recipientCount: input.payload.to.length,
+        attachmentCount: input.payload.attachments?.length ?? 0,
+        subjectPresent: Boolean(input.payload.subject?.trim()),
+      }),
+    },
+  });
+}
+
 function replyRouteMetadata(value: unknown): ReplyRouteMetadata | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
@@ -235,6 +328,10 @@ function normalizeReplyDomain(value: string | undefined): string | null {
   return /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(domain) && domain.includes(".") ? domain : null;
 }
 
+function normalizeMxExchange(value: string): string {
+  return value.trim().toLowerCase().replace(/\.$/, "");
+}
+
 function normalizeProvider(provider: string | undefined, mailboxAccount: string): "gmail" | "outlook" {
   const value = (provider ?? "").toLowerCase();
   if (value.includes("microsoft") || value.includes("outlook")) return "outlook";
@@ -245,6 +342,11 @@ function normalizeProvider(provider: string | undefined, mailboxAccount: string)
 function normalizeEmail(value: string): string {
   const match = value.match(/<([^>]+)>/)?.[1] ?? value;
   return match.trim().toLowerCase().match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i)?.[0] ?? "";
+}
+
+function emailDomain(value: string): string | undefined {
+  const email = normalizeEmail(value);
+  return email.split("@")[1] || undefined;
 }
 
 function displayNameFromHeader(value: string): string | undefined {

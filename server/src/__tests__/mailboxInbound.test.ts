@@ -3,11 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   ingestCarrierReply: vi.fn(),
+  recordCarrierReplyIngress: vi.fn(),
   verifyInboundWebhookSecret: vi.fn(),
 }));
 
 vi.mock("../services/carrierReplyRelay.js", () => ({
   ingestCarrierReply: mocks.ingestCarrierReply,
+  recordCarrierReplyIngress: mocks.recordCarrierReplyIngress,
   verifyInboundWebhookSecret: mocks.verifyInboundWebhookSecret,
 }));
 
@@ -18,6 +20,7 @@ beforeEach(() => {
     tenantId: "tenant-1",
     userId: "user-1",
   });
+  mocks.recordCarrierReplyIngress.mockReset().mockResolvedValue(undefined);
   mocks.verifyInboundWebhookSecret.mockReset().mockReturnValue(true);
 });
 
@@ -57,6 +60,10 @@ describe("SendGrid inbound parse route", () => {
         ],
       })
     );
+    expect(mocks.recordCarrierReplyIngress).toHaveBeenCalledWith({
+      payload: expect.objectContaining({ subject: "Re: Commercial application" }),
+      result: expect.objectContaining({ status: "linked", communicationId: "communication-1" }),
+    });
   });
 
   it("does not reveal whether an invalid webhook route exists", async () => {

@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   mailboxConnectionFindFirst: vi.fn(),
   createCarrierReplyRoute: vi.fn(),
   carrierReplyRelayConfiguration: vi.fn(),
+  carrierReplyRelayReadiness: vi.fn(),
 }));
 
 vi.mock("../services/mailboxOAuth.js", async () => {
@@ -59,6 +60,7 @@ vi.mock("../services/email.js", () => ({
 vi.mock("../services/carrierReplyRelay.js", () => ({
   createCarrierReplyRoute: mocks.createCarrierReplyRoute,
   carrierReplyRelayConfiguration: mocks.carrierReplyRelayConfiguration,
+  carrierReplyRelayReadiness: mocks.carrierReplyRelayReadiness,
 }));
 
 const JWT_SECRET = "test-jwt-secret-with-more-than-32-characters";
@@ -87,6 +89,14 @@ beforeEach(() => {
     configured: true,
     domain: "reply.quotexinsurance.com",
     webhookSecretConfigured: true,
+  });
+  mocks.carrierReplyRelayReadiness.mockReset().mockResolvedValue({
+    configured: true,
+    domain: "reply.quotexinsurance.com",
+    webhookSecretConfigured: true,
+    active: true,
+    reason: "active",
+    checkedAt: "2026-07-20T00:00:00.000Z",
   });
   mocks.emailDeliveryConfiguration.mockReturnValue({
     configured: true,
@@ -190,6 +200,7 @@ describe("mailbox delivery routes", () => {
         inboxSyncConnected: true,
         inboxSyncProvider: "google",
         carrierReplyRelayConfigured: true,
+        carrierReplyRelayActive: true,
         transactionalConfigured: true,
         transactionalProvider: "sendgrid",
         missingEnvironmentVariables: [],
@@ -367,12 +378,48 @@ describe("mailbox delivery routes", () => {
       userId: "user_mail",
       mailboxAccount: "abe@example.com",
       context: replyContext,
+      relayActive: true,
     });
     expect(mocks.sendMailboxEmail).toHaveBeenCalledWith(
       expect.objectContaining({
         to: ["underwriter@carrier.example"],
         replyTo: "reply+opaque-token@reply.quotexinsurance.com",
       })
+    );
+  });
+
+  it("routes replies to the staff mailbox when the inbound relay DNS is not live", async () => {
+    mocks.carrierReplyRelayReadiness.mockResolvedValue({
+      configured: true,
+      domain: "reply.quotexinsurance.com",
+      webhookSecretConfigured: true,
+      active: false,
+      reason: "mx_not_routed",
+      checkedAt: "2026-07-20T00:00:00.000Z",
+    });
+    mocks.sendMailboxEmail.mockResolvedValue({
+      provider: "google",
+      status: "sent",
+      externalMessageId: "gmail_carrier_2",
+    });
+    const replyContext = {
+      communicationId: "comm_carrier_2",
+      customerId: "customer_1",
+      carrierSubmissionId: "submission_2",
+    };
+
+    const response = await postMailbox(
+      "/send",
+      { ...validSendPayload(), to: ["underwriter@carrier.example"], replyContext },
+      staffToken()
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.createCarrierReplyRoute).toHaveBeenCalledWith(
+      expect.objectContaining({ relayActive: false })
+    );
+    expect(mocks.sendMailboxEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ replyTo: "abe@example.com" })
     );
   });
 

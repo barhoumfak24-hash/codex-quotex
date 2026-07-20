@@ -23,6 +23,7 @@ import { emailDeliveryConfiguration, sendEmail } from "../services/email.js";
 import { prisma } from "../services/prisma.js";
 import {
   carrierReplyRelayConfiguration,
+  carrierReplyRelayReadiness,
   createCarrierReplyRoute,
 } from "../services/carrierReplyRelay.js";
 
@@ -104,6 +105,7 @@ mailboxesRoutes.get("/capability", async (req, res, next) => {
     });
     const transactional = emailDeliveryConfiguration();
     const carrierReplyRelay = carrierReplyRelayConfiguration();
+    const carrierReplyReadiness = await carrierReplyRelayReadiness();
     const readableConnections = connections.filter(connectionCanReadInbox);
     res.json({
       ok: true,
@@ -112,6 +114,8 @@ mailboxesRoutes.get("/capability", async (req, res, next) => {
         inboxSyncConnected: readableConnections.length > 0,
         inboxSyncProvider: readableConnections[0]?.provider ?? null,
         carrierReplyRelayConfigured: carrierReplyRelay.configured,
+        carrierReplyRelayActive: carrierReplyReadiness.active,
+        carrierReplyRelayReason: carrierReplyReadiness.reason,
         transactionalConfigured: transactional.configured,
         transactionalProvider: transactional.provider,
         missingEnvironmentVariables: transactional.missingEnvironmentVariables,
@@ -229,11 +233,15 @@ mailboxesRoutes.post("/send", async (req, res, next) => {
       userId: req.auth.userId,
       ownerType,
     });
+    const carrierReplyReadiness = parsed.data.replyContext
+      ? await carrierReplyRelayReadiness()
+      : null;
     const carrierReplyTo = await createCarrierReplyRoute({
       tenantId: req.auth.tenantId,
       userId: req.auth.userId,
       mailboxAccount: identity.email,
       context: parsed.data.replyContext,
+      relayActive: carrierReplyReadiness?.active === true,
     });
     const effectiveReplyTo = carrierReplyTo ?? identity.email;
     try {

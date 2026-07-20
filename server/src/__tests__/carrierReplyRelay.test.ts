@@ -21,8 +21,10 @@ vi.mock("../services/prisma.js", () => ({
 }));
 
 import {
+  carrierReplyRelayReadiness,
   createCarrierReplyRoute,
   ingestCarrierReply,
+  recordCarrierReplyIngress,
   verifyInboundWebhookSecret,
 } from "../services/carrierReplyRelay.js";
 
@@ -57,6 +59,7 @@ describe("carrier reply relay", () => {
         customerId: "customer-1",
         carrierSubmissionId: "submission-1",
       },
+      relayActive: true,
     });
 
     expect(replyAddress).toMatch(/^reply\+[A-Za-z0-9_-]{20,40}@reply\.quotexinsurance\.com$/);
@@ -76,6 +79,60 @@ describe("carrier reply relay", () => {
         }),
       }),
     });
+  });
+
+  it("uses the inbound relay only when DNS routes the reply domain to SendGrid", async () => {
+    const active = await carrierReplyRelayReadiness({
+      resolver: vi.fn().mockResolvedValue([{ exchange: "mx.sendgrid.net.", priority: 10 }]),
+      bypassCache: true,
+    });
+    const inactive = await carrierReplyRelayReadiness({
+      resolver: vi.fn().mockResolvedValue([{ exchange: "mail.example.com", priority: 10 }]),
+      bypassCache: true,
+    });
+
+    expect(active).toMatchObject({ active: true, reason: "active" });
+    expect(inactive).toMatchObject({ active: false, reason: "mx_not_routed" });
+  });
+
+  it("does not create a dead reply route when relay DNS is inactive", async () => {
+    const replyAddress = await createCarrierReplyRoute({
+      tenantId: "tenant-1",
+      userId: "user-1",
+      mailboxAccount: "agent@example.com",
+      context: { communicationId: "communication-1" },
+      relayActive: false,
+    });
+
+    expect(replyAddress).toBeNull();
+    expect(mocks.auditCreate).not.toHaveBeenCalled();
+  });
+
+  it("records ignored webhook deliveries without storing message contents", async () => {
+    await recordCarrierReplyIngress({
+      payload: {
+        from: "Underwriter <underwriter@carrier.example>",
+        to: ["unknown@reply.quotexinsurance.com"],
+        subject: "Sensitive subject",
+        text: "Sensitive message body",
+      },
+      result: { status: "ignored", reason: "reply_route_not_found" },
+    });
+
+    expect(mocks.auditCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: "mailbox.inbound.webhook_ignored",
+        tenantId: null,
+        metadata: expect.objectContaining({
+          status: "ignored",
+          reason: "reply_route_not_found",
+          fromDomain: "carrier.example",
+          subjectPresent: true,
+        }),
+      }),
+    });
+    expect(JSON.stringify(mocks.auditCreate.mock.calls[0])).not.toContain("Sensitive message body");
+    expect(JSON.stringify(mocks.auditCreate.mock.calls[0])).not.toContain("Sensitive subject");
   });
 
   it("links a provider reply to the exact tenant, user, customer, and submission", async () => {

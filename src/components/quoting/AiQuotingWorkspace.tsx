@@ -4176,7 +4176,7 @@ function CommercialFlowPanel({
           } else {
             mailboxWarning = sync.message;
           }
-        } else if (!capability.carrierReplyRelayConfigured) {
+        } else if (!capability.carrierReplyRelayActive) {
           const provider = mailboxOAuthProviderFor(user);
           setResponseMailboxConnectProvider(provider);
           mailboxWarning = provider

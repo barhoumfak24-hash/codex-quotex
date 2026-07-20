@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { Router, type Request } from "express";
 import {
   ingestCarrierReply,
+  recordCarrierReplyIngress,
   verifyInboundWebhookSecret,
   type InboundCarrierReply,
 } from "../services/carrierReplyRelay.js";
@@ -23,6 +24,11 @@ mailboxInboundRoutes.post("/sendgrid/:secret", async (req, res, next) => {
   try {
     const payload = await parseSendGridInbound(req);
     const result = await ingestCarrierReply(payload);
+    try {
+      await recordCarrierReplyIngress({ payload, result });
+    } catch (auditError) {
+      console.error("Inbound carrier reply audit could not be recorded.", auditError);
+    }
     // Acknowledge valid provider calls even when the route is stale or unknown.
     // Retrying cannot make an unaddressed message linkable.
     return res.status(200).json({ ok: true, status: result.status });
