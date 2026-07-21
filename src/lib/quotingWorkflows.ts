@@ -1,5 +1,35 @@
 import type { QuotingSession } from "@/types";
 
+type CommercialCarrierSubmission = NonNullable<
+  QuotingSession["commercialCarrierSubmissions"]
+>[number];
+
+const COMMERCIAL_REPLY_STATUSES = new Set<CommercialCarrierSubmission["status"]>([
+  "accepted",
+  "declined",
+  "needs_supplemental",
+  "supplemental_sent",
+  "needs_client_info",
+  "agent_review",
+]);
+
+export function commercialCarrierSubmissionHasReply(
+  submission: CommercialCarrierSubmission
+): boolean {
+  return (
+    Boolean(submission.responseAt) ||
+    (submission.replyCommunicationIds?.length ?? 0) > 0 ||
+    COMMERCIAL_REPLY_STATUSES.has(submission.status)
+  );
+}
+
+export function allCommercialCarrierSubmissionsHaveReplies(
+  session: Pick<QuotingSession, "commercialCarrierSubmissions">
+): boolean {
+  const submissions = session.commercialCarrierSubmissions ?? [];
+  return submissions.length > 0 && submissions.every(commercialCarrierSubmissionHasReply);
+}
+
 export type QuotingWorkflowTone = "neutral" | "info" | "success" | "warn" | "error" | "gold";
 
 export interface QuotingWorkflowSummary {

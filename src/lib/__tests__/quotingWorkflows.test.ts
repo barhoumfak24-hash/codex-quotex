@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import {
+  allCommercialCarrierSubmissionsHaveReplies,
+  commercialCarrierSubmissionHasReply,
   newestOpenQuotingSessionsPerContact,
   summarizeQuotingWorkflow,
 } from "../quotingWorkflows";
@@ -96,6 +98,70 @@ describe("summarizeQuotingWorkflow", () => {
 
     expect(summary.stage).toBe("Policy implemented");
     expect(summary.isClosed).toBe(true);
+  });
+});
+
+describe("commercial carrier reply completion", () => {
+  const submission = (
+    overrides: Partial<NonNullable<QuotingSession["commercialCarrierSubmissions"]>[number]>
+  ): NonNullable<QuotingSession["commercialCarrierSubmissions"]>[number] => ({
+    carrierId: "carrier_test",
+    status: "awaiting_response",
+    score: 0.9,
+    fitReason: "Appetite match",
+    aiRationale: "Selected for the quote flow.",
+    ...overrides,
+  });
+
+  it("does not treat sent, awaiting, or failed delivery as a carrier reply", () => {
+    expect(commercialCarrierSubmissionHasReply(submission({ status: "application_sent" }))).toBe(
+      false
+    );
+    expect(commercialCarrierSubmissionHasReply(submission({ status: "awaiting_response" }))).toBe(
+      false
+    );
+    expect(commercialCarrierSubmissionHasReply(submission({ status: "send_failed" }))).toBe(false);
+  });
+
+  it("accepts persisted reply evidence even before a stale status is refreshed", () => {
+    expect(
+      commercialCarrierSubmissionHasReply(
+        submission({
+          status: "awaiting_response",
+          replyCommunicationIds: ["communication_reply"],
+        })
+      )
+    ).toBe(true);
+    expect(
+      commercialCarrierSubmissionHasReply(
+        submission({ status: "application_sent", responseAt: "2026-07-21T12:00:00.000Z" })
+      )
+    ).toBe(true);
+  });
+
+  it("requires a reply from every carrier involved in the quote flow", () => {
+    expect(allCommercialCarrierSubmissionsHaveReplies(session({}))).toBe(false);
+    expect(
+      allCommercialCarrierSubmissionsHaveReplies(
+        session({
+          commercialCarrierSubmissions: [
+            submission({ carrierId: "carrier_one", status: "accepted" }),
+            submission({ carrierId: "carrier_two", status: "awaiting_response" }),
+          ],
+        })
+      )
+    ).toBe(false);
+    expect(
+      allCommercialCarrierSubmissionsHaveReplies(
+        session({
+          commercialCarrierSubmissions: [
+            submission({ carrierId: "carrier_one", status: "accepted" }),
+            submission({ carrierId: "carrier_two", status: "declined" }),
+            submission({ carrierId: "carrier_three", status: "needs_client_info" }),
+          ],
+        })
+      )
+    ).toBe(true);
   });
 });
 

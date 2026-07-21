@@ -61,6 +61,7 @@ import {
   quoteMatchCriteriaTitle,
   quoteMatchPercent,
 } from "@/lib/quoteMatch";
+import { allCommercialCarrierSubmissionsHaveReplies } from "@/lib/quotingWorkflows";
 import { isVinInputField, normalizeVinFieldValue } from "@/lib/vinInput";
 import type {
   AssetType,
@@ -1600,6 +1601,7 @@ function workflowCompletedStepNumbers(session: QuotingSession): number[] {
       completed.add(4);
     }
     if (session.commercialSupplementalsCompletedAt) completed.add(5);
+    if (allCommercialCarrierSubmissionsHaveReplies(session)) completed.add(6);
     return Array.from(completed);
   }
   return session.status === "complete" || session.quotes.length > 0 ? [4] : [];
