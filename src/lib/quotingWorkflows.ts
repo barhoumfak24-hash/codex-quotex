@@ -89,6 +89,8 @@ export function summarizeQuotingWorkflow(session: QuotingSession): QuotingWorkfl
   const acceptedCount = submissions.filter(
     (submission) => submission.status === "accepted" || submission.status === "supplemental_sent"
   ).length;
+  const repliedCount = submissions.filter(commercialCarrierSubmissionHasReply).length;
+  const allCarrierRepliesReceived = allCommercialCarrierSubmissionsHaveReplies(session);
   const waitingCount = submissions.filter(
     (submission) => submission.status === "needs_client_info"
   ).length;
@@ -139,6 +141,34 @@ export function summarizeQuotingWorkflow(session: QuotingSession): QuotingWorkfl
   }
 
   if (session.status === "complete") {
+    if (session.lineOfBusiness === "commercial" && !allCarrierRepliesReceived) {
+      const remainingCount = Math.max(0, submissions.length - repliedCount);
+      const replyProgress =
+        submissions.length > 0 ? Math.round((repliedCount / submissions.length) * 18) : 0;
+
+      return {
+        stage: "Awaiting carrier replies",
+        tone: "info",
+        detail:
+          submissions.length > 0
+            ? `${repliedCount} of ${submissions.length} carrier repl${
+                submissions.length === 1 ? "y" : "ies"
+              } received.`
+            : "Carrier submissions have not been recorded yet.",
+        blocker:
+          remainingCount > 0
+            ? `${remainingCount} carrier repl${remainingCount === 1 ? "y" : "ies"} still outstanding.`
+            : "Waiting for carrier submission records.",
+        progress: 76 + replyProgress,
+        acceptedCount,
+        waitingCount,
+        quoteCount,
+        implemented,
+        isClosed: false,
+        sortPriority: 25,
+      };
+    }
+
     return {
       stage: "Ranking ready",
       tone: "success",

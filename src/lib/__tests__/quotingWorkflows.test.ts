@@ -99,6 +99,61 @@ describe("summarizeQuotingWorkflow", () => {
     expect(summary.stage).toBe("Policy implemented");
     expect(summary.isClosed).toBe(true);
   });
+
+  it("keeps a completed commercial workflow pending until every carrier replies", () => {
+    const summary = summarizeQuotingWorkflow(
+      session({
+        status: "complete",
+        commercialCarrierSubmissions: [
+          {
+            carrierId: "carrier_replied",
+            status: "accepted",
+            score: 0.92,
+            fitReason: "Strong appetite",
+            aiRationale: "Accepted the application.",
+          },
+          {
+            carrierId: "carrier_pending",
+            status: "awaiting_response",
+            score: 0.84,
+            fitReason: "Appetite match",
+            aiRationale: "Waiting for the carrier.",
+          },
+        ],
+      })
+    );
+
+    expect(summary.stage).toBe("Awaiting carrier replies");
+    expect(summary.tone).toBe("info");
+    expect(summary.detail).toBe("1 of 2 carrier replies received.");
+  });
+
+  it("turns the ranking summary green after every involved carrier replies", () => {
+    const summary = summarizeQuotingWorkflow(
+      session({
+        status: "complete",
+        commercialCarrierSubmissions: [
+          {
+            carrierId: "carrier_accepted",
+            status: "accepted",
+            score: 0.92,
+            fitReason: "Strong appetite",
+            aiRationale: "Accepted the application.",
+          },
+          {
+            carrierId: "carrier_declined",
+            status: "declined",
+            score: 0.7,
+            fitReason: "Outside appetite",
+            aiRationale: "Declined the application.",
+          },
+        ],
+      })
+    );
+
+    expect(summary.stage).toBe("Ranking ready");
+    expect(summary.tone).toBe("success");
+  });
 });
 
 describe("commercial carrier reply completion", () => {

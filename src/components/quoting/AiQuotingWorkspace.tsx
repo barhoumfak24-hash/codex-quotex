@@ -1673,7 +1673,7 @@ function CollapsedWorkflowProgress({
               {subtitle && <div className="mt-0.5 truncate text-sm text-ink-500">{subtitle}</div>}
             </div>
           </div>
-          <div className="mt-3 overflow-x-auto pb-1">
+          <div className="workflow-scroll-pane mt-3 overflow-x-auto pb-1">
             <WorkflowStepIcons
               steps={steps}
               currentStep={currentStep}

@@ -469,7 +469,7 @@ function ContactQuotingCard({
             </div>
           </div>
           {existing ? (
-            <div className="min-w-0 overflow-x-auto py-1 lg:justify-self-stretch">
+            <div className="workflow-scroll-pane min-w-0 overflow-x-auto py-1 lg:justify-self-stretch">
               <QuoteWorkflowProgress session={existing} />
             </div>
           ) : null}

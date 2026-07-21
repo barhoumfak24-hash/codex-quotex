@@ -912,7 +912,9 @@ function QuotingWorkflowsPanel({
                   </div>
                   <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-ink-100">
                     <div
-                      className="h-full rounded-full bg-gold-500"
+                      className={`h-full rounded-full ${
+                        row.summary.tone === "success" ? "bg-emerald-500" : "bg-gold-500"
+                      }`}
                       style={{ width: `${Math.max(0, Math.min(100, row.summary.progress))}%` }}
                     />
                   </div>
