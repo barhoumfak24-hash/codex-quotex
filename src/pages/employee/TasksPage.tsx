@@ -1711,7 +1711,7 @@ function RoutingList({
   onRemove: (row: RoutingRow) => void;
 }) {
   return (
-    <div className="rounded-md border border-ink-100 bg-white p-3">
+    <div data-stable-removal-region className="rounded-md border border-ink-100 bg-white p-3">
       <div className="text-xs uppercase tracking-wider text-ink-500 mb-2">{label} ({rows.length})</div>
       {rows.length === 0 ? (
         <div className="text-xs text-ink-400 text-center py-4">{emptyHint}</div>

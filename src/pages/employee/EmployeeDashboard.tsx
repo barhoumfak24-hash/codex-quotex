@@ -331,81 +331,83 @@ export function EmployeeDashboard() {
               </div>
             }
           />
-          {reminders.length === 0 ? (
-            <div className="text-sm text-ink-400 flex items-start gap-2">
-              <Bell className="h-4 w-4 text-ink-300 mt-0.5 shrink-0" />
-              <span>
-                No reminders set. Click <span className="font-medium">New reminder</span>{" "}
-                above for a general follow-up, or use{" "}
-                <span className="font-medium">Set personal reminder</span> on any activity.
-              </span>
-            </div>
-          ) : (
-            <ul className="divide-y divide-ink-100">
-              {reminders.map((r) => (
-                <ReminderRow
-                  key={r.id}
-                  reminder={r}
-                  onOpen={() => setSelectedReminder(r)}
-                  onRemove={() => {
-                    api.reminders.remove(r.id);
-                    setHiddenReminderIds((current) => {
-                      const next = new Set(current);
-                      next.add(r.id);
-                      return next;
-                    });
-                    refresh();
-                  }}
-                />
-              ))}
-            </ul>
-          )}
+          <div data-stable-removal-region>
+            {reminders.length === 0 ? (
+              <div className="text-sm text-ink-400 flex items-start gap-2">
+                <Bell className="h-4 w-4 text-ink-300 mt-0.5 shrink-0" />
+                <span>
+                  No reminders set. Click <span className="font-medium">New reminder</span>{" "}
+                  above for a general follow-up, or use{" "}
+                  <span className="font-medium">Set personal reminder</span> on any activity.
+                </span>
+              </div>
+            ) : (
+              <ul className="divide-y divide-ink-100">
+                {reminders.map((r) => (
+                  <ReminderRow
+                    key={r.id}
+                    reminder={r}
+                    onOpen={() => setSelectedReminder(r)}
+                    onRemove={() => {
+                      api.reminders.remove(r.id);
+                      setHiddenReminderIds((current) => {
+                        const next = new Set(current);
+                        next.add(r.id);
+                        return next;
+                      });
+                      refresh();
+                    }}
+                  />
+                ))}
+              </ul>
+            )}
 
-          {pastReminders.length > 0 && (
-            <div className="mt-4 pt-3 border-t border-ink-100">
-              <button
-                type="button"
-                className="text-xs text-ink-600 hover:text-ink-900 inline-flex items-center gap-1"
-                onClick={() => setShowPastReminders((v) => !v)}
-              >
-                {showPastReminders ? (
-                  <ChevronUp className="h-3 w-3" />
-                ) : (
-                  <ChevronDown className="h-3 w-3" />
-                )}
-                {showPastReminders ? "Hide" : "Show"} past reminders ({pastReminders.length})
-              </button>
-              {showPastReminders && (
-                <div
-                  className={`mt-2 ${
-                    pastReminders.length > 5 ? "max-h-[18rem] dropdown-scroll-y" : ""
-                  }`}
+            {pastReminders.length > 0 && (
+              <div className="mt-4 pt-3 border-t border-ink-100">
+                <button
+                  type="button"
+                  className="text-xs text-ink-600 hover:text-ink-900 inline-flex items-center gap-1"
+                  onClick={() => setShowPastReminders((v) => !v)}
                 >
-                  <ul className="divide-y divide-ink-100">
-                    {pastReminders.map((r) => (
-                      <PastReminderRow
-                        key={r.id}
-                        reminder={r}
-                        onRestore={() => {
-                          api.reminders.restore(r.id);
-                          refresh();
-                        }}
-                        onRemove={() => {
-                          api.reminders.remove(r.id);
-                          setHiddenReminderIds((current) => {
-                            const next = new Set(current);
-                            next.add(r.id);
-                            return next;
-                          });
-                          refresh();
-                        }}
-                      />
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          )}
+                  {showPastReminders ? (
+                    <ChevronUp className="h-3 w-3" />
+                  ) : (
+                    <ChevronDown className="h-3 w-3" />
+                  )}
+                  {showPastReminders ? "Hide" : "Show"} past reminders ({pastReminders.length})
+                </button>
+                {showPastReminders && (
+                  <div
+                    className={`mt-2 ${
+                      pastReminders.length > 5 ? "max-h-[18rem] dropdown-scroll-y" : ""
+                    }`}
+                  >
+                    <ul className="divide-y divide-ink-100">
+                      {pastReminders.map((r) => (
+                        <PastReminderRow
+                          key={r.id}
+                          reminder={r}
+                          onRestore={() => {
+                            api.reminders.restore(r.id);
+                            refresh();
+                          }}
+                          onRemove={() => {
+                            api.reminders.remove(r.id);
+                            setHiddenReminderIds((current) => {
+                              const next = new Set(current);
+                              next.add(r.id);
+                              return next;
+                            });
+                            refresh();
+                          }}
+                        />
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </Card>
 
         <Card className="h-full min-h-[17rem]">
@@ -421,12 +423,14 @@ export function EmployeeDashboard() {
               </Link>
             }
           />
-          <NotificationsList
-            tenantId={agency.id}
-            userId={user.id}
-            visibleCustomerIds={notificationCustomerIds}
-            onChanged={refresh}
-          />
+          <div data-stable-removal-region>
+            <NotificationsList
+              tenantId={agency.id}
+              userId={user.id}
+              visibleCustomerIds={notificationCustomerIds}
+              onChanged={refresh}
+            />
+          </div>
         </Card>
 
         <ActivityCenterDashboardCard
@@ -708,52 +712,61 @@ export function ActivityQuickList({
 
   const visibleRows = rows.filter((row) => !hiddenRowIds.has(row.id));
 
-  if (visibleRows.length === 0) {
-    return <div className="text-sm text-ink-400 text-center py-6">All caught up.</div>;
-  }
-
   return (
-    <ul className="divide-y divide-ink-100">
-      {visibleRows.slice(0, maxRows).map((row) => (
-        <li key={row.id} className="group py-2.5 flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <ImportanceIcon importance={row.tone ?? "info"} className="h-4 w-4 shrink-0" />
-              <div className="text-sm font-medium text-ink-900 truncate">{row.title}</div>
-            </div>
-            <div className="mt-1 text-xs text-ink-500 line-clamp-2">{row.detail}</div>
-            <div className="mt-1 text-[11px] text-ink-400">{fmt.relative(row.at)}</div>
-          </div>
-          <div className="flex shrink-0 items-center gap-1.5">
-            <Link to={row.href} state={{ fromDashboard: true }} className="btn-outline text-[11px] shrink-0">
-              Open
-            </Link>
-            <button
-              type="button"
-              className="inline-flex h-8 w-8 items-center justify-center rounded-md text-ink-400 opacity-100 transition hover:bg-alert-soft hover:text-alert sm:opacity-0 sm:focus-visible:opacity-100 sm:group-hover:opacity-100"
-              aria-label={row.removeLabel}
-              title={row.removeLabel}
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                preserveScrollDuring(event.currentTarget, () => {
-                  const result = row.onRemove();
-                  if (result === false || result === null) return;
-                  setHiddenRowIds((current) => {
-                    const next = new Set(current);
-                    next.add(row.id);
-                    return next;
-                  });
-                  onChanged();
-                });
-              }}
-            >
-              <X className="h-4 w-4" />
-            </button>
-          </div>
-        </li>
-      ))}
-    </ul>
+    <div data-stable-removal-region>
+      {visibleRows.length === 0 ? (
+        <div className="text-sm text-ink-400 text-center py-6">All caught up.</div>
+      ) : (
+        <ul className="divide-y divide-ink-100">
+          {visibleRows.slice(0, maxRows).map((row) => (
+            <li key={row.id} className="group py-2.5 flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <ImportanceIcon
+                    importance={row.tone ?? "info"}
+                    className="h-4 w-4 shrink-0"
+                  />
+                  <div className="text-sm font-medium text-ink-900 truncate">{row.title}</div>
+                </div>
+                <div className="mt-1 text-xs text-ink-500 line-clamp-2">{row.detail}</div>
+                <div className="mt-1 text-[11px] text-ink-400">{fmt.relative(row.at)}</div>
+              </div>
+              <div className="flex shrink-0 items-center gap-1.5">
+                <Link
+                  to={row.href}
+                  state={{ fromDashboard: true }}
+                  className="btn-outline text-[11px] shrink-0"
+                >
+                  Open
+                </Link>
+                <button
+                  type="button"
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-md text-ink-400 opacity-100 transition hover:bg-alert-soft hover:text-alert sm:opacity-0 sm:focus-visible:opacity-100 sm:group-hover:opacity-100"
+                  aria-label={row.removeLabel}
+                  title={row.removeLabel}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    preserveScrollDuring(event.currentTarget, () => {
+                      const result = row.onRemove();
+                      if (result === false || result === null) return;
+                      setHiddenRowIds((current) => {
+                        const next = new Set(current);
+                        next.add(row.id);
+                        return next;
+                      });
+                      onChanged();
+                    });
+                  }}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

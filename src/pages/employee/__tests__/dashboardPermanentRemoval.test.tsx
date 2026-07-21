@@ -106,11 +106,27 @@ describe("dashboard permanent removal", () => {
     const removeButton = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Delete activity"]'
     );
+    const stableRegion = container.querySelector<HTMLElement>(
+      "[data-stable-removal-region]"
+    );
     expect(removeButton).not.toBeNull();
+    expect(stableRegion).not.toBeNull();
+    vi.spyOn(stableRegion!, "getBoundingClientRect").mockReturnValue({
+      bottom: 180,
+      height: 180,
+      left: 0,
+      right: 400,
+      top: 0,
+      width: 400,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
 
     act(() => removeButton!.click());
 
     expect(container.scrollTop).toBe(240);
+    expect(stableRegion!.style.minHeight).toBe("180px");
     expect(container.textContent).not.toContain("Delete without moving the page");
   });
 });
