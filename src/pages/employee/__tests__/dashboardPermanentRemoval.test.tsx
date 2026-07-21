@@ -71,4 +71,46 @@ describe("dashboard permanent removal", () => {
     expect(container.textContent).toContain("All caught up");
     expect(onChanged).toHaveBeenCalledTimes(1);
   });
+
+  it("keeps the scrolling panel stationary while removing a row", () => {
+    const agency = api.agencies.list()[0]!;
+    const user = api.users.list(agency.id)[0]!;
+    const task = api.tasks.create({
+      tenantId: agency.id,
+      title: "Delete without moving the page",
+      assignedToId: user.id,
+    });
+    container.style.overflowY = "auto";
+    container.scrollTop = 240;
+    const onChanged = vi.fn(() => {
+      container.scrollTop = 0;
+    });
+
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <ActivityQuickList
+            notifications={[]}
+            tasks={[task]}
+            routingProspects={[]}
+            routingClients={[]}
+            routingTasks={[]}
+            maxRows={5}
+            userId={user.id}
+            onChanged={onChanged}
+          />
+        </MemoryRouter>
+      );
+    });
+
+    const removeButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Delete activity"]'
+    );
+    expect(removeButton).not.toBeNull();
+
+    act(() => removeButton!.click());
+
+    expect(container.scrollTop).toBe(240);
+    expect(container.textContent).not.toContain("Delete without moving the page");
+  });
 });

@@ -20,6 +20,7 @@ import { fmt } from "@/lib/format";
 import { isRoutingManagerRole } from "@/lib/roles";
 import { sweepGoalAchievements } from "@/lib/performanceGoals";
 import { isRoutingAssignmentTask } from "@/lib/taskFilters";
+import { preserveScrollDuring } from "@/lib/preserveScroll";
 import { NewReminderModal } from "@/components/tasks/NewReminderModal";
 import { PerformanceGoalsMiniCard } from "@/components/analytics/PerformanceGoalsMiniCard";
 import { ImportanceIcon } from "@/components/tasks/ImportancePicker";
@@ -735,14 +736,16 @@ export function ActivityQuickList({
               onClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
-                const result = row.onRemove();
-                if (result === false || result === null) return;
-                setHiddenRowIds((current) => {
-                  const next = new Set(current);
-                  next.add(row.id);
-                  return next;
+                preserveScrollDuring(event.currentTarget, () => {
+                  const result = row.onRemove();
+                  if (result === false || result === null) return;
+                  setHiddenRowIds((current) => {
+                    const next = new Set(current);
+                    next.add(row.id);
+                    return next;
+                  });
+                  onChanged();
                 });
-                onChanged();
               }}
             >
               <X className="h-4 w-4" />
@@ -818,7 +821,7 @@ function ReminderRow({
       <button
         type="button"
         className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-400 opacity-100 transition hover:bg-alert-soft hover:text-alert sm:opacity-0 sm:focus-visible:opacity-100 sm:group-hover:opacity-100"
-        onClick={onRemove}
+        onClick={(event) => preserveScrollDuring(event.currentTarget, onRemove)}
         aria-label={`Delete reminder: ${label}`}
         title="Delete reminder"
       >
@@ -936,7 +939,7 @@ function PastReminderRow({
       <button
         type="button"
         className="btn-outline text-xs !px-2"
-        onClick={onRemove}
+        onClick={(event) => preserveScrollDuring(event.currentTarget, onRemove)}
         title="Delete permanently"
       >
         <X className="h-3.5 w-3.5" />
@@ -1227,14 +1230,16 @@ function NotificationsList({
               onClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
-                const result = r.onDismiss();
-                if (result === false || result === null) return;
-                setHiddenRowKeys((current) => {
-                  const next = new Set(current);
-                  next.add(r.key);
-                  return next;
+                preserveScrollDuring(event.currentTarget, () => {
+                  const result = r.onDismiss();
+                  if (result === false || result === null) return;
+                  setHiddenRowKeys((current) => {
+                    const next = new Set(current);
+                    next.add(r.key);
+                    return next;
+                  });
+                  onChanged();
                 });
-                onChanged();
               }}
               aria-label={r.dismissLabel}
               title={r.dismissLabel}

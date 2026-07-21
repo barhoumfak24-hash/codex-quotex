@@ -63,6 +63,7 @@ import {
   summarizeQuotingWorkflow,
 } from "@/lib/quotingWorkflows";
 import { isRoutingAssignmentTask } from "@/lib/taskFilters";
+import { preserveScrollDuring } from "@/lib/preserveScroll";
 import type {
   AssetType,
   CustomerProfile,
@@ -1770,7 +1771,9 @@ function RoutingList({
                 <button
                   type="button"
                   className="inline-flex h-8 w-8 items-center justify-center rounded-md text-ink-400 opacity-100 transition hover:bg-alert-soft hover:text-alert sm:opacity-0 sm:focus-visible:opacity-100 sm:group-hover:opacity-100"
-                  onClick={() => onRemove(r)}
+                  onClick={(event) =>
+                    preserveScrollDuring(event.currentTarget, () => onRemove(r))
+                  }
                   aria-label={`Delete ${r.name} routing entry`}
                   title="Delete routing entry"
                 >
