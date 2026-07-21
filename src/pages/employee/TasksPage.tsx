@@ -1186,8 +1186,14 @@ function RoutingCard({
   // confirm modal before mutating state. The same modal also
   // lets the manager add or remove co-owners before confirming.
   const [confirming, setConfirming] = useState<AssignIntent | null>(null);
+  const [hiddenRoutingRows, setHiddenRoutingRows] = useState<Set<string>>(
+    () => new Set()
+  );
   const routeRequests = activities.filter((task) => !!task.routeRequestKind);
-  const activityHandoffs = activities.filter((task) => !task.routeRequestKind);
+  const activityHandoffs = activities.filter(
+    (task) =>
+      !task.routeRequestKind && !hiddenRoutingRows.has(`activity:${task.id}`)
+  );
   const prospectRouteRequests = routeRequests.filter(
     (task) => task.routeRequestKind === "prospect" && !!task.prospectId
   );
@@ -1303,7 +1309,7 @@ function RoutingCard({
     ...prospectRouteRequests
       .filter((t) => t.prospectId && !prospects.some((p) => p.id === t.prospectId))
       .map(taskRoutingRow),
-  ];
+  ].filter((row) => !hiddenRoutingRows.has(`prospect:${row.id}`));
 
   const clientRows: RoutingRow[] = [
     ...clients.map((c) => {
@@ -1355,7 +1361,7 @@ function RoutingCard({
     ...clientRouteRequests
       .filter((t) => t.customerId && !clients.some((c) => c.id === t.customerId))
       .map(taskRoutingRow),
-  ];
+  ].filter((row) => !hiddenRoutingRows.has(`client:${row.id}`));
 
   const total = prospectRows.length + clientRows.length + activityHandoffs.length;
   const routingSummary =
@@ -1394,22 +1400,23 @@ function RoutingCard({
 
   function removeRoutingItem(kind: "prospect" | "client" | "activity", row: RoutingRow) {
     if (kind === "activity" || (row.assignId && row.assignId === row.id)) {
-      if (!window.confirm("Permanently delete this routing activity?")) return;
       const taskId = row.assignId ?? row.id;
       api.tasks.remove(taskId);
+      setHiddenRoutingRows((current) => {
+        const next = new Set(current);
+        next.add(`activity:${taskId}`);
+        return next;
+      });
       onChanged();
       return;
     }
 
-    const label = kind === "client" ? "client" : "prospect";
-    if (
-      !window.confirm(
-        `Permanently delete this routing entry? The ${label} record will remain in Quotex.`
-      )
-    ) {
-      return;
-    }
     api.routing.remove(kind, row.id, currentUserId);
+    setHiddenRoutingRows((current) => {
+      const next = new Set(current);
+      next.add(`${kind}:${row.id}`);
+      return next;
+    });
     onChanged();
   }
 

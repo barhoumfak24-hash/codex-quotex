@@ -42,6 +42,9 @@ export function EmployeeDashboard() {
   >(null);
   const [showPastReminders, setShowPastReminders] = useState(false);
   const [selectedReminder, setSelectedReminder] = useState<Reminder | null>(null);
+  const [hiddenReminderIds, setHiddenReminderIds] = useState<Set<string>>(
+    () => new Set()
+  );
   useEffect(() => subscribeToDbChanges(() => setRev((r) => r + 1)), []);
   // Keep upcoming-renewal packets available, but do not send or
   // assign e-signature work just because a document was tagged as
@@ -98,8 +101,12 @@ export function EmployeeDashboard() {
   }
   const dashboardRouteState = { fromDashboard: true };
   const viewer = { id: user.id, role: user.role };
-  const reminders = api.reminders.listForUser(agency.id, user.id);
-  const pastReminders = api.reminders.listDismissedForUser(agency.id, user.id);
+  const reminders = api.reminders
+    .listForUser(agency.id, user.id)
+    .filter((reminder) => !hiddenReminderIds.has(reminder.id));
+  const pastReminders = api.reminders
+    .listDismissedForUser(agency.id, user.id)
+    .filter((reminder) => !hiddenReminderIds.has(reminder.id));
   const unreadInternalThreads = api.internalMessages.unreadThreadsForUser(
     agency.id,
     user.id
@@ -340,8 +347,12 @@ export function EmployeeDashboard() {
                   reminder={r}
                   onOpen={() => setSelectedReminder(r)}
                   onRemove={() => {
-                    if (!window.confirm("Delete this reminder?")) return;
                     api.reminders.remove(r.id);
+                    setHiddenReminderIds((current) => {
+                      const next = new Set(current);
+                      next.add(r.id);
+                      return next;
+                    });
                     refresh();
                   }}
                 />
@@ -380,6 +391,11 @@ export function EmployeeDashboard() {
                         }}
                         onRemove={() => {
                           api.reminders.remove(r.id);
+                          setHiddenReminderIds((current) => {
+                            const next = new Set(current);
+                            next.add(r.id);
+                            return next;
+                          });
                           refresh();
                         }}
                       />
@@ -599,7 +615,7 @@ function StatQuickView({
   );
 }
 
-function ActivityQuickList({
+export function ActivityQuickList({
   notifications,
   tasks,
   routingProspects,
@@ -618,6 +634,7 @@ function ActivityQuickList({
   userId: string;
   onChanged: () => void;
 }) {
+  const [hiddenRowIds, setHiddenRowIds] = useState<Set<string>>(() => new Set());
   type ActivityRow = {
     id: string;
     at: string;
@@ -626,7 +643,7 @@ function ActivityQuickList({
     href: string;
     tone?: import("@/types").TaskSeverity;
     removeLabel: string;
-    onRemove: () => void;
+    onRemove: () => unknown;
   };
   const rows: ActivityRow[] = [
     ...notifications.map((n) => ({
@@ -688,13 +705,15 @@ function ActivityQuickList({
     })),
   ].sort((a, b) => (a.at < b.at ? 1 : -1));
 
-  if (rows.length === 0) {
+  const visibleRows = rows.filter((row) => !hiddenRowIds.has(row.id));
+
+  if (visibleRows.length === 0) {
     return <div className="text-sm text-ink-400 text-center py-6">All caught up.</div>;
   }
 
   return (
     <ul className="divide-y divide-ink-100">
-      {rows.slice(0, maxRows).map((row) => (
+      {visibleRows.slice(0, maxRows).map((row) => (
         <li key={row.id} className="group py-2.5 flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
@@ -713,9 +732,16 @@ function ActivityQuickList({
               className="inline-flex h-8 w-8 items-center justify-center rounded-md text-ink-400 opacity-100 transition hover:bg-alert-soft hover:text-alert sm:opacity-0 sm:focus-visible:opacity-100 sm:group-hover:opacity-100"
               aria-label={row.removeLabel}
               title={row.removeLabel}
-              onClick={() => {
-                if (!window.confirm("Permanently delete this item?")) return;
-                row.onRemove();
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const result = row.onRemove();
+                if (result === false || result === null) return;
+                setHiddenRowIds((current) => {
+                  const next = new Set(current);
+                  next.add(row.id);
+                  return next;
+                });
                 onChanged();
               }}
             >
@@ -935,6 +961,7 @@ function NotificationsList({
   visibleCustomerIds: Set<string>;
   onChanged: () => void;
 }) {
+  const [hiddenRowKeys, setHiddenRowKeys] = useState<Set<string>>(() => new Set());
   // Tasks assigned to me in the last 7 days, not yet started.
   const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
   const recentTasks = api.tasks
@@ -986,7 +1013,7 @@ function NotificationsList({
     // / red. Tasks + client messages leave this undefined.
     urgency?: import("@/types").TaskSeverity;
     onOpen?: () => void;
-    onDismiss: () => void;
+    onDismiss: () => unknown;
     dismissLabel: string;
   };
   // Look up staff once so each internal-message row can resolve a
@@ -1130,7 +1157,9 @@ function NotificationsList({
   );
   rows.sort((a, b) => (a.at < b.at ? 1 : -1));
 
-  if (rows.length === 0) {
+  const visibleRows = rows.filter((row) => !hiddenRowKeys.has(row.key));
+
+  if (visibleRows.length === 0) {
     return (
       <div className="text-sm text-ink-400 flex items-center gap-2">
         <Bell className="h-4 w-4 text-ink-300" /> All caught up.
@@ -1139,7 +1168,7 @@ function NotificationsList({
   }
   return (
     <ul className="divide-y divide-ink-100">
-      {rows.slice(0, 6).map((r) => {
+      {visibleRows.slice(0, 6).map((r) => {
         const Icon = r.icon;
         const urgencyLabel =
           r.urgency === "urgent"
@@ -1195,9 +1224,16 @@ function NotificationsList({
             <button
               type="button"
               className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-400 opacity-100 transition hover:bg-alert-soft hover:text-alert sm:opacity-0 sm:focus-visible:opacity-100 sm:group-hover:opacity-100"
-              onClick={() => {
-                if (!window.confirm("Permanently delete this item?")) return;
-                r.onDismiss();
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const result = r.onDismiss();
+                if (result === false || result === null) return;
+                setHiddenRowKeys((current) => {
+                  const next = new Set(current);
+                  next.add(r.key);
+                  return next;
+                });
                 onChanged();
               }}
               aria-label={r.dismissLabel}
