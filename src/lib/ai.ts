@@ -6461,6 +6461,12 @@ function audienceFirstWord(audience: DraftCampaignAudience[]): string {
 // severity so the auto-creator can stamp a useful card.
 // =====================================================================
 
+export type InboundServiceIntent =
+  | "certificate_of_insurance"
+  | "insurance_id_card"
+  | "declarations_page"
+  | "policy_copy";
+
 export interface InboundTriage {
   disposition: "ignore" | "notification" | "activity";
   warrants: boolean;
@@ -6468,6 +6474,7 @@ export interface InboundTriage {
   topic: TaskTopic;
   severity: "urgent" | "warning" | "info";
   reason: string;
+  serviceIntent?: InboundServiceIntent;
 }
 
 export function aiClassifyInboundForActivity(input: {
@@ -6527,6 +6534,45 @@ export function aiClassifyInboundForActivity(input: {
       return mk("coverage_change", "warning", "carrier response needs review");
     }
     return mk("other", "info", "carrier update received", "notification");
+  }
+  // Exact service requests are handled before the broader document rule.
+  // The service intent is consumed by the inbound sweep, which may prepare
+  // (but never send) a reply when an approved client document is available.
+  if (
+    has(/\b(certificate of insurance|proof of insurance|coi)\b/) &&
+    has(/\b(send|email|issue|provide|get|need|request|attach|copy|could you|can you|please)\b/)
+  ) {
+    return {
+      ...mk("document_upload", "info", "certificate of insurance requested", "notification"),
+      serviceIntent: "certificate_of_insurance",
+    };
+  }
+  if (
+    has(/\b(insurance id card|auto id card|vehicle id card|proof of auto insurance)\b/) &&
+    has(/\b(send|email|issue|provide|get|need|request|attach|copy|could you|can you|please)\b/)
+  ) {
+    return {
+      ...mk("document_upload", "info", "insurance ID card requested", "notification"),
+      serviceIntent: "insurance_id_card",
+    };
+  }
+  if (
+    has(/\b(declarations page|declaration page|dec page)\b/) &&
+    has(/\b(send|email|provide|get|need|request|attach|copy|could you|can you|please)\b/)
+  ) {
+    return {
+      ...mk("document_upload", "info", "declarations page requested", "notification"),
+      serviceIntent: "declarations_page",
+    };
+  }
+  if (
+    has(/\b(full policy|policy copy|copy of (?:my|the) policy|policy booklet)\b/) &&
+    has(/\b(send|email|provide|get|need|request|attach|copy|could you|can you|please)\b/)
+  ) {
+    return {
+      ...mk("document_upload", "info", "policy copy requested", "notification"),
+      serviceIntent: "policy_copy",
+    };
   }
   if (has(/\b(add|adding|insure|cover|new)\b[\s\S]{0,40}\b(vehicle|car|auto|truck|suv|driver|boat|yacht|jewelry|ring|watch|home|house|property|condo|asset|rv|motorcycle)\b/)) {
     return mk("coverage_change", "warning", "wants to add to their policy");

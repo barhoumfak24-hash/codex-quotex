@@ -2102,6 +2102,16 @@ export interface Communication {
   aiActivityScannedAt?: string;
   aiActivityTaskId?: string;
   aiActivityNotificationId?: string;
+  aiTriageDisposition?: "ignore" | "notification" | "activity";
+  aiTriageTopic?: TaskTopic;
+  aiTriageReason?: string;
+  aiServiceIntent?:
+    | "certificate_of_insurance"
+    | "insurance_id_card"
+    | "declarations_page"
+    | "policy_copy";
+  aiReplyDraftId?: string;
+  aiDraftSourceCommunicationId?: string;
   createdAt: string;
   createdById?: string;
 }

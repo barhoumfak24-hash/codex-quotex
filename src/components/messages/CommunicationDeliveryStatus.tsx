@@ -49,6 +49,14 @@ export function CommunicationDeliveryStatus({
 
   if (communication.direction !== "outbound" || communication.channel !== "email") return null;
 
+  if (status === "draft") {
+    return (
+      <span className="mt-1 inline-flex items-center gap-1 text-[10px] font-semibold text-gold-800">
+        AI draft - review before sending
+      </span>
+    );
+  }
+
   if (!job && status === "synced") {
     return (
       <span className="mt-1 inline-flex items-center gap-1 text-[10px] font-medium text-emerald-700">

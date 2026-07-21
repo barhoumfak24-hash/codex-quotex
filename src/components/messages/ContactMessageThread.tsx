@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/Badge";
 import { DocumentViewerModal } from "@/components/ui/DocumentViewerModal";
 import {
   MessageComposer,
+  type ComposerDraftSeed,
   type ComposedMessage,
   type ReplyTarget,
 } from "@/components/messages/MessageComposer";
@@ -117,6 +118,24 @@ function replyTargetFor(row: Communication | MarketingMessage): ReplyTarget {
     externalThreadId: comm?.externalThreadId,
     replyToMessageIdHeader: comm?.messageIdHeader ?? comm?.externalMessageId,
     references,
+  };
+}
+
+function draftSeedFor(row: Communication): ComposerDraftSeed {
+  return {
+    id: row.id,
+    body: row.body,
+    subject: row.subject,
+    attachments: row.attachments,
+  };
+}
+
+function replyTargetForDraft(row: Communication): ReplyTarget {
+  const target = replyTargetFor(row);
+  return {
+    ...target,
+    replyToId: row.replyToId ?? row.id,
+    replyToMessageIdHeader: row.inReplyToHeader ?? target.replyToMessageIdHeader,
   };
 }
 
@@ -264,6 +283,7 @@ export function ContactMessageThread({
   const [busy, setBusy] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
+  const [draftSeed, setDraftSeed] = useState<ComposerDraftSeed | null>(null);
   const [previewDocument, setPreviewDocument] = useState<Document | null>(null);
   const [, setRev] = useState(0);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -328,6 +348,13 @@ export function ContactMessageThread({
 
   useEffect(() => {
     if (!targetMessageId) return;
+    const target = visibleRows.find(
+      (item) => item.kind === "comm" && item.row.id === targetMessageId
+    );
+    if (target?.kind === "comm" && target.row.deliveryStatus === "draft") {
+      setDraftSeed(draftSeedFor(target.row));
+      setReplyTarget(replyTargetForDraft(target.row));
+    }
     const el = messageRefs.current[targetMessageId];
     if (!el) return;
     const t = window.setTimeout(() => {
@@ -376,6 +403,10 @@ export function ContactMessageThread({
         setDeliveryNotice("Delivered to the client portal. External email was not available.");
       }
       setReplyTarget(null);
+      if (draftSeed) {
+        api.communications.remove(draftSeed.id);
+        setDraftSeed(null);
+      }
       setRev((r) => r + 1);
       onChanged?.();
     } finally {
@@ -499,7 +530,13 @@ export function ContactMessageThread({
                     >
                       <div className="text-[10px] text-ink-500 mb-0.5 flex flex-wrap items-center gap-1">
                         {isAi && <Bot className="h-3 w-3 text-violet-600" />}
-                        {isInbound ? "Inbound" : isOutboundComm ? "You" : "AI send"}
+                        {isInbound
+                          ? "Inbound"
+                          : commRow?.deliveryStatus === "draft"
+                            ? "AI draft"
+                            : isOutboundComm
+                              ? "You"
+                              : "AI send"}
                         {" - "}
                         {String(channelChip).toUpperCase()}
                         {" - "}
@@ -553,10 +590,19 @@ export function ContactMessageThread({
                       <div className="mt-1 flex flex-wrap items-center gap-2">
                         <button
                           type="button"
-                          onClick={() => setReplyTarget(replyTargetFor(row))}
+                          onClick={() => {
+                            if (commRow?.deliveryStatus === "draft") {
+                              setDraftSeed(draftSeedFor(commRow));
+                              setReplyTarget(replyTargetForDraft(commRow));
+                            } else {
+                              setDraftSeed(null);
+                              setReplyTarget(replyTargetFor(row));
+                            }
+                          }}
                           className="inline-flex items-center gap-1 text-[10px] text-ink-500 hover:text-ink-800"
                         >
-                          <Reply className="h-3 w-3" /> Reply
+                          <Reply className="h-3 w-3" />
+                          {commRow?.deliveryStatus === "draft" ? "Review draft" : "Reply"}
                         </button>
                         <a
                           href={mailboxUrlForContact(mailbox, contact, row)}
@@ -602,7 +648,11 @@ export function ContactMessageThread({
         )}
         <MessageComposer
           replyTarget={replyTarget}
-          onCancelReply={() => setReplyTarget(null)}
+          draftSeed={draftSeed}
+          onCancelReply={() => {
+            setReplyTarget(null);
+            setDraftSeed(null);
+          }}
           onSend={send}
           busy={busy}
           contactName={contact.name}

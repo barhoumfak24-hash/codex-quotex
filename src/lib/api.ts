@@ -21,7 +21,11 @@ import {
   normalizeAssetDetails,
   uppercaseVinTokens,
 } from "./assetDisplay";
-import type { ActivityResolution, AiAcordFieldMapping } from "./ai";
+import type {
+  ActivityResolution,
+  AiAcordFieldMapping,
+  InboundServiceIntent,
+} from "./ai";
 import { db } from "./db";
 import { fmt } from "./format";
 import { uid, nowIso } from "./id";
@@ -4651,6 +4655,148 @@ function topicLabel(t: import("@/types").TaskTopic): string {
     other: "their policy",
   };
   return map[t] ?? "their policy";
+}
+
+const INBOUND_SERVICE_DOCUMENT_TYPES: Record<InboundServiceIntent, string[]> = {
+  certificate_of_insurance: ["proof_of_insurance"],
+  insurance_id_card: ["insurance_id_card"],
+  declarations_page: ["declarations_page"],
+  policy_copy: ["policy_document", "policy_booklet"],
+};
+
+const INBOUND_SERVICE_FILE_PATTERNS: Record<InboundServiceIntent, RegExp> = {
+  certificate_of_insurance: /\b(certificate of insurance|proof of insurance|coi)\b/i,
+  insurance_id_card: /\b(insurance id card|auto id card|vehicle id card|insurance card)\b/i,
+  declarations_page: /\b(declarations? page|dec page)\b/i,
+  policy_copy: /\b(policy document|policy booklet|full policy|policy copy)\b/i,
+};
+
+function inboundServiceLabel(intent: InboundServiceIntent): string {
+  const labels: Record<InboundServiceIntent, string> = {
+    certificate_of_insurance: "certificate of insurance",
+    insurance_id_card: "insurance ID card",
+    declarations_page: "declarations page",
+    policy_copy: "policy copy",
+  };
+  return labels[intent];
+}
+
+function findApprovedInboundServiceDocument(input: {
+  tenantId: string;
+  customerId: string;
+  intent: InboundServiceIntent;
+}): Document | undefined {
+  const policies = db
+    .list("policies")
+    .filter((policy) => policy.tenantId === input.tenantId && policy.customerId === input.customerId);
+  const policyById = new Map(policies.map((policy) => [policy.id, policy]));
+  const activeStatuses = new Set<PolicyStatus>([
+    "approved",
+    "bound",
+    "deposit_paid",
+    "renewal_upcoming",
+    "renewed",
+    "carrier_reviewing",
+  ]);
+  const candidates = db
+    .list("documents")
+    .filter((document) => {
+      if (document.tenantId !== input.tenantId || document.status !== "approved") return false;
+      return (
+        document.customerId === input.customerId ||
+        (!!document.policyId && policyById.has(document.policyId))
+      );
+    });
+  const exactTypes = new Set(INBOUND_SERVICE_DOCUMENT_TYPES[input.intent]);
+  const exactMatches = candidates.filter((document) => exactTypes.has(String(document.type)));
+  const namedMatches = candidates.filter((document) =>
+    INBOUND_SERVICE_FILE_PATTERNS[input.intent].test(
+      `${document.documentName ?? ""} ${document.fileName ?? ""}`
+    )
+  );
+  const pool = exactMatches.length > 0 ? exactMatches : namedMatches;
+  return [...pool].sort((a, b) => {
+    const aActive = a.policyId && activeStatuses.has(policyById.get(a.policyId)?.status as PolicyStatus) ? 1 : 0;
+    const bActive = b.policyId && activeStatuses.has(policyById.get(b.policyId)?.status as PolicyStatus) ? 1 : 0;
+    if (aActive !== bActive) return bActive - aActive;
+    const aDirect = a.customerId === input.customerId ? 1 : 0;
+    const bDirect = b.customerId === input.customerId ? 1 : 0;
+    if (aDirect !== bDirect) return bDirect - aDirect;
+    return (b.uploadedAt ?? "").localeCompare(a.uploadedAt ?? "");
+  })[0];
+}
+
+function inboundServiceDraftBody(intent: InboundServiceIntent, customerName: string): string {
+  const firstName = customerName.trim().split(/\s+/)[0] || "there";
+  const messages: Record<InboundServiceIntent, string> = {
+    certificate_of_insurance:
+      `Hi ${firstName},\n\nI've attached the certificate of insurance you requested. Please review it and let me know if you need a certificate holder added or any other changes.\n\nThank you,`,
+    insurance_id_card:
+      `Hi ${firstName},\n\nI've attached the insurance ID card you requested. Please review it and let me know if you need anything else.\n\nThank you,`,
+    declarations_page:
+      `Hi ${firstName},\n\nI've attached the declarations page you requested. Please review it and let me know if you have any questions.\n\nThank you,`,
+    policy_copy:
+      `Hi ${firstName},\n\nI've attached the policy copy you requested. Please review it and let me know if you need anything else.\n\nThank you,`,
+  };
+  return messages[intent];
+}
+
+function createInboundServiceDraft(input: {
+  inbound: Communication;
+  customer: CustomerProfile;
+  assignedToId: string;
+  intent: InboundServiceIntent;
+  document: Document;
+}): Communication {
+  const existing = db
+    .list("communications")
+    .find((row) => row.aiDraftSourceCommunicationId === input.inbound.id);
+  if (existing) return existing;
+  const senderMailbox = mailboxForUser(input.assignedToId);
+  const rawSubject = input.inbound.subject?.trim() || inboundServiceLabel(input.intent);
+  const subject = /^re:/i.test(rawSubject) ? rawSubject : `Re: ${rawSubject}`;
+  const references = [
+    ...(input.inbound.references ?? []),
+    input.inbound.messageIdHeader,
+    input.inbound.externalMessageId,
+  ].filter((value): value is string => Boolean(value));
+  const attachment: CommunicationAttachment = {
+    id: uid("att"),
+    documentId: input.document.id,
+    sourceDocumentId: input.document.id,
+    fileName: input.document.fileName,
+    fileType: input.document.fileType || "application/pdf",
+    dataUrl: input.document.downloadUrl,
+    storagePath: input.document.storagePath,
+    description: input.document.documentName ?? inboundServiceLabel(input.intent),
+  };
+  const row: Communication = {
+    id: uid("comm"),
+    tenantId: input.inbound.tenantId,
+    customerId: input.customer.id,
+    channel: "email",
+    direction: "outbound",
+    subject,
+    threadId: input.inbound.threadId ?? `thread_msg_${input.inbound.id}`,
+    replyToId: input.inbound.id,
+    mailboxOrigin: "app",
+    mailboxAccount: senderMailbox.account,
+    mailboxProvider: senderMailbox.provider,
+    mailboxConnectionId: senderMailbox.connectionId,
+    deliveryStatus: "draft",
+    externalThreadId: input.inbound.externalThreadId,
+    inReplyToHeader: input.inbound.messageIdHeader ?? input.inbound.externalMessageId,
+    references,
+    to: input.customer.email ? [input.customer.email] : undefined,
+    body: inboundServiceDraftBody(input.intent, input.customer.name),
+    attachments: [attachment],
+    aiDraftSourceCommunicationId: input.inbound.id,
+    aiServiceIntent: input.intent,
+    createdAt: nowIso(),
+    createdById: input.assignedToId,
+  };
+  db.insert("communications", row);
+  return row;
 }
 
 function fieldSlug(s: string): string {
@@ -14651,9 +14797,111 @@ export const api = {
           contactName: customer?.name ?? prospect?.name ?? carrierContact?.name,
           contactKind,
         });
-        const patch: Partial<Communication> = { aiActivityScannedAt: nowIso() };
+        const patch: Partial<Communication> = {
+          aiActivityScannedAt: nowIso(),
+          aiTriageDisposition: triage.disposition,
+          aiTriageTopic: triage.topic,
+          aiTriageReason: triage.reason,
+          aiServiceIntent: triage.serviceIntent,
+        };
         const assignedToId = assignedContactOwner(customer ?? prospect);
-        if (triage.disposition === "activity") {
+        if (triage.serviceIntent) {
+          const requestedDocument = customer
+            ? findApprovedInboundServiceDocument({
+                tenantId,
+                customerId: customer.id,
+                intent: triage.serviceIntent,
+              })
+            : undefined;
+          const canPrepareDraft =
+            !!customer && !!customer.email && !!assignedToId && !!requestedDocument;
+
+          if (canPrepareDraft) {
+            const draft = createInboundServiceDraft({
+              inbound: c,
+              customer,
+              assignedToId,
+              intent: triage.serviceIntent,
+              document: requestedDocument,
+            });
+            const existingNotification = db
+              .list("aiNotifications")
+              .find(
+                (row) =>
+                  row.communicationId === c.id && row.messageId === draft.id
+              );
+            const notification: AiNotification =
+              existingNotification ?? {
+                id: uid("ain"),
+                tenantId,
+                kind: "inbound_notice",
+                title: `Draft ready: ${inboundServiceLabel(triage.serviceIntent)} - ${customer.name}`,
+                summary: `Quotex prepared a reply and attached ${requestedDocument.fileName}. Review it before sending.`,
+                customerId: customer.id,
+                policyId: requestedDocument.policyId,
+                documentId: requestedDocument.id,
+                messageId: draft.id,
+                communicationId: c.id,
+                topic: "document_upload",
+                severity: "info",
+                severityReason:
+                  "A verified customer document was attached to an unsent reply draft for staff review.",
+                aiSummary: triage.reason,
+                originalMessageContent: c.body,
+                originalMessageId: c.id,
+                aiReplyBody: draft.body,
+                aiReplySubject: draft.subject,
+                assignedToId,
+                createdAt: nowIso(),
+              };
+            if (!existingNotification) db.insert("aiNotifications", notification);
+            patch.aiReplyDraftId = draft.id;
+            patch.aiActivityNotificationId = notification.id;
+            created.push({ communicationId: c.id, notification });
+          } else {
+            const missing = !customer
+              ? "The sender is not linked to a client."
+              : !customer.email
+                ? "The client does not have an email address on file."
+                : !assignedToId
+                  ? "The client does not have an active assigned staff owner."
+                  : `No approved ${inboundServiceLabel(triage.serviceIntent)} was found for this client.`;
+            const taskRow: Task = {
+              id: uid("task"),
+              tenantId,
+              title: `${customer?.name ?? prospect?.name ?? carrierContact?.name ?? "Contact"}: ${inboundServiceLabel(triage.serviceIntent)} request needs review`,
+              description: `${triage.reason} ${missing}`,
+              customerId: c.customerId,
+              prospectId: c.prospectId,
+              messageId: c.id,
+              source: "ai_notification",
+              topic: "document_upload",
+              severity: "warning",
+              severityReason:
+                "Quotex did not create a draft because a required verified record or owner was unavailable.",
+              status: "open",
+              assignedToId,
+              awaitingManagerAssignment: !assignedToId || undefined,
+              createdById: "ai",
+              createdAt: nowIso(),
+            };
+            db.insert("tasks", taskRow);
+            logTaskAudit({
+              tenantId,
+              actorId: actorId ?? "ai",
+              action: "task.created_from_inbound_service_request",
+              taskId: taskRow.id,
+              metadata: {
+                communicationId: c.id,
+                serviceIntent: triage.serviceIntent,
+                documentFound: !!requestedDocument,
+              },
+            });
+            patch.aiTriageDisposition = "activity";
+            patch.aiActivityTaskId = taskRow.id;
+            created.push({ communicationId: c.id, task: taskRow });
+          }
+        } else if (triage.disposition === "activity") {
           // Carrier messages (and any unowned contact) route to a
           // manager via the Routing card.
           const awaiting = !assignedToId;
@@ -14886,6 +15134,9 @@ export const api = {
           ? linkInboundCarrierCommunicationToSubmission(updatedExisting)
           : updatedExisting;
         communicationStatusEvent(linkedExisting);
+        if (direction === "inbound") {
+          api.communications.sweepInboundForActivities(input.tenantId, input.mailboxUserId);
+        }
         return linkedExisting;
       }
 
@@ -14950,6 +15201,9 @@ export const api = {
       }
       const linkedRow = direction === "inbound" ? linkInboundCarrierCommunicationToSubmission(row) : row;
       communicationStatusEvent(linkedRow);
+      if (direction === "inbound") {
+        api.communications.sweepInboundForActivities(input.tenantId, input.mailboxUserId);
+      }
       return linkedRow;
     },
   },

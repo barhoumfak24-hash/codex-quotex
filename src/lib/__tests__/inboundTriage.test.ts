@@ -60,6 +60,17 @@ describe("aiClassifyInboundForActivity", () => {
     );
   });
 
+  it("recognizes a certificate request as a draftable service intent", async () => {
+    const { aiClassifyInboundForActivity } = await import("../ai");
+    const out = aiClassifyInboundForActivity({
+      subject: "Certificate request",
+      body: "Can you please send me a certificate of insurance?",
+      contactKind: "client",
+    });
+    expect(out.disposition).toBe("notification");
+    expect(out.serviceIntent).toBe("certificate_of_insurance");
+  });
+
   it("still opens activities for failed payments and carrier supplementals", async () => {
     const { aiClassifyInboundForActivity } = await import("../ai");
     expect(
@@ -138,6 +149,99 @@ describe("communications.sweepInboundForActivities", () => {
     expect(
       api.tasks.listByTenant(agency.id).some((t) => t.messageId === comm.id)
     ).toBe(false);
+  });
+
+  it("prepares an unsent COI reply draft with the approved document attached", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const ownerId = customer.assignedAgentId!;
+    api.documents.create({
+      tenantId: agency.id,
+      uploadedById: ownerId,
+      fileName: "Alexandra-Whitford-COI.pdf",
+      fileType: "application/pdf",
+      documentName: "Certificate of insurance",
+      type: "proof_of_insurance",
+      visibility: "employee_only",
+      status: "approved",
+      customerId: customer.id,
+      downloadUrl: "data:application/pdf;base64,JVBERi0xLjQK",
+    });
+    const beforeOutbox = api.mailboxOutbox.listByTenant(agency.id).length;
+    const inbound = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      subject: "Need a COI",
+      body: "Please email me a certificate of insurance.",
+    });
+
+    const created = api.communications.sweepInboundForActivities(agency.id);
+    expect(created).toHaveLength(1);
+    expect(created[0].task).toBeUndefined();
+    const fresh = api.communications.listByCustomer(customer.id).find((row) => row.id === inbound.id)!;
+    expect(fresh.aiTriageDisposition).toBe("notification");
+    expect(fresh.aiServiceIntent).toBe("certificate_of_insurance");
+    expect(fresh.aiReplyDraftId).toBeTruthy();
+    const draft = api.communications
+      .listByCustomer(customer.id)
+      .find((row) => row.id === fresh.aiReplyDraftId)!;
+    expect(draft.deliveryStatus).toBe("draft");
+    expect(draft.createdById).toBe(ownerId);
+    expect(draft.replyToId).toBe(inbound.id);
+    expect(draft.attachments).toHaveLength(1);
+    const attachedDocument = api.documents.get(draft.attachments![0].documentId!)!;
+    expect(attachedDocument).toEqual(
+      expect.objectContaining({ status: "approved", type: "proof_of_insurance" })
+    );
+    expect(
+      attachedDocument.customerId === customer.id ||
+        api.policies.get(attachedDocument.policyId ?? "")?.customerId === customer.id
+    ).toBe(true);
+    expect(draft.outboxJobId).toBeUndefined();
+    expect(api.mailboxOutbox.listByTenant(agency.id)).toHaveLength(beforeOutbox);
+    expect(created[0].notification).toEqual(
+      expect.objectContaining({
+        messageId: draft.id,
+        documentId: attachedDocument.id,
+        assignedToId: ownerId,
+      })
+    );
+    expect(api.communications.sweepInboundForActivities(agency.id)).toHaveLength(0);
+    expect(
+      api.communications
+        .listByCustomer(customer.id)
+        .filter((row) => row.aiDraftSourceCommunicationId === inbound.id)
+    ).toHaveLength(1);
+  });
+
+  it("opens a review activity instead of drafting when no approved document exists", async () => {
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    api.documents
+      .listByEntity({ customerId: customer.id })
+      .filter((document) => document.type === "insurance_id_card")
+      .forEach((document) => db.remove("documents", document.id));
+    const inbound = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      subject: "ID card",
+      body: "Please send me my insurance ID card.",
+    });
+
+    const created = api.communications.sweepInboundForActivities(agency.id);
+    expect(created).toHaveLength(1);
+    expect(created[0].task?.topic).toBe("document_upload");
+    expect(created[0].notification).toBeUndefined();
+    const fresh = api.communications.listByCustomer(customer.id).find((row) => row.id === inbound.id)!;
+    expect(fresh.aiTriageDisposition).toBe("activity");
+    expect(fresh.aiReplyDraftId).toBeUndefined();
   });
 
   it("permanently removes an inbound communication and its notification", async () => {

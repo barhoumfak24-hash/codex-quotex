@@ -35,6 +35,7 @@ import { ImportancePicker } from "@/components/tasks/ImportancePicker";
 import { EmailSignatureCard } from "@/components/messages/EmailSignatureCard";
 import {
   MessageComposer,
+  type ComposerDraftSeed,
   type ComposedMessage,
   type ReplyTarget,
 } from "@/components/messages/MessageComposer";
@@ -234,6 +235,7 @@ export function MessagesPage() {
   // dashboard notification card land you on the right thread.
   const activeContactKey = searchParams.get("contact") ?? null;
   const activeInternalId = searchParams.get("thread") ?? null;
+  const targetMessageId = searchParams.get("msg") ?? undefined;
 
   // AI scans inbound messages on load. Actionable items become activities;
   // informational items become dashboard notifications.
@@ -789,6 +791,7 @@ export function MessagesPage() {
                   }}
                   mailbox={mailbox}
                   mailboxCapability={mailboxCapability}
+                  targetMessageId={targetMessageId}
                   fill={fill}
                 />
               )}
@@ -914,6 +917,7 @@ export function MessagesPage() {
                   }}
                   mailbox={mailbox}
                   mailboxCapability={mailboxCapability}
+                  targetMessageId={targetMessageId}
                   fill={fill}
                 />
               )}
@@ -1387,6 +1391,7 @@ function ActiveContactPane({
   onSent,
   mailbox,
   mailboxCapability,
+  targetMessageId,
   fill = false,
 }: {
   tenantId: string;
@@ -1396,11 +1401,13 @@ function ActiveContactPane({
   onSent: () => void;
   mailbox: ConnectedMailbox;
   mailboxCapability: LiveMailboxCapability | null;
+  targetMessageId?: string;
   fill?: boolean;
 }) {
   const { user: authenticatedUser } = useAuth();
   const [busy, setBusy] = useState(false);
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
+  const [draftSeed, setDraftSeed] = useState<ComposerDraftSeed | null>(null);
   const [previewDocument, setPreviewDocument] = useState<Document | null>(null);
   const [deliveryNotice, setDeliveryNotice] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -1428,6 +1435,15 @@ function ActiveContactPane({
         ).length
     : 0;
   useAnchoredMessageScroll(scrollRef, scrollContentRef, [contact?.id, fill, msgCount]);
+  useEffect(() => {
+    if (!contact || !targetMessageId) return;
+    const draft = api.communications
+      .listByTenant(tenantId)
+      .find((row) => row.id === targetMessageId && row.deliveryStatus === "draft");
+    if (!draft) return;
+    setDraftSeed(draftSeedForRow(draft));
+    setReplyTarget(replyTargetForDraftRow(draft));
+  }, [contact?.id, contact?.kind, targetMessageId, tenantId]);
   if (!contact) {
     return (
       <div className={`rounded-md border border-dashed border-ink-200 text-sm text-ink-400 p-4 text-center flex items-center justify-center ${fill ? "h-full" : ""}`}>
@@ -1528,6 +1544,10 @@ function ActiveContactPane({
         setDeliveryNotice("Delivered to the client portal. External email was not available.");
       }
       setReplyTarget(null);
+      if (draftSeed) {
+        api.communications.remove(draftSeed.id);
+        setDraftSeed(null);
+      }
       onSent();
     } finally {
       setBusy(false);
@@ -1628,9 +1648,11 @@ function ActiveContactPane({
                     {ai && <Bot className="h-3 w-3 text-violet-600" />}
                     {fromCustomer
                       ? "Inbound"
-                      : isOutboundComm
-                      ? "You"
-                      : "AI send"}
+                      : r.kind === "comm" && r.row.deliveryStatus === "draft"
+                        ? "AI draft"
+                        : isOutboundComm
+                          ? "You"
+                          : "AI send"}
                     {" - "}
                     {String(channelChip).toUpperCase()}
                     {" - "}
@@ -1683,10 +1705,21 @@ function ActiveContactPane({
                   <div className="mt-1 flex flex-wrap items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => setReplyTarget(replyTargetForRow(r.row))}
+                      onClick={() => {
+                        if (r.kind === "comm" && r.row.deliveryStatus === "draft") {
+                          setDraftSeed(draftSeedForRow(r.row));
+                          setReplyTarget(replyTargetForDraftRow(r.row));
+                        } else {
+                          setDraftSeed(null);
+                          setReplyTarget(replyTargetForRow(r.row));
+                        }
+                      }}
                       className="inline-flex items-center gap-1 text-[10px] text-ink-500 hover:text-ink-800"
                     >
-                      <Reply className="h-3 w-3" /> Reply
+                      <Reply className="h-3 w-3" />
+                      {r.kind === "comm" && r.row.deliveryStatus === "draft"
+                        ? "Review draft"
+                        : "Reply"}
                     </button>
                     <a
                       href={mailboxUrlForContact(mailbox, contact, r.row)}
@@ -1732,7 +1765,11 @@ function ActiveContactPane({
       )}
       <MessageComposer
         replyTarget={replyTarget}
-        onCancelReply={() => setReplyTarget(null)}
+        draftSeed={draftSeed}
+        onCancelReply={() => {
+          setReplyTarget(null);
+          setDraftSeed(null);
+        }}
         onSend={send}
         busy={busy}
         contactName={contact.name}
@@ -1766,6 +1803,24 @@ function replyTargetForRow(row: Communication | MarketingMessage): ReplyTarget {
     externalThreadId: comm?.externalThreadId,
     replyToMessageIdHeader: comm?.messageIdHeader ?? comm?.externalMessageId,
     references,
+  };
+}
+
+function draftSeedForRow(row: Communication): ComposerDraftSeed {
+  return {
+    id: row.id,
+    body: row.body,
+    subject: row.subject,
+    attachments: row.attachments,
+  };
+}
+
+function replyTargetForDraftRow(row: Communication): ReplyTarget {
+  const target = replyTargetForRow(row);
+  return {
+    ...target,
+    replyToId: row.replyToId ?? row.id,
+    replyToMessageIdHeader: row.inReplyToHeader ?? target.replyToMessageIdHeader,
   };
 }
 

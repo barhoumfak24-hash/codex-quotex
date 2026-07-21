@@ -1143,11 +1143,11 @@ function NotificationsList({
       title: n.title.replace(/^Notification:\s*/i, ""),
       detail: n.summary,
       href: n.customerId
-        ? `/employee/messages?contact=client:${n.customerId}`
+        ? `/employee/messages?contact=client:${n.customerId}${n.messageId ? `&msg=${encodeURIComponent(n.messageId)}` : ""}`
         : n.prospectId
-        ? `/employee/messages?contact=prospect:${n.prospectId}`
+        ? `/employee/messages?contact=prospect:${n.prospectId}${n.messageId ? `&msg=${encodeURIComponent(n.messageId)}` : ""}`
         : comm?.carrierContactId
-        ? `/employee/messages?contact=carrier:${comm.carrierContactId}`
+        ? `/employee/messages?contact=carrier:${comm.carrierContactId}${n.messageId ? `&msg=${encodeURIComponent(n.messageId)}` : ""}`
         : "/employee/messages",
       urgency: n.severity ?? "info",
       onOpen: () => api.aiNotifications.dismiss(n.id, userId),

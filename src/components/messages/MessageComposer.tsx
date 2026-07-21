@@ -41,18 +41,27 @@ export interface ComposedMessage {
   attachments?: CommunicationAttachment[];
 }
 
+export interface ComposerDraftSeed {
+  id: string;
+  body: string;
+  subject?: string;
+  attachments?: CommunicationAttachment[];
+}
+
 export function newThreadId(): string {
   return `thread_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export function MessageComposer({
   replyTarget,
+  draftSeed,
   onCancelReply,
   onSend,
   busy,
   contactName,
 }: {
   replyTarget: ReplyTarget | null;
+  draftSeed?: ComposerDraftSeed | null;
   onCancelReply: () => void;
   onSend: (msg: ComposedMessage) => void;
   busy?: boolean;
@@ -66,12 +75,31 @@ export function MessageComposer({
   const [enhancing, setEnhancing] = useState(false);
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const loadedDraftIdRef = useRef<string | null>(null);
 
   // When a reply target is set the subject is fixed; clear the manual
   // subject draft so it doesn't leak into the next new chat.
   useEffect(() => {
     if (replyTarget) setSubject("");
   }, [replyTarget]);
+
+  useEffect(() => {
+    if (!draftSeed) {
+      if (loadedDraftIdRef.current) {
+        loadedDraftIdRef.current = null;
+        setBody("");
+        setSubject("");
+        setAttachments([]);
+      }
+      return;
+    }
+    loadedDraftIdRef.current = draftSeed.id;
+    setBody(draftSeed.body);
+    setSubject(draftSeed.subject ?? "");
+    setAttachments(draftSeed.attachments ?? []);
+    const frame = window.requestAnimationFrame(() => taRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [draftSeed]);
 
   // Auto-grow the textarea downward as the draft gets longer (the box
   // stays a fixed width; only its height tracks the content). Capped
@@ -172,7 +200,9 @@ export function MessageComposer({
         <div className="flex items-center justify-between gap-3 rounded-full border border-blue-300 bg-blue-50 pl-4 pr-2 py-2 text-sm text-blue-800 shadow-sm">
           <span className="inline-flex items-center gap-2 min-w-0">
             <Reply className="h-4 w-4 shrink-0 text-blue-600" />
-            <span className="font-semibold shrink-0">Replying to</span>
+            <span className="font-semibold shrink-0">
+              {draftSeed ? "AI draft ready" : "Replying to"}
+            </span>
             <span className="truncate text-blue-700">{replyTarget!.toSummary}</span>
           </span>
           <button
