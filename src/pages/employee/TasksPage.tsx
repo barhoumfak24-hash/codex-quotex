@@ -180,6 +180,7 @@ export function TasksPage() {
     if (!agency || !user) return;
     api.aiNotifications.autoPromote(agency.id, user.id);
     api.renewals.ensureActivities(agency.id);
+    api.routing.reconcileAccountWorkOwnership(agency.id);
     // AI triage of inbound messages opens activities only for owned work.
     api.communications.sweepInboundForActivities(agency.id, user.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -229,6 +230,7 @@ export function TasksPage() {
         c.assignedAgentId,
         ...(c.additionalAgentIds ?? []),
         c.assignedCsrId,
+        ...(c.additionalCsrIds ?? []),
       ]);
     }
     if (row.prospectId) {
@@ -237,6 +239,7 @@ export function TasksPage() {
         p.assignedAgentId,
         ...(p.additionalAgentIds ?? []),
         p.assignedCsrId,
+        ...(p.additionalCsrIds ?? []),
       ]);
     }
     return [];
@@ -309,17 +312,17 @@ export function TasksPage() {
   );
 
   // Manager-only routing surface: prospects + clients in the
-  // tenant with no assigned agent. The manager can assign each
+  // tenant with no active assigned staff member. The manager can assign each
   // one to a specific agent (or themselves) inline.
   const unroutedProspects = isManager
     ? api.prospects
         .listByTenant(agency.id)
-        .filter((p) => !p.assignedAgentId)
+        .filter((prospect) => !api.routing.hasAssignedOwner("prospect", prospect.id))
     : [];
   const unroutedClients = isManager
     ? api.customers
         .list(agency.id)
-        .filter((c) => !c.assignedAgentId)
+        .filter((customer) => !api.routing.hasAssignedOwner("client", customer.id))
     : [];
   // Activities an agent handed to a manager to assign — surfaced
   // tenant-wide in the Routing card so any manager can pick them up.
@@ -339,11 +342,13 @@ export function TasksPage() {
       if (session.customerId && !api.customers.canSee(customer, viewer)) return null;
       if (session.prospectId && !prospect) return null;
       if (session.prospectId && !api.prospects.canSee(prospect, viewer)) return null;
-      const ownerIds = effectiveOwnerIds({
-        assignedToId: session.createdById,
+      const accountOwnerIds = contactOwnerIds({
         customerId: session.customerId,
         prospectId: session.prospectId,
       });
+      const ownerIds = accountOwnerIds.length > 0
+        ? accountOwnerIds
+        : effectiveOwnerIds({ assignedToId: session.createdById });
       const ownerLabel =
         ownerIds
           .map((id) => api.users.get(id)?.name)
@@ -404,10 +409,10 @@ export function TasksPage() {
     .map((quote): QuotingWorkflowRow | null => {
       const customer = api.customers.get(quote.customerId);
       if (!api.customers.canSee(customer, viewer)) return null;
-      const ownerIds = effectiveOwnerIds({
-        assignedToId: quote.assignedAgentId ?? customer?.assignedAgentId,
-        customerId: quote.customerId,
-      });
+      const accountOwnerIds = contactOwnerIds({ customerId: quote.customerId });
+      const ownerIds = accountOwnerIds.length > 0
+        ? accountOwnerIds
+        : effectiveOwnerIds({ assignedToId: quote.assignedAgentId });
       const ownerLabel =
         ownerIds
           .map((id) => api.users.get(id)?.name)

@@ -144,6 +144,157 @@ describe("auto routing", () => {
   });
 });
 
+describe("account ownership inheritance", () => {
+  it("does not route a new client away from an existing CSR assignment", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const csr = api.users.create({
+      tenantId: agency.id,
+      role: "csr",
+      email: "account-csr@example.com",
+      name: "Account CSR",
+    });
+    const login = api.users.create({
+      tenantId: agency.id,
+      role: "customer",
+      email: "csr-owned-client@example.com",
+      name: "CSR Owned Client",
+    });
+
+    const client = api.customers.create({
+      tenantId: agency.id,
+      userId: login.id,
+      name: login.name,
+      email: login.email,
+      lineOfBusiness: "personal",
+      assignedCsrId: csr.id,
+      marketingOptInEmail: false,
+      marketingOptInSms: false,
+    });
+
+    expect(client.assignedAgentId).toBeUndefined();
+    expect(client.assignedCsrId).toBe(csr.id);
+    expect(api.routing.hasAssignedOwner("client", client.id)).toBe(true);
+    expect(
+      api.tasks
+        .listByTenant(agency.id)
+        .some((task) => task.customerId === client.id && /new client assigned/i.test(task.title))
+    ).toBe(false);
+  });
+
+  it("does not silently route an existing ownerless account when its profile is edited", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const login = api.users.create({
+      tenantId: agency.id,
+      role: "customer",
+      email: "existing-unassigned@example.com",
+      name: "Existing Unassigned",
+    });
+    const client = api.customers.create({
+      tenantId: agency.id,
+      userId: login.id,
+      name: login.name,
+      email: login.email,
+      marketingOptInEmail: false,
+      marketingOptInSms: false,
+      skipAutoRoute: true,
+    });
+
+    const updated = api.customers.update(client.id, { lineOfBusiness: "commercial" });
+
+    expect(updated?.assignedAgentId).toBeUndefined();
+    expect(api.routing.hasAssignedOwner("client", client.id)).toBe(false);
+    expect(
+      api.tasks
+        .listByTenant(agency.id)
+        .some((task) => task.customerId === client.id && /new client assigned/i.test(task.title))
+    ).toBe(false);
+  });
+
+  it("assigns account-linked activities to every staff member handling the account", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((user) => user.role === "manager")!;
+    const agent = api.users.list(agency.id).find((user) => user.role === "agent")!;
+    const csr = api.users.create({
+      tenantId: agency.id,
+      role: "csr",
+      email: "shared-account-csr@example.com",
+      name: "Shared Account CSR",
+    });
+    const login = api.users.create({
+      tenantId: agency.id,
+      role: "customer",
+      email: "shared-account@example.com",
+      name: "Shared Account",
+    });
+    const client = api.customers.create({
+      tenantId: agency.id,
+      userId: login.id,
+      name: login.name,
+      email: login.email,
+      assignedAgentId: manager.id,
+      additionalAgentIds: [agent.id],
+      assignedCsrId: csr.id,
+      marketingOptInEmail: false,
+      marketingOptInSms: false,
+    });
+
+    const task = api.tasks.create({
+      tenantId: agency.id,
+      title: "Account-linked follow-up",
+      customerId: client.id,
+      createdById: manager.id,
+    });
+
+    expect(task.assignedToId).toBe(manager.id);
+    expect(new Set(task.additionalAssignedToIds)).toEqual(new Set([agent.id, csr.id]));
+    expect(task.awaitingManagerAssignment).not.toBe(true);
+  });
+
+  it("repairs existing AI work so it follows the account owner instead of routing", async () => {
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((user) => user.role === "manager")!;
+    const wrongAgent = api.users.list(agency.id).find((user) => user.role === "agent")!;
+    const login = api.users.create({
+      tenantId: agency.id,
+      role: "customer",
+      email: "repair-owner@example.com",
+      name: "Repair Owner",
+    });
+    const client = api.customers.create({
+      tenantId: agency.id,
+      userId: login.id,
+      name: login.name,
+      email: login.email,
+      assignedAgentId: manager.id,
+      marketingOptInEmail: false,
+      marketingOptInSms: false,
+    });
+    db.insert("tasks", {
+      id: "task_wrong_owner",
+      tenantId: agency.id,
+      title: "Existing AI follow-up",
+      customerId: client.id,
+      source: "ai_notification",
+      status: "open",
+      assignedToId: wrongAgent.id,
+      awaitingManagerAssignment: true,
+      createdAt: new Date().toISOString(),
+    });
+
+    expect(api.routing.reconcileAccountWorkOwnership(agency.id)).toBeGreaterThan(0);
+    const repaired = api.tasks
+      .listByTenant(agency.id)
+      .find((task) => task.id === "task_wrong_owner");
+    expect(repaired?.assignedToId).toBe(manager.id);
+    expect(repaired?.awaitingManagerAssignment).toBe(false);
+  });
+});
+
 describe("prospects.assignAgent — routing surfaces in the Activity Center", () => {
   it("assigning an unrouted prospect spawns a follow-up task on the agent's queue", async () => {
     const { api } = await import("../api");

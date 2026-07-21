@@ -59,9 +59,10 @@ export function EmployeeDashboard() {
   useEffect(() => {
     if (!agency || !user) return;
     const celebrated = sweepGoalAchievements(agency.id);
+    const reassigned = api.routing.reconcileAccountWorkOwnership(agency.id);
     // AI triage of inbound messages opens activities only for owned work.
     const triaged = api.communications.sweepInboundForActivities(agency.id, user.id);
-    if (celebrated.length > 0 || triaged.length > 0) refresh();
+    if (celebrated.length > 0 || reassigned > 0 || triaged.length > 0) refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agency?.id, user?.id]);
   const navigate = useNavigate();
@@ -130,10 +131,14 @@ export function EmployeeDashboard() {
     (r.additionalAssignedToIds ?? []).includes(viewer.id);
   const isManager = isRoutingManagerRole(user.role);
   const routingProspects = isManager
-    ? api.prospects.listByTenant(agency.id).filter((p) => !p.assignedAgentId)
+    ? api.prospects
+        .listByTenant(agency.id)
+        .filter((prospect) => !api.routing.hasAssignedOwner("prospect", prospect.id))
     : [];
   const routingClients = isManager
-    ? api.customers.list(agency.id).filter((c) => !c.assignedAgentId)
+    ? api.customers
+        .list(agency.id)
+        .filter((customer) => !api.routing.hasAssignedOwner("client", customer.id))
     : [];
   const routingProspectIds = new Set(routingProspects.map((p) => p.id));
   const routingClientIds = new Set(routingClients.map((c) => c.id));

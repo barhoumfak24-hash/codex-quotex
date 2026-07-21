@@ -1711,6 +1711,63 @@ function contactIsOwnedBy(
   return !!userId && contactOwnerIds(row).includes(userId);
 }
 
+type ContactOwnership = {
+  tenantId: string;
+  assignedAgentId?: string;
+  additionalAgentIds?: string[];
+  assignedCsrId?: string;
+  additionalCsrIds?: string[];
+};
+
+function assignedContactOwners(row?: ContactOwnership | null): string[] {
+  if (!row) return [];
+  return contactOwnerIds(row).filter((ownerId) => {
+    const owner = db
+      .list("users")
+      .find((user) => user.id === ownerId && user.tenantId === row.tenantId);
+    return (
+      !!owner &&
+      owner.active !== false &&
+      owner.staffAccessStatus !== "banned" &&
+      owner.staffAccessStatus !== "deleted" &&
+      isRoutableStaffRole(owner.role)
+    );
+  });
+}
+
+function assignedContactOwner(row?: ContactOwnership | null): string | undefined {
+  return assignedContactOwners(row)[0];
+}
+
+function linkedContactOwners(input: {
+  tenantId: string;
+  customerId?: string;
+  prospectId?: string;
+}): string[] {
+  const contact = input.customerId
+    ? db
+        .list("customers")
+        .find((row) => row.id === input.customerId && row.tenantId === input.tenantId)
+    : input.prospectId
+      ? db
+          .list("prospects")
+          .find((row) => row.id === input.prospectId && row.tenantId === input.tenantId)
+      : undefined;
+  return assignedContactOwners(contact);
+}
+
+function linkedContactOwner(input: {
+  tenantId: string;
+  customerId?: string;
+  prospectId?: string;
+}): string | undefined {
+  return linkedContactOwners(input)[0];
+}
+
+function hasContactAssignment(row: ContactOwnership): boolean {
+  return contactOwnerIds(row).length > 0;
+}
+
 type ContactLineOfBusiness = "personal" | "commercial";
 
 type AutoRoutableContact = {
@@ -2943,6 +3000,7 @@ function createActionTaskOnce(input: {
   severity?: TaskSeverity;
   severityReason?: string;
   assignedToId?: string;
+  additionalAssignedToIds?: string[];
   awaitingManagerAssignment?: boolean;
   createdById?: string;
   createdAt?: string;
@@ -2959,6 +3017,20 @@ function createActionTaskOnce(input: {
         t.status !== "resolved"
     );
   if (existing) return existing;
+  const inheritedOwnerIds = input.assignedToId
+    ? []
+    : linkedContactOwners({
+      tenantId: input.tenantId,
+      customerId: input.customerId,
+      prospectId: input.prospectId,
+    });
+  const assignedToId = input.assignedToId ?? inheritedOwnerIds[0];
+  const additionalAssignedToIds =
+    input.additionalAssignedToIds ??
+    (!input.assignedToId && inheritedOwnerIds.length > 1
+      ? inheritedOwnerIds.slice(1)
+      : undefined);
+  const linkedToContact = !!input.customerId || !!input.prospectId;
   const row: Task = {
     id: uid("task"),
     tenantId: input.tenantId,
@@ -2980,8 +3052,10 @@ function createActionTaskOnce(input: {
     severity: input.severity ?? "warning",
     severityReason: input.severityReason,
     status: "open",
-    assignedToId: input.assignedToId,
-    awaitingManagerAssignment: input.awaitingManagerAssignment,
+    assignedToId,
+    additionalAssignedToIds,
+    awaitingManagerAssignment:
+      input.awaitingManagerAssignment ?? (linkedToContact && !assignedToId ? true : undefined),
     createdById: input.createdById ?? "ai",
     createdAt: input.createdAt ?? nowIso(),
   };
@@ -3105,11 +3179,23 @@ function quoteSessionContact(session: Pick<QuotingSession, "customerId" | "prosp
   return { name: "Client" };
 }
 
-function quoteSessionAssignedStaff(session: Pick<QuotingSession, "createdById" | "customerId" | "prospectId">): string | undefined {
+function quoteSessionAssignedStaffIds(
+  session: Pick<QuotingSession, "tenantId" | "createdById" | "customerId" | "prospectId">
+): string[] {
+  const accountOwners = linkedContactOwners({
+    tenantId: session.tenantId,
+    customerId: session.customerId,
+    prospectId: session.prospectId,
+  });
+  if (accountOwners.length > 0) return accountOwners;
   const creator = db.list("users").find((u) => u.id === session.createdById);
-  if (creator && isStaffRole(creator.role)) return creator.id;
-  const contact = quoteSessionContact(session);
-  return contact.assignedAgentId ?? contact.assignedCsrId;
+  return creator && isStaffRole(creator.role) ? [creator.id] : [];
+}
+
+function quoteSessionAssignedStaff(
+  session: Pick<QuotingSession, "tenantId" | "createdById" | "customerId" | "prospectId">
+): string | undefined {
+  return quoteSessionAssignedStaffIds(session)[0];
 }
 
 function quoteMilestoneKey(sessionId: string, milestone: string): string {
@@ -3128,6 +3214,7 @@ function createQuoteMilestoneTask(
     auditAction?: string;
   }
 ): Task {
+  const [assignedToId, ...additionalAssignedToIds] = quoteSessionAssignedStaffIds(session);
   return createActionTaskOnce({
     tenantId: session.tenantId,
     activityKey: quoteMilestoneKey(session.id, input.milestone),
@@ -3141,7 +3228,9 @@ function createQuoteMilestoneTask(
     topic: "other",
     severity: input.severity ?? "warning",
     severityReason: input.severityReason,
-    assignedToId: quoteSessionAssignedStaff(session),
+    assignedToId,
+    additionalAssignedToIds:
+      additionalAssignedToIds.length > 0 ? additionalAssignedToIds : undefined,
     createdById: input.createdById ?? "ai",
     auditAction: input.auditAction ?? "task.created_from_quote_milestone",
     auditMetadata: { quoteSessionId: session.id, quoteRequestId: session.quoteRequestId, milestone: input.milestone },
@@ -3223,7 +3312,7 @@ function policyRef(policy?: Pick<Policy, "policyNumber" | "id"> | null): string 
 }
 
 function primaryOwnerForCustomer(customer?: CustomerProfile | null): string | undefined {
-  return customer?.assignedAgentId ?? customer?.assignedCsrId;
+  return assignedContactOwner(customer);
 }
 
 function customerForPolicy(policy?: Policy | null): CustomerProfile | undefined {
@@ -10005,7 +10094,7 @@ export const api = {
       input: Omit<CustomerProfile, "id" | "createdAt"> & { skipAutoRoute?: boolean }
     ): CustomerProfile {
       const { skipAutoRoute, ...customerInput } = input;
-      const autoAgent = !customerInput.assignedAgentId && !skipAutoRoute
+      const autoAgent = !hasContactAssignment(customerInput) && !skipAutoRoute
         ? chooseAutoRouteAgent(customerInput.tenantId, contactLine(customerInput))
         : undefined;
       const row: CustomerProfile = {
@@ -10030,33 +10119,7 @@ export const api = {
       return row;
     },
     update(id: string, patch: Partial<CustomerProfile>) {
-      const before = db.list("customers").find((c) => c.id === id);
-      if (!before) return undefined;
-      const shouldAutoRoute =
-        !before.assignedAgentId &&
-        !patch.assignedAgentId &&
-        !!patch.lineOfBusiness;
-      const autoAgent = shouldAutoRoute
-        ? chooseAutoRouteAgent(before.tenantId, contactLine(patch))
-        : undefined;
-      const nextPatch: Partial<CustomerProfile> = { ...patch };
-      if (patch.assignedAgentId || autoAgent) {
-        nextPatch.assignedAgentId = patch.assignedAgentId ?? autoAgent?.id;
-      }
-      const updated = db.update("customers", id, nextPatch);
-      if (updated && autoAgent) {
-        spawnRoutingTask(updated, autoAgent.id, "ai");
-        logContactRoutingEvent({
-          tenantId: updated.tenantId,
-          kind: "client",
-          contactId: updated.id,
-          contactName: updated.name,
-          before,
-          after: updated,
-          byUserId: "ai",
-        });
-      }
-      return updated;
+      return db.update("customers", id, patch);
     },
     // Routing transition for an existing client. Mirrors
     // prospects.assignAgent: when a client goes from unassigned →
@@ -10067,7 +10130,7 @@ export const api = {
     assignAgent(id: string, agentId: string, byUserId?: string) {
       const before = db.list("customers").find((c) => c.id === id);
       const updated = db.update("customers", id, { assignedAgentId: agentId });
-      if (updated && !before?.assignedAgentId && agentId) {
+      if (updated && before && !hasContactAssignment(before) && agentId) {
         spawnRoutingTask(updated, agentId, byUserId);
       }
       if (before && updated) {
@@ -10307,6 +10370,13 @@ export const api = {
     }): QuoteRequest {
       const touchedAt = nowIso();
       const customer = db.list("customers").find((c) => c.id === input.customerId);
+      const inheritedOwnerIds = assignedContactOwners(customer);
+      const assignedAgentId = input.assignedAgentId ?? inheritedOwnerIds[0];
+      const additionalAssignedToIds = input.assignedAgentId
+        ? undefined
+        : inheritedOwnerIds.length > 1
+          ? inheritedOwnerIds.slice(1)
+          : undefined;
       const contactName = input.contactName.trim() || customer?.name || "Customer";
       const firstName = contactName.split(/\s+/)[0] || "there";
       const categoryLabel = input.categoryLabel ?? quoteStatusLabel("quote_started");
@@ -10356,7 +10426,9 @@ export const api = {
           aiSummary: description,
           aiReplySubject: subject,
           aiReplyBody: body,
-          assignedToId: input.assignedAgentId,
+          assignedToId: assignedAgentId,
+          additionalAssignedToIds,
+          awaitingManagerAssignment: assignedAgentId ? false : true,
           severityReason: `Customer quote is ${Math.max(
             0,
             Math.min(100, input.completionPercent)
@@ -10380,7 +10452,9 @@ export const api = {
           aiSummary: description,
           aiReplySubject: subject,
           aiReplyBody: body,
-          assignedToId: input.assignedAgentId,
+          assignedToId: assignedAgentId,
+          additionalAssignedToIds,
+          awaitingManagerAssignment: assignedAgentId ? undefined : true,
           createdById: input.createdById ?? "ai",
           expressQuoteFollowUp: true,
           createdAt: touchedAt,
@@ -10411,7 +10485,7 @@ export const api = {
         parsedData,
         missingDocuments: [],
         status: "quote_started",
-        assignedAgentId: input.assignedAgentId,
+        assignedAgentId,
         currentStep: input.currentStep,
         completionPercent: Math.max(0, Math.min(100, input.completionPercent)),
         lastTouchedAt: touchedAt,
@@ -11242,7 +11316,7 @@ export const api = {
     },
     create(input: Omit<Prospect, "id" | "createdAt"> & { skipAutoRoute?: boolean }): Prospect {
       const { skipAutoRoute, ...prospectInput } = input;
-      const autoAgent = !prospectInput.assignedAgentId && !skipAutoRoute
+      const autoAgent = !hasContactAssignment(prospectInput) && !skipAutoRoute
         ? chooseAutoRouteAgent(prospectInput.tenantId, contactLine(prospectInput))
         : undefined;
       const row: Prospect = {
@@ -11307,7 +11381,7 @@ export const api = {
       // When a prospect goes from unassigned → assigned (the
       // routing transition), spawn an Activity Center task on the
       // new agent's queue so they actually see the new work.
-      if (updated && !before?.assignedAgentId && agentId) {
+      if (updated && before && !hasContactAssignment(before) && agentId) {
         spawnProspectRoutingTask(updated, agentId, byUserId);
       }
       if (before && updated) {
@@ -14563,7 +14637,7 @@ export const api = {
           contactKind,
         });
         const patch: Partial<Communication> = { aiActivityScannedAt: nowIso() };
-        const assignedToId = customer?.assignedAgentId ?? prospect?.assignedAgentId;
+        const assignedToId = assignedContactOwner(customer ?? prospect);
         if (triage.disposition === "activity") {
           // Carrier messages (and any unowned contact) route to a
           // manager via the Routing card.
@@ -14975,6 +15049,65 @@ export const api = {
 
   // ------------ Contact routing requests ------------
   routing: {
+    hasAssignedOwner(kind: "client" | "prospect", targetId: string): boolean {
+      const contact =
+        kind === "client"
+          ? db.list("customers").find((row) => row.id === targetId)
+          : db.list("prospects").find((row) => row.id === targetId);
+      return !!assignedContactOwner(contact);
+    },
+    reconcileAccountWorkOwnership(tenantId: string): number {
+      let changed = 0;
+      db
+        .list("tasks")
+        .filter(
+          (task) =>
+            task.tenantId === tenantId &&
+            !task.completedAt &&
+            task.status !== "resolved" &&
+            !task.routeRequestKind &&
+            (!!task.customerId || !!task.prospectId)
+        )
+        .forEach((task) => {
+          const ownerIds = linkedContactOwners({
+            tenantId,
+            customerId: task.customerId,
+            prospectId: task.prospectId,
+          });
+          const [ownerId, ...additionalOwnerIds] = ownerIds;
+          if (!ownerId) return;
+          const shouldInheritOwner =
+            !task.assignedToId || task.awaitingManagerAssignment || task.source === "ai_notification";
+          if (!shouldInheritOwner) return;
+          if (task.assignedToId === ownerId && !task.awaitingManagerAssignment) return;
+          db.update("tasks", task.id, {
+            assignedToId: ownerId,
+            additionalAssignedToIds:
+              additionalOwnerIds.length > 0 ? additionalOwnerIds : undefined,
+            awaitingManagerAssignment: false,
+          });
+          changed += 1;
+        });
+      db
+        .list("aiNotifications")
+        .filter(
+          (notification) =>
+            notification.tenantId === tenantId &&
+            !notification.acknowledgedAt &&
+            (!!notification.customerId || !!notification.prospectId)
+        )
+        .forEach((notification) => {
+          const ownerId = linkedContactOwner({
+            tenantId,
+            customerId: notification.customerId,
+            prospectId: notification.prospectId,
+          });
+          if (!ownerId || notification.assignedToId === ownerId) return;
+          db.update("aiNotifications", notification.id, { assignedToId: ownerId });
+          changed += 1;
+        });
+      return changed;
+    },
     findOpenContactRouteRequest(
       kind: "client" | "prospect",
       targetId: string
@@ -15723,6 +15856,15 @@ export const api = {
           );
         }
       }
+      const inheritedOwnerIds = input.assignedToId
+        ? []
+        : linkedContactOwners({
+          tenantId: input.tenantId,
+          customerId: input.customerId,
+          prospectId: input.prospectId,
+        });
+      const assignedToId = input.assignedToId ?? inheritedOwnerIds[0];
+      const linkedToContact = !!input.customerId || !!input.prospectId;
       const row: Task = {
         id: uid("task"),
         tenantId: input.tenantId,
@@ -15731,13 +15873,18 @@ export const api = {
         customerId: input.customerId,
         prospectId: input.prospectId,
         policyId: input.policyId,
-        assignedToId: input.assignedToId,
+        assignedToId,
+        additionalAssignedToIds:
+          !input.assignedToId && inheritedOwnerIds.length > 1
+            ? inheritedOwnerIds.slice(1)
+            : undefined,
         topic: input.topic,
         source: "manual",
         status: "open",
         severity: input.severity ?? "info",
         severityReason: input.severityReason,
-        awaitingManagerAssignment: input.awaitingManagerAssignment,
+        awaitingManagerAssignment:
+          input.awaitingManagerAssignment ?? (linkedToContact && !assignedToId ? true : undefined),
         renewalId: input.renewalId,
         createdById: input.createdById,
         createdAt: nowIso(),
@@ -15955,6 +16102,10 @@ export const api = {
       createdById?: string;
     }): Task {
       const taskId = uid("task");
+      const inheritedOwnerIds = input.assignedToId
+        ? []
+        : linkedContactOwners({ tenantId: input.tenantId, customerId: input.customerId });
+      const assignedToId = input.assignedToId ?? inheritedOwnerIds[0];
       const row: Task = {
         id: taskId,
         tenantId: input.tenantId,
@@ -15971,7 +16122,12 @@ export const api = {
         aiSummary: input.aiSummary,
         aiReplyBody: input.aiReplyBody,
         aiReplySubject: input.aiReplySubject,
-        assignedToId: input.assignedToId,
+        assignedToId,
+        additionalAssignedToIds:
+          !input.assignedToId && inheritedOwnerIds.length > 1
+            ? inheritedOwnerIds.slice(1)
+            : undefined,
+        awaitingManagerAssignment: assignedToId ? undefined : true,
         createdById: input.createdById,
         expressQuoteFollowUp: true,
         createdAt: nowIso(),
@@ -19619,8 +19775,10 @@ export const api = {
         const customer = d.customerId
           ? db.list("customers").find((c) => c.id === d.customerId)
           : null;
-        const assignedToId =
-          d.agentEsignAssignedToId ?? customer?.assignedAgentId ?? undefined;
+        const inheritedOwnerIds = d.agentEsignAssignedToId
+          ? []
+          : assignedContactOwners(customer);
+        const assignedToId = d.agentEsignAssignedToId ?? inheritedOwnerIds[0];
         const taskId = uid("task");
         const taskRow: Task = {
           id: taskId,
@@ -19635,6 +19793,11 @@ export const api = {
           severityReason: "Document waiting on agent e-signature.",
           status: "open",
           assignedToId,
+          additionalAssignedToIds:
+            !d.agentEsignAssignedToId && inheritedOwnerIds.length > 1
+              ? inheritedOwnerIds.slice(1)
+              : undefined,
+          awaitingManagerAssignment: assignedToId ? undefined : true,
           createdById: actorId,
           createdAt: nowIso(),
         };
