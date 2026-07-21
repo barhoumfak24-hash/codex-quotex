@@ -12,11 +12,68 @@ import { readRemoteState } from "../services/supabaseState.js";
 export const stateBlobRoutes = Router();
 
 const MAX_STATE_BLOB_BYTES = 3 * 1024 * 1024;
+const MAX_DIRECT_STATE_BLOB_BYTES = 50 * 1024 * 1024;
 const DEFAULT_BUCKET = "quotex-app-blobs";
 
 const stateBlobPayloadSchema = z.object({
   dataUrl: z.string().min(1),
   contentType: z.string().min(1).optional(),
+});
+
+const stateBlobUploadUrlSchema = z.object({
+  contentType: z.string().min(1).max(200),
+  sizeBytes: z.number().int().positive().max(MAX_DIRECT_STATE_BLOB_BYTES),
+});
+
+stateBlobRoutes.post("/upload-url", async (req, res, next) => {
+  try {
+    res.set("Cache-Control", "no-store, max-age=0");
+    const access = stateBlobAccess(req);
+    if (!access) return res.status(401).json({ error: "unauthorized" });
+    if (!canAccessAgencyStateForAuth(access.auth)) return res.status(403).json({ error: "forbidden" });
+    if (!supabaseStorageConfigured()) {
+      return res.status(503).json({ error: "state_blob_storage_not_configured" });
+    }
+
+    const parsed = stateBlobUploadUrlSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: "invalid_state_blob_upload", details: parsed.error.flatten() });
+    }
+
+    const key = `${blobScopeKey(access)}/${new Date().toISOString().slice(0, 10)}/${randomUUID()}.${extensionForContentType(parsed.data.contentType)}`;
+    const signed = await fetch(
+      `${supabaseUrl()}/storage/v1/object/upload/sign/${stateBlobBucket()}/${key}`,
+      {
+        method: "POST",
+        headers: {
+          apikey: supabaseKey(),
+          authorization: `Bearer ${supabaseKey()}`,
+          "content-type": "application/json",
+          "x-upsert": "false",
+        },
+        body: "{}",
+      }
+    );
+    const payload = (await signed.json().catch(() => null)) as { url?: string; error?: string; message?: string } | null;
+    if (!signed.ok || !payload?.url) {
+      return res.status(502).json({
+        error: "state_blob_upload_url_failed",
+        details: String(payload?.error || payload?.message || signed.status).slice(0, 300),
+      });
+    }
+
+    return res.json({
+      ok: true,
+      ref: `blob:${key}`,
+      key,
+      contentType: parsed.data.contentType,
+      sizeBytes: parsed.data.sizeBytes,
+      uploadUrl: absoluteSupabaseStorageUrl(payload.url),
+      maxBytes: MAX_DIRECT_STATE_BLOB_BYTES,
+    });
+  } catch (error) {
+    next(error);
+  }
 });
 
 stateBlobRoutes.post("/", async (req, res, next) => {
@@ -163,6 +220,12 @@ function stateBlobBucket(): string {
 
 function supabaseStorageConfigured(): boolean {
   return Boolean(supabaseUrl() && supabaseKey());
+}
+
+function absoluteSupabaseStorageUrl(value: string): string {
+  if (/^https?:\/\//i.test(value)) return value;
+  const path = value.startsWith("/") ? value : `/${value}`;
+  return `${supabaseUrl()}/storage/v1${path}`;
 }
 
 type StateBlobAccess = {

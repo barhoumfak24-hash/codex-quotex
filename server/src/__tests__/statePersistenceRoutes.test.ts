@@ -276,6 +276,30 @@ describe("state persistence routes", () => {
 });
 
 describe("state blob routes", () => {
+  it("creates a short-lived tenant-scoped direct upload URL without exposing the service key", async () => {
+    const supabaseFetch = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toContain("/storage/v1/object/upload/sign/quotex-app-blobs/tenant/");
+      return jsonResponse({ url: "/object/upload/sign/quotex-app-blobs/tenant/scope/file.pdf?token=signed-token" });
+    });
+    installSupabaseFetch(supabaseFetch);
+
+    const response = await requestRoute(stateBlobRoutes, "/upload-url", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        ...authHeaders("agent", "agency_a", "user_a"),
+      },
+      body: JSON.stringify({ contentType: "application/pdf", sizeBytes: 8_000_000 }),
+    });
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as { ref: string; uploadUrl: string; key: string };
+    expect(payload.ref).toBe(`blob:${payload.key}`);
+    expect(payload.key).toMatch(/^tenant\/[a-f0-9]{32}\//);
+    expect(payload.uploadUrl).toContain("token=signed-token");
+    expect(payload.uploadUrl).not.toContain("service-role-test-key");
+  });
+
   it("stores blobs under a tenant-owned key", async () => {
     const supabaseFetch = vi.fn(async () => new Response(null, { status: 200 }));
     installSupabaseFetch(supabaseFetch);

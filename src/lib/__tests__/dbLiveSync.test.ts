@@ -451,19 +451,34 @@ describe("db live sync", () => {
     spy.mockRestore();
   });
 
-  it("does not PUT oversized inline document bytes into the cloud snapshot", async () => {
+  it("moves multi-megabyte document bytes to direct storage before syncing the cloud snapshot", async () => {
     vi.stubEnv("VITE_STATE_SYNC_MODE", "supabase");
-    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
       if ((init?.method ?? "GET") === "GET") {
         return {
           ok: true,
           json: async () => ({ found: true, revision: 1, snapshot: {} }),
         };
       }
+      if (String(url).includes("/state-blobs/upload-url")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            ref: "blob:tenant/test/2026-07-21/document_huge_data_url.pdf",
+            uploadUrl: "https://storage.example.test/signed-upload",
+          }),
+        };
+      }
+      if (String(url) === "https://storage.example.test/signed-upload") {
+        return { ok: true, status: 200 };
+      }
+      const body = JSON.parse(String(init?.body));
       return {
         ok: true,
         status: 200,
-        json: async () => ({ ok: true, revision: 2, snapshot: {} }),
+        json: async () => ({ ok: true, revision: 2, snapshot: body.snapshot }),
       };
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -483,17 +498,19 @@ describe("db live sync", () => {
       createdAt: new Date().toISOString(),
     } as never);
 
-    await wait(850);
+    await db.syncNow();
 
     const stateWrites = fetchMock.mock.calls.filter(
       (call) => fetchMethod(call) === "PUT" && String(call[0]).includes("/state/")
     );
-    expect(
-      stateWrites.some((call) =>
-        String((call[1] as RequestInit | undefined)?.body ?? "").includes("data:application/pdf")
-      )
-    ).toBe(false);
-    expect(db.syncStatus().message ?? "").not.toMatch(/data:application\/pdf|local_quota|Browser storage/i);
+    const directUploads = fetchMock.mock.calls.filter(
+      (call) => fetchMethod(call) === "PUT" && String(call[0]) === "https://storage.example.test/signed-upload"
+    );
+    expect(directUploads).toHaveLength(1);
+    expect(stateWrites).toHaveLength(1);
+    expect(String(stateWrites[0][1]?.body)).not.toContain("data:application/pdf");
+    expect(String(stateWrites[0][1]?.body)).toContain("blob:tenant/test/2026-07-21/document_huge_data_url.pdf");
+    expect(db.syncStatus()).toMatchObject({ status: "synced" });
   });
 
   it("moves oversized document bytes to state blobs before writing the cloud snapshot", async () => {
