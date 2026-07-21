@@ -318,11 +318,13 @@ export function TasksPage() {
     ? api.prospects
         .listByTenant(agency.id)
         .filter((prospect) => !api.routing.hasAssignedOwner("prospect", prospect.id))
+        .filter((prospect) => !api.routing.isDismissed("prospect", prospect.id))
     : [];
   const unroutedClients = isManager
     ? api.customers
         .list(agency.id)
         .filter((customer) => !api.routing.hasAssignedOwner("client", customer.id))
+        .filter((customer) => !api.routing.isDismissed("client", customer.id))
     : [];
   // Activities an agent handed to a manager to assign — surfaced
   // tenant-wide in the Routing card so any manager can pick them up.
@@ -569,6 +571,7 @@ export function TasksPage() {
           agents={agents}
           currentUserId={user.id}
           currentUserName={user.name}
+          onChanged={refresh}
         />
       )}
 
@@ -1169,6 +1172,7 @@ function RoutingCard({
   agents,
   currentUserId,
   currentUserName,
+  onChanged,
 }: {
   prospects: import("@/types").Prospect[];
   clients: import("@/types").CustomerProfile[];
@@ -1176,6 +1180,7 @@ function RoutingCard({
   agents: { id: string; name: string; role: string }[];
   currentUserId: string;
   currentUserName: string;
+  onChanged: () => void;
 }) {
   // Two-click confirmation: every assignment goes through a
   // confirm modal before mutating state. The same modal also
@@ -1387,6 +1392,30 @@ function RoutingCard({
     setConfirming(null);
   }
 
+  function removeRoutingItem(kind: "prospect" | "client" | "activity", row: RoutingRow) {
+    if (kind === "activity" || (row.assignId && row.assignId === row.id)) {
+      if (!window.confirm("Remove this routing activity?")) return;
+      const taskId = row.assignId ?? row.id;
+      const task = api.tasks.get(taskId);
+      if (task?.routeRequestKind) api.tasks.markComplete(taskId, currentUserId);
+      else api.tasks.remove(taskId);
+      onChanged();
+      return;
+    }
+
+    const label = kind === "client" ? "client" : "prospect";
+    if (
+      !window.confirm(
+        `Remove this ${label} from routing? The ${label} record will remain in Quotex.`
+      )
+    ) {
+      return;
+    }
+    api.routing.dismiss(kind, row.id, currentUserId);
+    if (row.assignId) api.tasks.markComplete(row.assignId, currentUserId);
+    onChanged();
+  }
+
   return (
     <div className="rounded-lg border border-gold-200 bg-gold-50/40 p-4">
       <div className="flex items-start justify-between gap-3 mb-3">
@@ -1424,6 +1453,7 @@ function RoutingCard({
           currentUserId={currentUserId}
           currentUserName={currentUserName}
           onAssign={(intent) => setConfirming(intent)}
+          onRemove={(row) => removeRoutingItem("activity", row)}
         />
         <div className="grid lg:grid-cols-2 gap-4">
           <RoutingList
@@ -1435,6 +1465,7 @@ function RoutingCard({
             currentUserId={currentUserId}
             currentUserName={currentUserName}
             onAssign={(intent) => setConfirming(intent)}
+            onRemove={(row) => removeRoutingItem("prospect", row)}
           />
           <RoutingList
             label="Clients"
@@ -1445,6 +1476,7 @@ function RoutingCard({
             currentUserId={currentUserId}
             currentUserName={currentUserName}
             onAssign={(intent) => setConfirming(intent)}
+            onRemove={(row) => removeRoutingItem("client", row)}
           />
         </div>
       </div>
@@ -1661,6 +1693,7 @@ function RoutingList({
   kind,
   currentUserId,
   onAssign,
+  onRemove,
 }: {
   label: string;
   emptyHint: string;
@@ -1670,6 +1703,7 @@ function RoutingList({
   currentUserId: string;
   currentUserName: string;
   onAssign: (intent: AssignIntent) => void;
+  onRemove: (row: RoutingRow) => void;
 }) {
   return (
     <div className="rounded-md border border-ink-100 bg-white p-3">
@@ -1679,7 +1713,7 @@ function RoutingList({
       ) : (
         <ul className="divide-y divide-ink-100">
           {rows.map((r) => (
-            <li key={r.id} className="py-2.5 flex items-center justify-between gap-3">
+            <li key={r.id} className="group py-2.5 flex items-center justify-between gap-3">
               <div className="min-w-0 flex-1">
                 <Link
                   to={r.link}
@@ -1728,6 +1762,15 @@ function RoutingList({
                   title={`Pick one or more staff members to route this ${kind}`}
                 >
                   Assign to staff
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-md text-ink-400 opacity-100 transition hover:bg-alert-soft hover:text-alert sm:opacity-0 sm:focus-visible:opacity-100 sm:group-hover:opacity-100"
+                  onClick={() => onRemove(r)}
+                  aria-label={`Remove ${r.name} from routing`}
+                  title="Remove from routing"
+                >
+                  <X className="h-4 w-4" />
                 </button>
               </div>
             </li>

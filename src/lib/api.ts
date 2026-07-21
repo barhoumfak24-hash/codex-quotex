@@ -10129,7 +10129,11 @@ export const api = {
     // different agent) skip the task to avoid noise.
     assignAgent(id: string, agentId: string, byUserId?: string) {
       const before = db.list("customers").find((c) => c.id === id);
-      const updated = db.update("customers", id, { assignedAgentId: agentId });
+      const updated = db.update("customers", id, {
+        assignedAgentId: agentId,
+        routingDismissedAt: undefined,
+        routingDismissedById: undefined,
+      });
       if (updated && before && !hasContactAssignment(before) && agentId) {
         spawnRoutingTask(updated, agentId, byUserId);
       }
@@ -10183,6 +10187,8 @@ export const api = {
         additionalAgentIds: rest.length > 0 ? rest : undefined,
         assignedCsrId: csrId,
         additionalCsrIds: additionalCsrIds.length > 0 ? additionalCsrIds : undefined,
+        routingDismissedAt: undefined,
+        routingDismissedById: undefined,
       });
       if (updated) {
         [...agentUsers.map((u) => u.id), ...csrIds]
@@ -11377,7 +11383,11 @@ export const api = {
     },
     assignAgent(id: string, agentId: string, byUserId?: string) {
       const before = db.list("prospects").find((p) => p.id === id);
-      const updated = db.update("prospects", id, { assignedAgentId: agentId });
+      const updated = db.update("prospects", id, {
+        assignedAgentId: agentId,
+        routingDismissedAt: undefined,
+        routingDismissedById: undefined,
+      });
       // When a prospect goes from unassigned → assigned (the
       // routing transition), spawn an Activity Center task on the
       // new agent's queue so they actually see the new work.
@@ -11432,6 +11442,8 @@ export const api = {
         additionalAgentIds: rest.length > 0 ? rest : undefined,
         assignedCsrId: csrId,
         additionalCsrIds: additionalCsrIds.length > 0 ? additionalCsrIds : undefined,
+        routingDismissedAt: undefined,
+        routingDismissedById: undefined,
       });
       if (updated) {
         [...agentUsers.map((u) => u.id), ...csrIds]
@@ -15056,6 +15068,31 @@ export const api = {
           : db.list("prospects").find((row) => row.id === targetId);
       return !!assignedContactOwner(contact);
     },
+    isDismissed(kind: "client" | "prospect", targetId: string): boolean {
+      const contact =
+        kind === "client"
+          ? db.list("customers").find((row) => row.id === targetId)
+          : db.list("prospects").find((row) => row.id === targetId);
+      return !!contact?.routingDismissedAt;
+    },
+    dismiss(kind: "client" | "prospect", targetId: string, actorId?: string) {
+      const patch = {
+        routingDismissedAt: nowIso(),
+        routingDismissedById: actorId,
+      };
+      return kind === "client"
+        ? db.update("customers", targetId, patch)
+        : db.update("prospects", targetId, patch);
+    },
+    restore(kind: "client" | "prospect", targetId: string) {
+      const patch = {
+        routingDismissedAt: undefined,
+        routingDismissedById: undefined,
+      };
+      return kind === "client"
+        ? db.update("customers", targetId, patch)
+        : db.update("prospects", targetId, patch);
+    },
     reconcileAccountWorkOwnership(tenantId: string): number {
       let changed = 0;
       db
@@ -15126,6 +15163,9 @@ export const api = {
       actorId: string;
       requestedAgentIds: string[];
     }): Task {
+      // An explicit new routing request always re-opens a row that a
+      // manager previously dismissed from the routing surface.
+      this.restore(input.kind, input.targetId);
       const existing = this.findOpenContactRouteRequest(input.kind, input.targetId);
       if (existing) return existing;
       const requestedAgentIds = Array.from(

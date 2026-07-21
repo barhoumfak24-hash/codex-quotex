@@ -925,6 +925,11 @@ export interface CustomerProfile {
   // unset → primary owner only.
   additionalAgentIds?: string[];
   additionalCsrIds?: string[];
+  // Managers can dismiss an unassigned row from the Routing surface
+  // without deleting the client record itself. A later explicit route
+  // request clears these fields and makes the row actionable again.
+  routingDismissedAt?: string;
+  routingDismissedById?: string;
   // Soft delete. Archived clients are hidden from the main client
   // list but reachable via /employee/archive. Unarchive restores
   // them. Default false (treated as missing → not archived).
@@ -1179,6 +1184,11 @@ export interface Prospect {
   assignedCsrId?: string;
   additionalAgentIds?: string[];
   additionalCsrIds?: string[];
+  // Routing dismissal is presentation state only. The prospect and all
+  // of its history remain intact until a user explicitly archives or
+  // deletes the underlying record through the appropriate workflow.
+  routingDismissedAt?: string;
+  routingDismissedById?: string;
   status: ProspectStatus;
   quoteRequestId?: string;
   // Soft delete. Archived prospects are hidden from the prospect

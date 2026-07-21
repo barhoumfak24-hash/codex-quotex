@@ -133,12 +133,20 @@ export function EmployeeDashboard() {
   const routingProspects = isManager
     ? api.prospects
         .listByTenant(agency.id)
-        .filter((prospect) => !api.routing.hasAssignedOwner("prospect", prospect.id))
+        .filter(
+          (prospect) =>
+            !api.routing.hasAssignedOwner("prospect", prospect.id) &&
+            !api.routing.isDismissed("prospect", prospect.id)
+        )
     : [];
   const routingClients = isManager
     ? api.customers
         .list(agency.id)
-        .filter((customer) => !api.routing.hasAssignedOwner("client", customer.id))
+        .filter(
+          (customer) =>
+            !api.routing.hasAssignedOwner("client", customer.id) &&
+            !api.routing.isDismissed("client", customer.id)
+        )
     : [];
   const routingProspectIds = new Set(routingProspects.map((p) => p.id));
   const routingClientIds = new Set(routingClients.map((c) => c.id));
@@ -293,6 +301,8 @@ export function EmployeeDashboard() {
         prospects={newProspects}
         renewals={renewals.filter((r) => r.status === "upcoming")}
         activityItems={activityItems}
+        userId={user.id}
+        onChanged={refresh}
       />
 
       <div className="grid gap-6 lg:grid-cols-3">
@@ -329,6 +339,11 @@ export function EmployeeDashboard() {
                   key={r.id}
                   reminder={r}
                   onOpen={() => setSelectedReminder(r)}
+                  onRemove={() => {
+                    if (!window.confirm("Delete this reminder?")) return;
+                    api.reminders.remove(r.id);
+                    refresh();
+                  }}
                 />
               ))}
             </ul>
@@ -393,6 +408,7 @@ export function EmployeeDashboard() {
             tenantId={agency.id}
             userId={user.id}
             visibleCustomerIds={notificationCustomerIds}
+            onChanged={refresh}
           />
         </Card>
 
@@ -401,6 +417,8 @@ export function EmployeeDashboard() {
           activityItems={activityItems}
           routingCount={routingCount}
           isManager={isManager}
+          userId={user.id}
+          onChanged={refresh}
         />
 
         <NewReminderModal
@@ -517,6 +535,8 @@ function StatQuickView({
   prospects,
   renewals,
   activityItems,
+  userId,
+  onChanged,
 }: {
   which: null | "clients" | "policies" | "prospects" | "renewals" | "activities";
   onClose: () => void;
@@ -531,6 +551,8 @@ function StatQuickView({
     routingClients: import("@/types").CustomerProfile[];
     routingTasks: ReturnType<typeof api.tasks.listOpen>;
   };
+  userId: string;
+  onChanged: () => void;
 }) {
   if (!which) return null;
 
@@ -569,7 +591,9 @@ function StatQuickView({
         )}
         {which === "prospects" && <ProspectList prospects={prospects} />}
         {which === "renewals" && <RenewalList renewals={renewals} />}
-        {which === "activities" && <ActivityQuickList {...activityItems} />}
+        {which === "activities" && (
+          <ActivityQuickList {...activityItems} userId={userId} onChanged={onChanged} />
+        )}
       </div>
     </Modal>
   );
@@ -582,6 +606,8 @@ function ActivityQuickList({
   routingClients,
   routingTasks,
   maxRows,
+  userId,
+  onChanged,
 }: {
   notifications: ReturnType<typeof api.aiNotifications.listUnacked>;
   tasks: ReturnType<typeof api.tasks.listOpen>;
@@ -589,6 +615,8 @@ function ActivityQuickList({
   routingClients: import("@/types").CustomerProfile[];
   routingTasks: ReturnType<typeof api.tasks.listOpen>;
   maxRows?: number;
+  userId: string;
+  onChanged: () => void;
 }) {
   type ActivityRow = {
     id: string;
@@ -597,6 +625,8 @@ function ActivityQuickList({
     detail: string;
     href: string;
     tone?: import("@/types").TaskSeverity;
+    removeLabel: string;
+    onRemove: () => void;
   };
   const rows: ActivityRow[] = [
     ...notifications.map((n) => ({
@@ -606,6 +636,8 @@ function ActivityQuickList({
       detail: n.summary,
       href: n.taskId ? `/employee/tasks?focus=${n.taskId}` : "/employee/tasks",
       tone: n.severity,
+      removeLabel: "Dismiss notification",
+      onRemove: () => api.aiNotifications.dismiss(n.id, userId),
     })),
     ...tasks.map((t) => ({
       id: `task:${t.id}`,
@@ -614,6 +646,8 @@ function ActivityQuickList({
       detail: t.aiSummary ?? t.description ?? fmt.titleCase(t.status ?? "open"),
       href: `/employee/tasks?focus=${t.id}`,
       tone: t.severity,
+      removeLabel: "Delete activity",
+      onRemove: () => api.tasks.remove(t.id),
     })),
     ...routingTasks.map((t) => ({
       id: `routing-task:${t.id}`,
@@ -627,6 +661,8 @@ function ActivityQuickList({
       detail: t.description ?? "Manager routing confirmation needed.",
       href: `/employee/tasks?focus=${t.id}`,
       tone: (t.routeRequestMode === "reroute" ? "warning" : "info") as import("@/types").TaskSeverity,
+      removeLabel: "Remove routing activity",
+      onRemove: () => api.tasks.markComplete(t.id, userId),
     })),
     ...routingProspects.map((p) => ({
       id: `routing-prospect:${p.id}`,
@@ -637,6 +673,8 @@ function ActivityQuickList({
       )}`,
       href: "/employee/tasks",
       tone: "info" as const,
+      removeLabel: "Dismiss prospect from routing",
+      onRemove: () => api.routing.dismiss("prospect", p.id, userId),
     })),
     ...routingClients.map((c) => ({
       id: `routing-client:${c.id}`,
@@ -645,6 +683,8 @@ function ActivityQuickList({
       detail: c.businessName ? `${c.name} - ${fmt.titleCase(c.lineOfBusiness ?? "commercial")} lines` : `${fmt.titleCase(c.lineOfBusiness ?? "personal")} lines`,
       href: "/employee/tasks",
       tone: "info" as const,
+      removeLabel: "Dismiss client from routing",
+      onRemove: () => api.routing.dismiss("client", c.id, userId),
     })),
   ].sort((a, b) => (a.at < b.at ? 1 : -1));
 
@@ -655,7 +695,7 @@ function ActivityQuickList({
   return (
     <ul className="divide-y divide-ink-100">
       {rows.slice(0, maxRows).map((row) => (
-        <li key={row.id} className="py-2.5 flex items-start justify-between gap-3">
+        <li key={row.id} className="group py-2.5 flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <ImportanceIcon importance={row.tone ?? "info"} className="h-4 w-4 shrink-0" />
@@ -664,9 +704,25 @@ function ActivityQuickList({
             <div className="mt-1 text-xs text-ink-500 line-clamp-2">{row.detail}</div>
             <div className="mt-1 text-[11px] text-ink-400">{fmt.relative(row.at)}</div>
           </div>
-          <Link to={row.href} state={{ fromDashboard: true }} className="btn-outline text-[11px] shrink-0">
-            Open
-          </Link>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <Link to={row.href} state={{ fromDashboard: true }} className="btn-outline text-[11px] shrink-0">
+              Open
+            </Link>
+            <button
+              type="button"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md text-ink-400 opacity-100 transition hover:bg-alert-soft hover:text-alert sm:opacity-0 sm:focus-visible:opacity-100 sm:group-hover:opacity-100"
+              aria-label={row.removeLabel}
+              title={row.removeLabel}
+              onClick={() => {
+                const destructive = row.id.startsWith("task:");
+                if (destructive && !window.confirm("Delete this activity?")) return;
+                row.onRemove();
+                onChanged();
+              }}
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </li>
       ))}
     </ul>
@@ -677,6 +733,8 @@ function ActivityCenterDashboardCard({
   activityItems,
   routingCount,
   isManager,
+  userId,
+  onChanged,
   className = "",
 }: {
   activityItems: {
@@ -688,6 +746,8 @@ function ActivityCenterDashboardCard({
   };
   routingCount: number;
   isManager: boolean;
+  userId: string;
+  onChanged: () => void;
   className?: string;
 }) {
   return (
@@ -701,7 +761,7 @@ function ActivityCenterDashboardCard({
           </Link>
         }
       />
-      <ActivityQuickList {...activityItems} maxRows={5} />
+      <ActivityQuickList {...activityItems} maxRows={5} userId={userId} onChanged={onChanged} />
     </Card>
   );
 }
@@ -709,24 +769,35 @@ function ActivityCenterDashboardCard({
 function ReminderRow({
   reminder,
   onOpen,
+  onRemove,
 }: {
   reminder: Reminder;
   onOpen: () => void;
+  onRemove: () => void;
 }) {
   const task = reminder.taskId
     ? api.tasks.listByTenant(reminder.tenantId).find((t) => t.id === reminder.taskId)
     : undefined;
   const label = reminder.title ?? task?.title ?? "(activity removed)";
   return (
-    <li className="py-2">
+    <li className="group flex items-center gap-1 py-2">
       <button
         type="button"
-        className="flex w-full min-w-0 items-center gap-2 text-left text-sm font-medium text-ink-900 hover:text-gold-700"
+        className="flex min-w-0 flex-1 items-center gap-2 text-left text-sm font-medium text-ink-900 hover:text-gold-700"
         onClick={onOpen}
         title="Open reminder details"
       >
         <span className="shrink-0 text-ink-400">-</span>
         <span className="min-w-0 truncate">{label}</span>
+      </button>
+      <button
+        type="button"
+        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-400 opacity-100 transition hover:bg-alert-soft hover:text-alert sm:opacity-0 sm:focus-visible:opacity-100 sm:group-hover:opacity-100"
+        onClick={onRemove}
+        aria-label={`Delete reminder: ${label}`}
+        title="Delete reminder"
+      >
+        <X className="h-3.5 w-3.5" />
       </button>
     </li>
   );
@@ -858,10 +929,12 @@ function NotificationsList({
   tenantId,
   userId,
   visibleCustomerIds,
+  onChanged,
 }: {
   tenantId: string;
   userId: string;
   visibleCustomerIds: Set<string>;
+  onChanged: () => void;
 }) {
   // Tasks assigned to me in the last 7 days, not yet started.
   const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
@@ -914,6 +987,8 @@ function NotificationsList({
     // / red. Tasks + client messages leave this undefined.
     urgency?: import("@/types").TaskSeverity;
     onOpen?: () => void;
+    onDismiss: () => void;
+    dismissLabel: string;
   };
   // Look up staff once so each internal-message row can resolve a
   // sender name without re-querying for every row.
@@ -930,6 +1005,8 @@ function NotificationsList({
       title: incompleteQuote ? "Incomplete customer quote" : "New activity assigned",
       detail: t.title,
       href: `/employee/tasks?focus=${t.id}`,
+      onDismiss: () => api.tasks.remove(t.id),
+      dismissLabel: "Delete activity notification",
     });
   });
   pendingComms.forEach((c) => {
@@ -946,6 +1023,14 @@ function NotificationsList({
       href: c.customerId
         ? `/employee/messages?contact=client:${c.customerId}`
         : "/employee/messages",
+      onDismiss: () => {
+        api.communications.markResolved(c.id, userId);
+        api.aiNotifications
+          .listUnacked(tenantId)
+          .filter((notification) => notification.communicationId === c.id)
+          .forEach((notification) => api.aiNotifications.dismiss(notification.id, userId));
+      },
+      dismissLabel: "Dismiss message notification",
     });
   });
   unreadInternal.forEach(({ thread, latest }) => {
@@ -961,6 +1046,8 @@ function NotificationsList({
       detail: latest.body.slice(0, 80),
       href: `/employee/messages?thread=${thread.id}`,
       urgency: latest.urgency,
+      onDismiss: () => api.internalMessages.markRead(thread.id, userId),
+      dismissLabel: "Mark internal message notification as read",
     });
   });
   goalRequests.forEach((n) =>
@@ -977,6 +1064,8 @@ function NotificationsList({
       )}#performance-goals`,
       urgency: "info",
       onOpen: () => api.aiNotifications.dismiss(n.id, userId),
+      onDismiss: () => api.aiNotifications.dismiss(n.id, userId),
+      dismissLabel: "Dismiss notification",
     })
   );
   timesheetNotifications.forEach((n) =>
@@ -991,6 +1080,8 @@ function NotificationsList({
       href: "/employee/accounting",
       urgency: "info",
       onOpen: () => api.aiNotifications.dismiss(n.id, userId),
+      onDismiss: () => api.aiNotifications.dismiss(n.id, userId),
+      dismissLabel: "Dismiss notification",
     })
   );
   inboundNotices.forEach((n) => {
@@ -1014,6 +1105,8 @@ function NotificationsList({
         : "/employee/messages",
       urgency: n.severity ?? "info",
       onOpen: () => api.aiNotifications.dismiss(n.id, userId),
+      onDismiss: () => api.aiNotifications.dismiss(n.id, userId),
+      dismissLabel: "Dismiss notification",
     });
   });
   quoteReadyNotifications.forEach((n) =>
@@ -1032,6 +1125,8 @@ function NotificationsList({
         : "/employee",
       urgency: n.severity ?? "info",
       onOpen: () => api.aiNotifications.dismiss(n.id, userId),
+      onDismiss: () => api.aiNotifications.dismiss(n.id, userId),
+      dismissLabel: "Dismiss notification",
     })
   );
   rows.sort((a, b) => (a.at < b.at ? 1 : -1));
@@ -1062,12 +1157,12 @@ function NotificationsList({
             ? "bg-amber-50 text-amber-800 border-amber-200"
             : "bg-yellow-50 text-yellow-700 border-yellow-200";
         return (
-          <li key={r.key} className="py-2">
+          <li key={r.key} className="group flex items-start gap-1 py-2">
             <Link
               to={r.href}
               state={{ fromDashboard: true }}
               onClick={r.onOpen}
-              className="flex items-start gap-2 hover:text-gold-700"
+              className="flex min-w-0 flex-1 items-start gap-2 hover:text-gold-700"
             >
               {r.kind === "internal_msg" && r.urgency ? (
                 <ImportanceIcon
@@ -1098,6 +1193,19 @@ function NotificationsList({
                 </div>
               </div>
             </Link>
+            <button
+              type="button"
+              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-400 opacity-100 transition hover:bg-alert-soft hover:text-alert sm:opacity-0 sm:focus-visible:opacity-100 sm:group-hover:opacity-100"
+              onClick={() => {
+                if (r.kind === "task" && !window.confirm("Delete this activity?")) return;
+                r.onDismiss();
+                onChanged();
+              }}
+              aria-label={r.dismissLabel}
+              title={r.dismissLabel}
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
           </li>
         );
       })}

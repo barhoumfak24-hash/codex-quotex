@@ -499,3 +499,94 @@ describe("contact route requests", () => {
     ).toBe(true);
   });
 });
+
+describe("routing dismissal", () => {
+  it("dismisses a client routing row without deleting the client", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((user) => user.role === "manager")!;
+    const login = api.users.create({
+      tenantId: agency.id,
+      role: "customer",
+      email: "dismissed-routing-client@example.com",
+      name: "Dismissed Routing Client",
+    });
+    const client = api.customers.create({
+      tenantId: agency.id,
+      userId: login.id,
+      name: login.name,
+      email: login.email,
+      marketingOptInEmail: false,
+      marketingOptInSms: false,
+      skipAutoRoute: true,
+    });
+
+    api.routing.dismiss("client", client.id, manager.id);
+
+    expect(api.routing.isDismissed("client", client.id)).toBe(true);
+    expect(api.customers.get(client.id)?.name).toBe(client.name);
+    expect(api.customers.list(agency.id).some((row) => row.id === client.id)).toBe(true);
+  });
+
+  it("reopens a dismissed prospect when staff explicitly request routing", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((user) => user.role === "manager")!;
+    const prospect = api.prospects.create({
+      tenantId: agency.id,
+      name: "Dismissed Routing Prospect",
+      email: "dismissed-routing-prospect@example.com",
+      lineOfBusiness: "personal",
+      assetType: "coastal_home",
+      aiSummary: "x",
+      lastAction: "x",
+      lastActivityAt: new Date().toISOString(),
+      recommendedFollowUp: "x",
+      marketingStatus: "none",
+      status: "new",
+      skipAutoRoute: true,
+    });
+    api.routing.dismiss("prospect", prospect.id, manager.id);
+
+    const request = api.routing.requestContactRoute({
+      tenantId: agency.id,
+      kind: "prospect",
+      targetId: prospect.id,
+      mode: "route",
+      actorId: manager.id,
+      requestedAgentIds: [manager.id],
+    });
+
+    expect(request.prospectId).toBe(prospect.id);
+    expect(api.routing.isDismissed("prospect", prospect.id)).toBe(false);
+    expect(api.prospects.get(prospect.id)?.name).toBe(prospect.name);
+  });
+
+  it("clears routing dismissal when a client is assigned", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((user) => user.role === "manager")!;
+    const agent = api.users.list(agency.id).find((user) => user.role === "agent") ?? manager;
+    const login = api.users.create({
+      tenantId: agency.id,
+      role: "customer",
+      email: "restored-routing-client@example.com",
+      name: "Restored Routing Client",
+    });
+    const client = api.customers.create({
+      tenantId: agency.id,
+      userId: login.id,
+      name: login.name,
+      email: login.email,
+      marketingOptInEmail: false,
+      marketingOptInSms: false,
+      skipAutoRoute: true,
+    });
+    api.routing.dismiss("client", client.id, manager.id);
+
+    api.customers.assignAgent(client.id, agent.id, manager.id);
+
+    expect(api.routing.isDismissed("client", client.id)).toBe(false);
+    expect(api.customers.get(client.id)?.assignedAgentId).toBe(agent.id);
+  });
+});
