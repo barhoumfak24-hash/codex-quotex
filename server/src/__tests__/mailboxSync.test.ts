@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   readFreshMailboxToken: vi.fn(),
+  readFreshTenantStaffMailboxToken: vi.fn(),
   writeMailboxSyncCursor: vi.fn(),
   queryRaw: vi.fn(),
   executeRaw: vi.fn(),
@@ -11,6 +12,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../services/mailboxProvider.js", () => ({
   readFreshMailboxToken: mocks.readFreshMailboxToken,
+  readFreshTenantStaffMailboxToken: mocks.readFreshTenantStaffMailboxToken,
   writeMailboxSyncCursor: mocks.writeMailboxSyncCursor,
 }));
 
@@ -32,6 +34,7 @@ import {
 
 beforeEach(() => {
   mocks.readFreshMailboxToken.mockReset();
+  mocks.readFreshTenantStaffMailboxToken.mockReset();
   mocks.writeMailboxSyncCursor.mockReset().mockResolvedValue(undefined);
   mocks.queryRaw.mockReset().mockResolvedValue([]);
   mocks.executeRaw.mockReset().mockResolvedValue(1);
@@ -269,12 +272,12 @@ describe("mailbox sync reliability", () => {
       }],
     });
 
-    expect(mocks.readFreshMailboxToken).toHaveBeenCalledWith({
+    expect(mocks.readFreshMailboxToken).toHaveBeenCalledWith(expect.objectContaining({
       tenantId: "tenant-1",
       userId: "user-sender",
       connectionId: "connection-sender",
       expectedAddress: "sender@example.com",
-    });
+    }));
     expect(result.messages).toHaveLength(1);
     expect(result.mailboxAccount).toBe("sender@example.com");
   });
@@ -431,6 +434,64 @@ describe("mailbox sync reliability", () => {
       tenantId: "tenant-1",
       userId: "user-checking-replies",
     }));
+  });
+
+  it("recovers old quote-flow replies through an agency mailbox when the checking user has no mailbox", async () => {
+    mocks.queryRaw.mockResolvedValueOnce([]);
+    mocks.readFreshMailboxToken.mockRejectedValue(new Error("No connected mailbox was found for this staff account."));
+    mocks.readFreshTenantStaffMailboxToken.mockResolvedValue({
+      ...googleConnection(),
+      connection: {
+        ...googleConnection().connection,
+        id: "connection-original-sender",
+        user_id: "user-original-sender",
+        address: "agent@agency.example",
+      },
+    });
+    fetchMock().mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/messages") && url.searchParams.has("q")) {
+        expect(url.searchParams.get("q")).toContain("from:gbnhone@gmail.com");
+        expect(url.searchParams.get("q")).toContain('subject:"commercial application package - fictional insured"');
+        return jsonResponse({ messages: [{ id: "carrier-reply-found-through-agency-mailbox" }] });
+      }
+      if (url.pathname.endsWith("/messages/carrier-reply-found-through-agency-mailbox")) {
+        return jsonResponse(gmailInboundReply(
+          "carrier-reply-found-through-agency-mailbox",
+          "gmail-thread-recovered",
+          "<legacy-outbound@example.com>",
+          {
+            from: "GBN Hone <gbnhone@gmail.com>",
+            subject: "Re: Commercial application package - Fictional Insured",
+            sentAt: "2026-07-19T23:59:00.000Z",
+            body: "The coverage has been approved. Annual Premium: $4,850.",
+          }
+        ));
+      }
+      throw new Error(`Unexpected Gmail request: ${url.toString()}`);
+    });
+
+    const result = await syncMailboxReplyMessages({
+      tenantId: "tenant-1",
+      userId: "user-checking-replies",
+      targets: [{
+        communicationId: "legacy-local-communication",
+        subject: "Commercial application package - Fictional Insured",
+        participantEmail: "gbnhone@gmail.com",
+        sentAt: "2026-07-19T21:56:30.375Z",
+        carrierSubmissionId: "submission-great-lakes",
+      }],
+    });
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]).toMatchObject({
+      externalMessageId: "carrier-reply-found-through-agency-mailbox",
+      carrierSubmissionId: "submission-great-lakes",
+    });
+    expect(mocks.readFreshTenantStaffMailboxToken).toHaveBeenCalledWith({
+      tenantId: "tenant-1",
+      connectionId: undefined,
+    });
   });
 
   it("rejects a reply batch when any exact target lacks its outbound communication id", async () => {

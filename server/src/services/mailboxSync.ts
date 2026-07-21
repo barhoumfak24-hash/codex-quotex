@@ -1,6 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { Prisma } from "@prisma/client";
-import { readFreshMailboxToken, writeMailboxSyncCursor, type OAuthTokenPayload } from "./mailboxProvider.js";
+import {
+  readFreshMailboxToken,
+  readFreshTenantStaffMailboxToken,
+  writeMailboxSyncCursor,
+  type OAuthTokenPayload,
+} from "./mailboxProvider.js";
 import { prisma } from "./prisma.js";
 import { readRemoteState, supabaseStateConfigured } from "./supabaseState.js";
 
@@ -26,6 +31,10 @@ export type MailboxReplySyncInput = {
   userId: string;
   connectionId?: string;
   targets: MailboxReplyTarget[];
+};
+
+type MailboxReplyTokenInput = MailboxReplySyncInput & {
+  expectedAddress?: string;
 };
 
 type AuthorizedReplyMailbox = {
@@ -299,11 +308,12 @@ export async function syncMailboxReplyMessages(input: MailboxReplySyncInput): Pr
   const mailboxesChecked: Array<{ connectionId: string; mailboxAccount: string; provider: "gmail" | "outlook" }> = [];
 
   for (const group of groups) {
-    const { connection, token } = await readFreshMailboxToken({
+    const { connection, token } = await readReplyMailboxToken({
       tenantId: input.tenantId,
       userId: group.userId,
       connectionId: group.connectionId,
       expectedAddress: group.expectedAddress,
+      targets: group.targets,
     });
     const provider = token.provider === "google" ? "gmail" : "outlook";
     const synced = token.provider === "google"
@@ -1144,9 +1154,9 @@ async function resolveAuthorizedReplyGroups(
   )];
 
   if (communicationIds.length === 0) {
-    const { connection } = await readFreshMailboxToken(input);
+    const { connection } = await readReplyMailboxToken(input);
     return [{
-      userId: input.userId,
+      userId: connection.user_id ?? input.userId,
       connectionId: connection.id,
       expectedAddress: connection.address,
       targets,
@@ -1202,7 +1212,7 @@ async function resolveAuthorizedReplyGroups(
   );
   const recoverableTargets = stillMissingTargets.filter(isRecoveryReplyTarget);
   if (recoverableTargets.length > 0) {
-    const { connection } = await readFreshMailboxToken(input);
+    const { connection } = await readReplyMailboxToken(input);
     recoverableTargets.forEach((target) => {
       canonicalById.set(target.communicationId!, recoveryTargetRowFromCurrentMailbox(target, connection, input.userId));
     });
@@ -1228,6 +1238,23 @@ async function resolveAuthorizedReplyGroups(
     });
   }
   return [...groups.values()];
+}
+
+async function readReplyMailboxToken(input: MailboxReplyTokenInput) {
+  try {
+    return await readFreshMailboxToken(input);
+  } catch (error) {
+    if (!isMissingStaffMailboxError(error)) throw error;
+    return readFreshTenantStaffMailboxToken({
+      tenantId: input.tenantId,
+      connectionId: input.connectionId,
+      expectedAddress: input.expectedAddress,
+    });
+  }
+}
+
+function isMissingStaffMailboxError(error: unknown): boolean {
+  return error instanceof Error && error.message === "No connected mailbox was found for this staff account.";
 }
 
 function recoveryTargetRowFromCurrentMailbox(

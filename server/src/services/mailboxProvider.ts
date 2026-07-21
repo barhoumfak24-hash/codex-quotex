@@ -128,6 +128,12 @@ type MailboxConnectionLookupInput = {
   expectedAddress?: string;
 };
 
+type TenantMailboxConnectionLookupInput = {
+  tenantId: string;
+  connectionId?: string;
+  expectedAddress?: string;
+};
+
 type MicrosoftMessageMetadata = {
   id?: string;
   conversationId?: string;
@@ -284,6 +290,21 @@ export async function readFreshMailboxToken(input: MailboxConnectionLookupInput)
   return { connection, token: await ensureFreshToken(connection, token) };
 }
 
+export async function readFreshTenantStaffMailboxToken(input: TenantMailboxConnectionLookupInput): Promise<{
+  connection: MailboxConnectionRow;
+  token: OAuthTokenPayload;
+}> {
+  const connection = await resolveTenantStaffMailboxConnection(input);
+  if (connection.status !== "connected") {
+    throw new Error("Mailbox is not connected. Reconnect the staff mailbox before syncing.");
+  }
+  const token = await readMailboxToken(connection);
+  if (token.provider === "smtp") {
+    throw new Error("Password-based campaign mailboxes are send-only and do not support inbox sync.");
+  }
+  return { connection, token: await ensureFreshToken(connection, token) };
+}
+
 export async function writeMailboxSyncCursor(
   connection: MailboxConnectionRow,
   token: OAuthTokenPayload,
@@ -360,6 +381,54 @@ async function resolveMailboxConnection(input: MailboxConnectionLookupInput): Pr
         ? "The connected agency marketing mailbox does not match the agency contact email."
         : "The connected mailbox does not match the signed-in staff email."
     );
+  }
+  if (!connection.token_vault_ref) throw new Error("Connected mailbox is missing its encrypted token reference.");
+  return connection;
+}
+
+async function resolveTenantStaffMailboxConnection(
+  input: TenantMailboxConnectionLookupInput
+): Promise<MailboxConnectionRow> {
+  const rows = input.connectionId
+    ? await prisma.$queryRaw<MailboxConnectionRow[]>`
+        SELECT id, tenant_id, user_id, provider, address, status, token_vault_ref
+        FROM mailbox_connections
+        WHERE id = ${input.connectionId}
+          AND tenant_id = ${input.tenantId}
+          AND owner_type = 'staff'
+          AND status = 'connected'
+        LIMIT 1
+      `
+    : input.expectedAddress
+    ? await prisma.$queryRaw<MailboxConnectionRow[]>`
+        SELECT id, tenant_id, user_id, provider, address, status, token_vault_ref
+        FROM mailbox_connections
+        WHERE tenant_id = ${input.tenantId}
+          AND owner_type = 'staff'
+          AND status = 'connected'
+          AND lower(address) = lower(${input.expectedAddress})
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `
+    : await prisma.$queryRaw<MailboxConnectionRow[]>`
+        SELECT id, tenant_id, user_id, provider, address, status, token_vault_ref
+        FROM mailbox_connections
+        WHERE tenant_id = ${input.tenantId}
+          AND owner_type = 'staff'
+          AND status = 'connected'
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `;
+
+  const connection = rows[0];
+  if (!connection) {
+    throw new Error("No connected mailbox was found for this agency.");
+  }
+  if (
+    input.expectedAddress &&
+    normalizeMailboxAddress(connection.address) !== normalizeMailboxAddress(input.expectedAddress)
+  ) {
+    throw new Error("The connected mailbox does not match the original sender.");
   }
   if (!connection.token_vault_ref) throw new Error("Connected mailbox is missing its encrypted token reference.");
   return connection;
