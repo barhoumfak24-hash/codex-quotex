@@ -6707,6 +6707,8 @@ function parseCommercialCarrierReplyFromCommunication(
   };
 }
 
+const carrierReplyProcessingInFlight = new Set<string>();
+
 async function parseCommercialCarrierReplyWithAi(
   communication: Communication,
   submission: CommercialCarrierSubmission
@@ -17552,7 +17554,7 @@ export const api = {
           (communication) => {
             const prior = existingByCommunicationId.get(communication.id);
             const canRecheckForSelectedSession =
-              Boolean(options.sessionId) && prior?.outcome !== "matched_processed";
+              Boolean(options.sessionId) && prior?.outcome === "ignored";
             return (
               communication.tenantId === tenantId &&
               communication.direction === "inbound" &&
@@ -17584,13 +17586,21 @@ export const api = {
           const submissionId =
             match.submission.submissionId ??
             commercialSubmissionStableId(match.session, match.submission.carrierId);
-          const applied = await applyInboundCarrierReply({
-            tenantId,
-            sessionId: match.session.id,
-            submissionId,
-            communicationId: communication.id,
-            matchReason: match.reason,
-          });
+          const processingKey = `${tenantId}:${communication.id}`;
+          if (carrierReplyProcessingInFlight.has(processingKey)) continue;
+          carrierReplyProcessingInFlight.add(processingKey);
+          let applied: QuotingSession | null = null;
+          try {
+            applied = await applyInboundCarrierReply({
+              tenantId,
+              sessionId: match.session.id,
+              submissionId,
+              communicationId: communication.id,
+              matchReason: match.reason,
+            });
+          } finally {
+            carrierReplyProcessingInFlight.delete(processingKey);
+          }
           if (applied) {
             processed += 1;
             continue;

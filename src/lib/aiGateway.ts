@@ -65,7 +65,7 @@ export class AiGatewayUnavailableError extends Error {
 export async function postServerAi<T>(
   path: AiPath,
   payload: Record<string, unknown>,
-  opts: { timeoutMs?: number; requireServer?: boolean } = {}
+  opts: { timeoutMs?: number; requireServer?: boolean; softFail?: boolean } = {}
 ): Promise<T | null> {
   const mode = aiMode();
   const canUseServer = serverAiEnabled() || (opts.requireServer === true && !aiModeDisabled(mode));
@@ -122,6 +122,7 @@ export async function postServerAi<T>(
               message: body?.message || body?.error || `AI request failed with HTTP ${res.status}.`,
               error: body?.error,
             });
+            if (opts.softFail) return null;
             handleAiGatewayFailure(detail);
             return null;
           }
@@ -133,6 +134,7 @@ export async function postServerAi<T>(
     );
   } catch (error) {
     if (error instanceof AiGatewayUnavailableError) throw error;
+    if (opts.softFail) return null;
     const detail = normalizeAiGatewayFailureDetail({
       path,
       message: error instanceof Error ? error.message : "AI request could not be completed.",

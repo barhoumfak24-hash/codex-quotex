@@ -2825,8 +2825,8 @@ export interface AiParsedCarrierReply {
 
 function carrierReplySentences(text: string): string[] {
   return text
-    .replace(/\s+/g, " ")
-    .split(/(?<=[.!?])\s+|\n+/)
+    .replace(/\r/g, "")
+    .split(/\n+|(?<=[.!?])\s+/)
     .map((sentence) => sentence.trim())
     .filter(Boolean)
     .slice(0, 18);
@@ -2838,7 +2838,17 @@ function extractCurrencyStrings(text: string): string[] {
   ).slice(0, 8);
 }
 
-function fallbackParseCarrierReply(input: {
+function labeledCarrierValue(text: string, label: RegExp): string | undefined {
+  const match = text.match(new RegExp(`${label.source}\\s*:?\\s*([^\\n\\r]+)`, label.flags));
+  return match?.[1]?.replace(/^[-*•]\s*/, "").trim() || undefined;
+}
+
+function explicitAnnualPremium(text: string): string | undefined {
+  const value = labeledCarrierValue(text, /(?:estimated\s+)?annual\s+premium/i);
+  return value?.match(/\$\s?\d[\d,]*(?:\.\d{2})?/)?.[0];
+}
+
+export function fallbackParseCarrierReply(input: {
   email: {
     subject?: string;
     text?: string;
@@ -2862,7 +2872,12 @@ function fallbackParseCarrierReply(input: {
     )
     .map((attachment) => attachment.fileName ?? "Supplemental attachment")
     .filter(Boolean);
-  const premiums = extractCurrencyStrings(text);
+  const annualPremium = explicitAnnualPremium(text);
+  const premiums = annualPremium ? [annualPremium] : extractCurrencyStrings(text);
+  const policyType = labeledCarrierValue(text, /policy\s+type/i);
+  const effectiveDate = labeledCarrierValue(text, /(?:proposed\s+)?effective\s+date/i);
+  const deductible = labeledCarrierValue(text, /(?:property\s+)?deductible/i);
+  const commission = labeledCarrierValue(text, /commission/i);
   const deadlineMatch = text.match(
     /(?:need(?:ed)?|required|respond|response|due|provide|send|return|receive)[^.!?\n]{0,60}\bby\s+((?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}(?:,\s*\d{4})?|\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/i
   );
@@ -2937,11 +2952,12 @@ function fallbackParseCarrierReply(input: {
     return {
       outcome: "quoted",
       confidence: approvalEvidence.length > 0 ? 0.92 : 0.8,
+      policyType,
       coverages: [],
       limits: Array.from(new Set(text.match(/\$?\d[\d,]*(?:,\d{3})*(?:\s?(?:limit|coverage|occurrence|aggregate))/gi) ?? [])).slice(0, 8),
       premiums,
-      deductibles: Array.from(new Set(text.match(/\$?\d[\d,]*(?:,\d{3})*(?:\s?(?:deductible|ded))/gi) ?? [])).slice(0, 8),
-      terms: [],
+      deductibles: deductible ? [deductible] : [],
+      terms: [effectiveDate ? `Effective date: ${effectiveDate}` : "", commission ? `Commission: ${commission}` : ""].filter(Boolean),
       carrierNotes: [...approvalEvidence, ...quoteEvidence].slice(0, 8),
       conditions: bindingConditionEvidence,
       nextSteps: [...bindingConditionEvidence, ...evidence([/\bnext step\b/i, /\bsubject to\b/i, /\bunderwriting\b/i])].slice(0, 8),
@@ -3030,7 +3046,7 @@ export async function aiParseCarrierReply(input: {
       submission: input.submission,
       email: input.email,
     },
-    { timeoutMs: 60_000 }
+    { timeoutMs: 60_000, softFail: true }
   );
   if (
     server &&

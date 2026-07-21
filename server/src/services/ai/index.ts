@@ -1446,17 +1446,14 @@ Return only information explicitly stated in the untrusted data. Put stated fees
       policyType: { type: "string" },
       coverages: {
         type: "array",
-        items: objectSchema(
-          {
-            label: { type: "string" },
-            limit: { type: "string" },
-            premium: { type: "string" },
-            deductible: { type: "string" },
-            terms: { type: "string" },
-            sourceText: { type: "string" },
-          },
-          ["label"]
-        ),
+        items: objectSchema({
+          label: { type: "string" },
+          limit: { type: "string" },
+          premium: { type: "string" },
+          deductible: { type: "string" },
+          terms: { type: "string" },
+          sourceText: { type: "string" },
+        }),
       },
       limits: STRING_ARRAY_SCHEMA,
       premiums: STRING_ARRAY_SCHEMA,
