@@ -389,8 +389,10 @@ async function resolveMailboxConnection(input: MailboxConnectionLookupInput): Pr
 async function resolveTenantStaffMailboxConnection(
   input: TenantMailboxConnectionLookupInput
 ): Promise<MailboxConnectionRow> {
-  const rows = input.connectionId
-    ? await prisma.$queryRaw<MailboxConnectionRow[]>`
+  let connection: MailboxConnectionRow | undefined;
+
+  if (input.connectionId) {
+    const rows = await prisma.$queryRaw<MailboxConnectionRow[]>`
         SELECT id, tenant_id, user_id, provider, address, status, token_vault_ref
         FROM mailbox_connections
         WHERE id = ${input.connectionId}
@@ -398,9 +400,15 @@ async function resolveTenantStaffMailboxConnection(
           AND owner_type = 'staff'
           AND status = 'connected'
         LIMIT 1
-      `
-    : input.expectedAddress
-    ? await prisma.$queryRaw<MailboxConnectionRow[]>`
+      `;
+    connection = rows[0];
+  }
+
+  // Quote flows retain the mailbox connection that sent the application. A
+  // reconnect can replace that row, so recover the current connection by the
+  // original sender address without ever leaving the quote flow's tenant.
+  if (!connection && input.expectedAddress) {
+    const rows = await prisma.$queryRaw<MailboxConnectionRow[]>`
         SELECT id, tenant_id, user_id, provider, address, status, token_vault_ref
         FROM mailbox_connections
         WHERE tenant_id = ${input.tenantId}
@@ -409,8 +417,12 @@ async function resolveTenantStaffMailboxConnection(
           AND lower(address) = lower(${input.expectedAddress})
         ORDER BY updated_at DESC
         LIMIT 1
-      `
-    : await prisma.$queryRaw<MailboxConnectionRow[]>`
+      `;
+    connection = rows[0];
+  }
+
+  if (!connection && !input.expectedAddress) {
+    const rows = await prisma.$queryRaw<MailboxConnectionRow[]>`
         SELECT id, tenant_id, user_id, provider, address, status, token_vault_ref
         FROM mailbox_connections
         WHERE tenant_id = ${input.tenantId}
@@ -419,8 +431,9 @@ async function resolveTenantStaffMailboxConnection(
         ORDER BY updated_at DESC
         LIMIT 1
       `;
+    connection = rows[0];
+  }
 
-  const connection = rows[0];
   if (!connection) {
     throw new Error("No connected mailbox was found for this agency.");
   }

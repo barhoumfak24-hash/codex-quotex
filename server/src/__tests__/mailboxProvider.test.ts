@@ -26,6 +26,7 @@ vi.mock("nodemailer", () => ({
 
 import {
   isMailboxFallbackSafeError,
+  readFreshTenantStaffMailboxToken,
   saveAgencyMarketingSmtpCredential,
   sendMailboxEmail,
 } from "../services/mailboxProvider.js";
@@ -177,6 +178,46 @@ describe("Microsoft mailbox send metadata", () => {
 
     expect(isMailboxFallbackSafeError(error)).toBe(true);
     expect(fetchMock()).not.toHaveBeenCalled();
+  });
+});
+
+describe("tenant mailbox reply sync", () => {
+  it("recovers a reconnected sender mailbox when a quote flow retains a stale connection id", async () => {
+    mocks.queryRaw.mockReset()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{
+        id: "current-connection",
+        tenant_id: "tenant-1",
+        user_id: "user-1",
+        provider: "google",
+        address: "agent@example.com",
+        status: "connected",
+        token_vault_ref: "mailbox-token:current",
+      }])
+      .mockResolvedValueOnce([{
+        encrypted_payload: encryptToken({
+          provider: "google",
+          accessToken: "google-access-token",
+          expiresAt: "2099-01-01T00:00:00.000Z",
+        }),
+      }]);
+
+    const result = await readFreshTenantStaffMailboxToken({
+      tenantId: "tenant-1",
+      connectionId: "retired-connection",
+      expectedAddress: "Agent@Example.com",
+    });
+
+    expect(result.connection).toMatchObject({
+      id: "current-connection",
+      tenant_id: "tenant-1",
+      address: "agent@example.com",
+    });
+    expect(result.token).toMatchObject({
+      provider: "google",
+      accessToken: "google-access-token",
+    });
+    expect(mocks.queryRaw).toHaveBeenCalledTimes(3);
   });
 });
 
