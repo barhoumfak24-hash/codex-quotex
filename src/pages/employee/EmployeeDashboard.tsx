@@ -719,7 +719,11 @@ export function ActivityQuickList({
       ) : (
         <ul className="divide-y divide-ink-100">
           {visibleRows.slice(0, maxRows).map((row) => (
-            <li key={row.id} className="group py-2.5 flex items-start justify-between gap-3">
+            <li
+              key={row.id}
+              data-removal-item
+              className="group py-2.5 flex items-start justify-between gap-3"
+            >
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <ImportanceIcon
@@ -821,7 +825,7 @@ function ReminderRow({
     : undefined;
   const label = reminder.title ?? task?.title ?? "(activity removed)";
   return (
-    <li className="group flex items-center gap-1 py-2">
+    <li data-removal-item className="group flex items-center gap-1 py-2">
       <button
         type="button"
         className="flex min-w-0 flex-1 items-center gap-2 text-left text-sm font-medium text-ink-900 hover:text-gold-700"
@@ -923,7 +927,7 @@ function PastReminderRow({
     : undefined;
   const label = reminder.title ?? task?.title ?? "(activity removed)";
   return (
-    <li className="py-2 flex items-start gap-3 opacity-75">
+    <li data-removal-item className="py-2 flex items-start gap-3 opacity-75">
       <ImportanceIcon
         importance={reminder.importance}
         className="h-4 w-4 mt-0.5 shrink-0 opacity-60"
@@ -1201,7 +1205,7 @@ function NotificationsList({
             ? "bg-amber-50 text-amber-800 border-amber-200"
             : "bg-yellow-50 text-yellow-700 border-yellow-200";
         return (
-          <li key={r.key} className="group flex items-start gap-1 py-2">
+          <li key={r.key} data-removal-item className="group flex items-start gap-1 py-2">
             <Link
               to={r.href}
               state={{ fromDashboard: true }}

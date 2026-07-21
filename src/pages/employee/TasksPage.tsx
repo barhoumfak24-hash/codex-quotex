@@ -1718,7 +1718,11 @@ function RoutingList({
       ) : (
         <ul className="divide-y divide-ink-100">
           {rows.map((r) => (
-            <li key={r.id} className="group py-2.5 flex items-center justify-between gap-3">
+            <li
+              key={r.id}
+              data-removal-item
+              className="group py-2.5 flex items-center justify-between gap-3"
+            >
               <div className="min-w-0 flex-1">
                 <Link
                   to={r.link}
