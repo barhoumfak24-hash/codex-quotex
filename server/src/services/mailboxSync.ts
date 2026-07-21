@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { Prisma } from "@prisma/client";
 import { readFreshMailboxToken, writeMailboxSyncCursor, type OAuthTokenPayload } from "./mailboxProvider.js";
 import { prisma } from "./prisma.js";
+import { readRemoteState, supabaseStateConfigured } from "./supabaseState.js";
 
 export type MailboxSyncInput = {
   tenantId: string;
@@ -10,6 +12,7 @@ export type MailboxSyncInput = {
 };
 
 export type MailboxReplyTarget = {
+  communicationId?: string;
   externalThreadId?: string;
   rfc822MessageId?: string;
   sentAt?: string;
@@ -22,6 +25,32 @@ export type MailboxReplySyncInput = {
   tenantId: string;
   userId: string;
   connectionId?: string;
+  targets: MailboxReplyTarget[];
+};
+
+type AuthorizedReplyMailbox = {
+  connection_id: string;
+  user_id: string;
+  address: string;
+  communication_id: string;
+};
+
+type CanonicalReplyTargetRow = AuthorizedReplyMailbox & {
+  provider: string;
+  subject: string | null;
+  message_id_header: string | null;
+  external_recipient_email: string | null;
+  to_recipients: unknown;
+  sent_at: Date | null;
+  created_at: Date;
+  mailbox: unknown;
+  resolution: unknown;
+};
+
+type AuthorizedReplyGroup = {
+  userId: string;
+  connectionId: string;
+  expectedAddress: string;
   targets: MailboxReplyTarget[];
 };
 
@@ -258,44 +287,45 @@ export async function syncMailboxReplyMessages(input: MailboxReplySyncInput): Pr
   connectionId: string;
   mailboxAccount: string;
   provider: "gmail" | "outlook";
+  mailboxesChecked: Array<{ connectionId: string; mailboxAccount: string; provider: "gmail" | "outlook" }>;
   targetsChecked: number;
   messages: SyncedMailboxMessage[];
   importSummary: MailboxSyncImportSummary;
 }> {
-  const targets = uniqueReplyTargets(input.targets);
-  const { connection, token } = await readFreshMailboxToken(input);
-  const provider = token.provider === "google" ? "gmail" : "outlook";
-  if (targets.length === 0) {
-    return {
-      connectionId: connection.id,
-      mailboxAccount: connection.address,
-      provider,
-      targetsChecked: 0,
-      messages: [],
-      importSummary: { imported: 0, updated: 0, deduped: 0, failed: 0 },
-    };
+  const requestedTargets = uniqueReplyTargets(input.targets);
+  const groups = await resolveAuthorizedReplyGroups(input, requestedTargets);
+  const messages: SyncedMailboxMessage[] = [];
+  const importSummary: MailboxSyncImportSummary = { imported: 0, updated: 0, deduped: 0, failed: 0 };
+  const mailboxesChecked: Array<{ connectionId: string; mailboxAccount: string; provider: "gmail" | "outlook" }> = [];
+
+  for (const group of groups) {
+    const { connection, token } = await readFreshMailboxToken({
+      tenantId: input.tenantId,
+      userId: group.userId,
+      connectionId: group.connectionId,
+      expectedAddress: group.expectedAddress,
+    });
+    const provider = token.provider === "google" ? "gmail" : "outlook";
+    const synced = token.provider === "google"
+      ? await syncGmailReplyMessages(connection.id, connection.address, token.accessToken, group.targets)
+      : await syncMicrosoftReplyMessages(connection.id, connection.address, token.accessToken, group.targets);
+    const summary = await persistSyncedMailboxMessages(connection, synced);
+    messages.push(...synced);
+    importSummary.imported += summary.imported;
+    importSummary.updated += summary.updated;
+    importSummary.deduped += summary.deduped;
+    importSummary.failed += summary.failed;
+    mailboxesChecked.push({ connectionId: connection.id, mailboxAccount: connection.address, provider });
+    await markConnectionSynced(connection.id);
   }
 
-  const messages = token.provider === "google"
-    ? await syncGmailReplyMessages(
-        connection.id,
-        connection.address,
-        token.accessToken,
-        targets
-      )
-    : await syncMicrosoftReplyMessages(
-        connection.id,
-        connection.address,
-        token.accessToken,
-        targets
-      );
-  const importSummary = await persistSyncedMailboxMessages(connection, messages);
-  await markConnectionSynced(connection.id);
+  const firstMailbox = mailboxesChecked[0];
   return {
-    connectionId: connection.id,
-    mailboxAccount: connection.address,
-    provider,
-    targetsChecked: targets.length,
+    connectionId: firstMailbox?.connectionId ?? "",
+    mailboxAccount: firstMailbox?.mailboxAccount ?? "",
+    provider: firstMailbox?.provider ?? "gmail",
+    mailboxesChecked,
+    targetsChecked: groups.reduce((total, group) => total + group.targets.length, 0),
     messages,
     importSummary,
   };
@@ -1082,15 +1112,18 @@ function uniqueReplyTargets(targets: MailboxReplyTarget[]): MailboxReplyTarget[]
     const subject = target.subject?.trim() || undefined;
     const participantEmail = normalizeEmail(target.participantEmail);
     const sentAt = target.sentAt?.trim() || undefined;
-    if (!externalThreadId && !rfc822MessageId && !(subject && participantEmail && sentAt)) continue;
+    const communicationId = target.communicationId?.trim() || undefined;
+    if (!communicationId && !externalThreadId && !rfc822MessageId && !(subject && participantEmail && sentAt)) continue;
     const key = [
       externalThreadId ?? "",
       canonicalMessageId(rfc822MessageId),
       normalizeReplySubject(subject),
       participantEmail,
       sentAt ?? "",
+      communicationId ?? "",
     ].join("|");
     unique.set(key, {
+      communicationId,
       externalThreadId,
       rfc822MessageId,
       sentAt,
@@ -1100,6 +1133,180 @@ function uniqueReplyTargets(targets: MailboxReplyTarget[]): MailboxReplyTarget[]
     });
   }
   return [...unique.values()];
+}
+
+async function resolveAuthorizedReplyGroups(
+  input: MailboxReplySyncInput,
+  targets: MailboxReplyTarget[]
+): Promise<AuthorizedReplyGroup[]> {
+  const communicationIds = [...new Set(
+    targets.map((target) => target.communicationId?.trim()).filter((value): value is string => Boolean(value))
+  )];
+
+  if (communicationIds.length === 0) {
+    const { connection } = await readFreshMailboxToken(input);
+    return [{
+      userId: input.userId,
+      connectionId: connection.id,
+      expectedAddress: connection.address,
+      targets,
+    }];
+  }
+  if (communicationIds.length !== targets.length) {
+    throw new Error("Every carrier reply target must identify its original outbound message.");
+  }
+
+  // Exact carrier checks are routed exclusively from the server-owned send
+  // record. A browser-provided connection hint must never override or narrow
+  // the original sender mailbox selected here.
+  const requestedConnectionId = null;
+  const canonicalRows = await prisma.$queryRaw<CanonicalReplyTargetRow[]>`
+    SELECT
+      mailbox_connection.id AS connection_id,
+      mailbox_connection.user_id AS user_id,
+      mailbox_connection.address,
+      mailbox_connection.provider,
+      communication.id AS communication_id,
+      communication.subject,
+      communication.message_id_header,
+      communication.external_recipient_email,
+      communication.to_recipients,
+      communication.sent_at,
+      communication.created_at,
+      communication.mailbox,
+      communication.resolution
+    FROM communications AS communication
+    JOIN mailbox_connections AS mailbox_connection
+      ON mailbox_connection.tenant_id = communication.tenant_id
+      AND mailbox_connection.owner_type = 'staff'
+      AND mailbox_connection.status = 'connected'
+      AND mailbox_connection.id = communication.mailbox->>'connectionId'
+      AND lower(mailbox_connection.address) = lower(communication.mailbox->>'account')
+    WHERE communication.tenant_id = ${input.tenantId}
+      AND communication.id IN (${Prisma.join(communicationIds)})
+      AND communication.channel = 'email'
+      AND communication.direction = 'outbound'
+      AND communication.mailbox->>'origin' = 'provider_send'
+      AND communication.resolution->>'verifiedOutbound' = 'true'
+      AND (${requestedConnectionId}::text IS NULL OR mailbox_connection.id = ${requestedConnectionId})
+  `;
+
+  const canonicalById = new Map(canonicalRows.map((row) => [row.communication_id, row]));
+  const missingIds = communicationIds.filter((communicationId) => !canonicalById.has(communicationId));
+  if (missingIds.length > 0) {
+    const legacyRows = await resolveLegacyReplyTargets(input, missingIds, requestedConnectionId);
+    legacyRows.forEach((row) => canonicalById.set(row.communication_id, row));
+  }
+  if (communicationIds.some((communicationId) => !canonicalById.has(communicationId))) {
+    throw new Error("The carrier reply check could not verify the original outbound carrier email.");
+  }
+
+  const groups = new Map<string, AuthorizedReplyGroup>();
+  for (const communicationId of communicationIds) {
+    const row = canonicalById.get(communicationId)!;
+    const target = canonicalTargetFromRow(row);
+    if (!target.externalThreadId && !target.rfc822MessageId && !isRecoveryReplyTarget(target)) {
+      throw new Error("The original carrier email is missing the provider identifiers required to check replies.");
+    }
+    const existing = groups.get(row.connection_id);
+    if (existing) existing.targets.push(target);
+    else groups.set(row.connection_id, {
+      userId: row.user_id,
+      connectionId: row.connection_id,
+      expectedAddress: row.address,
+      targets: [target],
+    });
+  }
+  return [...groups.values()];
+}
+
+function canonicalTargetFromRow(row: CanonicalReplyTargetRow): MailboxReplyTarget {
+  const mailbox = asRecord(row.mailbox);
+  const resolution = asRecord(row.resolution);
+  const recipients = stringArray(row.to_recipients);
+  const sentAt = dateValue(row.sent_at) ?? dateValue(row.created_at);
+  return {
+    communicationId: row.communication_id,
+    externalThreadId: optionalString(mailbox.externalThreadId),
+    rfc822MessageId: row.message_id_header ?? optionalString(mailbox.rfc822MessageId),
+    sentAt: sentAt?.toISOString(),
+    subject: row.subject ?? undefined,
+    participantEmail: row.external_recipient_email ?? recipients[0],
+    carrierSubmissionId: optionalString(resolution.carrierSubmissionId),
+  };
+}
+
+async function resolveLegacyReplyTargets(
+  input: MailboxReplySyncInput,
+  communicationIds: string[],
+  requestedConnectionId: string | null
+): Promise<CanonicalReplyTargetRow[]> {
+  if (!supabaseStateConfigured()) return [];
+  const stateId = process.env.STATE_SYNC_ID?.trim() || process.env.VITE_STATE_SYNC_ID?.trim() || "default";
+  const state = await readRemoteState(`app_state:${stateId}`).catch(() => null);
+  const snapshot = asRecord(state?.snapshot);
+  const communications = objectArray(snapshot.communications);
+  const carrierContacts = objectArray(snapshot.carrierContacts);
+  const byId = new Map(communications.map((row) => [stringValue(row.id), row]));
+  const validIds = communicationIds.filter((communicationId) => {
+    const row = byId.get(communicationId);
+    return row &&
+      stringValue(row.tenantId) === input.tenantId &&
+      stringValue(row.channel) === "email" &&
+      stringValue(row.direction) === "outbound";
+  });
+  if (validIds.length === 0) return [];
+
+  const auditRows = await prisma.$queryRaw<AuthorizedReplyMailbox[]>`
+    SELECT DISTINCT ON (audit.metadata->>'communicationId')
+      mailbox_connection.id AS connection_id,
+      mailbox_connection.user_id AS user_id,
+      mailbox_connection.address,
+      audit.metadata->>'communicationId' AS communication_id
+    FROM audit_logs AS audit
+    JOIN mailbox_connections AS mailbox_connection
+      ON mailbox_connection.tenant_id = audit.tenant_id
+      AND mailbox_connection.owner_type = 'staff'
+      AND mailbox_connection.status = 'connected'
+      AND mailbox_connection.user_id = COALESCE(NULLIF(audit.metadata->>'userId', ''), audit.actor_id)
+      AND lower(mailbox_connection.address) = lower(audit.metadata->>'mailboxAccount')
+    WHERE audit.tenant_id = ${input.tenantId}
+      AND audit.action IN ('mailbox.reply_route.created', 'mailbox.reply_route.unavailable')
+      AND audit.metadata->>'communicationId' IN (${Prisma.join(validIds)})
+      AND (${requestedConnectionId}::text IS NULL OR mailbox_connection.id = ${requestedConnectionId})
+    ORDER BY audit.metadata->>'communicationId', audit.created_at DESC, mailbox_connection.updated_at DESC
+  `;
+
+  return auditRows.flatMap((audit) => {
+    const communication = byId.get(audit.communication_id);
+    if (!communication) return [];
+    const carrierContactId = optionalString(communication.carrierContactId);
+    const carrierContact = carrierContactId
+      ? carrierContacts.find((row) => stringValue(row.id) === carrierContactId)
+      : undefined;
+    const to = stringArray(communication.to);
+    const participantEmail = optionalString(communication.externalRecipientEmail) ||
+      to[0] || optionalString(carrierContact?.email);
+    const mailbox = {
+      origin: "legacy_verified_send",
+      account: audit.address,
+      connectionId: audit.connection_id,
+      externalThreadId: optionalString(communication.externalThreadId),
+      rfc822MessageId: optionalString(communication.rfc822MessageId) || optionalString(communication.messageIdHeader),
+    };
+    return [{
+      ...audit,
+      provider: "",
+      subject: optionalString(communication.subject) || null,
+      message_id_header: optionalString(communication.rfc822MessageId) || optionalString(communication.messageIdHeader) || null,
+      external_recipient_email: participantEmail || null,
+      to_recipients: to,
+      sent_at: dateValue(communication.createdAt),
+      created_at: dateValue(communication.createdAt) ?? new Date(),
+      mailbox,
+      resolution: { carrierSubmissionId: optionalString(communication.carrierSubmissionId) },
+    }];
+  });
 }
 
 function replyTargetForMessage(
@@ -1393,6 +1600,7 @@ async function upsertSyncedCommunication(
       };
   const threadId = await resolveServerThreadId(
     connection.tenant_id,
+    connection.id,
     provider,
     contactEmail || `unassigned:${message.externalMessageId}`,
     message
@@ -1491,6 +1699,7 @@ async function findExistingCommunication(
 
 async function resolveServerThreadId(
   tenantId: string,
+  connectionId: string,
   provider: "gmail" | "outlook",
   contactEmail: string,
   message: SyncedMailboxMessage
@@ -1505,6 +1714,7 @@ async function resolveServerThreadId(
     FROM communications
     WHERE tenant_id = ${tenantId}
       AND channel = 'email'
+      AND mailbox->>'connectionId' = ${connectionId}
     ORDER BY created_at DESC
     LIMIT 500
   `;
@@ -1628,6 +1838,21 @@ async function markConnectionError(connectionId: string, message: string) {
 
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+}
+
+function objectArray(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+    : [];
+}
+
+function dateValue(value: unknown): Date | null {
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime()) ? value : null;
+  }
+  if (typeof value !== "string" || !value.trim()) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp) : null;
 }
 
 function stringValue(value: unknown): string {

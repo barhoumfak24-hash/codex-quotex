@@ -197,6 +197,219 @@ describe("mailbox sync reliability", () => {
     });
   });
 
+  it("uses the verified original sender mailbox for a same-agency carrier reply check", async () => {
+    mocks.queryRaw.mockResolvedValueOnce([{
+      connection_id: "connection-sender",
+      user_id: "user-sender",
+      address: "sender@example.com",
+      provider: "google",
+      communication_id: "communication-carrier-1",
+      subject: "Commercial application package - Fictional Insured",
+      message_id_header: "<sent-carrier-sender@example.com>",
+      external_recipient_email: "underwriter@carrier.example",
+      to_recipients: ["underwriter@carrier.example"],
+      sent_at: new Date("2026-01-01T00:00:00.000Z"),
+      created_at: new Date("2026-01-01T00:00:00.000Z"),
+      mailbox: {
+        origin: "provider_send",
+        account: "sender@example.com",
+        connectionId: "connection-sender",
+        externalThreadId: "gmail-thread-sender",
+        rfc822MessageId: "<sent-carrier-sender@example.com>",
+      },
+      resolution: { verifiedOutbound: true },
+    }]);
+    mocks.readFreshMailboxToken.mockResolvedValue({
+      connection: {
+        id: "connection-sender",
+        tenant_id: "tenant-1",
+        user_id: "user-sender",
+        provider: "google",
+        address: "sender@example.com",
+        status: "connected",
+        token_vault_ref: "mailbox-token:sender-vault",
+      },
+      token: {
+        provider: "google",
+        accessToken: "sender-google-token",
+        scope: "https://www.googleapis.com/auth/gmail.readonly",
+      },
+    });
+    fetchMock().mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/messages") && url.searchParams.has("q")) {
+        return jsonResponse({ messages: [] });
+      }
+      if (url.pathname.endsWith("/threads/gmail-thread-sender")) {
+        return jsonResponse({
+          id: "gmail-thread-sender",
+          messages: [
+            gmailMessage("sent-carrier-sender"),
+            gmailInboundReply(
+              "carrier-reply-sender",
+              "gmail-thread-sender",
+              "<sent-carrier-sender@example.com>",
+              { from: "Underwriter <underwriter@carrier.example>" }
+            ),
+          ],
+        });
+      }
+      throw new Error(`Unexpected Gmail request: ${url.toString()}`);
+    });
+
+    const result = await syncMailboxReplyMessages({
+      tenantId: "tenant-1",
+      userId: "user-checking-replies",
+      connectionId: "connection-sender",
+      targets: [{
+        communicationId: "communication-carrier-1",
+        externalThreadId: "gmail-thread-sender",
+        rfc822MessageId: "<sent-carrier-sender@example.com>",
+        sentAt: "2026-01-01T00:00:00.000Z",
+      }],
+    });
+
+    expect(mocks.readFreshMailboxToken).toHaveBeenCalledWith({
+      tenantId: "tenant-1",
+      userId: "user-sender",
+      connectionId: "connection-sender",
+      expectedAddress: "sender@example.com",
+    });
+    expect(result.messages).toHaveLength(1);
+    expect(result.mailboxAccount).toBe("sender@example.com");
+  });
+
+  it("checks multiple original sender mailboxes sequentially without crossing threads", async () => {
+    const canonicalRow = (suffix: string) => ({
+      connection_id: `connection-${suffix}`,
+      user_id: `user-${suffix}`,
+      address: `${suffix}@example.com`,
+      provider: "google",
+      communication_id: `communication-${suffix}`,
+      subject: `Commercial application package - ${suffix}`,
+      message_id_header: `<sent-${suffix}@example.com>`,
+      external_recipient_email: `${suffix}@carrier.example`,
+      to_recipients: [`${suffix}@carrier.example`],
+      sent_at: new Date("2026-01-01T00:00:00.000Z"),
+      created_at: new Date("2026-01-01T00:00:00.000Z"),
+      mailbox: {
+        origin: "provider_send",
+        account: `${suffix}@example.com`,
+        connectionId: `connection-${suffix}`,
+        externalThreadId: `thread-${suffix}`,
+        rfc822MessageId: `<sent-${suffix}@example.com>`,
+      },
+      resolution: { verifiedOutbound: true },
+    });
+    mocks.queryRaw.mockResolvedValueOnce([canonicalRow("first"), canonicalRow("second")]);
+    mocks.readFreshMailboxToken.mockImplementation(async ({ connectionId }: { connectionId?: string }) => {
+      const suffix = connectionId?.replace("connection-", "") ?? "unknown";
+      return {
+        connection: {
+          id: `connection-${suffix}`,
+          tenant_id: "tenant-1",
+          user_id: `user-${suffix}`,
+          provider: "google",
+          address: `${suffix}@example.com`,
+          status: "connected",
+          token_vault_ref: `mailbox-token:${suffix}`,
+        },
+        token: {
+          provider: "google",
+          accessToken: `token-${suffix}`,
+          scope: "https://www.googleapis.com/auth/gmail.readonly",
+        },
+      };
+    });
+    fetchMock().mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/messages") && url.searchParams.has("q")) {
+        return jsonResponse({ messages: [] });
+      }
+      const suffix = url.pathname.endsWith("/threads/thread-first")
+        ? "first"
+        : url.pathname.endsWith("/threads/thread-second")
+          ? "second"
+          : "";
+      if (!suffix) throw new Error(`Unexpected Gmail request: ${url.toString()}`);
+      return jsonResponse({
+        id: `thread-${suffix}`,
+        messages: [
+          gmailMessage(`sent-${suffix}`),
+          gmailInboundReply(
+            `reply-${suffix}`,
+            `thread-${suffix}`,
+            `<sent-${suffix}@example.com>`,
+            { from: `${suffix} underwriter <${suffix}@carrier.example>` }
+          ),
+        ],
+      });
+    });
+
+    const result = await syncMailboxReplyMessages({
+      tenantId: "tenant-1",
+      userId: "user-checking-replies",
+      connectionId: "untrusted-browser-hint",
+      targets: [
+        { communicationId: "communication-first" },
+        { communicationId: "communication-second" },
+      ],
+    });
+
+    expect(mocks.readFreshMailboxToken.mock.calls.map(([input]) => input.connectionId)).toEqual([
+      "connection-first",
+      "connection-second",
+    ]);
+    expect(result.mailboxesChecked.map((mailbox) => mailbox.mailboxAccount)).toEqual([
+      "first@example.com",
+      "second@example.com",
+    ]);
+    expect(result.messages.map((message) => message.externalMessageId)).toEqual([
+      "reply-first",
+      "reply-second",
+    ]);
+  });
+
+  it("rejects an unverified or cross-agency outbound communication before reading a mailbox token", async () => {
+    mocks.queryRaw.mockResolvedValueOnce([]);
+
+    await expect(syncMailboxReplyMessages({
+      tenantId: "tenant-1",
+      userId: "user-checking-replies",
+      targets: [{
+        communicationId: "communication-from-another-agency",
+        subject: "Commercial application package - Fictional Insured",
+        participantEmail: "underwriter@carrier.example",
+        sentAt: "2026-07-19T21:56:30.375Z",
+      }],
+    })).rejects.toThrow("could not verify the original outbound carrier email");
+
+    expect(mocks.readFreshMailboxToken).not.toHaveBeenCalled();
+  });
+
+  it("rejects a reply batch when any exact target lacks its outbound communication id", async () => {
+    await expect(syncMailboxReplyMessages({
+      tenantId: "tenant-1",
+      userId: "user-checking-replies",
+      targets: [
+        {
+          communicationId: "communication-carrier-1",
+          subject: "Commercial application package - Fictional Insured",
+          participantEmail: "first@carrier.example",
+          sentAt: "2026-07-19T21:56:30.375Z",
+        },
+        {
+          subject: "Commercial application package - Another Insured",
+          participantEmail: "second@carrier.example",
+          sentAt: "2026-07-19T21:57:30.375Z",
+        },
+      ],
+    })).rejects.toThrow("must identify its original outbound message");
+
+    expect(mocks.queryRaw).not.toHaveBeenCalled();
+    expect(mocks.readFreshMailboxToken).not.toHaveBeenCalled();
+  });
+
   it("recovers a Gmail carrier reply by exact subject, sender, and send time when the outbound fallback has no provider IDs", async () => {
     mocks.readFreshMailboxToken.mockResolvedValue(googleConnection());
     fetchMock().mockImplementation(async (input: string | URL | Request) => {

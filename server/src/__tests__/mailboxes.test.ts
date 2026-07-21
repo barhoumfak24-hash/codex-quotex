@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   recordCarrierReplyRouteUnavailable: vi.fn(),
   carrierReplyRelayConfiguration: vi.fn(),
   carrierReplyRelayReadiness: vi.fn(),
+  recordVerifiedOutboundCommunication: vi.fn(),
 }));
 
 vi.mock("../services/mailboxOAuth.js", async () => {
@@ -67,6 +68,10 @@ vi.mock("../services/carrierReplyRelay.js", () => ({
   carrierReplyRelayReadiness: mocks.carrierReplyRelayReadiness,
 }));
 
+vi.mock("../services/mailboxOutbound.js", () => ({
+  recordVerifiedOutboundCommunication: mocks.recordVerifiedOutboundCommunication,
+}));
+
 const JWT_SECRET = "test-jwt-secret-with-more-than-32-characters";
 
 beforeEach(() => {
@@ -104,6 +109,7 @@ beforeEach(() => {
     reason: "active",
     checkedAt: "2026-07-20T00:00:00.000Z",
   });
+  mocks.recordVerifiedOutboundCommunication.mockReset().mockResolvedValue(undefined);
   mocks.emailDeliveryConfiguration.mockReturnValue({
     configured: true,
     provider: "sendgrid",
@@ -361,8 +367,12 @@ describe("mailbox delivery routes", () => {
     mocks.createCarrierReplyRoute.mockResolvedValue("reply+opaque-token@reply.quotexinsurance.com");
     mocks.sendMailboxEmail.mockResolvedValue({
       provider: "google",
+      connectionId: "mailbox_conn_carrier_1",
+      mailboxAccount: "abe@example.com",
       status: "sent",
       externalMessageId: "gmail_carrier_1",
+      externalThreadId: "gmail_thread_carrier_1",
+      rfc822MessageId: "<gmail-carrier-1@example.test>",
     });
     const replyContext = {
       communicationId: "comm_carrier_1",
@@ -393,6 +403,18 @@ describe("mailbox delivery routes", () => {
         replyTo: "reply+opaque-token@reply.quotexinsurance.com",
       })
     );
+    expect(mocks.recordVerifiedOutboundCommunication).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantId: "tenant_mail",
+        userId: "user_mail",
+        context: replyContext,
+        result: expect.objectContaining({
+          connectionId: "mailbox_conn_carrier_1",
+          mailboxAccount: "abe@example.com",
+          externalThreadId: "gmail_thread_carrier_1",
+        }),
+      })
+    );
   });
 
   it("routes replies to the staff mailbox when the inbound relay DNS is not live", async () => {
@@ -406,6 +428,8 @@ describe("mailbox delivery routes", () => {
     });
     mocks.sendMailboxEmail.mockResolvedValue({
       provider: "google",
+      connectionId: "mailbox_conn_carrier_2",
+      mailboxAccount: "abe@example.com",
       status: "sent",
       externalMessageId: "gmail_carrier_2",
     });
@@ -661,6 +685,7 @@ describe("mailbox delivery routes", () => {
       {
         connectionId: "mailbox_conn_1",
         targets: [{
+          communicationId: "communication_carrier_1",
           externalThreadId: "gmail_thread_1",
           rfc822MessageId: "<sent-carrier-1@example.com>",
           sentAt: "2026-07-20T12:00:00.000Z",
@@ -682,6 +707,7 @@ describe("mailbox delivery routes", () => {
       userId: "user_mail",
       connectionId: "mailbox_conn_1",
       targets: [{
+        communicationId: "communication_carrier_1",
         externalThreadId: "gmail_thread_1",
         rfc822MessageId: "<sent-carrier-1@example.com>",
         sentAt: "2026-07-20T12:00:00.000Z",

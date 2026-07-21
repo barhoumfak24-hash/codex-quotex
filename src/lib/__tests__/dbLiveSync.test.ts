@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 beforeEach(() => {
   vi.resetModules();
+  (window as Window & { __quotexActiveDbInstanceId?: string }).__quotexActiveDbInstanceId =
+    `test-reset-${Math.random().toString(36).slice(2)}`;
   window.localStorage.clear();
   window.sessionStorage.clear();
   window.localStorage.setItem("quotex.authToken", "test-session-token");
@@ -218,10 +220,9 @@ describe("db live sync", () => {
 
     vi.resetModules();
     const { db } = await import("../db");
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-
     const first = db.hydrateNow();
     const second = db.hydrateNow();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
     resolveFetch(
       new Response(
         JSON.stringify({ found: true, scoped: true, revision: 1, snapshot: db.snapshot() }),

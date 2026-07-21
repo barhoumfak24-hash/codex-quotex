@@ -4154,6 +4154,7 @@ function CommercialFlowPanel({
             );
             if (!communication.externalThreadId && !rfc822MessageId && !hasRecoveryKey) return [];
             const target = {
+              communicationId: communication.id,
               mailboxConnectionId: communication.mailboxConnectionId,
               externalThreadId: communication.externalThreadId,
               rfc822MessageId,

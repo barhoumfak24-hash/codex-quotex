@@ -33,6 +33,8 @@ export type MailboxSendInput = {
 
 export type MailboxSendResult = {
   provider: "google" | "microsoft" | "smtp";
+  connectionId: string;
+  mailboxAccount: string;
   externalMessageId?: string;
   externalThreadId?: string;
   externalUrl?: string;
@@ -159,14 +161,19 @@ export async function sendMailboxEmail(input: MailboxSendInput): Promise<Mailbox
     throw new MailboxFallbackSafeError(error instanceof Error ? error.message : "Mailbox is unavailable.");
   }
 
-  if (freshToken.provider === "google") {
-    return sendGoogleMail(connection, freshToken, input);
-  }
-  if (freshToken.provider === "microsoft") {
-    return sendMicrosoftMail(connection, freshToken, input);
-  }
-  if (freshToken.provider === "smtp") {
-    return sendSmtpMail(connection, freshToken, input);
+  const result = freshToken.provider === "google"
+    ? await sendGoogleMail(connection, freshToken, input)
+    : freshToken.provider === "microsoft"
+      ? await sendMicrosoftMail(connection, freshToken, input)
+      : freshToken.provider === "smtp"
+        ? await sendSmtpMail(connection, freshToken, input)
+        : null;
+  if (result) {
+    return {
+      ...result,
+      connectionId: connection.id,
+      mailboxAccount: connection.address,
+    };
   }
   throw new MailboxFallbackSafeError(`Unsupported mailbox provider: ${connection.provider}.`);
 }
@@ -487,6 +494,8 @@ async function sendGoogleMail(
   await markConnectionSent(connection.id).catch(() => undefined);
   return {
     provider: "google",
+    connectionId: connection.id,
+    mailboxAccount: connection.address,
     status: "sent",
     externalMessageId: json.id,
     externalThreadId: json.threadId,
@@ -548,6 +557,8 @@ async function sendMicrosoftMail(
   await markConnectionSent(connection.id).catch(() => undefined);
   return {
     provider: "microsoft",
+    connectionId: connection.id,
+    mailboxAccount: connection.address,
     status: "sent",
     externalMessageId: sent?.id ?? created.id,
     externalThreadId: sent?.conversationId ?? created.conversationId,
@@ -584,6 +595,8 @@ async function sendSmtpMail(
     await markConnectionSent(connection.id).catch(() => undefined);
     return {
       provider: "smtp",
+      connectionId: connection.id,
+      mailboxAccount: connection.address,
       status: "sent",
       externalMessageId: result.messageId || undefined,
       rfc822MessageId: result.messageId || undefined,

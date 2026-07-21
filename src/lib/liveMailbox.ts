@@ -268,6 +268,7 @@ export async function syncCommunicationsFromLiveMailbox(input: {
 }
 
 export type ExactCarrierReplyTarget = {
+  communicationId?: string;
   mailboxConnectionId?: string;
   externalThreadId?: string;
   rfc822MessageId?: string;
@@ -337,7 +338,8 @@ export async function syncExactCarrierRepliesFromLiveMailbox(input: {
         headers: authHeaders(input.user, input.tenantId),
         body: JSON.stringify({
           connectionId: connectionId || undefined,
-          targets: targets.map(({ externalThreadId, rfc822MessageId, sentAt, subject, participantEmail, carrierSubmissionId }) => ({
+          targets: targets.map(({ communicationId, externalThreadId, rfc822MessageId, sentAt, subject, participantEmail, carrierSubmissionId }) => ({
+            communicationId,
             externalThreadId,
             rfc822MessageId,
             sentAt,

@@ -2219,6 +2219,9 @@ function updateCommunicationDeliveryFromOutbox(
   job: MailboxOutboxJob,
   status: Communication["deliveryStatus"],
   provider?: {
+    provider?: "google" | "microsoft" | "transactional";
+    connectionId?: string;
+    mailboxAccount?: string;
     externalMessageId?: string;
     externalThreadId?: string;
     externalUrl?: string;
@@ -2230,6 +2233,10 @@ function updateCommunicationDeliveryFromOutbox(
   if (provider?.externalMessageId) patch.externalMessageId = provider.externalMessageId;
   if (provider?.externalThreadId) patch.externalThreadId = provider.externalThreadId;
   if (provider?.externalUrl) patch.externalUrl = provider.externalUrl;
+  if (provider?.connectionId) patch.mailboxConnectionId = provider.connectionId;
+  if (provider?.mailboxAccount) patch.mailboxAccount = provider.mailboxAccount;
+  if (provider?.provider === "google") patch.mailboxProvider = "gmail";
+  if (provider?.provider === "microsoft") patch.mailboxProvider = "outlook";
   const rfc822MessageId = provider?.rfc822MessageId ?? provider?.messageIdHeader;
   if (rfc822MessageId) {
     patch.rfc822MessageId = rfc822MessageId;
@@ -2262,6 +2269,8 @@ function reconcileOutboxFromProviderMessage(row: Communication) {
 
 type MailboxDeliveryProviderResult = {
   provider?: "google" | "microsoft" | "transactional";
+  connectionId?: string;
+  mailboxAccount?: string;
   status?: "sent";
   externalMessageId?: string;
   externalThreadId?: string;

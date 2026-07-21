@@ -28,6 +28,7 @@ import {
   createCarrierReplyRoute,
   recordCarrierReplyRouteUnavailable,
 } from "../services/carrierReplyRelay.js";
+import { recordVerifiedOutboundCommunication } from "../services/mailboxOutbound.js";
 
 export const mailboxesRoutes = Router();
 export const mailboxOAuthCallbackRoutes = Router();
@@ -73,6 +74,7 @@ const syncSchema = z.object({
   maxResults: z.number().int().min(1).max(50).optional(),
 });
 const replyTargetSchema = z.object({
+  communicationId: z.string().trim().min(1).max(200).optional(),
   externalThreadId: z.string().trim().min(1).max(500).optional(),
   rfc822MessageId: z.string().trim().min(1).max(998).optional(),
   sentAt: z.string().datetime().optional(),
@@ -80,6 +82,7 @@ const replyTargetSchema = z.object({
   participantEmail: emailSchema.optional(),
   carrierSubmissionId: z.string().trim().min(1).max(200).optional(),
 }).refine((target) => Boolean(
+  target.communicationId ||
   target.externalThreadId ||
   target.rfc822MessageId ||
   (target.subject && target.participantEmail && target.sentAt)
@@ -283,6 +286,28 @@ mailboxesRoutes.post("/send", async (req, res, next) => {
         senderName: identity.name,
         replyTo: effectiveReplyTo,
       });
+      if (parsed.data.replyContext) {
+        await recordVerifiedOutboundCommunication({
+          tenantId: req.auth.tenantId,
+          userId: req.auth.userId,
+          context: parsed.data.replyContext,
+          result,
+          to: parsed.data.to,
+          cc: parsed.data.cc,
+          bcc: parsed.data.bcc,
+          subject: parsed.data.subject,
+          text: parsed.data.text,
+          html: parsed.data.html,
+          attachments: parsed.data.attachments,
+        }).catch((error) => {
+          console.error("Verified outbound carrier message could not be recorded", {
+            tenantId: req.auth?.tenantId,
+            userId: req.auth?.userId,
+            communicationId: parsed.data.replyContext?.communicationId,
+            message: error instanceof Error ? error.message : "Unknown persistence error.",
+          });
+        });
+      }
       return res.json({ ok: true, result });
     } catch (mailboxError) {
       if (!isMailboxFallbackSafeError(mailboxError)) {

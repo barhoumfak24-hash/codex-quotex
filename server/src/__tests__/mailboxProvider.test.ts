@@ -92,6 +92,8 @@ describe("Microsoft mailbox send metadata", () => {
     expect(result).toEqual({
       provider: "microsoft",
       status: "sent",
+      connectionId: "connection-1",
+      mailboxAccount: "agent@example.com",
       externalMessageId: "immutable-draft-id",
       externalThreadId: "sent-conversation",
       externalUrl: "https://outlook.office.com/mail/sentitems/exact-link",
