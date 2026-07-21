@@ -636,8 +636,8 @@ function ActivityQuickList({
       detail: n.summary,
       href: n.taskId ? `/employee/tasks?focus=${n.taskId}` : "/employee/tasks",
       tone: n.severity,
-      removeLabel: "Dismiss notification",
-      onRemove: () => api.aiNotifications.dismiss(n.id, userId),
+      removeLabel: "Delete notification",
+      onRemove: () => api.aiNotifications.remove(n.id),
     })),
     ...tasks.map((t) => ({
       id: `task:${t.id}`,
@@ -661,8 +661,8 @@ function ActivityQuickList({
       detail: t.description ?? "Manager routing confirmation needed.",
       href: `/employee/tasks?focus=${t.id}`,
       tone: (t.routeRequestMode === "reroute" ? "warning" : "info") as import("@/types").TaskSeverity,
-      removeLabel: "Remove routing activity",
-      onRemove: () => api.tasks.markComplete(t.id, userId),
+      removeLabel: "Delete routing activity",
+      onRemove: () => api.tasks.remove(t.id),
     })),
     ...routingProspects.map((p) => ({
       id: `routing-prospect:${p.id}`,
@@ -673,8 +673,8 @@ function ActivityQuickList({
       )}`,
       href: "/employee/tasks",
       tone: "info" as const,
-      removeLabel: "Dismiss prospect from routing",
-      onRemove: () => api.routing.dismiss("prospect", p.id, userId),
+      removeLabel: "Delete prospect routing entry",
+      onRemove: () => api.routing.remove("prospect", p.id, userId),
     })),
     ...routingClients.map((c) => ({
       id: `routing-client:${c.id}`,
@@ -683,8 +683,8 @@ function ActivityQuickList({
       detail: c.businessName ? `${c.name} - ${fmt.titleCase(c.lineOfBusiness ?? "commercial")} lines` : `${fmt.titleCase(c.lineOfBusiness ?? "personal")} lines`,
       href: "/employee/tasks",
       tone: "info" as const,
-      removeLabel: "Dismiss client from routing",
-      onRemove: () => api.routing.dismiss("client", c.id, userId),
+      removeLabel: "Delete client routing entry",
+      onRemove: () => api.routing.remove("client", c.id, userId),
     })),
   ].sort((a, b) => (a.at < b.at ? 1 : -1));
 
@@ -714,8 +714,7 @@ function ActivityQuickList({
               aria-label={row.removeLabel}
               title={row.removeLabel}
               onClick={() => {
-                const destructive = row.id.startsWith("task:");
-                if (destructive && !window.confirm("Delete this activity?")) return;
+                if (!window.confirm("Permanently delete this item?")) return;
                 row.onRemove();
                 onChanged();
               }}
@@ -1024,13 +1023,13 @@ function NotificationsList({
         ? `/employee/messages?contact=client:${c.customerId}`
         : "/employee/messages",
       onDismiss: () => {
-        api.communications.markResolved(c.id, userId);
+        api.communications.remove(c.id);
         api.aiNotifications
           .listUnacked(tenantId)
           .filter((notification) => notification.communicationId === c.id)
-          .forEach((notification) => api.aiNotifications.dismiss(notification.id, userId));
+          .forEach((notification) => api.aiNotifications.remove(notification.id));
       },
-      dismissLabel: "Dismiss message notification",
+      dismissLabel: "Delete message notification",
     });
   });
   unreadInternal.forEach(({ thread, latest }) => {
@@ -1046,8 +1045,8 @@ function NotificationsList({
       detail: latest.body.slice(0, 80),
       href: `/employee/messages?thread=${thread.id}`,
       urgency: latest.urgency,
-      onDismiss: () => api.internalMessages.markRead(thread.id, userId),
-      dismissLabel: "Mark internal message notification as read",
+      onDismiss: () => api.internalMessages.remove(latest.id),
+      dismissLabel: "Delete internal message notification",
     });
   });
   goalRequests.forEach((n) =>
@@ -1064,8 +1063,8 @@ function NotificationsList({
       )}#performance-goals`,
       urgency: "info",
       onOpen: () => api.aiNotifications.dismiss(n.id, userId),
-      onDismiss: () => api.aiNotifications.dismiss(n.id, userId),
-      dismissLabel: "Dismiss notification",
+      onDismiss: () => api.aiNotifications.remove(n.id),
+      dismissLabel: "Delete notification",
     })
   );
   timesheetNotifications.forEach((n) =>
@@ -1080,8 +1079,8 @@ function NotificationsList({
       href: "/employee/accounting",
       urgency: "info",
       onOpen: () => api.aiNotifications.dismiss(n.id, userId),
-      onDismiss: () => api.aiNotifications.dismiss(n.id, userId),
-      dismissLabel: "Dismiss notification",
+      onDismiss: () => api.aiNotifications.remove(n.id),
+      dismissLabel: "Delete notification",
     })
   );
   inboundNotices.forEach((n) => {
@@ -1105,8 +1104,8 @@ function NotificationsList({
         : "/employee/messages",
       urgency: n.severity ?? "info",
       onOpen: () => api.aiNotifications.dismiss(n.id, userId),
-      onDismiss: () => api.aiNotifications.dismiss(n.id, userId),
-      dismissLabel: "Dismiss notification",
+      onDismiss: () => api.aiNotifications.remove(n.id),
+      dismissLabel: "Delete notification",
     });
   });
   quoteReadyNotifications.forEach((n) =>
@@ -1125,8 +1124,8 @@ function NotificationsList({
         : "/employee",
       urgency: n.severity ?? "info",
       onOpen: () => api.aiNotifications.dismiss(n.id, userId),
-      onDismiss: () => api.aiNotifications.dismiss(n.id, userId),
-      dismissLabel: "Dismiss notification",
+      onDismiss: () => api.aiNotifications.remove(n.id),
+      dismissLabel: "Delete notification",
     })
   );
   rows.sort((a, b) => (a.at < b.at ? 1 : -1));
@@ -1197,7 +1196,7 @@ function NotificationsList({
               type="button"
               className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-ink-400 opacity-100 transition hover:bg-alert-soft hover:text-alert sm:opacity-0 sm:focus-visible:opacity-100 sm:group-hover:opacity-100"
               onClick={() => {
-                if (r.kind === "task" && !window.confirm("Delete this activity?")) return;
+                if (!window.confirm("Permanently delete this item?")) return;
                 r.onDismiss();
                 onChanged();
               }}

@@ -501,7 +501,7 @@ describe("contact route requests", () => {
 });
 
 describe("routing dismissal", () => {
-  it("dismisses a client routing row without deleting the client", async () => {
+  it("permanently removes a client routing entry without deleting the client", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     const manager = api.users.list(agency.id).find((user) => user.role === "manager")!;
@@ -521,9 +521,20 @@ describe("routing dismissal", () => {
       skipAutoRoute: true,
     });
 
-    api.routing.dismiss("client", client.id, manager.id);
+    const request = api.routing.requestContactRoute({
+      tenantId: agency.id,
+      kind: "client",
+      targetId: client.id,
+      mode: "route",
+      actorId: manager.id,
+      requestedAgentIds: [manager.id],
+    });
+
+    api.routing.remove("client", client.id, manager.id);
 
     expect(api.routing.isDismissed("client", client.id)).toBe(true);
+    expect(api.tasks.get(request.id)).toBeUndefined();
+    expect(api.routing.findOpenContactRouteRequest("client", client.id)).toBeUndefined();
     expect(api.customers.get(client.id)?.name).toBe(client.name);
     expect(api.customers.list(agency.id).some((row) => row.id === client.id)).toBe(true);
   });

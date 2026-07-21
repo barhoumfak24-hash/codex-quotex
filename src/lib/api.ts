@@ -14556,6 +14556,9 @@ export const api = {
         resolvedById: byUserId,
       });
     },
+    remove(id: string): boolean {
+      return db.remove("communications", id);
+    },
     // Mark every unread inbound message in a contact's thread as read
     // (resolved). Used by the ⋯ thread settings "Mark as read".
     markContactRead(
@@ -15033,6 +15036,9 @@ export const api = {
         acknowledgedById: userId,
       });
     },
+    remove(id: string): boolean {
+      return db.remove("aiNotifications", id);
+    },
     // Promote every pending task-spawning notification straight into a
     // Task. The Activity Center used to keep these in a manual "New
     // notifications" inbox the agent had to acknowledge one-by-one;
@@ -15076,6 +15082,26 @@ export const api = {
       return !!contact?.routingDismissedAt;
     },
     dismiss(kind: "client" | "prospect", targetId: string, actorId?: string) {
+      const patch = {
+        routingDismissedAt: nowIso(),
+        routingDismissedById: actorId,
+      };
+      return kind === "client"
+        ? db.update("customers", targetId, patch)
+        : db.update("prospects", targetId, patch);
+    },
+    remove(kind: "client" | "prospect", targetId: string, actorId?: string) {
+      db
+        .list("tasks")
+        .filter(
+          (task) =>
+            (kind === "client" ? task.customerId === targetId : task.prospectId === targetId) &&
+            (!!task.routeRequestKind || task.awaitingManagerAssignment)
+        )
+        .forEach((task) => db.remove("tasks", task.id));
+
+      // This queue control must never erase the client or prospect. Permanently
+      // remove its routing entry while preserving the underlying contact record.
       const patch = {
         routingDismissedAt: nowIso(),
         routingDismissedById: actorId,
@@ -16670,6 +16696,20 @@ export const api = {
           db.update("internalMessages", m.id, { readBy: [...m.readBy, userId] });
         }
       });
+    },
+    remove(messageId: string): boolean {
+      const message = db.list("internalMessages").find((row) => row.id === messageId);
+      if (!message || !db.remove("internalMessages", messageId)) return false;
+      const remaining = db
+        .list("internalMessages")
+        .filter((row) => row.threadId === message.threadId)
+        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+      if (remaining[0]) {
+        db.update("internalThreads", message.threadId, { lastMessageAt: remaining[0].createdAt });
+      } else {
+        db.remove("internalThreads", message.threadId);
+      }
+      return true;
     },
     // Permanently delete a DM / group thread + all its messages, and
     // clean up any pins / mutes pointing at it. Destructive — caller

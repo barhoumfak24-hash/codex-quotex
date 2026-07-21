@@ -1394,11 +1394,9 @@ function RoutingCard({
 
   function removeRoutingItem(kind: "prospect" | "client" | "activity", row: RoutingRow) {
     if (kind === "activity" || (row.assignId && row.assignId === row.id)) {
-      if (!window.confirm("Remove this routing activity?")) return;
+      if (!window.confirm("Permanently delete this routing activity?")) return;
       const taskId = row.assignId ?? row.id;
-      const task = api.tasks.get(taskId);
-      if (task?.routeRequestKind) api.tasks.markComplete(taskId, currentUserId);
-      else api.tasks.remove(taskId);
+      api.tasks.remove(taskId);
       onChanged();
       return;
     }
@@ -1406,13 +1404,12 @@ function RoutingCard({
     const label = kind === "client" ? "client" : "prospect";
     if (
       !window.confirm(
-        `Remove this ${label} from routing? The ${label} record will remain in Quotex.`
+        `Permanently delete this routing entry? The ${label} record will remain in Quotex.`
       )
     ) {
       return;
     }
-    api.routing.dismiss(kind, row.id, currentUserId);
-    if (row.assignId) api.tasks.markComplete(row.assignId, currentUserId);
+    api.routing.remove(kind, row.id, currentUserId);
     onChanged();
   }
 
@@ -1767,8 +1764,8 @@ function RoutingList({
                   type="button"
                   className="inline-flex h-8 w-8 items-center justify-center rounded-md text-ink-400 opacity-100 transition hover:bg-alert-soft hover:text-alert sm:opacity-0 sm:focus-visible:opacity-100 sm:group-hover:opacity-100"
                   onClick={() => onRemove(r)}
-                  aria-label={`Remove ${r.name} from routing`}
-                  title="Remove from routing"
+                  aria-label={`Delete ${r.name} routing entry`}
+                  title="Delete routing entry"
                 >
                   <X className="h-4 w-4" />
                 </button>

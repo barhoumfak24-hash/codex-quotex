@@ -65,6 +65,31 @@ describe("internalMessages namespace", () => {
     expect(reloaded.lastMessageAt > before).toBe(true);
   });
 
+  it("permanently removes a message and removes an empty thread", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const [a, b] = api.users
+      .list(agency.id)
+      .filter((u) => u.role === "agent" || u.role === "manager");
+    const thread = api.internalMessages.openThread({
+      tenantId: agency.id,
+      participantIds: [a.id, b.id],
+      createdById: a.id,
+    });
+    const message = api.internalMessages.send({
+      threadId: thread.id,
+      tenantId: agency.id,
+      fromUserId: a.id,
+      body: "delete me",
+    });
+
+    expect(api.internalMessages.remove(message.id)).toBe(true);
+    expect(api.internalMessages.listMessages(thread.id)).toHaveLength(0);
+    expect(api.internalMessages.listThreadsForUser(agency.id, a.id)).not.toContainEqual(
+      expect.objectContaining({ id: thread.id })
+    );
+  });
+
   it("unreadCountForUser excludes the sender's own messages", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];

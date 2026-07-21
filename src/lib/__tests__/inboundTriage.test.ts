@@ -140,6 +140,32 @@ describe("communications.sweepInboundForActivities", () => {
     ).toBe(false);
   });
 
+  it("permanently removes an inbound communication and its notification", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const comm = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      body: "The requested form was uploaded.",
+    });
+    const created = api.communications.sweepInboundForActivities(agency.id);
+    const notificationId = created[0]?.notification?.id;
+    expect(notificationId).toBeTruthy();
+
+    expect(api.communications.remove(comm.id)).toBe(true);
+    if (notificationId) expect(api.aiNotifications.remove(notificationId)).toBe(true);
+
+    expect(api.communications.listByCustomer(customer.id)).not.toContainEqual(
+      expect.objectContaining({ id: comm.id })
+    );
+    expect(api.aiNotifications.listByTenant(agency.id)).not.toContainEqual(
+      expect.objectContaining({ id: notificationId })
+    );
+  });
+
   it("skips AI-authored inbound and outbound messages", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
