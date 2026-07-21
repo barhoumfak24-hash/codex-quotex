@@ -29,6 +29,7 @@ import {
   recordCarrierReplyRouteUnavailable,
 } from "../services/carrierReplyRelay.js";
 import { recordVerifiedOutboundCommunication } from "../services/mailboxOutbound.js";
+import { processPersistedCarrierReplies } from "../services/carrierReplyProcessor.js";
 
 export const mailboxesRoutes = Router();
 export const mailboxOAuthCallbackRoutes = Router();
@@ -155,12 +156,16 @@ mailboxesRoutes.post("/replay", async (req, res, next) => {
     if (!req.auth?.tenantId) return res.status(403).json({ ok: false, error: "tenant_required" });
     const parsed = replaySchema.safeParse(req.body ?? {});
     if (!parsed.success) return res.status(400).json({ ok: false, error: parsed.error.flatten() });
+    const carrierReplyProcessing = await processPersistedCarrierReplies({
+      tenantId: req.auth.tenantId,
+      limit: parsed.data.limit,
+    });
     const messages = await listPersistedMailboxMessages({
       tenantId: req.auth.tenantId,
       userId: req.auth.userId,
       limit: parsed.data.limit,
     });
-    return res.json({ ok: true, messages });
+    return res.json({ ok: true, messages, carrierReplyProcessing });
   } catch (error) {
     next(error);
   }
@@ -345,6 +350,10 @@ mailboxesRoutes.post("/sync", async (req, res, next) => {
       connectionId: parsed.data.connectionId,
       maxResults: parsed.data.maxResults,
     });
+    const carrierReplyProcessing = await processPersistedCarrierReplies({
+      tenantId: req.auth.tenantId,
+      limit: 100,
+    });
     const replayed = await listPersistedMailboxMessages({
       tenantId: req.auth.tenantId,
       userId: req.auth.userId,
@@ -356,7 +365,10 @@ mailboxesRoutes.post("/sync", async (req, res, next) => {
         message,
       ])
     );
-    res.json({ ok: true, result: { ...result, messages: [...byProviderMessage.values()] } });
+    res.json({
+      ok: true,
+      result: { ...result, messages: [...byProviderMessage.values()], carrierReplyProcessing },
+    });
   } catch (error) {
     if (error instanceof Error) {
       return res.status(502).json({
@@ -381,7 +393,11 @@ mailboxesRoutes.post("/sync/replies", async (req, res, next) => {
       connectionId: parsed.data.connectionId,
       targets: parsed.data.targets,
     });
-    res.json({ ok: true, result });
+    const carrierReplyProcessing = await processPersistedCarrierReplies({
+      tenantId: req.auth.tenantId,
+      limit: 100,
+    });
+    res.json({ ok: true, result: { ...result, carrierReplyProcessing } });
   } catch (error) {
     if (error instanceof Error) {
       console.error("Mailbox reply sync failed", {

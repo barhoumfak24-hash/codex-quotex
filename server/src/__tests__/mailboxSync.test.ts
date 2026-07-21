@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   executeRaw: vi.fn(),
   transaction: vi.fn(),
   txQueryRaw: vi.fn(),
+  processPersistedCarrierReplies: vi.fn(),
 }));
 
 vi.mock("../services/mailboxProvider.js", () => ({
@@ -22,6 +23,10 @@ vi.mock("../services/prisma.js", () => ({
     $executeRaw: mocks.executeRaw,
     $transaction: mocks.transaction,
   },
+}));
+
+vi.mock("../services/carrierReplyProcessor.js", () => ({
+  processPersistedCarrierReplies: mocks.processPersistedCarrierReplies,
 }));
 
 import {
@@ -42,6 +47,13 @@ beforeEach(() => {
   mocks.transaction.mockReset().mockImplementation(async (callback) =>
     callback({ $queryRaw: mocks.txQueryRaw })
   );
+  mocks.processPersistedCarrierReplies.mockReset().mockResolvedValue({
+    candidates: 0,
+    processed: 0,
+    alreadyProcessed: 0,
+    unmatched: 0,
+    failed: 0,
+  });
   vi.stubGlobal("fetch", vi.fn());
 });
 

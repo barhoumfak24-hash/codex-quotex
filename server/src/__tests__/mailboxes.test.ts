@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => ({
   carrierReplyRelayConfiguration: vi.fn(),
   carrierReplyRelayReadiness: vi.fn(),
   recordVerifiedOutboundCommunication: vi.fn(),
+  processPersistedCarrierReplies: vi.fn(),
 }));
 
 vi.mock("../services/mailboxOAuth.js", async () => {
@@ -72,6 +73,10 @@ vi.mock("../services/mailboxOutbound.js", () => ({
   recordVerifiedOutboundCommunication: mocks.recordVerifiedOutboundCommunication,
 }));
 
+vi.mock("../services/carrierReplyProcessor.js", () => ({
+  processPersistedCarrierReplies: mocks.processPersistedCarrierReplies,
+}));
+
 const JWT_SECRET = "test-jwt-secret-with-more-than-32-characters";
 
 beforeEach(() => {
@@ -110,6 +115,13 @@ beforeEach(() => {
     checkedAt: "2026-07-20T00:00:00.000Z",
   });
   mocks.recordVerifiedOutboundCommunication.mockReset().mockResolvedValue(undefined);
+  mocks.processPersistedCarrierReplies.mockReset().mockResolvedValue({
+    candidates: 0,
+    processed: 0,
+    alreadyProcessed: 0,
+    unmatched: 0,
+    failed: 0,
+  });
   mocks.emailDeliveryConfiguration.mockReturnValue({
     configured: true,
     provider: "sendgrid",

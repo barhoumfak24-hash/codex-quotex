@@ -24,6 +24,7 @@ import {
 } from "../services/ai/index.js";
 import { publicAiAgentManifest } from "../services/ai/agents.js";
 import { generateOpenAiImage } from "../services/ai/provider.js";
+import { parseCarrierReplyDeterministically } from "../services/carrierReplyParser.js";
 
 // ALL AI is server-side. No model key ever crosses to the browser.
 export const aiRoutes = Router();
@@ -274,6 +275,7 @@ aiRoutes.post("/parse-carrier-appetite", async (req, res) => {
 });
 
 aiRoutes.post("/parse-carrier-reply", async (req, res) => {
+  let fallbackInput: Parameters<typeof parseCarrierReplyDeterministically>[0] | null = null;
   try {
     const { submission, email } = req.body ?? {};
     if (!isRecord(email)) return badRequest(res, "email must be an object");
@@ -290,12 +292,18 @@ aiRoutes.post("/parse-carrier-reply", async (req, res) => {
           }))
         : undefined,
     };
+    fallbackInput = cleanEmail;
+    const deterministic = parseCarrierReplyDeterministically(cleanEmail);
+    if (deterministic.confidence >= 0.8 && !deterministic.requiresAgentReview) {
+      return res.json(deterministic);
+    }
     const out = await aiParseCarrierReply({
       submission: isRecord(submission) ? submission : undefined,
       email: cleanEmail,
     });
     res.json(out);
   } catch (error) {
+    if (fallbackInput) return res.json(parseCarrierReplyDeterministically(fallbackInput));
     const message = error instanceof Error ? error.message.slice(0, 300) : "Carrier reply parsing failed.";
     res.status(500).json({ error: "ai_failed", message });
   }

@@ -8,6 +8,7 @@ import {
 } from "./mailboxProvider.js";
 import { prisma } from "./prisma.js";
 import { readRemoteState, supabaseStateConfigured } from "./supabaseState.js";
+import { processPersistedCarrierReplies } from "./carrierReplyProcessor.js";
 
 export type MailboxSyncInput = {
   tenantId: string;
@@ -478,6 +479,10 @@ export async function syncDueMailboxConnections(input: { maxConnections?: number
         connectionId: row.id,
         maxResults: input.maxResults ?? 25,
       });
+      const carrierReplyProcessing = await processPersistedCarrierReplies({
+        tenantId: row.tenant_id,
+        limit: 100,
+      });
       imported += result.importSummary.imported;
       updated += result.importSummary.updated;
       deduped += result.importSummary.deduped;
@@ -497,6 +502,7 @@ export async function syncDueMailboxConnections(input: { maxConnections?: number
           updated: result.importSummary.updated,
           deduped: result.importSummary.deduped,
           failed: result.importSummary.failed,
+          carrierReplyProcessing,
           messageCount: result.messages.length,
         },
       });
@@ -507,6 +513,7 @@ export async function syncDueMailboxConnections(input: { maxConnections?: number
         ok: true,
         messageCount: result.messages.length,
         importSummary: result.importSummary,
+        carrierReplyProcessing,
       });
     } catch (error) {
       failed += 1;
