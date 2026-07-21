@@ -1197,6 +1197,16 @@ async function resolveAuthorizedReplyGroups(
     const legacyRows = await resolveLegacyReplyTargets(input, missingIds, requestedConnectionId);
     legacyRows.forEach((row) => canonicalById.set(row.communication_id, row));
   }
+  const stillMissingTargets = targets.filter((target) =>
+    target.communicationId && !canonicalById.has(target.communicationId)
+  );
+  const recoverableTargets = stillMissingTargets.filter(isRecoveryReplyTarget);
+  if (recoverableTargets.length > 0) {
+    const { connection } = await readFreshMailboxToken(input);
+    recoverableTargets.forEach((target) => {
+      canonicalById.set(target.communicationId!, recoveryTargetRowFromCurrentMailbox(target, connection, input.userId));
+    });
+  }
   if (communicationIds.some((communicationId) => !canonicalById.has(communicationId))) {
     throw new Error("The carrier reply check could not verify the original outbound carrier email.");
   }
@@ -1218,6 +1228,35 @@ async function resolveAuthorizedReplyGroups(
     });
   }
   return [...groups.values()];
+}
+
+function recoveryTargetRowFromCurrentMailbox(
+  target: MailboxReplyTarget,
+  connection: { id: string; user_id?: string | null; address: string; provider: string },
+  fallbackUserId: string
+): CanonicalReplyTargetRow {
+  const sentAt = dateValue(target.sentAt);
+  return {
+    connection_id: connection.id,
+    user_id: connection.user_id ?? fallbackUserId,
+    address: connection.address,
+    provider: connection.provider,
+    communication_id: target.communicationId!,
+    subject: target.subject ?? null,
+    message_id_header: target.rfc822MessageId ?? null,
+    external_recipient_email: target.participantEmail ?? null,
+    to_recipients: target.participantEmail ? [target.participantEmail] : [],
+    sent_at: sentAt,
+    created_at: sentAt ?? new Date(),
+    mailbox: {
+      origin: "current_mailbox_recovery",
+      account: connection.address,
+      connectionId: connection.id,
+      externalThreadId: target.externalThreadId,
+      rfc822MessageId: target.rfc822MessageId,
+    },
+    resolution: { carrierSubmissionId: target.carrierSubmissionId },
+  };
 }
 
 function canonicalTargetFromRow(row: CanonicalReplyTargetRow): MailboxReplyTarget {

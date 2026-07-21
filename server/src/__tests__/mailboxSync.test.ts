@@ -370,7 +370,7 @@ describe("mailbox sync reliability", () => {
     ]);
   });
 
-  it("rejects an unverified or cross-agency outbound communication before reading a mailbox token", async () => {
+  it("rejects an unverified outbound communication when it has no exact recovery key", async () => {
     mocks.queryRaw.mockResolvedValueOnce([]);
 
     await expect(syncMailboxReplyMessages({
@@ -378,13 +378,59 @@ describe("mailbox sync reliability", () => {
       userId: "user-checking-replies",
       targets: [{
         communicationId: "communication-from-another-agency",
-        subject: "Commercial application package - Fictional Insured",
-        participantEmail: "underwriter@carrier.example",
-        sentAt: "2026-07-19T21:56:30.375Z",
       }],
     })).rejects.toThrow("could not verify the original outbound carrier email");
 
     expect(mocks.readFreshMailboxToken).not.toHaveBeenCalled();
+  });
+
+  it("recovers an old quote-flow reply target through the current mailbox when no send ledger row exists", async () => {
+    mocks.queryRaw.mockResolvedValueOnce([]);
+    mocks.readFreshMailboxToken.mockResolvedValue(googleConnection());
+    fetchMock().mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/messages") && url.searchParams.has("q")) {
+        expect(url.searchParams.get("q")).toContain("from:gbnhone@gmail.com");
+        expect(url.searchParams.get("q")).toContain('subject:"commercial application package - fictional insured"');
+        return jsonResponse({ messages: [{ id: "carrier-reply-recovered-from-current-mailbox" }] });
+      }
+      if (url.pathname.endsWith("/messages/carrier-reply-recovered-from-current-mailbox")) {
+        return jsonResponse(gmailInboundReply(
+          "carrier-reply-recovered-from-current-mailbox",
+          "gmail-thread-recovered",
+          "<legacy-outbound@example.com>",
+          {
+            from: "GBN Hone <gbnhone@gmail.com>",
+            subject: "Re: Commercial application package - Fictional Insured",
+            sentAt: "2026-07-19T23:59:00.000Z",
+            body: "Approved. Annual Premium: $4,850.",
+          }
+        ));
+      }
+      throw new Error(`Unexpected Gmail request: ${url.toString()}`);
+    });
+
+    const result = await syncMailboxReplyMessages({
+      tenantId: "tenant-1",
+      userId: "user-checking-replies",
+      targets: [{
+        communicationId: "legacy-local-communication",
+        subject: "Commercial application package - Fictional Insured",
+        participantEmail: "gbnhone@gmail.com",
+        sentAt: "2026-07-19T21:56:30.375Z",
+        carrierSubmissionId: "submission-great-lakes",
+      }],
+    });
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]).toMatchObject({
+      externalMessageId: "carrier-reply-recovered-from-current-mailbox",
+      carrierSubmissionId: "submission-great-lakes",
+    });
+    expect(mocks.readFreshMailboxToken).toHaveBeenCalledWith(expect.objectContaining({
+      tenantId: "tenant-1",
+      userId: "user-checking-replies",
+    }));
   });
 
   it("rejects a reply batch when any exact target lacks its outbound communication id", async () => {
