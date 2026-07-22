@@ -33,6 +33,8 @@ export type LiveMailboxCapability = {
 
 const capabilityCache = new Map<string, Promise<LiveMailboxCapability>>();
 const retryInFlight = new Set<string>();
+const mailboxSyncInFlight = new Map<string, Promise<LiveMailboxSyncResult>>();
+const carrierReplySyncInFlight = new Map<string, Promise<ExactCarrierReplySyncResult>>();
 
 const OUTBOX_RETRY_DELAYS_MS = [15_000, 60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000];
 
@@ -186,15 +188,18 @@ async function waitForExistingDelivery(jobId: string): Promise<LiveMailboxSendRe
   };
 }
 
-export async function syncCommunicationsFromLiveMailbox(input: {
+type LiveMailboxSyncInput = {
   tenantId: string;
   user: User;
   connectionId?: string;
   maxResults?: number;
   quotingSessionId?: string;
-}): Promise<
+};
+
+export type LiveMailboxSyncResult =
   | {
       ok: true;
+      deferred?: boolean;
       imported: number;
       serverImported?: number;
       serverUpdated?: number;
@@ -204,8 +209,20 @@ export async function syncCommunicationsFromLiveMailbox(input: {
       review: number;
       ignored: number;
     }
-  | { ok: false; message: string }
-> {
+  | { ok: false; message: string };
+
+export function syncCommunicationsFromLiveMailbox(input: LiveMailboxSyncInput): Promise<LiveMailboxSyncResult> {
+  const key = `${input.tenantId}:${input.connectionId ?? input.user.id}`;
+  const current = mailboxSyncInFlight.get(key);
+  if (current) return current;
+  const request = syncCommunicationsFromLiveMailboxOnce(input).finally(() => {
+    if (mailboxSyncInFlight.get(key) === request) mailboxSyncInFlight.delete(key);
+  });
+  mailboxSyncInFlight.set(key, request);
+  return request;
+}
+
+async function syncCommunicationsFromLiveMailboxOnce(input: LiveMailboxSyncInput): Promise<LiveMailboxSyncResult> {
   try {
     const response = await fetch(`${apiBaseUrl()}/mailboxes/sync`, {
       method: "POST",
@@ -221,6 +238,7 @@ export async function syncCommunicationsFromLiveMailbox(input: {
           result: {
             mailboxAccount: string;
             provider: "gmail" | "outlook";
+            deferred?: boolean;
             messages: SyncedMailboxMessage[];
             importSummary?: {
               imported?: number;
@@ -250,6 +268,7 @@ export async function syncCommunicationsFromLiveMailbox(input: {
     if (!mirrored.ok) return mirrored;
     return {
       ok: true,
+      deferred: json.result.deferred,
       imported: mirrored.imported,
       serverImported: json.result.importSummary?.imported,
       serverUpdated: json.result.importSummary?.updated,
@@ -278,14 +297,17 @@ export type ExactCarrierReplyTarget = {
   carrierSubmissionId?: string;
 };
 
-export async function syncExactCarrierRepliesFromLiveMailbox(input: {
+type ExactCarrierReplySyncInput = {
   tenantId: string;
   user: User;
   targets: ExactCarrierReplyTarget[];
   quotingSessionId: string;
-}): Promise<
+};
+
+export type ExactCarrierReplySyncResult =
   | {
       ok: true;
+      deferred?: boolean;
       targetsChecked: number;
       imported: number;
       serverImported: number;
@@ -296,8 +318,24 @@ export async function syncExactCarrierRepliesFromLiveMailbox(input: {
       review: number;
       ignored: number;
     }
-  | { ok: false; message: string }
-> {
+  | { ok: false; message: string };
+
+export function syncExactCarrierRepliesFromLiveMailbox(
+  input: ExactCarrierReplySyncInput
+): Promise<ExactCarrierReplySyncResult> {
+  const key = `${input.tenantId}:${input.user.id}:${input.quotingSessionId}`;
+  const current = carrierReplySyncInFlight.get(key);
+  if (current) return current;
+  const request = syncExactCarrierRepliesFromLiveMailboxOnce(input).finally(() => {
+    if (carrierReplySyncInFlight.get(key) === request) carrierReplySyncInFlight.delete(key);
+  });
+  carrierReplySyncInFlight.set(key, request);
+  return request;
+}
+
+async function syncExactCarrierRepliesFromLiveMailboxOnce(
+  input: ExactCarrierReplySyncInput
+): Promise<ExactCarrierReplySyncResult> {
   const groups = new Map<string, ExactCarrierReplyTarget[]>();
   for (const target of input.targets) {
     const hasRecoveryKey = Boolean(target.subject && target.participantEmail && target.sentAt);
@@ -321,6 +359,7 @@ export async function syncExactCarrierRepliesFromLiveMailbox(input: {
   }
 
   const totals = {
+    deferred: false,
     targetsChecked: 0,
     imported: 0,
     serverImported: 0,
@@ -354,6 +393,7 @@ export async function syncExactCarrierRepliesFromLiveMailbox(input: {
             ok: true;
             result: {
               targetsChecked?: number;
+              deferred?: boolean;
               messages: SyncedMailboxMessage[];
               importSummary?: {
                 imported?: number;
@@ -382,6 +422,7 @@ export async function syncExactCarrierRepliesFromLiveMailbox(input: {
       );
       if (!mirrored.ok) return mirrored;
       totals.targetsChecked += json.result.targetsChecked ?? targets.length;
+      totals.deferred = totals.deferred || Boolean(json.result.deferred);
       totals.imported += mirrored.imported;
       totals.serverImported += json.result.importSummary?.imported ?? 0;
       totals.serverUpdated += json.result.importSummary?.updated ?? 0;

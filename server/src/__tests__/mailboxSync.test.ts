@@ -50,7 +50,7 @@ beforeEach(() => {
   mocks.writeMailboxSyncCursor.mockReset().mockResolvedValue(undefined);
   mocks.queryRaw.mockReset().mockResolvedValue([]);
   mocks.executeRaw.mockReset().mockResolvedValue(1);
-  mocks.txQueryRaw.mockReset();
+  mocks.txQueryRaw.mockReset().mockResolvedValue([{ locked: true }]);
   mocks.transaction.mockReset().mockImplementation(async (callback) =>
     callback({ $queryRaw: mocks.txQueryRaw })
   );
@@ -91,6 +91,8 @@ describe("mailbox sync reliability", () => {
   it("drains every Gmail history page before persisting and advancing the history cursor", async () => {
     mocks.readFreshMailboxToken.mockResolvedValue(googleConnection("history-old"));
     mockCustomerContacts([{ id: "customer-1", email: "client@example.com", additional_contacts: [] }]);
+    let activeMessageReads = 0;
+    let maxConcurrentMessageReads = 0;
     fetchMock().mockImplementation(async (input: string | URL | Request) => {
       const url = new URL(String(input));
       if (url.pathname.endsWith("/history") && !url.searchParams.has("pageToken")) {
@@ -107,7 +109,13 @@ describe("mailbox sync reliability", () => {
         });
       }
       const messageId = url.pathname.match(/\/messages\/([^/]+)$/)?.[1];
-      if (messageId) return jsonResponse(gmailMessage(messageId));
+      if (messageId) {
+        activeMessageReads += 1;
+        maxConcurrentMessageReads = Math.max(maxConcurrentMessageReads, activeMessageReads);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        activeMessageReads -= 1;
+        return jsonResponse(gmailMessage(messageId));
+      }
       throw new Error(`Unexpected Gmail request: ${url.toString()}`);
     });
 
@@ -122,6 +130,7 @@ describe("mailbox sync reliability", () => {
     );
     const cursorOrder = mocks.writeMailboxSyncCursor.mock.invocationCallOrder[0];
     expect(mocks.executeRaw.mock.invocationCallOrder.filter((order) => order < cursorOrder)).toHaveLength(2);
+    expect(maxConcurrentMessageReads).toBe(1);
   });
 
   it("mirrors inbound email from a client address on file", async () => {
@@ -256,13 +265,47 @@ describe("mailbox sync reliability", () => {
     mocks.readFreshMailboxToken.mockResolvedValue(googleConnection("history-old"));
     fetchMock()
       .mockResolvedValueOnce(jsonResponse({ history: [], historyId: "history-page-1", nextPageToken: "page-2" }))
-      .mockResolvedValueOnce(jsonResponse({ error: { message: "temporary failure" } }, 503));
+      .mockResolvedValueOnce(jsonResponse({ error: { message: "temporary failure" } }, 400));
 
     await expect(
       syncMailboxMessages({ tenantId: "tenant-1", userId: "user-1" })
     ).rejects.toThrow("temporary failure");
     expect(fetchMock()).toHaveBeenCalledTimes(2);
     expect(mocks.writeMailboxSyncCursor).not.toHaveBeenCalled();
+  });
+
+  it("retries a throttled Gmail request before completing the sync", async () => {
+    mocks.readFreshMailboxToken.mockResolvedValue(googleConnection("history-old"));
+    fetchMock()
+      .mockResolvedValueOnce(jsonResponse({ error: { message: "Too many concurrent requests for user." } }, 429))
+      .mockResolvedValueOnce(jsonResponse({ history: [], historyId: "history-current" }));
+
+    const result = await syncMailboxMessages({ tenantId: "tenant-1", userId: "user-1" });
+
+    expect(result.messages).toEqual([]);
+    expect(fetchMock()).toHaveBeenCalledTimes(2);
+    expect(mocks.writeMailboxSyncCursor).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "connection-1" }),
+      expect.any(Object),
+      { gmailHistoryId: "history-current" }
+    );
+  });
+
+  it("retries an interrupted provider request before completing the sync", async () => {
+    mocks.readFreshMailboxToken.mockResolvedValue(googleConnection("history-old"));
+    fetchMock()
+      .mockRejectedValueOnce(new TypeError("network interrupted"))
+      .mockResolvedValueOnce(jsonResponse({ history: [], historyId: "history-current" }));
+
+    const result = await syncMailboxMessages({ tenantId: "tenant-1", userId: "user-1" });
+
+    expect(result.messages).toEqual([]);
+    expect(fetchMock()).toHaveBeenCalledTimes(2);
+    expect(mocks.writeMailboxSyncCursor).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "connection-1" }),
+      expect.any(Object),
+      { gmailHistoryId: "history-current" }
+    );
   });
 
   it("preserves the old cursor when a fetched message cannot be persisted", async () => {
@@ -858,6 +901,16 @@ describe("mailbox sync reliability", () => {
     expect(diagnostic.grantedScopes).toEqual(["https://www.googleapis.com/auth/gmail.send"]);
     expect(diagnostic.hasReadScope).toBe(false);
     expect(diagnostic.hasSendScope).toBe(true);
+  });
+
+  it("defers an overlapping mailbox sync without calling the provider", async () => {
+    mocks.readFreshMailboxToken.mockResolvedValue(googleConnection("history-old"));
+    mocks.txQueryRaw.mockResolvedValue([{ locked: false }]);
+
+    const result = await syncMailboxMessages({ tenantId: "tenant-1", userId: "user-1" });
+
+    expect(result).toMatchObject({ deferred: true, messages: [] });
+    expect(fetchMock()).not.toHaveBeenCalled();
   });
 
   it("uses a transaction-scoped advisory lock and skips when another poll owns it", async () => {

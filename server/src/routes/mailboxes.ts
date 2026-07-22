@@ -374,7 +374,7 @@ mailboxesRoutes.post("/sync", async (req, res, next) => {
       return res.status(502).json({
         ok: false,
         error: "mailbox_sync_failed",
-        message: error.message,
+        message: publicMailboxSyncMessage(error),
       });
     }
     next(error);
@@ -409,12 +409,19 @@ mailboxesRoutes.post("/sync/replies", async (req, res, next) => {
       return res.status(502).json({
         ok: false,
         error: "mailbox_reply_sync_failed",
-        message: error.message,
+        message: publicMailboxSyncMessage(error),
       });
     }
     next(error);
   }
 });
+
+function publicMailboxSyncMessage(error: Error): string {
+  if (/connect|authorization|authorisation|scope|permission|token|credential/i.test(error.message)) {
+    return "The mailbox connection needs attention before messages can be checked.";
+  }
+  return "Mailbox checking is temporarily delayed and will retry automatically.";
+}
 
 mailboxesRoutes.get("/sync/status", async (req, res, next) => {
   try {

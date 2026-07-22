@@ -654,16 +654,20 @@ export function MessagesPage() {
         maxResults: 25,
       });
       if (sync.ok) {
-        const imported = sync.serverImported ?? sync.imported;
-        const updated = sync.serverUpdated ?? 0;
-        const failed = sync.serverFailed ?? 0;
-        setMailboxSyncStatus(
-          failed > 0
-            ? `Mailbox checked. ${imported} new, ${updated} updated, ${failed} failed.`
-            : `Mailbox checked. ${imported} new, ${updated} updated.`
-        );
+        if (sync.deferred) {
+          setMailboxSyncStatus("Mailbox check is continuing automatically.");
+        } else {
+          const imported = sync.serverImported ?? sync.imported;
+          const updated = sync.serverUpdated ?? 0;
+          const failed = sync.serverFailed ?? 0;
+          setMailboxSyncStatus(
+            failed > 0
+              ? `Mailbox checked. ${imported} new, ${updated} updated, ${failed} need another attempt.`
+              : `Mailbox checked. ${imported} new, ${updated} updated.`
+          );
+        }
       } else {
-        setMailboxSyncStatus(`Mailbox receive check failed: ${sync.message}`);
+        setMailboxSyncStatus("Mailbox check will retry automatically.");
       }
       const created = api.communications.sweepInboundForActivities(agency.id, user.id);
       if (created.length > 0) setAiTriaged((current) => current + created.length);

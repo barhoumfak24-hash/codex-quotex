@@ -29,6 +29,40 @@ async function mailboxFixture() {
 }
 
 describe("mailbox outbox", () => {
+  it("coalesces overlapping mailbox checks for the same user", async () => {
+    const { agency, user } = await mailboxFixture();
+    const { syncCommunicationsFromLiveMailbox } = await import("../liveMailbox");
+    let releaseResponse: ((response: Response) => void) | undefined;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
+      () => new Promise<Response>((resolve) => {
+        releaseResponse = resolve;
+      })
+    );
+
+    const first = syncCommunicationsFromLiveMailbox({ tenantId: agency.id, user });
+    const second = syncCommunicationsFromLiveMailbox({ tenantId: agency.id, user });
+
+    expect(second).toBe(first);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    releaseResponse?.(
+      new Response(
+        JSON.stringify({
+          ok: true,
+          result: {
+            mailboxAccount: user.businessEmail ?? user.email,
+            provider: "gmail",
+            deferred: true,
+            messages: [],
+            importSummary: { imported: 0, updated: 0, deduped: 0, failed: 0 },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    );
+
+    await expect(first).resolves.toMatchObject({ ok: true, deferred: true, imported: 0 });
+  });
+
   it("treats a configured transactional provider as live email capability", async () => {
     const { capabilityCanSendEmail } = await import("../liveMailbox");
 

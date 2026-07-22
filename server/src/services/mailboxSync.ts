@@ -253,45 +253,77 @@ type AdvisoryLockTransaction = {
   $queryRaw<T>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T>;
 };
 
+function emptyImportSummary(): MailboxSyncImportSummary {
+  return { imported: 0, updated: 0, deduped: 0, ignored: 0, failed: 0 };
+}
+
+async function withMailboxSyncLock<T>(
+  connectionId: string,
+  operation: () => Promise<T>
+): Promise<{ acquired: true; value: T } | { acquired: false }> {
+  return prisma.$transaction(async (tx: AdvisoryLockTransaction) => {
+    const lockKey = `quotex-mailbox-sync:${connectionId}`;
+    const rows = await tx.$queryRaw<Array<{ locked: boolean }>>`
+      SELECT pg_try_advisory_xact_lock(hashtext(${lockKey})) AS locked
+    `;
+    if (rows[0]?.locked !== true) return { acquired: false } as const;
+    return { acquired: true, value: await operation() } as const;
+  }, { timeout: 60_000 });
+}
+
 export async function syncMailboxMessages(input: MailboxSyncInput): Promise<{
   connectionId: string;
   mailboxAccount: string;
   provider: "gmail" | "outlook";
   messages: SyncedMailboxMessage[];
   importSummary: MailboxSyncImportSummary;
+  deferred?: boolean;
 }> {
   const { connection, token } = await readFreshMailboxToken(input);
   const maxResults = Math.min(Math.max(input.maxResults ?? 25, 1), 50);
-  if (token.provider === "google") {
-    const result = await syncGmailMessages(
+  const locked = await withMailboxSyncLock(connection.id, async () => {
+    if (token.provider === "google") {
+      const result = await syncGmailMessages(
+        connection.id,
+        connection.address,
+        token.accessToken,
+        maxResults,
+        token.syncCursor?.gmailHistoryId
+      );
+      const messages = result.messages;
+      const importSummary = await persistSyncedMailboxMessages(connection, messages);
+      if (result.nextHistoryId && importSummary.failed === 0) {
+        await writeMailboxSyncCursor(connection, token, { gmailHistoryId: result.nextHistoryId });
+      }
+      await markConnectionSynced(connection.id);
+      return { connectionId: connection.id, mailboxAccount: connection.address, provider: "gmail" as const, messages, importSummary };
+    }
+    const result = await syncMicrosoftMessages(
       connection.id,
       connection.address,
       token.accessToken,
       maxResults,
-      token.syncCursor?.gmailHistoryId
+      token.syncCursor?.graphDeltaLink
     );
     const messages = result.messages;
     const importSummary = await persistSyncedMailboxMessages(connection, messages);
-    if (result.nextHistoryId && importSummary.failed === 0) {
-      await writeMailboxSyncCursor(connection, token, { gmailHistoryId: result.nextHistoryId });
+    if (result.nextDeltaLink && importSummary.failed === 0) {
+      await writeMailboxSyncCursor(connection, token, { graphDeltaLink: result.nextDeltaLink });
     }
     await markConnectionSynced(connection.id);
-    return { connectionId: connection.id, mailboxAccount: connection.address, provider: "gmail", messages, importSummary };
+    return { connectionId: connection.id, mailboxAccount: connection.address, provider: "outlook" as const, messages, importSummary };
+  });
+  if (!locked.acquired) {
+    return {
+      connectionId: connection.id,
+      mailboxAccount: connection.address,
+      provider: token.provider === "google" ? "gmail" : "outlook",
+      messages: [],
+      importSummary: emptyImportSummary(),
+      deferred: true,
+    };
   }
-  const result = await syncMicrosoftMessages(
-    connection.id,
-    connection.address,
-    token.accessToken,
-    maxResults,
-    token.syncCursor?.graphDeltaLink
-  );
-  const messages = result.messages;
-  const importSummary = await persistSyncedMailboxMessages(connection, messages);
-  if (result.nextDeltaLink && importSummary.failed === 0) {
-    await writeMailboxSyncCursor(connection, token, { graphDeltaLink: result.nextDeltaLink });
-  }
-  await markConnectionSynced(connection.id);
-  return { connectionId: connection.id, mailboxAccount: connection.address, provider: "outlook", messages, importSummary };
+  return locked.value;
 }
 
 export async function syncMailboxReplyMessages(input: MailboxReplySyncInput): Promise<{
@@ -302,12 +334,15 @@ export async function syncMailboxReplyMessages(input: MailboxReplySyncInput): Pr
   targetsChecked: number;
   messages: SyncedMailboxMessage[];
   importSummary: MailboxSyncImportSummary;
+  deferred?: boolean;
 }> {
   const requestedTargets = uniqueReplyTargets(input.targets);
   const groups = await resolveAuthorizedReplyGroups(input, requestedTargets);
   const messages: SyncedMailboxMessage[] = [];
   const importSummary: MailboxSyncImportSummary = { imported: 0, updated: 0, deduped: 0, ignored: 0, failed: 0 };
   const mailboxesChecked: Array<{ connectionId: string; mailboxAccount: string; provider: "gmail" | "outlook" }> = [];
+  let deferred = false;
+  let targetsChecked = 0;
 
   for (const group of groups) {
     const { connection, token } = await readReplyMailboxToken({
@@ -318,10 +353,20 @@ export async function syncMailboxReplyMessages(input: MailboxReplySyncInput): Pr
       targets: group.targets,
     });
     const provider = token.provider === "google" ? "gmail" : "outlook";
-    const synced = token.provider === "google"
-      ? await syncGmailReplyMessages(connection.id, connection.address, token.accessToken, group.targets)
-      : await syncMicrosoftReplyMessages(connection.id, connection.address, token.accessToken, group.targets);
-    const summary = await persistSyncedMailboxMessages(connection, synced);
+    const locked = await withMailboxSyncLock(connection.id, async () => {
+      const synced = token.provider === "google"
+        ? await syncGmailReplyMessages(connection.id, connection.address, token.accessToken, group.targets)
+        : await syncMicrosoftReplyMessages(connection.id, connection.address, token.accessToken, group.targets);
+      const summary = await persistSyncedMailboxMessages(connection, synced);
+      await markConnectionSynced(connection.id);
+      return { synced, summary };
+    });
+    if (!locked.acquired) {
+      deferred = true;
+      continue;
+    }
+    const { synced, summary } = locked.value;
+    targetsChecked += group.targets.length;
     messages.push(...synced);
     importSummary.imported += summary.imported;
     importSummary.updated += summary.updated;
@@ -329,7 +374,6 @@ export async function syncMailboxReplyMessages(input: MailboxReplySyncInput): Pr
     importSummary.ignored += summary.ignored;
     importSummary.failed += summary.failed;
     mailboxesChecked.push({ connectionId: connection.id, mailboxAccount: connection.address, provider });
-    await markConnectionSynced(connection.id);
   }
 
   const firstMailbox = mailboxesChecked[0];
@@ -338,9 +382,10 @@ export async function syncMailboxReplyMessages(input: MailboxReplySyncInput): Pr
     mailboxAccount: firstMailbox?.mailboxAccount ?? "",
     provider: firstMailbox?.provider ?? "gmail",
     mailboxesChecked,
-    targetsChecked: groups.reduce((total, group) => total + group.targets.length, 0),
+    targetsChecked,
     messages,
     importSummary,
+    deferred,
   };
 }
 
@@ -864,20 +909,21 @@ async function syncGmailReplyMessages(
 }
 
 async function readGmailMessagesById(ids: Iterable<string>, accessToken: string): Promise<GmailMessage[]> {
-  return Promise.all(
-    Array.from(new Set(Array.from(ids).filter(Boolean))).map(async (id) => {
-      const url = new URL(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}`);
-      url.searchParams.set("format", "full");
-      try {
-        return await providerJson<GmailMessage>(url.toString(), accessToken);
-      } catch (error) {
-        if (isMissingGmailItemError(error)) {
-          return { id, error: { message: "Gmail message is no longer available." } };
-        }
-        throw error;
+  const messages: GmailMessage[] = [];
+  for (const id of new Set(Array.from(ids).filter(Boolean))) {
+    const url = new URL(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}`);
+    url.searchParams.set("format", "full");
+    try {
+      messages.push(await providerJson<GmailMessage>(url.toString(), accessToken));
+    } catch (error) {
+      if (isMissingGmailItemError(error)) {
+        messages.push({ id, error: { message: "Gmail message is no longer available." } });
+        continue;
       }
-    })
-  );
+      throw error;
+    }
+  }
+  return messages;
 }
 
 function uniqueGmailHistoryMessageIds(history: GmailHistoryResponse): string[] {
@@ -1465,17 +1511,37 @@ function escapeODataString(value: string): string {
 }
 
 async function providerJson<T>(url: string, accessToken: string): Promise<T> {
-  const res = await fetch(url, {
-    headers: { authorization: `Bearer ${accessToken}` },
-  });
-  const json = (await res.json().catch(() => null)) as T & { error?: { message?: string } };
-  if (!res.ok) {
-    throw new MailboxProviderHttpError(
+  const retryDelaysMs = [300, 900, 1_800, 3_000];
+  let lastError: MailboxProviderHttpError | undefined;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        headers: { authorization: `Bearer ${accessToken}` },
+      });
+    } catch {
+      lastError = new MailboxProviderHttpError("Mailbox provider request was interrupted.", 503);
+      if (attempt === retryDelaysMs.length) throw lastError;
+      await new Promise((resolve) => setTimeout(resolve, retryDelaysMs[attempt]));
+      continue;
+    }
+    const json = (await res.json().catch(() => null)) as T & { error?: { message?: string } };
+    if (res.ok) return json;
+
+    lastError = new MailboxProviderHttpError(
       json?.error?.message ?? `Mailbox sync failed with ${res.status}.`,
       res.status
     );
+    if (!isTransientProviderError(lastError) || attempt === retryDelaysMs.length) {
+      throw lastError;
+    }
+    const retryAfter = Number(res.headers.get("retry-after"));
+    const delayMs = Number.isFinite(retryAfter)
+      ? Math.min(Math.max(retryAfter * 1_000, retryDelaysMs[attempt]), 5_000)
+      : retryDelaysMs[attempt];
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
-  return json;
+  throw lastError ?? new MailboxProviderHttpError("Mailbox sync is temporarily unavailable.", 503);
 }
 
 class MailboxProviderHttpError extends Error {
@@ -1487,6 +1553,17 @@ class MailboxProviderHttpError extends Error {
 
 function isExpiredGmailHistoryError(error: unknown): boolean {
   return error instanceof MailboxProviderHttpError && error.status === 404;
+}
+
+function isTransientProviderError(error: MailboxProviderHttpError): boolean {
+  return (
+    error.status === 429 ||
+    error.status === 500 ||
+    error.status === 502 ||
+    error.status === 503 ||
+    error.status === 504 ||
+    /too many concurrent requests|rate limit|temporarily unavailable/i.test(error.message)
+  );
 }
 
 function isMissingGmailItemError(error: unknown): boolean {

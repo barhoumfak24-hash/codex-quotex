@@ -425,7 +425,8 @@ export function ContactMessageThread({
           connectionId: mailbox.connectionId,
           maxResults: 25,
         });
-        if (!sync.ok && mailbox.status === "connected") setSyncNotice(sync.message);
+        if (!sync.ok && mailbox.status === "connected") setSyncNotice("Mailbox check will retry automatically.");
+        else if (sync.ok && sync.deferred) setSyncNotice("Mailbox check is continuing automatically.");
         else if (sync.ok) setSyncNotice(`Mailbox checked. ${sync.imported} new message${sync.imported === 1 ? "" : "s"}.`);
       }
       setRev((r) => r + 1);

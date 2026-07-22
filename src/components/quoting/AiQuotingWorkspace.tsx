@@ -4226,6 +4226,7 @@ function CommercialFlowPanel({
     try {
       let responsesNeedingReview = 0;
       let exactTargetsChecked = 0;
+      let responseCheckDeferred = false;
 
       // First replay messages already imported by the scheduled mailbox job.
       // The server and browser use different persistence layers, so this bridge
@@ -4248,6 +4249,7 @@ function CommercialFlowPanel({
             quotingSessionId: session.id,
           });
           if (sync.ok) {
+            responseCheckDeferred = Boolean(sync.deferred);
             exactTargetsChecked += sync.targetsChecked;
             responsesNeedingReview += sync.review;
             await api.quoting.readCommercialCarrierResponses(session.id);
@@ -4266,6 +4268,7 @@ function CommercialFlowPanel({
           responsesNeedingReview,
           exactTargetsChecked,
           exactReplyTargetCount: exactReplyTargets.length,
+          deferred: responseCheckDeferred,
         })
       );
       onChanged?.();
@@ -4507,6 +4510,7 @@ export function carrierResponseCheckNotice(input: {
   responsesNeedingReview: number;
   exactTargetsChecked: number;
   exactReplyTargetCount: number;
+  deferred?: boolean;
 }): { tone: "success" | "neutral" | "warn"; message: string } {
   if (input.newlyMatched > 0) {
     return {
@@ -4524,6 +4528,12 @@ export function carrierResponseCheckNotice(input: {
     return {
       tone: "neutral",
       message: `Checked ${input.exactTargetsChecked} sent carrier email thread${input.exactTargetsChecked === 1 ? "" : "s"}. No new verified replies were found.`,
+    };
+  }
+  if (input.deferred) {
+    return {
+      tone: "neutral",
+      message: "Carrier responses are still being checked automatically.",
     };
   }
   return {
