@@ -1762,7 +1762,7 @@ function ActiveContactPane({
                       ))}
                     </div>
                   )}
-                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                  <div className={`${isDraft ? "mt-3" : "mt-1"} flex flex-wrap items-center gap-2`}>
                     <button
                       type="button"
                       onClick={() => {
@@ -1774,9 +1774,13 @@ function ActiveContactPane({
                           setReplyTarget(replyTargetForRow(r.row));
                         }
                       }}
-                      className="inline-flex items-center gap-1 text-[10px] text-ink-500 hover:text-ink-800"
+                      className={
+                        isDraft
+                          ? "inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-ink-950 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-ink-800 focus:outline-none focus:ring-2 focus:ring-gold-300 focus:ring-offset-2"
+                          : "inline-flex items-center gap-1 text-[10px] text-ink-500 hover:text-ink-800"
+                      }
                     >
-                      <Reply className="h-3 w-3" />
+                      {isDraft ? <Check className="h-4 w-4" /> : <Reply className="h-3 w-3" />}
                       {isDraft ? "Review and approve draft" : "Reply"}
                     </button>
                     {!isDraft && (
