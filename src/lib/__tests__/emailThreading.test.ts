@@ -140,7 +140,7 @@ describe("communications threading", () => {
     expect(mirrored).toHaveLength(2);
   });
 
-  it("mirrors provider messages from unknown external contacts instead of dropping them", async () => {
+  it("drops provider messages from senders that are not on file", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
@@ -161,14 +161,38 @@ describe("communications threading", () => {
       sentAt: "2026-05-31T13:00:00.000Z",
     });
 
-    expect(inbound).toBeTruthy();
-    expect(inbound?.direction).toBe("inbound");
-    expect(inbound?.customerId).toBeUndefined();
-    expect(inbound?.prospectId).toBeUndefined();
-    expect(inbound?.carrierContactId).toBeUndefined();
-    expect(inbound?.externalRecipientEmail).toBe("taylor.contact@example.com");
-    expect(inbound?.externalRecipientName).toBe("Taylor Contact");
-    expect(inbound?.mailboxOrigin).toBe("provider_sync");
+    expect(inbound).toBeNull();
+    expect(api.communications.listByTenant(agency.id)).not.toContainEqual(
+      expect.objectContaining({ externalMessageId: "gmail_unknown_contact_1" })
+    );
+  });
+
+  it("does not let carrier submission metadata bypass the known-sender boundary", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const manager = api.users.list(agency.id).find((u) => u.role === "manager")!;
+    api.users.update(manager.id, {
+      businessEmail: "advisor@gmail.com",
+      mailProvider: "gmail",
+    });
+
+    const inbound = api.mailbox.mirrorExternalEmail({
+      tenantId: agency.id,
+      mailboxUserId: manager.id,
+      externalMessageId: "gmail_unknown_carrier_reply_1",
+      externalThreadId: "gmail_unknown_carrier_thread_1",
+      from: "Unknown Underwriter <unknown.underwriter@example.com>",
+      to: ["advisor@gmail.com"],
+      subject: "Re: Commercial application",
+      body: "The application is approved.",
+      carrierSubmissionId: "submission-legacy-1",
+      sentAt: "2026-05-31T13:05:00.000Z",
+    });
+
+    expect(inbound).toBeNull();
+    expect(api.communications.listByTenant(agency.id)).not.toContainEqual(
+      expect.objectContaining({ externalMessageId: "gmail_unknown_carrier_reply_1" })
+    );
   });
 
   it("keeps company marketing on the agency mailbox instead of a staff mailbox", async () => {

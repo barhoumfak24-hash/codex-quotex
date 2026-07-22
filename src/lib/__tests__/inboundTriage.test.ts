@@ -84,6 +84,37 @@ describe("aiClassifyInboundForActivity", () => {
       }).disposition
     ).toBe("activity");
   });
+
+  it("classifies only the newest message and ignores claim language in quoted history", async () => {
+    const { aiClassifyInboundForActivity } = await import("../ai");
+    const out = aiClassifyInboundForActivity({
+      body: "Thank you!\n\nOn Tue, Jul 21, 2026 at 9:12 AM Agent wrote:\nPlease file a claim for the accident.",
+      contactKind: "client",
+    });
+    expect(out.disposition).toBe("ignore");
+    expect(out.evidence).toContain("newest_message:acknowledgement");
+  });
+
+  it("excludes bulk marketing email from workflow automation", async () => {
+    const { aiClassifyInboundForActivity } = await import("../ai");
+    const out = aiClassifyInboundForActivity({
+      subject: "New listing and price cut",
+      body: "See the latest homes in your area. Unsubscribe from these alerts.",
+      contactKind: "client",
+    });
+    expect(out.disposition).toBe("ignore");
+    expect(out.evidence).toContain("message_pattern:bulk_marketing");
+  });
+
+  it("does not treat an informational claim mention as a reported loss", async () => {
+    const { aiClassifyInboundForActivity } = await import("../ai");
+    const out = aiClassifyInboundForActivity({
+      body: "Our website has a new article about industry claim trends.",
+      contactKind: "client",
+    });
+    expect(out.topic).not.toBe("claim_filed");
+    expect(out.disposition).toBe("ignore");
+  });
 });
 
 describe("communications.sweepInboundForActivities", () => {
@@ -283,5 +314,28 @@ describe("communications.sweepInboundForActivities", () => {
       createdById: "ai",
     });
     expect(api.communications.sweepInboundForActivities(agency.id).length).toBe(0);
+  });
+
+  it("hides and does not automate a legacy provider email from an unknown sender", async () => {
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    const agency = api.agencies.list()[0];
+    const comm = api.communications.create({
+      tenantId: agency.id,
+      channel: "email",
+      direction: "inbound",
+      body: "Please cancel my policy.",
+      externalRecipientEmail: "unknown.sender@example.com",
+      mailboxOrigin: "provider_sync",
+    });
+
+    expect(api.communications.sweepInboundForActivities(agency.id)).toHaveLength(0);
+    expect(api.communications.listByTenant(agency.id)).not.toContainEqual(
+      expect.objectContaining({ id: comm.id })
+    );
+    expect(db.list("communications").find((row) => row.id === comm.id)).toMatchObject({
+      aiTriageDisposition: "ignore",
+      aiTriageEvidence: ["tenant_contact_match:none"],
+    });
   });
 });

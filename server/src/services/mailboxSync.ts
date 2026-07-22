@@ -383,6 +383,11 @@ export async function listPersistedMailboxMessages(input: {
       AND communication.mailbox->>'origin' IN ('provider_sync', 'inbound_relay')
       AND COALESCE(communication.mailbox->>'externalMessageId', '') <> ''
       AND (
+        communication.customer_id IS NOT NULL
+        OR communication.prospect_id IS NOT NULL
+        OR communication.carrier_contact_id IS NOT NULL
+      )
+      AND (
         (
           communication.mailbox->>'origin' = 'provider_sync'
           AND EXISTS (
@@ -1630,6 +1635,8 @@ async function upsertSyncedCommunication(
   const recipients = [...message.to, ...(message.cc ?? [])].map(normalizeEmail).filter(Boolean);
   const direction = message.direction ?? (from === mailboxAddress ? "outbound" : "inbound");
   const contactEmail = direction === "outbound" ? recipients.find((email) => email !== mailboxAddress) : from;
+  const contact = contactEmail ? knownContacts.get(normalizeEmail(contactEmail)) : undefined;
+  if (!contact) return "ignored";
 
   const existing = await findExistingCommunication(connection.tenant_id, mailboxAddress, message);
   const mailbox = {
@@ -1674,8 +1681,6 @@ async function upsertSyncedCommunication(
     return "updated";
   }
 
-  const contact = contactEmail ? knownContacts.get(normalizeEmail(contactEmail)) : undefined;
-  if (!contact && !message.carrierSubmissionId) return "ignored";
   const resolvedContact: ResolvedContact = contact ?? {
     externalRecipientEmail: contactEmail ? normalizeEmail(contactEmail) : null,
     externalRecipientName: displayNameFromEmailHeader(direction === "inbound" ? message.from : undefined) ?? contactEmail ?? "Carrier contact",

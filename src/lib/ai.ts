@@ -6474,7 +6474,37 @@ export interface InboundTriage {
   topic: TaskTopic;
   severity: "urgent" | "warning" | "info";
   reason: string;
+  confidence: "high" | "medium" | "low";
+  evidence: string[];
+  requiresHumanReview: boolean;
+  version: string;
   serviceIntent?: InboundServiceIntent;
+}
+
+const INBOUND_TRIAGE_VERSION = "2026-07-22-v2";
+
+export function newestInboundMessageText(value: string): string {
+  const normalized = (value ?? "")
+    .replace(/<br\s*\/?\s*>/gi, "\n")
+    .replace(/<\/p\s*>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/\r\n?/g, "\n");
+  const lines = normalized.split("\n");
+  const kept: string[] = [];
+  const quoteBoundary = /^(?:>{1,}|on .+ wrote:|from:\s|sent:\s|to:\s|subject:\s|-----+\s*original message\s*-----+)/i;
+  const footerBoundary = /^(?:--\s*$|_{3,}\s*$|confidentiality notice|this (?:email|message) and any attachments|unsubscribe\b|manage (?:your )?preferences|view (?:this )?email in (?:your )?browser)/i;
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (quoteBoundary.test(line) || footerBoundary.test(line)) break;
+    kept.push(line);
+  }
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]+/g, " ").trim();
 }
 
 export function aiClassifyInboundForActivity(input: {
@@ -6484,29 +6514,41 @@ export function aiClassifyInboundForActivity(input: {
   contactName?: string;
   contactKind?: "client" | "prospect" | "carrier";
 }): InboundTriage {
-  const text = `${input.subject ?? ""} ${input.body ?? ""}`.toLowerCase().trim();
+  const body = newestInboundMessageText(input.body);
+  const subject = (input.subject ?? "").replace(/^\s*(?:re|fw|fwd):\s*/gi, "").trim();
+  const text = `${subject} ${body}`.toLowerCase().trim();
   const who = input.contactName ?? "Contact";
   const has = (re: RegExp) => re.test(text);
-  const noActivity = (): InboundTriage => ({
+  const noActivity = (reason = "No actionable intent was identified.", evidence: string[] = []): InboundTriage => ({
     disposition: "ignore",
     warrants: false,
     title: "",
     topic: "other",
     severity: "info",
-    reason: "",
+    reason,
+    confidence: "high",
+    evidence,
+    requiresHumanReview: false,
+    version: INBOUND_TRIAGE_VERSION,
   });
 
   // Pure acknowledgements / pleasantries → no activity.
   const ACK = /^(thanks|thank you|thx|ty|ok|okay|k|got it|great|perfect|sounds good|will do|received|no problem|np|cheers|appreciate it|👍+|🙏+)[!.\s]*$/i;
-  if (!text || ACK.test(text) || (text.length < 6 && !text.includes("?"))) {
-    return noActivity();
+  if (!body || ACK.test(body) || (body.length < 6 && !body.includes("?"))) {
+    return noActivity("The newest message is an acknowledgement or contains no actionable content.", ["newest_message:acknowledgement"]);
+  }
+
+  if (/\b(unsubscribe|view in browser|manage (?:your )?preferences|newsletter|livestream|new listing|price cut|open house|shop now|limited time offer)\b/i.test(`${input.subject ?? ""} ${input.body ?? ""}`)) {
+    return noActivity("Bulk or promotional email was excluded from workflow automation.", ["message_pattern:bulk_marketing"]);
   }
 
   const mk = (
     topic: TaskTopic,
     severity: InboundTriage["severity"],
     label: string,
-    disposition: InboundTriage["disposition"] = "activity"
+    disposition: InboundTriage["disposition"] = "activity",
+    confidence: InboundTriage["confidence"] = "high",
+    evidence: string[] = []
   ): InboundTriage => ({
     disposition,
     warrants: disposition === "activity",
@@ -6517,23 +6559,29 @@ export function aiClassifyInboundForActivity(input: {
       input.channel ? input.channel.toUpperCase() + " " : ""
     }message and ${
       disposition === "activity" ? "opened an activity" : "logged a notification"
-    } - "${firstSentence(input.body)}"`,
+    } from the newest message - "${firstSentence(body)}"`,
+    confidence,
+    evidence,
+    requiresHumanReview: confidence !== "high",
+    version: INBOUND_TRIAGE_VERSION,
   });
 
-  // Highest-urgency events first.
-  if (has(/\b(accident|collision|crash|stolen|theft|burglar|fire|flood|water damage|hail|storm damage|damaged|loss|lawsuit|injured|injury)\b/) ||
-      has(/\b(file|open|start|report)\b[\s\S]{0,20}\bclaim\b/) ||
-      has(/\bclaim\b/)) {
-    return mk("claim_filed", "urgent", "possible claim / loss reported");
+  const directLoss = /\b(?:i|we|my|our)\b[\s\S]{0,35}\b(?:had|have|experienced|suffered|was in|were in|reported)\b[\s\S]{0,35}\b(?:accident|collision|crash|theft|burglary|fire|flood|water damage|hail damage|storm damage|loss|injury)\b/i;
+  const claimRequest = /\b(?:file|open|start|report|submit)\b[\s\S]{0,25}\b(?:a\s+)?claim\b/i;
+  if (directLoss.test(text) || claimRequest.test(text)) {
+    return mk("claim_filed", "urgent", "possible claim / loss reported", "activity", "high", ["intent:explicit_claim_or_loss"]);
   }
-  if (has(/\b(cancel|cancellation|terminate|drop|discontinue)\b/)) {
-    return mk("cancellation_request", "urgent", "wants to cancel coverage");
+  if (has(/\b(?:please\s+cancel|cancel\s+(?:my|our|the)\s+(?:policy|coverage)|want\s+to\s+cancel|terminate\s+(?:my|our|the)\s+(?:policy|coverage)|do\s+not\s+renew|stop\s+(?:my|our)\s+coverage)\b/)) {
+    return mk("cancellation_request", "urgent", "wants to cancel coverage", "activity", "high", ["intent:explicit_cancellation_request"]);
   }
   if (input.contactKind === "carrier") {
-    if (has(/\b(declin|not eligible|subjectivit|supplemental|additional information|missing information|need|requires|required|bind|binding|deadline|expires?|non[- ]renew|underwriting question)\b/)) {
-      return mk("coverage_change", "warning", "carrier response needs review");
+    if (has(/\b(?:declin(?:e|ed)|not eligible|subjectivit(?:y|ies)|supplemental|additional information|missing information|required prior to binding|binding requirement|underwriting question|non[- ]renewal)\b/)) {
+      return mk("coverage_change", "warning", "carrier response needs review", "activity", "high", ["carrier_intent:underwriting_action_required"]);
     }
-    return mk("other", "info", "carrier update received", "notification");
+    if (has(/\b(?:approved|accepted|quoted|proposal|annual premium|policy limits?|deductible|commission|effective date|bindable)\b/)) {
+      return mk("coverage_change", "info", "carrier quote or decision received", "notification", "high", ["carrier_intent:quote_or_decision"]);
+    }
+    return noActivity("The carrier message did not contain a verified quote, decision, or underwriting request.", ["carrier_intent:none"]);
   }
   // Exact service requests are handled before the broader document rule.
   // The service intent is consumed by the inbound sweep, which may prepare
@@ -6575,7 +6623,7 @@ export function aiClassifyInboundForActivity(input: {
     };
   }
   if (has(/\b(add|adding|insure|cover|new)\b[\s\S]{0,40}\b(vehicle|car|auto|truck|suv|driver|boat|yacht|jewelry|ring|watch|home|house|property|condo|asset|rv|motorcycle)\b/)) {
-    return mk("coverage_change", "warning", "wants to add to their policy");
+    return mk("coverage_change", "warning", "wants to add to their policy", "activity", "high", ["intent:explicit_add_asset_or_driver"]);
   }
   if (has(/\b(increase|decrease|raise|lower|change|update|adjust|add|remove)\b[\s\S]{0,30}\b(coverage|limit|deductible|endorsement|policy)\b/)) {
     return mk("coverage_change", "warning", "requested a coverage change");
@@ -6600,16 +6648,16 @@ export function aiClassifyInboundForActivity(input: {
     return mk("renewal_approaching", "info", "renewal update received", "notification");
   }
   if (has(/\b(quote|estimate|proposal)\b/)) {
-    return mk("coverage_change", "warning", "asking about a quote / pricing");
+    return mk("coverage_change", "warning", "asking about a quote / pricing", "activity", "medium", ["intent:quote_or_proposal_mention"]);
   }
   if (has(/\b(premium|price|pricing|rate)\b/)) {
     return mk("other", "info", "pricing question received", "notification");
   }
   // Generic question / request that needs a human response.
   if (has(/\?|\b(can you|could you|would you|please|need|how do|how can|when|why|what about|let me know|follow up|following up|waiting)\b/)) {
-    return mk("other", "info", "message may need a reply", "notification");
+    return mk("other", "info", "message may need a reply", "notification", "low", ["intent:general_question_or_request"]);
   }
-  return noActivity();
+  return noActivity("No explicit service, claim, billing, policy-change, or carrier intent was found.", ["intent:none"]);
 }
 
 function firstSentence(s: string): string {

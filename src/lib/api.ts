@@ -5168,6 +5168,23 @@ function quotingSessionStartKey(input: {
   return null;
 }
 
+function communicationHasKnownMailboxContact(row: Communication): boolean {
+  if (row.mailboxOrigin !== "provider_sync" && row.mailboxOrigin !== "inbound_relay") return true;
+  if (
+    row.customerId &&
+    db.list("customers").some((customer) => customer.id === row.customerId && customer.tenantId === row.tenantId)
+  ) return true;
+  if (
+    row.prospectId &&
+    db.list("prospects").some((prospect) => prospect.id === row.prospectId && prospect.tenantId === row.tenantId)
+  ) return true;
+  if (
+    row.carrierContactId &&
+    db.list("carrierContacts").some((contact) => contact.id === row.carrierContactId && contact.tenantId === row.tenantId)
+  ) return true;
+  return !!resolveEmailContact(row.tenantId, row.externalRecipientEmail ?? "");
+}
+
 function commercialApplicationSentAtForSession(session: QuotingSession): string | undefined {
   // The workflow milestone records that the agent completed carrier dispatch.
   // Provider delivery continues to be tracked independently on each
@@ -14661,15 +14678,15 @@ export const api = {
     listByCustomer(customerId: string): Communication[] {
       return db
         .list("communications")
-        .filter((c) => c.customerId === customerId)
+        .filter((c) => c.customerId === customerId && communicationHasKnownMailboxContact(c))
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
     },
     // All comms (inbound + outbound) across the tenant. Used by the
     // Messages inbox to build threads keyed by contact.
     listByTenant(tenantId: string): Communication[] {
-      return tenantFilter(db.list("communications"), tenantId).sort((a, b) =>
-        a.createdAt < b.createdAt ? 1 : -1
-      );
+      return tenantFilter(db.list("communications"), tenantId)
+        .filter(communicationHasKnownMailboxContact)
+        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
     },
     // Inbound, unresolved, customer-attached. Drives the Clients
     // sidebar "pending message" alert. Outbound comms and resolved
@@ -14681,6 +14698,7 @@ export const api = {
         .filter(
           (c) =>
             c.tenantId === tenantId &&
+            communicationHasKnownMailboxContact(c) &&
             c.direction === "inbound" &&
             !!c.customerId &&
             !c.resolvedAt
@@ -14692,7 +14710,10 @@ export const api = {
         .list("communications")
         .filter(
           (c) =>
-            c.customerId === customerId && c.direction === "inbound" && !c.resolvedAt
+            c.customerId === customerId &&
+            communicationHasKnownMailboxContact(c) &&
+            c.direction === "inbound" &&
+            !c.resolvedAt
         )
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
     },
@@ -14776,6 +14797,19 @@ export const api = {
         );
       const created: { communicationId: string; task?: Task; notification?: AiNotification }[] = [];
       for (const c of inbound) {
+        if (!communicationHasKnownMailboxContact(c)) {
+          db.update("communications", c.id, {
+            aiActivityScannedAt: nowIso(),
+            aiTriageDisposition: "ignore",
+            aiTriageTopic: "other",
+            aiTriageReason: "Mailbox sender is not a tenant contact and was excluded from Quotex.",
+            aiTriageConfidence: "high",
+            aiTriageEvidence: ["tenant_contact_match:none"],
+            aiTriageRequiresHumanReview: false,
+            aiTriageVersion: "2026-07-22-v2",
+          });
+          continue;
+        }
         const customer = c.customerId
           ? db.list("customers").find((x) => x.id === c.customerId)
           : undefined;
@@ -14802,6 +14836,10 @@ export const api = {
           aiTriageDisposition: triage.disposition,
           aiTriageTopic: triage.topic,
           aiTriageReason: triage.reason,
+          aiTriageConfidence: triage.confidence,
+          aiTriageEvidence: triage.evidence,
+          aiTriageRequiresHumanReview: triage.requiresHumanReview,
+          aiTriageVersion: triage.version,
           aiServiceIntent: triage.serviceIntent,
         };
         const assignedToId = assignedContactOwner(customer ?? prospect);
@@ -15086,18 +15124,9 @@ export const api = {
           ? recipients.find((email) => email !== mailboxAddress)
           : from;
       if (!contactEmail) return null;
-      const contact =
-        resolveEmailContact(input.tenantId, contactEmail) ??
-        ({
-          externalRecipientEmail: contactEmail,
-          externalRecipientName:
-            displayNameFromEmailHeader(direction === "inbound" ? input.from : undefined) ??
-            contactEmail,
-          externalRecipientRole: "External contact",
-        } satisfies Pick<
-          Communication,
-          "customerId" | "prospectId" | "carrierContactId" | "externalRecipientEmail" | "externalRecipientName" | "externalRecipientRole"
-        >);
+      const resolvedContact = resolveEmailContact(input.tenantId, contactEmail);
+      if (!resolvedContact) return null;
+      const contact = resolvedContact;
 
       const existing = db
         .list("communications")

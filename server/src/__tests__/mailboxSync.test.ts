@@ -160,6 +160,21 @@ describe("mailbox sync reliability", () => {
 
   it("ignores inbound email from an address that is not on file", async () => {
     mocks.readFreshMailboxToken.mockResolvedValue(googleConnection("history-old"));
+    mocks.queryRaw.mockImplementation(async (...args: unknown[]) => {
+      const query = sqlText(args);
+      if (query.includes("FROM customer_profiles")) return [];
+      if (query.includes("FROM communications")) {
+        return [{
+          id: "legacy-unknown",
+          thread_id: "legacy-thread",
+          message_id_header: "<unknown-inbound@example.com>",
+          in_reply_to_header: "<unknown-outbound@example.com>",
+          reference_headers: [],
+          mailbox: { account: "agent@example.com", externalMessageId: "unknown-inbound" },
+        }];
+      }
+      return [];
+    });
     fetchMock().mockImplementation(async (input: string | URL | Request) => {
       const url = new URL(String(input));
       if (url.pathname.endsWith("/history")) {
@@ -183,6 +198,7 @@ describe("mailbox sync reliability", () => {
 
     expect(result.importSummary).toMatchObject({ imported: 0, ignored: 1, failed: 0 });
     expect(mocks.executeRaw.mock.calls.some((call) => sqlText(call).includes("INSERT INTO communications"))).toBe(false);
+    expect(mocks.executeRaw.mock.calls.some((call) => sqlText(call).includes("UPDATE communications"))).toBe(false);
     expect(mocks.executeRaw.mock.calls.some((call) => call.includes("mailbox.inbound.ignored"))).toBe(true);
   });
 

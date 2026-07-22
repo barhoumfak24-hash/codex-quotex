@@ -2105,6 +2105,10 @@ export interface Communication {
   aiTriageDisposition?: "ignore" | "notification" | "activity";
   aiTriageTopic?: TaskTopic;
   aiTriageReason?: string;
+  aiTriageConfidence?: "high" | "medium" | "low";
+  aiTriageEvidence?: string[];
+  aiTriageRequiresHumanReview?: boolean;
+  aiTriageVersion?: string;
   aiServiceIntent?:
     | "certificate_of_insurance"
     | "insurance_id_card"
