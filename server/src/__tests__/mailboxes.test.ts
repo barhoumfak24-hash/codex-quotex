@@ -689,7 +689,7 @@ describe("mailbox delivery routes", () => {
           direction: "inbound",
         },
       ],
-      importSummary: { imported: 1, updated: 0, deduped: 0, failed: 0 },
+      importSummary: { imported: 1, updated: 0, deduped: 0, ignored: 0, failed: 0 },
     });
 
     const response = await postMailbox(

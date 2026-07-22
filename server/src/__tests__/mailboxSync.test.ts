@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
   transaction: vi.fn(),
   txQueryRaw: vi.fn(),
   processPersistedCarrierReplies: vi.fn(),
+  supabaseStateConfigured: vi.fn(),
+  readRemoteState: vi.fn(),
 }));
 
 vi.mock("../services/mailboxProvider.js", () => ({
@@ -27,6 +29,11 @@ vi.mock("../services/prisma.js", () => ({
 
 vi.mock("../services/carrierReplyProcessor.js", () => ({
   processPersistedCarrierReplies: mocks.processPersistedCarrierReplies,
+}));
+
+vi.mock("../services/supabaseState.js", () => ({
+  supabaseStateConfigured: mocks.supabaseStateConfigured,
+  readRemoteState: mocks.readRemoteState,
 }));
 
 import {
@@ -54,6 +61,8 @@ beforeEach(() => {
     unmatched: 0,
     failed: 0,
   });
+  mocks.supabaseStateConfigured.mockReset().mockReturnValue(false);
+  mocks.readRemoteState.mockReset().mockResolvedValue(null);
   vi.stubGlobal("fetch", vi.fn());
 });
 
@@ -81,6 +90,7 @@ describe("mailbox sync reliability", () => {
 
   it("drains every Gmail history page before persisting and advancing the history cursor", async () => {
     mocks.readFreshMailboxToken.mockResolvedValue(googleConnection("history-old"));
+    mockCustomerContacts([{ id: "customer-1", email: "client@example.com", additional_contacts: [] }]);
     fetchMock().mockImplementation(async (input: string | URL | Request) => {
       const url = new URL(String(input));
       if (url.pathname.endsWith("/history") && !url.searchParams.has("pageToken")) {
@@ -104,7 +114,7 @@ describe("mailbox sync reliability", () => {
     const result = await syncMailboxMessages({ tenantId: "tenant-1", userId: "user-1" });
 
     expect(result.messages.map((message) => message.externalMessageId)).toEqual(["gmail-1", "gmail-2"]);
-    expect(result.importSummary).toEqual({ imported: 2, updated: 0, deduped: 0, failed: 0 });
+    expect(result.importSummary).toEqual({ imported: 2, updated: 0, deduped: 0, ignored: 0, failed: 0 });
     expect(mocks.writeMailboxSyncCursor).toHaveBeenCalledWith(
       expect.objectContaining({ id: "connection-1" }),
       expect.any(Object),
@@ -112,6 +122,118 @@ describe("mailbox sync reliability", () => {
     );
     const cursorOrder = mocks.writeMailboxSyncCursor.mock.invocationCallOrder[0];
     expect(mocks.executeRaw.mock.invocationCallOrder.filter((order) => order < cursorOrder)).toHaveLength(2);
+  });
+
+  it("mirrors inbound email from a client address on file", async () => {
+    mocks.readFreshMailboxToken.mockResolvedValue(googleConnection("history-old"));
+    mockCustomerContacts([{
+      id: "customer-known",
+      email: "primary@example.com",
+      additional_contacts: [{ email: "known.client@example.com" }],
+    }]);
+    fetchMock().mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/history")) {
+        return jsonResponse({
+          history: [{ messagesAdded: [{ message: { id: "known-inbound" } }] }],
+          historyId: "history-known",
+        });
+      }
+      if (url.pathname.endsWith("/messages/known-inbound")) {
+        return jsonResponse(gmailInboundReply(
+          "known-inbound",
+          "known-thread",
+          "<known-outbound@example.com>",
+          { from: "Known Client <KNOWN.CLIENT@example.com>" }
+        ));
+      }
+      throw new Error(`Unexpected Gmail request: ${url.toString()}`);
+    });
+
+    const result = await syncMailboxMessages({ tenantId: "tenant-1", userId: "user-1" });
+
+    expect(result.importSummary).toMatchObject({ imported: 1, ignored: 0, failed: 0 });
+    const inserts = mocks.executeRaw.mock.calls.filter((call) => sqlText(call).includes("INSERT INTO communications"));
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0]).toContain("customer-known");
+  });
+
+  it("ignores inbound email from an address that is not on file", async () => {
+    mocks.readFreshMailboxToken.mockResolvedValue(googleConnection("history-old"));
+    fetchMock().mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/history")) {
+        return jsonResponse({
+          history: [{ messagesAdded: [{ message: { id: "unknown-inbound" } }] }],
+          historyId: "history-unknown",
+        });
+      }
+      if (url.pathname.endsWith("/messages/unknown-inbound")) {
+        return jsonResponse(gmailInboundReply(
+          "unknown-inbound",
+          "unknown-thread",
+          "<unknown-outbound@example.com>",
+          { from: "Stranger <stranger@example.com>" }
+        ));
+      }
+      throw new Error(`Unexpected Gmail request: ${url.toString()}`);
+    });
+
+    const result = await syncMailboxMessages({ tenantId: "tenant-1", userId: "user-1" });
+
+    expect(result.importSummary).toMatchObject({ imported: 0, ignored: 1, failed: 0 });
+    expect(mocks.executeRaw.mock.calls.some((call) => sqlText(call).includes("INSERT INTO communications"))).toBe(false);
+    expect(mocks.executeRaw.mock.calls.some((call) => call.includes("mailbox.inbound.ignored"))).toBe(true);
+  });
+
+  it("allows same-agency prospects and carrier contacts but rejects another agency's address", async () => {
+    mocks.readFreshMailboxToken.mockResolvedValue(googleConnection("history-old"));
+    mocks.supabaseStateConfigured.mockReturnValue(true);
+    mocks.readRemoteState.mockResolvedValue({
+      id: "app_state:default",
+      revision: 1,
+      snapshot: {
+        prospects: [
+          { id: "prospect-1", tenantId: "tenant-1", email: "prospect@example.com" },
+          { id: "prospect-other", tenantId: "tenant-2", email: "other-agency@example.com" },
+        ],
+        carrierContacts: [
+          { id: "carrier-contact-1", tenantId: "tenant-1", email: "underwriter@example.com" },
+        ],
+      },
+    });
+    const inboundById: Record<string, ReturnType<typeof gmailInboundReply>> = {
+      prospect: gmailInboundReply("prospect", "thread-prospect", "<sent-prospect@example.com>", {
+        from: "Prospect <prospect@example.com>",
+      }),
+      carrier: gmailInboundReply("carrier", "thread-carrier", "<sent-carrier@example.com>", {
+        from: "Underwriter <underwriter@example.com>",
+      }),
+      other: gmailInboundReply("other", "thread-other", "<sent-other@example.com>", {
+        from: "Other Agency <other-agency@example.com>",
+      }),
+    };
+    fetchMock().mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/history")) {
+        return jsonResponse({
+          history: [{ messagesAdded: Object.keys(inboundById).map((id) => ({ message: { id } })) }],
+          historyId: "history-state-contacts",
+        });
+      }
+      const messageId = url.pathname.match(/\/messages\/([^/]+)$/)?.[1];
+      if (messageId && inboundById[messageId]) return jsonResponse(inboundById[messageId]);
+      throw new Error(`Unexpected Gmail request: ${url.toString()}`);
+    });
+
+    const result = await syncMailboxMessages({ tenantId: "tenant-1", userId: "user-1" });
+
+    expect(result.importSummary).toMatchObject({ imported: 2, ignored: 1, failed: 0 });
+    const inserts = mocks.executeRaw.mock.calls.filter((call) => sqlText(call).includes("INSERT INTO communications"));
+    expect(inserts).toHaveLength(2);
+    expect(inserts.some((call) => call.includes("prospect-1"))).toBe(true);
+    expect(inserts.some((call) => call.includes("carrier-contact-1"))).toBe(true);
+    expect(inserts.some((call) => call.includes("prospect-other"))).toBe(false);
   });
 
   it("leaves the Gmail cursor untouched when a continuation page fails", async () => {
@@ -129,6 +251,7 @@ describe("mailbox sync reliability", () => {
 
   it("preserves the old cursor when a fetched message cannot be persisted", async () => {
     mocks.readFreshMailboxToken.mockResolvedValue(googleConnection("history-old"));
+    mockCustomerContacts([{ id: "customer-1", email: "client@example.com", additional_contacts: [] }]);
     fetchMock().mockImplementation(async (input: string | URL | Request) => {
       const url = new URL(String(input));
       if (url.pathname.endsWith("/history")) {
@@ -865,6 +988,14 @@ function graphInboundReply(id: string, conversationId: string) {
 
 function fetchMock() {
   return globalThis.fetch as ReturnType<typeof vi.fn>;
+}
+
+function mockCustomerContacts(
+  rows: Array<{ id: string; email: string; additional_contacts: unknown }>
+) {
+  mocks.queryRaw.mockImplementation(async (...args: unknown[]) =>
+    sqlText(args).includes("FROM customer_profiles") ? rows : []
+  );
 }
 
 function jsonResponse(value: unknown, status = 200) {

@@ -656,7 +656,7 @@ describe("AiQuotingWorkspace component", () => {
               provider: "gmail",
               targetsChecked: 1,
               messages: [],
-              importSummary: { imported: 0, updated: 0, deduped: 0, failed: 0 },
+              importSummary: { imported: 0, updated: 0, deduped: 0, ignored: 0, failed: 0 },
             },
           }),
         };

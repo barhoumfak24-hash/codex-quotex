@@ -68,6 +68,7 @@ export type MailboxSyncImportSummary = {
   imported: number;
   updated: number;
   deduped: number;
+  ignored: number;
   failed: number;
 };
 
@@ -239,14 +240,14 @@ type ExistingCommunicationRow = {
   mailbox: unknown;
 };
 
-type ResolvedContact =
-  | { customerId: string; externalRecipientEmail?: never; externalRecipientName?: never; externalRecipientRole?: never }
-  | {
-      customerId?: never;
-      externalRecipientEmail: string | null;
-      externalRecipientName: string;
-      externalRecipientRole: string;
-    };
+type ResolvedContact = {
+  customerId?: string;
+  prospectId?: string;
+  carrierContactId?: string;
+  externalRecipientEmail?: string | null;
+  externalRecipientName?: string;
+  externalRecipientRole?: string;
+};
 
 type AdvisoryLockTransaction = {
   $queryRaw<T>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T>;
@@ -305,7 +306,7 @@ export async function syncMailboxReplyMessages(input: MailboxReplySyncInput): Pr
   const requestedTargets = uniqueReplyTargets(input.targets);
   const groups = await resolveAuthorizedReplyGroups(input, requestedTargets);
   const messages: SyncedMailboxMessage[] = [];
-  const importSummary: MailboxSyncImportSummary = { imported: 0, updated: 0, deduped: 0, failed: 0 };
+  const importSummary: MailboxSyncImportSummary = { imported: 0, updated: 0, deduped: 0, ignored: 0, failed: 0 };
   const mailboxesChecked: Array<{ connectionId: string; mailboxAccount: string; provider: "gmail" | "outlook" }> = [];
 
   for (const group of groups) {
@@ -325,6 +326,7 @@ export async function syncMailboxReplyMessages(input: MailboxReplySyncInput): Pr
     importSummary.imported += summary.imported;
     importSummary.updated += summary.updated;
     importSummary.deduped += summary.deduped;
+    importSummary.ignored += summary.ignored;
     importSummary.failed += summary.failed;
     mailboxesChecked.push({ connectionId: connection.id, mailboxAccount: connection.address, provider });
     await markConnectionSynced(connection.id);
@@ -1586,18 +1588,25 @@ async function persistSyncedMailboxMessages(
   connection: MailboxConnectionForPersistence,
   messages: SyncedMailboxMessage[]
 ): Promise<MailboxSyncImportSummary> {
-  const summary: MailboxSyncImportSummary = { imported: 0, updated: 0, deduped: 0, failed: 0 };
+  const summary: MailboxSyncImportSummary = { imported: 0, updated: 0, deduped: 0, ignored: 0, failed: 0 };
+  const knownContacts = await loadServerEmailContacts(connection.tenant_id);
   for (const message of messages) {
     if (message.direction === "inbound") {
       await recordInboundAttempt(connection, message, "received");
     }
     try {
-      const result = await upsertSyncedCommunication(connection, message);
+      const result = await upsertSyncedCommunication(connection, message, knownContacts);
       if (result === "inserted") summary.imported += 1;
       else if (result === "updated") summary.updated += 1;
+      else if (result === "ignored") summary.ignored += 1;
       else summary.deduped += 1;
       if (message.direction === "inbound") {
-        await recordInboundAttempt(connection, message, result === "inserted" || result === "updated" ? "linked" : "deduped");
+        await recordInboundAttempt(
+          connection,
+          message,
+          result === "inserted" || result === "updated" ? "linked" : result,
+          result === "ignored" ? "email_not_on_file" : undefined
+        );
       }
     } catch (error) {
       summary.failed += 1;
@@ -1611,8 +1620,9 @@ async function persistSyncedMailboxMessages(
 
 async function upsertSyncedCommunication(
   connection: MailboxConnectionForPersistence,
-  message: SyncedMailboxMessage
-): Promise<"inserted" | "updated" | "deduped"> {
+  message: SyncedMailboxMessage,
+  knownContacts: ReadonlyMap<string, ResolvedContact>
+): Promise<"inserted" | "updated" | "deduped" | "ignored"> {
   const mailboxAccount = message.mailboxAccount || connection.address;
   const mailboxAddress = normalizeEmail(mailboxAccount);
   const provider = message.provider;
@@ -1664,13 +1674,13 @@ async function upsertSyncedCommunication(
     return "updated";
   }
 
-  const contact = contactEmail
-    ? await resolveServerEmailContact(connection.tenant_id, contactEmail, message, direction)
-    : {
-        externalRecipientEmail: null,
-        externalRecipientName: "Unassigned mailbox message",
-        externalRecipientRole: "Unassigned",
-      };
+  const contact = contactEmail ? knownContacts.get(normalizeEmail(contactEmail)) : undefined;
+  if (!contact && !message.carrierSubmissionId) return "ignored";
+  const resolvedContact: ResolvedContact = contact ?? {
+    externalRecipientEmail: contactEmail ? normalizeEmail(contactEmail) : null,
+    externalRecipientName: displayNameFromEmailHeader(direction === "inbound" ? message.from : undefined) ?? contactEmail ?? "Carrier contact",
+    externalRecipientRole: "Carrier underwriter",
+  };
   const threadId = await resolveServerThreadId(
     connection.tenant_id,
     connection.id,
@@ -1716,12 +1726,12 @@ async function upsertSyncedCommunication(
     VALUES (
       ${id},
       ${connection.tenant_id},
-      ${"customerId" in contact ? contact.customerId : null},
-      ${null},
-      ${null},
-      ${"externalRecipientName" in contact ? contact.externalRecipientName : null},
-      ${"externalRecipientEmail" in contact ? contact.externalRecipientEmail : null},
-      ${"externalRecipientRole" in contact ? contact.externalRecipientRole : null},
+      ${resolvedContact.customerId ?? null},
+      ${resolvedContact.prospectId ?? null},
+      ${resolvedContact.carrierContactId ?? null},
+      ${resolvedContact.externalRecipientName ?? null},
+      ${resolvedContact.externalRecipientEmail ?? null},
+      ${resolvedContact.externalRecipientRole ?? null},
       ${"email"},
       ${direction},
       ${message.subject ?? null},
@@ -1814,30 +1824,45 @@ async function resolveServerThreadId(
     : `provider:${provider}:${contactEmail}:${subjectKey}`;
 }
 
-async function resolveServerEmailContact(
-  tenantId: string,
-  email: string,
-  message: SyncedMailboxMessage,
-  direction: "inbound" | "outbound"
-): Promise<ResolvedContact> {
-  const target = normalizeEmail(email);
+async function loadServerEmailContacts(tenantId: string): Promise<Map<string, ResolvedContact>> {
+  const contacts = new Map<string, ResolvedContact>();
+  const add = (email: unknown, contact: ResolvedContact) => {
+    const normalized = typeof email === "string" ? normalizeEmail(email) : "";
+    if (normalized && !contacts.has(normalized)) contacts.set(normalized, contact);
+  };
   const customers = await prisma.$queryRaw<Array<{ id: string; email: string; additional_contacts: unknown }>>`
     SELECT id, email, additional_contacts
     FROM customer_profiles
     WHERE tenant_id = ${tenantId}
-      AND archived = false
   `;
-  const customer = customers.find((row) => {
-    if (normalizeEmail(row.email) === target) return true;
-    return additionalContactEmails(row.additional_contacts).some((item) => item === target);
-  });
-  if (customer) return { customerId: customer.id };
+  for (const customer of customers) {
+    const contact = { customerId: customer.id } satisfies ResolvedContact;
+    add(customer.email, contact);
+    for (const email of additionalContactEmails(customer.additional_contacts)) add(email, contact);
+  }
 
-  return {
-    externalRecipientEmail: target,
-    externalRecipientName: displayNameFromEmailHeader(direction === "inbound" ? message.from : undefined) ?? target,
-    externalRecipientRole: "External contact",
-  };
+  if (!supabaseStateConfigured()) return contacts;
+  const stateId = process.env.STATE_SYNC_ID?.trim() || process.env.VITE_STATE_SYNC_ID?.trim() || "default";
+  const state = await readRemoteState(`app_state:${stateId}`);
+  const snapshot = asRecord(state?.snapshot);
+  for (const customer of objectArray(snapshot.customers)) {
+    if (stringValue(customer.tenantId) !== tenantId) continue;
+    const contact = { customerId: stringValue(customer.id) } satisfies ResolvedContact;
+    if (!contact.customerId) continue;
+    add(customer.email, contact);
+    for (const additional of objectArray(customer.additionalContacts)) add(additional.email, contact);
+  }
+  for (const prospect of objectArray(snapshot.prospects)) {
+    if (stringValue(prospect.tenantId) !== tenantId) continue;
+    const contact = { prospectId: stringValue(prospect.id) } satisfies ResolvedContact;
+    if (contact.prospectId) add(prospect.email, contact);
+  }
+  for (const carrierContact of objectArray(snapshot.carrierContacts)) {
+    if (stringValue(carrierContact.tenantId) !== tenantId) continue;
+    const contact = { carrierContactId: stringValue(carrierContact.id) } satisfies ResolvedContact;
+    if (contact.carrierContactId) add(carrierContact.email, contact);
+  }
+  return contacts;
 }
 
 function additionalContactEmails(value: unknown): string[] {
@@ -1854,7 +1879,7 @@ function additionalContactEmails(value: unknown): string[] {
 async function recordInboundAttempt(
   connection: MailboxConnectionForPersistence,
   message: SyncedMailboxMessage,
-  status: "received" | "linked" | "deduped" | "failed",
+  status: "received" | "linked" | "deduped" | "ignored" | "failed",
   reason?: string
 ) {
   await recordMailboxAudit({
