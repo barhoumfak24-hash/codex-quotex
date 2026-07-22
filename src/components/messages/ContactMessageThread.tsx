@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { DependencyList, RefObject } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { Bot, Check, ExternalLink, FileText, Paperclip, RefreshCw, Reply, Zap } from "lucide-react";
+import { Bot, Check, ExternalLink, FileText, Paperclip, RefreshCw, Reply, X, Zap } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { DocumentViewerModal } from "@/components/ui/DocumentViewerModal";
 import {
@@ -414,6 +414,16 @@ export function ContactMessageThread({
     }
   }
 
+  function disregardDraft(draftId: string) {
+    if (!api.communications.remove(draftId)) return;
+    if (draftSeed?.id === draftId) {
+      setDraftSeed(null);
+      setReplyTarget(null);
+    }
+    setRev((r) => r + 1);
+    onChanged?.();
+  }
+
   async function refreshThread(options: { silent?: boolean } = {}) {
     if (!options.silent) setRefreshing(true);
     try {
@@ -602,7 +612,19 @@ export function ContactMessageThread({
                           ))}
                         </div>
                       )}
-                      <div className={`${isDraft ? "mt-3" : "mt-1"} flex flex-wrap items-center gap-2`}>
+                      <div
+                        className={`${isDraft ? "mt-3 justify-end" : "mt-1"} flex flex-wrap items-center gap-2`}
+                      >
+                        {isDraft && commRow && (
+                          <button
+                            type="button"
+                            onClick={() => disregardDraft(commRow.id)}
+                            className="inline-flex min-h-10 items-center justify-center gap-2 rounded-md border border-ink-200 bg-white px-4 py-2 text-sm font-semibold text-ink-700 shadow-sm transition hover:border-ink-300 hover:bg-ink-50 hover:text-ink-950 focus:outline-none focus:ring-2 focus:ring-ink-200 focus:ring-offset-2"
+                          >
+                            <X className="h-4 w-4" />
+                            Disregard
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => {
