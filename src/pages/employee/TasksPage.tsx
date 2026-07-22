@@ -2210,7 +2210,6 @@ function ActivityCard({
         className={`relative rounded-lg border border-ink-100 bg-white shadow-luxe overflow-hidden flex items-stretch transition ${
           isDragging ? "opacity-55 ring-2 ring-gold-200" : ""
         } ${dropEdge ? "ring-2 ring-gold-300" : ""}`}
-        title="Drag to reorder this activity"
       >
         {dropEdge === "before" && (
           <div className="pointer-events-none absolute -top-2 left-2 right-2 z-20 h-3 rounded-md border border-gold-300 bg-gold-100/90 shadow-sm" />
@@ -2222,11 +2221,17 @@ function ActivityCard({
         <button
           type="button"
           onClick={() => setExpanded(true)}
-          className="flex-1 flex items-center gap-3 px-3 sm:px-4 py-2.5 text-left min-w-0 hover:bg-ink-50/60 cursor-grab active:cursor-grabbing"
+          className="flex-1 flex items-center gap-3 px-3 sm:px-4 py-2.5 text-left min-w-0 cursor-pointer hover:bg-ink-50/60"
           aria-expanded={false}
           title="Expand activity"
         >
-          <GripVertical className="h-4 w-4 text-ink-300 shrink-0" aria-hidden="true" />
+          <span
+            className="inline-flex h-7 w-6 shrink-0 cursor-move items-center justify-center rounded text-ink-300 transition-colors hover:bg-ink-100 hover:text-ink-500"
+            title="Drag to reorder"
+            aria-hidden="true"
+          >
+            <GripVertical className="h-4 w-4" />
+          </span>
           <SeverityIcon severity={severity} />
           <div className="min-w-0 flex-1">
             <div className="text-sm font-medium text-ink-900 truncate">
