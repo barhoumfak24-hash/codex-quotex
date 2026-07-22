@@ -615,7 +615,7 @@ export function ContactMessageThread({
                           }}
                           className={
                             isDraft
-                              ? "inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-ink-950 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-ink-800 focus:outline-none focus:ring-2 focus:ring-gold-300 focus:ring-offset-2"
+                              ? "inline-flex min-h-10 items-center justify-center gap-2 rounded-md bg-blue-700 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-blue-800 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:ring-offset-2"
                               : "inline-flex items-center gap-1 text-[10px] text-ink-500 hover:text-ink-800"
                           }
                         >
