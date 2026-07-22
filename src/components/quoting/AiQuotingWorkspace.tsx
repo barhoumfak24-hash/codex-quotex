@@ -1507,9 +1507,48 @@ function WorkflowStepIcons({
   const visibleSteps = steps.slice(0, totalSteps ?? steps.length);
   const total = visibleSteps.length;
   const completed = new Set(completedStepNumbers);
+  const stepsRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const stepsElement = stepsRef.current;
+    const scrollPane = stepsElement?.closest<HTMLElement>(".workflow-scroll-pane");
+    const currentStepElement = stepsElement?.querySelector<HTMLElement>(
+      `[data-workflow-step="${currentStep}"]`
+    );
+    if (!scrollPane || !currentStepElement) return;
+
+    let frame = 0;
+    const centerCurrentStep = () => {
+      if (scrollPane.scrollWidth <= scrollPane.clientWidth) return;
+      const paneRect = scrollPane.getBoundingClientRect();
+      const stepRect = currentStepElement.getBoundingClientRect();
+      const centeredLeft =
+        scrollPane.scrollLeft +
+        stepRect.left +
+        stepRect.width / 2 -
+        (paneRect.left + paneRect.width / 2);
+      const maximumLeft = Math.max(0, scrollPane.scrollWidth - scrollPane.clientWidth);
+      const nextLeft = Math.min(maximumLeft, Math.max(0, centeredLeft));
+      if (Math.abs(scrollPane.scrollLeft - nextLeft) < 1) return;
+      const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+      scrollPane.scrollTo({ left: nextLeft, behavior: reduceMotion ? "auto" : "smooth" });
+    };
+    const queueCenter = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(centerCurrentStep);
+    };
+
+    queueCenter();
+    window.addEventListener("resize", queueCenter);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", queueCenter);
+    };
+  }, [currentStep, total]);
 
   return (
     <div
+      ref={stepsRef}
       className={`flex max-w-full items-center gap-1 py-1 ${wrap ? "flex-wrap" : "flex-nowrap"}`}
       aria-label={`Workflow progress: step ${currentStep} of ${total}`}
     >
@@ -1520,6 +1559,8 @@ function WorkflowStepIcons({
         return (
           <div key={step.number} className="flex items-center gap-1">
             <span
+              data-workflow-step={step.number}
+              aria-current={step.number === currentStep ? "step" : undefined}
               className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold transition ${
                 done
                   ? "border-emerald-300 bg-emerald-50 text-emerald-800"
