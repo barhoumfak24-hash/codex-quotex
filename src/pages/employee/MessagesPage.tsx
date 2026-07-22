@@ -162,6 +162,7 @@ type ContactThread = {
   subtitle?: string;
   lastBody: string;
   lastAt: string;
+  lastIsDraft?: boolean;
   hasUnreadInbound: boolean;
 };
 
@@ -326,7 +327,7 @@ export function MessagesPage() {
     function upsert(
       key: string,
       base: Pick<ContactThread, "kind" | "id" | "name" | "email" | "phone">,
-      msg: { body: string; at: string; isUnreadInbound?: boolean }
+      msg: { body: string; at: string; isUnreadInbound?: boolean; isDraft?: boolean }
     ) {
       const existing = map.get(key);
       if (!existing) {
@@ -334,12 +335,14 @@ export function MessagesPage() {
           ...base,
           lastBody: msg.body,
           lastAt: msg.at,
+          lastIsDraft: !!msg.isDraft,
           hasUnreadInbound: !!msg.isUnreadInbound,
         });
       } else {
         if (msg.at > existing.lastAt) {
           existing.lastBody = msg.body;
           existing.lastAt = msg.at;
+          existing.lastIsDraft = !!msg.isDraft;
         }
         if (msg.isUnreadInbound) existing.hasUnreadInbound = true;
       }
@@ -413,6 +416,7 @@ export function MessagesPage() {
         upsert(contact.key, map.get(contact.key) ?? contact.base, {
           body: c.body,
           at: c.createdAt,
+          isDraft: c.deliveryStatus === "draft",
           isUnreadInbound: c.direction === "inbound" && !c.resolvedAt,
         });
       });
@@ -462,6 +466,7 @@ export function MessagesPage() {
         upsert(key, base, {
           body: c.body,
           at: c.createdAt,
+          isDraft: c.deliveryStatus === "draft",
           isUnreadInbound: c.direction === "inbound" && !c.resolvedAt,
         });
       });
@@ -479,14 +484,20 @@ export function MessagesPage() {
     function upsert(
       key: string,
       base: ContactThread,
-      msg: { body: string; at: string }
+      msg: { body: string; at: string; isDraft?: boolean }
     ) {
       const existing = map.get(key);
       if (!existing) {
-        map.set(key, { ...base, lastBody: msg.body, lastAt: msg.at });
+        map.set(key, {
+          ...base,
+          lastBody: msg.body,
+          lastAt: msg.at,
+          lastIsDraft: !!msg.isDraft,
+        });
       } else if (msg.at > existing.lastAt) {
         existing.lastBody = msg.body;
         existing.lastAt = msg.at;
+        existing.lastIsDraft = !!msg.isDraft;
       }
     }
     const carrierContacts = api.carrierContacts.listForTenant(agency.id);
@@ -512,7 +523,11 @@ export function MessagesPage() {
       .forEach((c) => {
         const key = `carrier:${c.carrierContactId}`;
         if (!map.has(key)) return;
-        upsert(key, map.get(key)!, { body: c.body, at: c.createdAt });
+        upsert(key, map.get(key)!, {
+          body: c.body,
+          at: c.createdAt,
+          isDraft: c.deliveryStatus === "draft",
+        });
       });
     return Array.from(map.values()).sort((a, b) =>
       a.lastAt < b.lastAt ? 1 : -1
@@ -589,16 +604,42 @@ export function MessagesPage() {
     }
   }, [activeInternalThread?.id, user?.id]);
 
+  const [expandedInbox, setExpandedInbox] = useState<
+    "contacts" | "internal" | "carriers" | null
+  >(null);
+
+  useEffect(() => {
+    if (activeInternalThread) {
+      setExpandedInbox("internal");
+    } else if (activeContact) {
+      setExpandedInbox(activeContact.kind === "carrier" ? "carriers" : "contacts");
+    }
+  }, [activeContact?.id, activeContact?.kind, activeInternalThread?.id]);
+
   function setContact(key: string | null) {
     const next = new URLSearchParams(searchParams);
-    if (key) next.set("contact", key);
-    else next.delete("contact");
+    if (key) {
+      setExpandedInbox(key.startsWith("carrier:") ? "carriers" : "contacts");
+      next.set("contact", key);
+      next.delete("thread");
+    } else {
+      setExpandedInbox(null);
+      next.delete("contact");
+      next.delete("msg");
+    }
     setSearchParams(next, { replace: true });
   }
   function setThread(id: string | null) {
     const next = new URLSearchParams(searchParams);
-    if (id) next.set("thread", id);
-    else next.delete("thread");
+    if (id) {
+      setExpandedInbox("internal");
+      next.set("thread", id);
+      next.delete("contact");
+      next.delete("msg");
+    } else {
+      setExpandedInbox(null);
+      next.delete("thread");
+    }
     setSearchParams(next, { replace: true });
   }
 
@@ -730,6 +771,11 @@ export function MessagesPage() {
         {/* LEFT - Clients, prospects, and holders */}
         <ExpandableCard
           className={MESSAGE_CARD_CLASS}
+          expanded={expandedInbox === "contacts"}
+          onExpandedChange={(next) => {
+            if (next) setExpandedInbox("contacts");
+            else if (activeContact?.kind !== "carrier") setContact(null);
+          }}
           title="Clients, prospects, and holders"
           subtitle="One thread per contact, mixing inbound replies + outbound (AI / custom) sends."
           action={
@@ -757,6 +803,7 @@ export function MessagesPage() {
           {(expanded) => (
             <InboxBody
               expanded={expanded}
+              showPane={expanded && !!activeContact && activeContact.kind !== "carrier"}
               search={
                 <SearchInput
                   value={clientQuery}
@@ -780,11 +827,7 @@ export function MessagesPage() {
                 <ActiveContactPane
                   tenantId={agency.id}
                   userId={user.id}
-                  contact={
-                    activeContact && activeContact.kind !== "carrier"
-                      ? activeContact
-                      : null
-                  }
+                  contact={activeContact?.kind !== "carrier" ? activeContact : null}
                   onClose={() => setContact(null)}
                   onSent={() => {
                     /* db change tick rerenders */
@@ -802,6 +845,11 @@ export function MessagesPage() {
         {/* RIGHT - Internal */}
         <ExpandableCard
           className={MESSAGE_CARD_CLASS}
+          expanded={expandedInbox === "internal"}
+          onExpandedChange={(next) => {
+            if (next) setExpandedInbox("internal");
+            else setThread(null);
+          }}
           title="Internal"
           subtitle="Staff DMs and group threads. Private to the agency."
           action={
@@ -817,6 +865,7 @@ export function MessagesPage() {
           {(expanded) => (
             <InboxBody
               expanded={expanded}
+              showPane={expanded && !!activeInternalThread}
               search={
                 <SearchInput
                   value={internalQuery}
@@ -856,6 +905,11 @@ export function MessagesPage() {
         {/* LEFT - Carriers */}
         <ExpandableCard
           className={MESSAGE_CARD_CLASS}
+          expanded={expandedInbox === "carriers"}
+          onExpandedChange={(next) => {
+            if (next) setExpandedInbox("carriers");
+            else if (activeContact?.kind === "carrier") setContact(null);
+          }}
           title="Carriers"
           subtitle="Email threads with carrier reps (underwriters, adjusters, claims reps, etc.). Add or edit contacts under Carrier library."
           action={
@@ -883,6 +937,7 @@ export function MessagesPage() {
           {(expanded) => (
             <InboxBody
               expanded={expanded}
+              showPane={expanded && !!activeContact && activeContact.kind === "carrier"}
               search={
                 <SearchInput
                   value={carrierQuery}
@@ -906,11 +961,7 @@ export function MessagesPage() {
                 <ActiveContactPane
                   tenantId={agency.id}
                   userId={user.id}
-                  contact={
-                    activeContact && activeContact.kind === "carrier"
-                      ? activeContact
-                      : null
-                  }
+                  contact={activeContact?.kind === "carrier" ? activeContact : null}
                   onClose={() => setContact(null)}
                   onSent={() => {
                     /* db change tick rerenders */
@@ -960,16 +1011,18 @@ export function MessagesPage() {
 // so the conversation takes the majority of the width.
 function InboxBody({
   expanded,
+  showPane,
   search,
   renderList,
   renderPane,
 }: {
   expanded: boolean;
+  showPane: boolean;
   search: React.ReactNode;
   renderList: (fill: boolean, compact: boolean) => React.ReactNode;
   renderPane: (fill: boolean) => React.ReactNode;
 }) {
-  if (expanded) {
+  if (expanded && showPane) {
     return (
       <div className="flex flex-col h-full">
         {search}
@@ -983,9 +1036,8 @@ function InboxBody({
   return (
     <div className="h-[500px] min-h-0 flex flex-col">
       {search}
-      <div className="grid grid-cols-1 gap-3 mt-3 flex-1 min-h-0 2xl:grid-cols-[minmax(220px,0.85fr)_minmax(340px,1.15fr)]">
-        {renderList(true, false)}
-        {renderPane(true)}
+      <div className="mt-3 flex-1 min-h-0">
+        {renderList(true, expanded)}
       </div>
     </div>
   );
@@ -1113,6 +1165,7 @@ function ContactThreadsList({
               </div>
               {!compact && (
                 <div className="text-xs text-ink-500 mt-1 truncate">
+                  {t.lastIsDraft ? "Draft - not sent: " : ""}
                   {t.lastBody || "No messages yet."}
                 </div>
               )}
@@ -1445,11 +1498,7 @@ function ActiveContactPane({
     setReplyTarget(replyTargetForDraftRow(draft));
   }, [contact?.id, contact?.kind, targetMessageId, tenantId]);
   if (!contact) {
-    return (
-      <div className={`rounded-md border border-dashed border-ink-200 text-sm text-ink-400 p-4 text-center flex items-center justify-center ${fill ? "h-full" : ""}`}>
-        Select a conversation to view it here.
-      </div>
-    );
+    return null;
   }
   const selectedContact = contact;
 
@@ -1606,10 +1655,11 @@ function ActiveContactPane({
               No email messages yet - send the first one below.
             </div>
           ) : (
-            visibleRows.map((r, i) => {
+            visibleRows.map((r) => {
             const isInbound = r.kind === "comm" && r.row.direction === "inbound";
             const isOut = r.kind === "out";
             const isOutboundComm = r.kind === "comm" && r.row.direction === "outbound";
+            const isDraft = r.kind === "comm" && r.row.deliveryStatus === "draft";
             const fromCustomer = isInbound;
             const at = r.kind === "comm" ? r.row.createdAt : r.row.sentAt ?? r.row.createdAt;
             const body = r.kind === "comm" ? r.row.body : r.row.content;
@@ -1622,13 +1672,15 @@ function ActiveContactPane({
             const aiNoticeId = r.kind === "comm" ? r.row.aiActivityNotificationId : undefined;
             return (
               <div
-                key={i}
-                className={`flex ${fromCustomer ? "justify-start" : "justify-end"}`}
+                key={`${r.kind}:${r.row.id}`}
+                className={`flex ${isDraft ? "justify-center" : fromCustomer ? "justify-start" : "justify-end"}`}
               >
                 <div
                   className={`${
                     isMarketingPamphlet
                       ? "w-[min(96%,980px)] rounded-lg bg-transparent px-0 py-0 text-sm text-ink-900"
+                      : isDraft
+                      ? "w-[min(94%,760px)] rounded-md border-2 border-dashed border-gold-300 bg-gold-50 px-4 py-3 text-sm text-ink-900"
                       : `w-[min(85%,600px)] rounded-lg px-3 py-2 text-sm ${
                           fromCustomer
                             ? "bg-ink-100 text-ink-900"
@@ -1644,25 +1696,33 @@ function ActiveContactPane({
                       : ""
                   }`}
                 >
-                  <div className="text-[10px] text-ink-500 mb-0.5 flex items-center gap-1">
-                    {ai && <Bot className="h-3 w-3 text-violet-600" />}
-                    {fromCustomer
-                      ? "Inbound"
-                      : r.kind === "comm" && r.row.deliveryStatus === "draft"
-                        ? "AI draft"
-                        : isOutboundComm
-                          ? "You"
-                          : "AI send"}
-                    {" - "}
-                    {String(channelChip).toUpperCase()}
-                    {" - "}
-                    {fmt.dateTime(at)}
-                  </div>
+                  {isDraft ? (
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2 border-b border-gold-200 pb-2">
+                      <span className="inline-flex items-center gap-1.5 rounded-full bg-gold-200/70 px-2 py-1 text-[10px] font-bold uppercase text-gold-950">
+                        <Bot className="h-3 w-3" /> Draft - not sent
+                      </span>
+                      <span className="text-[10px] text-ink-500">Created {fmt.dateTime(at)}</span>
+                    </div>
+                  ) : (
+                    <div className="text-[10px] text-ink-500 mb-0.5 flex items-center gap-1">
+                      {ai && <Bot className="h-3 w-3 text-violet-600" />}
+                      {fromCustomer ? "Inbound" : isOutboundComm ? "You" : "AI send"}
+                      {" - "}
+                      {String(channelChip).toUpperCase()}
+                      {" - "}
+                      {fmt.dateTime(at)}
+                    </div>
+                  )}
+                  {isDraft && (
+                    <p className="mb-2 text-xs font-medium text-gold-900">
+                      Awaiting your review and approval. Nothing has been delivered to the recipient.
+                    </p>
+                  )}
                   {r.row.subject && (
                     <div className="font-medium mb-0.5">{r.row.subject}</div>
                   )}
                   <RichMessageBody body={body} tenantId={tenantId} message={r.kind === "comm" ? r.row : undefined} />
-                  {r.kind === "comm" && (
+                  {r.kind === "comm" && !isDraft && (
                     <CommunicationDeliveryStatus
                       communication={r.row}
                       tenantId={tenantId}
@@ -1706,7 +1766,7 @@ function ActiveContactPane({
                     <button
                       type="button"
                       onClick={() => {
-                        if (r.kind === "comm" && r.row.deliveryStatus === "draft") {
+                        if (isDraft) {
                           setDraftSeed(draftSeedForRow(r.row));
                           setReplyTarget(replyTargetForDraftRow(r.row));
                         } else {
@@ -1717,19 +1777,19 @@ function ActiveContactPane({
                       className="inline-flex items-center gap-1 text-[10px] text-ink-500 hover:text-ink-800"
                     >
                       <Reply className="h-3 w-3" />
-                      {r.kind === "comm" && r.row.deliveryStatus === "draft"
-                        ? "Review draft"
-                        : "Reply"}
+                      {isDraft ? "Review and approve draft" : "Reply"}
                     </button>
-                    <a
-                      href={mailboxUrlForContact(mailbox, contact, r.row)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 text-[10px] text-ink-500 hover:text-ink-800"
-                      title={`Open this message in ${mailbox.providerName}`}
-                    >
-                      <ExternalLink className="h-3 w-3" /> Open in {mailbox.providerName}
-                    </a>
+                    {!isDraft && (
+                      <a
+                        href={mailboxUrlForContact(mailbox, contact, r.row)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-[10px] text-ink-500 hover:text-ink-800"
+                        title={`Open this message in ${mailbox.providerName}`}
+                      >
+                        <ExternalLink className="h-3 w-3" /> Open in {mailbox.providerName}
+                      </a>
+                    )}
                   </div>
                   {aiTaskId && (
                     <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-violet-300 bg-violet-50 px-2 py-1.5 text-[11px] text-violet-800">
@@ -1984,11 +2044,7 @@ function ActiveInternalPane({
     : 0;
   useAnchoredMessageScroll(scrollRef, scrollContentRef, [thread?.id, fill, threadMsgCount]);
   if (!thread) {
-    return (
-      <div className={`rounded-md border border-dashed border-ink-200 text-sm text-ink-400 p-4 text-center flex items-center justify-center ${fill ? "h-full" : ""}`}>
-        Select a thread or start a new one to chat.
-      </div>
-    );
+    return null;
   }
   const msgs = api.internalMessages.listMessages(thread.id);
   const others = thread.participantIds.filter((id) => id !== user.id);

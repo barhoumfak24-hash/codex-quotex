@@ -496,6 +496,7 @@ export function ContactMessageThread({
                 const marketingRow = item.kind === "out" ? item.row : undefined;
                 const isInbound = commRow?.direction === "inbound";
                 const isOutboundComm = commRow?.direction === "outbound";
+                const isDraft = commRow?.deliveryStatus === "draft";
                 const isAi = item.kind === "out";
                 const at = commRow ? commRow.createdAt : marketingRow?.sentAt ?? marketingRow?.createdAt ?? row.createdAt;
                 const body = commRow ? commRow.body : marketingRow?.content ?? "";
@@ -507,7 +508,10 @@ export function ContactMessageThread({
                 const messageId = row.id;
                 const isHighlighted = highlightedId === messageId;
                 return (
-                  <div key={`${item.kind}:${row.id}`} className={`flex ${isInbound ? "justify-start" : "justify-end"}`}>
+                  <div
+                    key={`${item.kind}:${row.id}`}
+                    className={`flex ${isDraft ? "justify-center" : isInbound ? "justify-start" : "justify-end"}`}
+                  >
                     <div
                       ref={(el) => {
                         messageRefs.current[messageId] = el;
@@ -515,6 +519,8 @@ export function ContactMessageThread({
                       className={`${
                         isMarketingPamphlet
                           ? "w-[min(96%,980px)] rounded-lg bg-transparent px-0 py-0 text-sm text-ink-900"
+                          : isDraft
+                          ? "w-[min(94%,760px)] rounded-md border-2 border-dashed border-gold-300 bg-gold-50 px-4 py-3 text-sm text-ink-900"
                           : `w-[min(85%,600px)] rounded-lg px-3 py-2 text-sm ${
                               isInbound
                                 ? "bg-ink-100 text-ink-900"
@@ -528,28 +534,36 @@ export function ContactMessageThread({
                         isHighlighted ? "ring-4 ring-gold-300 ring-offset-2 ring-offset-white shadow-lg" : ""
                       }`}
                     >
-                      <div className="text-[10px] text-ink-500 mb-0.5 flex flex-wrap items-center gap-1">
-                        {isAi && <Bot className="h-3 w-3 text-violet-600" />}
-                        {isInbound
-                          ? "Inbound"
-                          : commRow?.deliveryStatus === "draft"
-                            ? "AI draft"
-                            : isOutboundComm
-                              ? "You"
-                              : "AI send"}
-                        {" - "}
-                        {String(channelChip).toUpperCase()}
-                        {" - "}
-                        {fmt.dateTime(at)}
-                        {marketingRow && (
-                          <Badge tone={marketingRow.deliveryStatus === "opened" ? "success" : "info"}>
-                            {fmt.titleCase(marketingRow.deliveryStatus)}
-                          </Badge>
-                        )}
-                      </div>
+                      {isDraft ? (
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2 border-b border-gold-200 pb-2">
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-gold-200/70 px-2 py-1 text-[10px] font-bold uppercase text-gold-950">
+                            <Bot className="h-3 w-3" /> Draft - not sent
+                          </span>
+                          <span className="text-[10px] text-ink-500">Created {fmt.dateTime(at)}</span>
+                        </div>
+                      ) : (
+                        <div className="text-[10px] text-ink-500 mb-0.5 flex flex-wrap items-center gap-1">
+                          {isAi && <Bot className="h-3 w-3 text-violet-600" />}
+                          {isInbound ? "Inbound" : isOutboundComm ? "You" : "AI send"}
+                          {" - "}
+                          {String(channelChip).toUpperCase()}
+                          {" - "}
+                          {fmt.dateTime(at)}
+                          {marketingRow && (
+                            <Badge tone={marketingRow.deliveryStatus === "opened" ? "success" : "info"}>
+                              {fmt.titleCase(marketingRow.deliveryStatus)}
+                            </Badge>
+                          )}
+                        </div>
+                      )}
+                      {isDraft && (
+                        <p className="mb-2 text-xs font-medium text-gold-900">
+                          Awaiting your review and approval. Nothing has been delivered to the recipient.
+                        </p>
+                      )}
                       {row.subject && <div className="font-medium mb-0.5">{row.subject}</div>}
                       <RichMessageBody body={body} tenantId={tenantId} message={commRow} />
-                      {commRow && (
+                      {commRow && !isDraft && (
                         <CommunicationDeliveryStatus
                           communication={commRow}
                           tenantId={tenantId}
@@ -591,7 +605,7 @@ export function ContactMessageThread({
                         <button
                           type="button"
                           onClick={() => {
-                            if (commRow?.deliveryStatus === "draft") {
+                            if (isDraft && commRow) {
                               setDraftSeed(draftSeedFor(commRow));
                               setReplyTarget(replyTargetForDraft(commRow));
                             } else {
@@ -602,17 +616,19 @@ export function ContactMessageThread({
                           className="inline-flex items-center gap-1 text-[10px] text-ink-500 hover:text-ink-800"
                         >
                           <Reply className="h-3 w-3" />
-                          {commRow?.deliveryStatus === "draft" ? "Review draft" : "Reply"}
+                          {isDraft ? "Review and approve draft" : "Reply"}
                         </button>
-                        <a
-                          href={mailboxUrlForContact(mailbox, contact, row)}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="inline-flex items-center gap-1 text-[10px] text-ink-500 hover:text-ink-800"
-                          title={`Open this message in ${mailbox.providerName}`}
-                        >
-                          <ExternalLink className="h-3 w-3" /> Open in {mailbox.providerName}
-                        </a>
+                        {!isDraft && (
+                          <a
+                            href={mailboxUrlForContact(mailbox, contact, row)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-[10px] text-ink-500 hover:text-ink-800"
+                            title={`Open this message in ${mailbox.providerName}`}
+                          >
+                            <ExternalLink className="h-3 w-3" /> Open in {mailbox.providerName}
+                          </a>
+                        )}
                       </div>
                       {aiTaskId && (
                         <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-violet-300 bg-violet-50 px-2 py-1.5 text-[11px] text-violet-800">

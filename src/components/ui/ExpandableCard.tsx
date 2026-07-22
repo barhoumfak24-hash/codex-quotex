@@ -21,6 +21,8 @@ export function ExpandableCard({
   action,
   id,
   className = "",
+  expanded: controlledExpanded,
+  onExpandedChange,
   children,
 }: {
   title: ReactNode;
@@ -28,9 +30,17 @@ export function ExpandableCard({
   action?: ReactNode;
   id?: string;
   className?: string;
+  expanded?: boolean;
+  onExpandedChange?: (expanded: boolean) => void;
   children: ReactNode | ((expanded: boolean) => ReactNode);
 }) {
-  const [expanded, setExpanded] = useState(false);
+  const [internalExpanded, setInternalExpanded] = useState(false);
+  const expanded = controlledExpanded ?? internalExpanded;
+
+  function setExpanded(next: boolean) {
+    if (controlledExpanded === undefined) setInternalExpanded(next);
+    onExpandedChange?.(next);
+  }
 
   // Lock background scroll + allow Esc to collapse while expanded.
   useEffect(() => {
@@ -58,7 +68,7 @@ export function ExpandableCard({
           {action}
           <button
             type="button"
-            onClick={() => setExpanded((v) => !v)}
+            onClick={() => setExpanded(!expanded)}
             className="btn-outline text-xs !px-2"
             title={expanded ? "Collapse" : "Expand to full screen"}
             aria-label={expanded ? "Collapse" : "Expand to full screen"}
