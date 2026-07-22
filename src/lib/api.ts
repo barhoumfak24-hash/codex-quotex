@@ -107,6 +107,11 @@ import {
 } from "./assetLabels";
 import { isLockingMasterAccount } from "./masterAccount";
 import { isDocumentOnlyAcordSession, isQuotingWorkflowOpen } from "./quotingWorkflows";
+import {
+  extractQuoteReplyIntake,
+  normalizedQuoteIdentifier,
+  type PersonalQuoteReplyIntake,
+} from "./personalQuoteAutomation";
 import { agencyMonthlyPriceUsd, TIER_LIMITS } from "./tiers";
 import {
   buildDocumentTemplateFields,
@@ -5329,6 +5334,148 @@ function communicationNeedsInboundTriage(row: Communication): boolean {
       channel: typeof row.channel === "string" ? row.channel : undefined,
       contactKind,
     }).serviceIntent === "vehicle_quote_intake"
+  );
+}
+
+type PersonalQuoteAutomationResult = {
+  communicationId: string;
+  status: "completed" | "manual" | "skipped" | "failed";
+  sessionId?: string;
+  assetId?: string;
+};
+
+const PERSONAL_QUOTE_AUTOMATION_MAX_ATTEMPTS = 3;
+const PERSONAL_QUOTE_AUTOMATION_PENDING_TIMEOUT_MS = 5 * 60_000;
+
+function communicationContactMatches(a: Communication, b: Communication): boolean {
+  return (
+    (!!a.customerId && a.customerId === b.customerId) ||
+    (!!a.prospectId && a.prospectId === b.prospectId)
+  );
+}
+
+function normalizedEmailSubject(value?: string): string {
+  return String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/^(?:re|fw|fwd):\s*/g, "")
+    .replace(/\s+/g, " ");
+}
+
+function priorQuoteContextForCommunication(row: Communication): string {
+  const subject = normalizedEmailSubject(row.subject);
+  const recentOutbound = db
+    .list("communications")
+    .filter(
+      (candidate) =>
+        candidate.tenantId === row.tenantId &&
+        candidate.direction === "outbound" &&
+        communicationContactMatches(candidate, row) &&
+        candidate.createdAt <= row.createdAt &&
+        (candidate.threadId === row.threadId ||
+          (!!candidate.externalThreadId && candidate.externalThreadId === row.externalThreadId) ||
+          normalizedEmailSubject(candidate.subject) === subject ||
+          /\b(?:quote|vin|vehicle|property address|asset id|hull id|hin)\b/i.test(
+            `${candidate.subject ?? ""}\n${candidate.body}`
+          ))
+    )
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
+  return recentOutbound ? `${recentOutbound.subject ?? ""}\n${recentOutbound.body}` : "";
+}
+
+function quoteAutomationCanRun(row: Communication): boolean {
+  if (!row.aiQuoteAutomationStatus) return true;
+  if (row.aiQuoteAutomationStatus === "failed") {
+    return (row.aiQuoteAutomationAttempts ?? 0) < PERSONAL_QUOTE_AUTOMATION_MAX_ATTEMPTS;
+  }
+  if (row.aiQuoteAutomationStatus !== "pending") return false;
+  const attemptedAt = Date.parse(row.aiQuoteAutomationProcessedAt ?? "");
+  return !Number.isFinite(attemptedAt) || Date.now() - attemptedAt > PERSONAL_QUOTE_AUTOMATION_PENDING_TIMEOUT_MS;
+}
+
+function quoteAutomationAssetDetails(intake: PersonalQuoteReplyIntake): Record<string, string> {
+  if (intake.identifierKind === "vin") return { vin: intake.identifier };
+  if (intake.identifierKind === "address") {
+    return { propertyAddress: intake.identifier, address: intake.identifier };
+  }
+  if (intake.identifierKind === "hin") return { hin: intake.identifier };
+  return { assetIdentifier: intake.identifier };
+}
+
+function quoteAutomationAssetIdentifier(
+  asset: Asset,
+  kind: PersonalQuoteReplyIntake["identifierKind"]
+): string {
+  const details = assetDetails(asset);
+  if (kind === "vin") return String(details.vin ?? details.vehicleVin ?? details.assetIdentifier ?? "");
+  if (kind === "address") {
+    return String(
+      details.propertyAddress ??
+        details.riskAddress ??
+        details.address ??
+        details.primaryResidenceAddress ??
+        ""
+    );
+  }
+  if (kind === "hin") {
+    return String(details.hin ?? details.hullId ?? details.hullIdentificationNumber ?? "");
+  }
+  return String(details.assetIdentifier ?? details.identifier ?? details.assetId ?? "");
+}
+
+function assetMatchesQuoteAutomationIntake(asset: Asset, intake: PersonalQuoteReplyIntake): boolean {
+  if (asset.type !== intake.assetType) return false;
+  return (
+    normalizedQuoteIdentifier(
+      intake.identifierKind,
+      quoteAutomationAssetIdentifier(asset, intake.identifierKind)
+    ) === normalizedQuoteIdentifier(intake.identifierKind, intake.identifier)
+  );
+}
+
+function personalCategoryForQuoteAutomation(
+  tenantId: string,
+  intake: PersonalQuoteReplyIntake
+): InsuranceCategory | undefined {
+  const candidates = api.categories
+    .listActiveForTenant(tenantId)
+    .filter(
+      (category) =>
+        category.lineOfBusiness === "personal" && category.assetType === intake.assetType
+    );
+  if (candidates.length <= 1) return candidates[0];
+  const keywords =
+    intake.assetType === "luxury_vehicle"
+      ? /\b(?:auto|vehicle|car|truck)\b/i
+      : intake.assetType === "coastal_home"
+        ? /\b(?:home|house|property|dwelling)\b/i
+        : intake.assetType === "yacht"
+          ? /\b(?:boat|yacht|marine|watercraft)\b/i
+          : intake.assetType === "jewelry"
+            ? /\b(?:jewelry|valuable|collection)\b/i
+            : /./;
+  return candidates.find((category) => keywords.test(category.label)) ?? candidates[0];
+}
+
+function quoteAutomationPortalUrl(sessionId: string): string {
+  const path = `/customer/questionnaire/${encodeURIComponent(sessionId)}`;
+  if (typeof window !== "undefined" && window.location?.origin) {
+    return `${window.location.origin}${path}`;
+  }
+  return `https://quotexinsurance.com${path}`;
+}
+
+function quoteAutomationUnansweredRequiredCount(session: QuotingSession): number {
+  const responses = session.questionnaireResponses ?? {};
+  return visibleQuotingQuestions(session).filter(
+    (question) => question.required && !(responses[question.id] ?? "").trim()
+  ).length;
+}
+
+function quoteAutomationSessionContainsAsset(session: QuotingSession, assetId: string): boolean {
+  return (
+    session.assetId === assetId ||
+    (session.selectedAssetMappings ?? []).some((mapping) => mapping.assetId === assetId)
   );
 }
 
@@ -14922,6 +15069,319 @@ export const api = {
       rows.forEach((c) => db.remove("communications", c.id));
       return rows.length;
     },
+    async automatePersonalQuoteReplies(
+      tenantId: string,
+      actorId?: string,
+      communicationId?: string
+    ): Promise<PersonalQuoteAutomationResult[]> {
+      const inbound = db
+        .list("communications")
+        .filter(
+          (communication) =>
+            communication.tenantId === tenantId &&
+            communication.direction === "inbound" &&
+            communication.createdById !== "ai" &&
+            (!communicationId || communication.id === communicationId) &&
+            communicationHasKnownMailboxContact(communication) &&
+            quoteAutomationCanRun(communication)
+        )
+        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+        .slice(0, 25);
+      const outcomes: PersonalQuoteAutomationResult[] = [];
+
+      for (const original of inbound) {
+        const customer = original.customerId
+          ? db
+              .list("customers")
+              .find(
+                (candidate) =>
+                  candidate.id === original.customerId && candidate.tenantId === tenantId
+              )
+          : undefined;
+        const prospect = original.prospectId
+          ? db
+              .list("prospects")
+              .find(
+                (candidate) =>
+                  candidate.id === original.prospectId && candidate.tenantId === tenantId
+              )
+          : undefined;
+        const contact = customer ?? prospect;
+        const intake = extractQuoteReplyIntake({
+          subject: original.subject,
+          body: original.body,
+          priorQuoteContext: priorQuoteContextForCommunication(original),
+          contactLine: contact?.lineOfBusiness,
+        });
+        if (!intake) {
+          db.update("communications", original.id, {
+            aiQuoteAutomationStatus: "skipped",
+            aiQuoteAutomationProcessedAt: nowIso(),
+            aiQuoteAutomationReason: "No quote identifier reply was detected.",
+          });
+          outcomes.push({ communicationId: original.id, status: "skipped" });
+          continue;
+        }
+
+        const claimedAt = nowIso();
+        const attempts = (original.aiQuoteAutomationAttempts ?? 0) + 1;
+        let task = db
+          .list("tasks")
+          .find(
+            (candidate) =>
+              candidate.tenantId === tenantId &&
+              (candidate.id === original.aiActivityTaskId || candidate.messageId === original.id)
+          );
+        const assignedOwnerId = assignedContactOwner(contact);
+        const actor = actorId
+          ? db
+              .list("users")
+              .find(
+                (candidate) =>
+                  candidate.id === actorId &&
+                  candidate.tenantId === tenantId &&
+                  candidate.active
+              )
+          : undefined;
+        const fallbackManager = db
+          .list("users")
+          .find(
+            (candidate) =>
+              candidate.tenantId === tenantId &&
+              candidate.active &&
+              isRoutingManagerRole(candidate.role)
+          );
+        const operatorId = assignedOwnerId ?? actor?.id ?? fallbackManager?.id;
+        const taskTitle = `${contact?.name ?? "Client"}: personal quote request`;
+        if (!task) {
+          task = {
+            id: uid("task"),
+            tenantId,
+            title: taskTitle,
+            description:
+              "Quotex received the requested asset identifier and is preparing the personal-lines quote flow.",
+            customerId: original.customerId,
+            prospectId: original.prospectId,
+            messageId: original.id,
+            source: "ai_notification",
+            topic: "coverage_change",
+            severity: "info",
+            severityReason:
+              "A client supplied the identifier needed to begin a personal-lines quote.",
+            status: "open",
+            assignedToId: operatorId,
+            awaitingManagerAssignment: !operatorId || undefined,
+            createdById: "ai",
+            createdAt: claimedAt,
+          };
+          db.insert("tasks", task);
+        } else {
+          task =
+            db.update("tasks", task.id, {
+              title: taskTitle,
+              description:
+                "Quotex received the requested asset identifier and is preparing the personal-lines quote flow.",
+              assignedToId: task.assignedToId ?? operatorId,
+              awaitingManagerAssignment: !(task.assignedToId ?? operatorId) || undefined,
+            }) ?? task;
+        }
+        db.update("communications", original.id, {
+          aiQuoteAutomationStatus: "pending",
+          aiQuoteAutomationProcessedAt: claimedAt,
+          aiQuoteAutomationReason: "Personal-lines quote automation is in progress.",
+          aiQuoteAutomationAttempts: attempts,
+          aiActivityScannedAt: claimedAt,
+          aiTriageDisposition: "activity",
+          aiTriageTopic: "coverage_change",
+          aiTriageReason:
+            "The client supplied an asset identifier needed for a personal-lines quote.",
+          aiTriageConfidence: "high",
+          aiTriageEvidence: [`quote_identifier:${intake.identifierKind}`],
+          aiTriageRequiresHumanReview: false,
+          aiTriageVersion: INBOUND_TRIAGE_VERSION,
+          aiActivityTaskId: task.id,
+        });
+
+        const finish = (
+          status: PersonalQuoteAutomationResult["status"],
+          reason: string,
+          sessionId?: string,
+          assetId?: string
+        ) => {
+          const processedAt = nowIso();
+          db.update("communications", original.id, {
+            aiQuoteAutomationStatus: status,
+            aiQuoteAutomationProcessedAt: processedAt,
+            aiQuoteAutomationReason: reason,
+            aiQuoteAutomationSessionId: sessionId,
+            aiQuoteAutomationAssetId: assetId,
+          });
+          const taskPatch: Partial<Task> = {
+            description: reason,
+            quoteSessionId: sessionId,
+            assetId,
+            assignedToId: task?.assignedToId ?? operatorId,
+            awaitingManagerAssignment: !(task?.assignedToId ?? operatorId) || undefined,
+          };
+          if (task) db.update("tasks", task.id, taskPatch);
+          const result = {
+            communicationId: original.id,
+            status,
+            sessionId,
+            assetId,
+          } satisfies PersonalQuoteAutomationResult;
+          outcomes.push(result);
+          return result;
+        };
+
+        if (intake.line === "commercial") {
+          finish(
+            "manual",
+            "Commercial-lines automation is paused. Staff must review this request before starting its quote flow."
+          );
+          continue;
+        }
+        if (intake.line !== "personal") {
+          finish(
+            "manual",
+            "Quotex could not safely determine whether this request is personal or commercial, so staff review is required."
+          );
+          continue;
+        }
+        if (!customer) {
+          finish(
+            "manual",
+            "This automatic personal-lines flow is available for client records. Staff must review this prospect request."
+          );
+          continue;
+        }
+        if (!operatorId) {
+          finish(
+            "failed",
+            "The quote request is saved, but it needs an active staff owner before Quotex can start the flow."
+          );
+          continue;
+        }
+
+        try {
+          const details = quoteAutomationAssetDetails(intake);
+          const category = personalCategoryForQuoteAutomation(tenantId, intake);
+          let asset = api.assets
+            .listByCustomer(customer.id)
+            .find((candidate) => assetMatchesQuoteAutomationIntake(candidate, intake));
+          if (!asset) {
+            asset = api.assets.create({
+              tenantId,
+              customerId: customer.id,
+              type: intake.assetType,
+              label: deriveAssetLabel(intake.assetType, details),
+              estimatedValue: 0,
+              details,
+              status: "pending",
+            });
+            if (intake.identifierKind === "vin") {
+              void api.assets.upgradeVehicleLabelFromVin(asset.id, asset.label);
+            }
+          }
+
+          const latestSession = api.quoting.getForCustomer(customer.id);
+          const openSession =
+            latestSession && isQuotingWorkflowOpen(latestSession) ? latestSession : undefined;
+          if (openSession && !quoteAutomationSessionContainsAsset(openSession, asset.id)) {
+            finish(
+              "manual",
+              "A quote flow is already open for this client. The new identifier was saved as an asset, but staff must decide whether to add it to the existing flow.",
+              openSession.id,
+              asset.id
+            );
+            continue;
+          }
+
+          const session =
+            openSession ??
+            (await api.quoting.startSession({
+              tenantId,
+              customerId: customer.id,
+              assetId: asset.id,
+              assets: [
+                {
+                  assetId: asset.id,
+                  label: asset.label,
+                  assetType: asset.type,
+                  categoryId: category?.id,
+                  categoryLabel: category?.label,
+                  address:
+                    intake.identifierKind === "address"
+                      ? intake.identifier
+                      : customer.mailingAddress,
+                  estimatedValue: asset.estimatedValue,
+                  assetDetails: details,
+                },
+              ],
+              createdById: operatorId,
+              assetType: asset.type,
+              contactName: customer.name,
+              address:
+                intake.identifierKind === "address"
+                  ? intake.identifier
+                  : customer.mailingAddress,
+              estimatedValue: asset.estimatedValue,
+              assetDetails: details,
+              categoryId: category?.id,
+              categoryLabel: category?.label,
+              categoryIds: category ? [category.id] : undefined,
+              categoryLabels: category ? [category.label] : undefined,
+              lineOfBusiness: "personal",
+            }));
+          let mappedSession = api.quoting.get(session.id) ?? session;
+          if (mappedSession.aiProviderError) {
+            mappedSession =
+              (await api.quoting.runAcordAiMapping(mappedSession.id)) ?? mappedSession;
+          }
+          const prepared =
+            api.quoting.preparePersonalQuestionnaire(mappedSession.id) ?? mappedSession;
+          const freshSession = api.quoting.get(prepared.id) ?? prepared;
+          const unansweredRequired = quoteAutomationUnansweredRequiredCount(freshSession);
+
+          if (unansweredRequired > 0) {
+            if (!freshSession.questionnaireMessageId) {
+              api.quoting.sendPortalLink(
+                freshSession.id,
+                quoteAutomationPortalUrl(freshSession.id)
+              );
+            }
+            finish(
+              "completed",
+              `Quotex started the personal-lines quote flow and sent the client a questionnaire for ${unansweredRequired} remaining required field${
+                unansweredRequired === 1 ? "" : "s"
+              }. Carrier quotes will run automatically when the client submits it.`,
+              freshSession.id,
+              asset.id
+            );
+          } else {
+            const completedSession =
+              freshSession.status === "complete"
+                ? freshSession
+                : api.quoting.runQuotes(freshSession.id);
+            finish(
+              "completed",
+              `Quotex started the personal-lines quote flow and automatically completed carrier ranking with ${completedSession.quotes.length} quote option${
+                completedSession.quotes.length === 1 ? "" : "s"
+              }.`,
+              completedSession.id,
+              asset.id
+            );
+          }
+        } catch {
+          finish(
+            "failed",
+            "The personal-lines quote request is saved. Quotex will retry it automatically."
+          );
+        }
+      }
+
+      return outcomes;
+    },
     // AI inbound triage. Scans every inbound message that hasn't been
     // scanned yet; if the AI judges it warrants follow-up, it auto-
     // creates an Activity Center task (assigned to the contact's
@@ -15430,6 +15890,11 @@ export const api = {
           : updatedExisting;
         communicationStatusEvent(linkedExisting);
         if (direction === "inbound") {
+          void api.communications.automatePersonalQuoteReplies(
+            input.tenantId,
+            input.mailboxUserId,
+            linkedExisting.id
+          );
           api.communications.sweepInboundForActivities(input.tenantId, input.mailboxUserId);
         }
         return linkedExisting;
@@ -15497,6 +15962,11 @@ export const api = {
       const linkedRow = direction === "inbound" ? linkInboundCarrierCommunicationToSubmission(row) : row;
       communicationStatusEvent(linkedRow);
       if (direction === "inbound") {
+        void api.communications.automatePersonalQuoteReplies(
+          input.tenantId,
+          input.mailboxUserId,
+          linkedRow.id
+        );
         api.communications.sweepInboundForActivities(input.tenantId, input.mailboxUserId);
       }
       return linkedRow;

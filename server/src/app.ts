@@ -17,6 +17,7 @@ import {
   appLimiter,
   authLimiter,
   diagnosticsLimiter,
+  mailboxApiLimiter,
   publicWorkflowLimiter,
   stateSyncLimiter,
   strictApiLimiter,
@@ -222,7 +223,7 @@ app.use("/api/mailboxes/oauth", authLimiter, mailboxOAuthCallbackRoutes);
 app.use("/api/mailboxes/inbound", webhookLimiter, mailboxInboundRoutes);
 
 app.use("/api/tenants", requireAuth, enforceTenantIsolation, tenantsRoutes);
-app.use("/api/mailboxes", requireAuth, enforceTenantIsolation, strictApiLimiter, mailboxesRoutes);
+app.use("/api/mailboxes", requireAuth, enforceTenantIsolation, mailboxApiLimiter, mailboxesRoutes);
 app.use("/api/customers", requireAuth, enforceTenantIsolation, customersRoutes);
 app.use("/api/quotes", requireAuth, enforceTenantIsolation, strictApiLimiter, quotesRoutes);
 app.use("/api/ai", requireAuth, enforceTenantIsolation, strictApiLimiter, aiRoutes);

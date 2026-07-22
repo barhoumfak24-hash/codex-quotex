@@ -38,7 +38,7 @@ const mailboxSyncRecent = new Map<string, { completedAt: number; result: LiveMai
 const carrierReplySyncInFlight = new Map<string, Promise<ExactCarrierReplySyncResult>>();
 
 const OUTBOX_RETRY_DELAYS_MS = [15_000, 60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000];
-const AUTOMATIC_MAILBOX_SYNC_COOLDOWN_MS = 15_000;
+const AUTOMATIC_MAILBOX_SYNC_COOLDOWN_MS = 4_000;
 
 export function getLiveMailboxCapability(input: {
   tenantId: string;
@@ -641,6 +641,10 @@ async function mirrorSyncedMailboxMessages(
       if (!mirrored) continue;
       imported += 1;
       mirroredCommunicationIds.push(mirrored.id);
+    }
+
+    if (mirroredCommunicationIds.length > 0) {
+      await api.communications.automatePersonalQuoteReplies(tenantId, user.id);
     }
 
     const processing = mirroredCommunicationIds.length > 0

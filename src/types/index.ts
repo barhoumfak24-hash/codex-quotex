@@ -2118,6 +2118,15 @@ export interface Communication {
   aiDraftMissingFields?: ("vin" | "policy_line")[];
   aiReplyDraftId?: string;
   aiDraftSourceCommunicationId?: string;
+  // Personal-lines quote automation. The mailbox agent stamps the inbound
+  // reply before starting asynchronous work so repeated provider syncs cannot
+  // create duplicate assets, quote flows, questionnaires, or carrier runs.
+  aiQuoteAutomationStatus?: "pending" | "completed" | "manual" | "skipped" | "failed";
+  aiQuoteAutomationProcessedAt?: string;
+  aiQuoteAutomationSessionId?: string;
+  aiQuoteAutomationAssetId?: string;
+  aiQuoteAutomationReason?: string;
+  aiQuoteAutomationAttempts?: number;
   createdAt: string;
   createdById?: string;
 }

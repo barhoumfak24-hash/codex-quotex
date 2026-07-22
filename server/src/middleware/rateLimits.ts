@@ -77,6 +77,16 @@ export const stateSyncLimiter = limiter(
   "memory"
 );
 export const strictApiLimiter = limiter("strict-api", envLimit("RATE_LIMIT_STRICT_API_PER_MINUTE", 20));
+export const mailboxApiLimiter = limiter(
+  "mailbox-api",
+  envLimit("RATE_LIMIT_MAILBOX_API_PER_MINUTE", 30),
+  60_000,
+  (req) => {
+    const tenantId = req.auth?.tenantId?.trim();
+    const userId = req.auth?.userId?.trim();
+    return tenantId && userId ? `${tenantId}:${userId}` : "unauthenticated";
+  }
+);
 export const webhookLimiter = limiter("webhook", envLimit("RATE_LIMIT_WEBHOOK_PER_MINUTE", 120));
 export const diagnosticsLimiter = limiter("diagnostics", envLimit("RATE_LIMIT_DIAGNOSTICS_PER_MINUTE", 20));
 

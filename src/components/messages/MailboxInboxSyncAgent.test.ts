@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { pickAutomaticMailboxConnection } from "./MailboxInboxSyncAgent";
+import {
+  ACTIVE_MAILBOX_SYNC_INTERVAL_MS,
+  claimMailboxSyncLease,
+  mailboxSyncRetryDelay,
+  pickAutomaticMailboxConnection,
+  releaseMailboxSyncLease,
+} from "./MailboxInboxSyncAgent";
 import type { ConnectedMailbox } from "@/types";
 
 function mailbox(overrides: Partial<ConnectedMailbox> = {}): ConnectedMailbox {
@@ -40,5 +46,49 @@ describe("automatic mailbox selection", () => {
     expect(
       pickAutomaticMailboxConnection([mailbox({ userId: undefined })], "user-1")
     ).toBeUndefined();
+  });
+});
+
+describe("automatic mailbox synchronization", () => {
+  function storage() {
+    const values = new Map<string, string>();
+    return {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    };
+  }
+
+  it("lets only one browser tab lead a mailbox cycle until its lease expires", () => {
+    const store = storage();
+    expect(
+      claimMailboxSyncLease({ storage: store, key: "tenant:user", ownerId: "tab-a", now: 1_000 })
+    ).toBe(true);
+    expect(
+      claimMailboxSyncLease({ storage: store, key: "tenant:user", ownerId: "tab-b", now: 2_000 })
+    ).toBe(false);
+    expect(
+      claimMailboxSyncLease({ storage: store, key: "tenant:user", ownerId: "tab-b", now: 14_000 })
+    ).toBe(true);
+  });
+
+  it("releases only the lease owned by the current browser tab", () => {
+    const store = storage();
+    claimMailboxSyncLease({ storage: store, key: "tenant:user", ownerId: "tab-a", now: 1_000 });
+    releaseMailboxSyncLease({ storage: store, key: "tenant:user", ownerId: "tab-b" });
+    expect(
+      claimMailboxSyncLease({ storage: store, key: "tenant:user", ownerId: "tab-b", now: 2_000 })
+    ).toBe(false);
+    releaseMailboxSyncLease({ storage: store, key: "tenant:user", ownerId: "tab-a" });
+    expect(
+      claimMailboxSyncLease({ storage: store, key: "tenant:user", ownerId: "tab-b", now: 2_000 })
+    ).toBe(true);
+  });
+
+  it("checks quickly when healthy and backs off after provider failures", () => {
+    expect(mailboxSyncRetryDelay(0)).toBe(ACTIVE_MAILBOX_SYNC_INTERVAL_MS);
+    expect(mailboxSyncRetryDelay(1)).toBe(10_000);
+    expect(mailboxSyncRetryDelay(2)).toBe(30_000);
+    expect(mailboxSyncRetryDelay(10)).toBe(60_000);
   });
 });
