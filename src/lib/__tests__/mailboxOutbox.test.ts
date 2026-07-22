@@ -61,6 +61,10 @@ describe("mailbox outbox", () => {
     );
 
     await expect(first).resolves.toMatchObject({ ok: true, deferred: true, imported: 0 });
+    await expect(
+      syncCommunicationsFromLiveMailbox({ tenantId: agency.id, user, automatic: true })
+    ).resolves.toMatchObject({ ok: true, deferred: true, imported: 0 });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
   it("treats a configured transactional provider as live email capability", async () => {

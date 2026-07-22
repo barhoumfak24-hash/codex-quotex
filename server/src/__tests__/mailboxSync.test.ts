@@ -6,8 +6,6 @@ const mocks = vi.hoisted(() => ({
   writeMailboxSyncCursor: vi.fn(),
   queryRaw: vi.fn(),
   executeRaw: vi.fn(),
-  transaction: vi.fn(),
-  txQueryRaw: vi.fn(),
   processPersistedCarrierReplies: vi.fn(),
   supabaseStateConfigured: vi.fn(),
   readRemoteState: vi.fn(),
@@ -23,7 +21,6 @@ vi.mock("../services/prisma.js", () => ({
   prisma: {
     $queryRaw: mocks.queryRaw,
     $executeRaw: mocks.executeRaw,
-    $transaction: mocks.transaction,
   },
 }));
 
@@ -50,10 +47,6 @@ beforeEach(() => {
   mocks.writeMailboxSyncCursor.mockReset().mockResolvedValue(undefined);
   mocks.queryRaw.mockReset().mockResolvedValue([]);
   mocks.executeRaw.mockReset().mockResolvedValue(1);
-  mocks.txQueryRaw.mockReset().mockResolvedValue([{ locked: true }]);
-  mocks.transaction.mockReset().mockImplementation(async (callback) =>
-    callback({ $queryRaw: mocks.txQueryRaw })
-  );
   mocks.processPersistedCarrierReplies.mockReset().mockResolvedValue({
     candidates: 0,
     processed: 0,
@@ -129,7 +122,14 @@ describe("mailbox sync reliability", () => {
       { gmailHistoryId: "history-terminal" }
     );
     const cursorOrder = mocks.writeMailboxSyncCursor.mock.invocationCallOrder[0];
-    expect(mocks.executeRaw.mock.invocationCallOrder.filter((order) => order < cursorOrder)).toHaveLength(2);
+    const persistedBeforeCursor = mocks.executeRaw.mock.calls.filter((call, index) => {
+      const order = mocks.executeRaw.mock.invocationCallOrder[index] ?? Number.POSITIVE_INFINITY;
+      const sql = sqlText(call);
+      return order < cursorOrder && (
+        sql.includes("INSERT INTO communications") || sql.includes("UPDATE communications")
+      );
+    });
+    expect(persistedBeforeCursor).toHaveLength(2);
     expect(maxConcurrentMessageReads).toBe(1);
   });
 
@@ -137,6 +137,7 @@ describe("mailbox sync reliability", () => {
     mocks.readFreshMailboxToken.mockResolvedValue(googleConnection("history-old"));
     mockCustomerContacts([{
       id: "customer-known",
+      name: "Known Client",
       email: "primary@example.com",
       additional_contacts: [{ email: "known.client@example.com" }],
     }]);
@@ -261,6 +262,51 @@ describe("mailbox sync reliability", () => {
     expect(inserts.some((call) => call.includes("prospect-other"))).toBe(false);
   });
 
+  it("persists a snapshot-only client by verified email without violating the customer FK", async () => {
+    mocks.readFreshMailboxToken.mockResolvedValue(googleConnection("history-old"));
+    mocks.supabaseStateConfigured.mockReturnValue(true);
+    mocks.readRemoteState.mockResolvedValue({
+      id: "app_state:default",
+      revision: 1,
+      snapshot: {
+        customers: [{
+          id: "snapshot-customer-without-relational-row",
+          tenantId: "tenant-1",
+          name: "Snapshot Client",
+          email: "snapshot.client@example.com",
+        }],
+      },
+    });
+    fetchMock().mockImplementation(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname.endsWith("/history")) {
+        return jsonResponse({
+          history: [{ messagesAdded: [{ message: { id: "snapshot-client-inbound" } }] }],
+          historyId: "history-snapshot-client",
+        });
+      }
+      if (url.pathname.endsWith("/messages/snapshot-client-inbound")) {
+        return jsonResponse(gmailInboundReply(
+          "snapshot-client-inbound",
+          "snapshot-client-thread",
+          "<snapshot-client-outbound@example.com>",
+          { from: "Snapshot Client <snapshot.client@example.com>" }
+        ));
+      }
+      throw new Error(`Unexpected Gmail request: ${url.toString()}`);
+    });
+
+    const result = await syncMailboxMessages({ tenantId: "tenant-1", userId: "user-1" });
+
+    expect(result.importSummary).toMatchObject({ imported: 1, ignored: 0, failed: 0 });
+    const insert = mocks.executeRaw.mock.calls.find((call) => sqlText(call).includes("INSERT INTO communications"));
+    expect(insert).toBeDefined();
+    expect(insert).not.toContain("snapshot-customer-without-relational-row");
+    expect(insert).toContain("Snapshot Client");
+    expect(insert).toContain("snapshot.client@example.com");
+    expect(insert).toContain("Client");
+  });
+
   it("leaves the Gmail cursor untouched when a continuation page fails", async () => {
     mocks.readFreshMailboxToken.mockResolvedValue(googleConnection("history-old"));
     fetchMock()
@@ -321,7 +367,10 @@ describe("mailbox sync reliability", () => {
       }
       return jsonResponse(gmailMessage("gmail-failed"));
     });
-    mocks.executeRaw.mockRejectedValueOnce(new Error("database unavailable")).mockResolvedValue(1);
+    mocks.executeRaw
+      .mockResolvedValueOnce(1)
+      .mockRejectedValueOnce(new Error("database unavailable"))
+      .mockResolvedValue(1);
 
     const result = await syncMailboxMessages({ tenantId: "tenant-1", userId: "user-1" });
 
@@ -905,7 +954,7 @@ describe("mailbox sync reliability", () => {
 
   it("defers an overlapping mailbox sync without calling the provider", async () => {
     mocks.readFreshMailboxToken.mockResolvedValue(googleConnection("history-old"));
-    mocks.txQueryRaw.mockResolvedValue([{ locked: false }]);
+    mocks.executeRaw.mockResolvedValueOnce(0);
 
     const result = await syncMailboxMessages({ tenantId: "tenant-1", userId: "user-1" });
 
@@ -913,15 +962,27 @@ describe("mailbox sync reliability", () => {
     expect(fetchMock()).not.toHaveBeenCalled();
   });
 
-  it("uses a transaction-scoped advisory lock and skips when another poll owns it", async () => {
-    mocks.txQueryRaw.mockResolvedValue([{ locked: false }]);
+  it("releases its mailbox lease after a provider failure", async () => {
+    mocks.readFreshMailboxToken.mockResolvedValue(googleConnection("history-old"));
+    fetchMock().mockRejectedValue(new Error("provider unavailable"));
+
+    await expect(syncMailboxMessages({ tenantId: "tenant-1", userId: "user-1" }))
+      .rejects.toThrow("Mailbox provider request was interrupted");
+
+    const leaseQueries = mocks.executeRaw.mock.calls.map(sqlText);
+    expect(leaseQueries[0]).toContain("SET sync_lease_id");
+    expect(leaseQueries.at(-1)).toContain("SET sync_lease_id = NULL");
+    expect(leaseQueries.at(-1)).toContain("AND sync_lease_id");
+  });
+
+  it("polls without wrapping provider work in a database transaction", async () => {
+    mocks.queryRaw.mockResolvedValue([]);
 
     const result = await pollDueMailboxConnections();
 
-    expect(result).toMatchObject({ skipped: true, reason: "mailbox_poll_already_running" });
-    expect(mocks.transaction).toHaveBeenCalledTimes(1);
-    expect(sqlText(mocks.txQueryRaw.mock.calls[0])).toContain("pg_try_advisory_xact_lock");
-    expect(sqlText(mocks.txQueryRaw.mock.calls[0])).not.toContain("pg_try_advisory_lock(");
+    expect(result).toMatchObject({ checked: 0, failed: 0, results: [] });
+    expect(mocks.queryRaw).toHaveBeenCalledTimes(1);
+    expect(sqlText(mocks.queryRaw.mock.calls[0])).toContain("FROM mailbox_connections");
   });
 });
 
@@ -1060,10 +1121,12 @@ function fetchMock() {
 }
 
 function mockCustomerContacts(
-  rows: Array<{ id: string; email: string; additional_contacts: unknown }>
+  rows: Array<{ id: string; name?: string; email: string; additional_contacts: unknown }>
 ) {
   mocks.queryRaw.mockImplementation(async (...args: unknown[]) =>
-    sqlText(args).includes("FROM customer_profiles") ? rows : []
+    sqlText(args).includes("FROM customer_profiles")
+      ? rows.map((row) => ({ ...row, name: row.name ?? row.email }))
+      : []
   );
 }
 

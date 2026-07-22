@@ -249,26 +249,53 @@ type ResolvedContact = {
   externalRecipientRole?: string;
 };
 
-type AdvisoryLockTransaction = {
-  $queryRaw<T>(strings: TemplateStringsArray, ...values: unknown[]): Promise<T>;
-};
-
 function emptyImportSummary(): MailboxSyncImportSummary {
   return { imported: 0, updated: 0, deduped: 0, ignored: 0, failed: 0 };
 }
+
+const MAILBOX_SYNC_LEASE_MINUTES = 6;
 
 async function withMailboxSyncLock<T>(
   connectionId: string,
   operation: () => Promise<T>
 ): Promise<{ acquired: true; value: T } | { acquired: false }> {
-  return prisma.$transaction(async (tx: AdvisoryLockTransaction) => {
-    const lockKey = `quotex-mailbox-sync:${connectionId}`;
-    const rows = await tx.$queryRaw<Array<{ locked: boolean }>>`
-      SELECT pg_try_advisory_xact_lock(hashtext(${lockKey})) AS locked
-    `;
-    if (rows[0]?.locked !== true) return { acquired: false } as const;
-    return { acquired: true, value: await operation() } as const;
-  }, { timeout: 60_000 });
+  const leaseId = randomUUID();
+  const acquired = await prisma.$executeRaw`
+    UPDATE mailbox_connections
+    SET sync_lease_id = ${leaseId},
+        sync_lease_until = clock_timestamp() + (${MAILBOX_SYNC_LEASE_MINUTES} * interval '1 minute')
+    WHERE id = ${connectionId}
+      AND (
+        sync_lease_until IS NULL
+        OR sync_lease_until <= clock_timestamp()
+      )
+  `;
+  if (acquired !== 1) return { acquired: false };
+
+  const startedAt = Date.now();
+  try {
+    const value = await operation();
+    console.info("Mailbox sync lease completed", {
+      connectionId,
+      durationMs: Date.now() - startedAt,
+    });
+    return { acquired: true, value };
+  } finally {
+    try {
+      await prisma.$executeRaw`
+        UPDATE mailbox_connections
+        SET sync_lease_id = NULL,
+            sync_lease_until = NULL
+        WHERE id = ${connectionId}
+          AND sync_lease_id = ${leaseId}
+      `;
+    } catch (error) {
+      console.error("Mailbox sync lease release failed", {
+        connectionId,
+        error: error instanceof Error ? error.message : "Unknown lease release error",
+      });
+    }
+  }
 }
 
 export async function syncMailboxMessages(input: MailboxSyncInput): Promise<{
@@ -599,24 +626,10 @@ export async function syncDueMailboxConnections(input: { maxConnections?: number
 }
 
 export async function pollDueMailboxConnections(input: { maxConnections?: number; maxResults?: number } = {}) {
-  return prisma.$transaction(async (tx: AdvisoryLockTransaction) => {
-    const rows = await tx.$queryRaw<Array<{ locked: boolean }>>`
-      SELECT pg_try_advisory_xact_lock(hashtext('quotex-mailbox-poll')) AS locked
-    `;
-    if (rows[0]?.locked !== true) {
-      return {
-        checked: 0,
-        imported: 0,
-        updated: 0,
-        deduped: 0,
-        failed: 0,
-        skipped: true,
-        reason: "mailbox_poll_already_running",
-        results: [],
-      };
-    }
-    return await syncDueMailboxConnections(input);
-  }, { timeout: 10 * 60_000 });
+  // Each mailbox obtains its own short database lease. Keeping the global poll
+  // outside a transaction prevents external provider calls from monopolizing
+  // the serverless database pool while still making overlapping polls safe.
+  return syncDueMailboxConnections(input);
 }
 
 export async function listMailboxSyncStatus(input: { tenantId: string; limit?: number }) {
@@ -1912,13 +1925,24 @@ async function loadServerEmailContacts(tenantId: string): Promise<Map<string, Re
     const normalized = typeof email === "string" ? normalizeEmail(email) : "";
     if (normalized && !contacts.has(normalized)) contacts.set(normalized, contact);
   };
-  const customers = await prisma.$queryRaw<Array<{ id: string; email: string; additional_contacts: unknown }>>`
-    SELECT id, email, additional_contacts
+  const customers = await prisma.$queryRaw<Array<{
+    id: string;
+    name: string;
+    email: string;
+    additional_contacts: unknown;
+  }>>`
+    SELECT id, name, email, additional_contacts
     FROM customer_profiles
     WHERE tenant_id = ${tenantId}
   `;
+  const relationalCustomerIds = new Set(customers.map((customer) => customer.id));
   for (const customer of customers) {
-    const contact = { customerId: customer.id } satisfies ResolvedContact;
+    const contact = {
+      customerId: customer.id,
+      externalRecipientName: customer.name,
+      externalRecipientEmail: customer.email,
+      externalRecipientRole: "Client",
+    } satisfies ResolvedContact;
     add(customer.email, contact);
     for (const email of additionalContactEmails(customer.additional_contacts)) add(email, contact);
   }
@@ -1929,10 +1953,33 @@ async function loadServerEmailContacts(tenantId: string): Promise<Map<string, Re
   const snapshot = asRecord(state?.snapshot);
   for (const customer of objectArray(snapshot.customers)) {
     if (stringValue(customer.tenantId) !== tenantId) continue;
-    const contact = { customerId: stringValue(customer.id) } satisfies ResolvedContact;
-    if (!contact.customerId) continue;
-    add(customer.email, contact);
-    for (const additional of objectArray(customer.additionalContacts)) add(additional.email, contact);
+    const customerId = stringValue(customer.id);
+    const email = stringValue(customer.email);
+    if (!customerId || !email) continue;
+    const contact = relationalCustomerIds.has(customerId)
+      ? {
+          customerId,
+          externalRecipientName: stringValue(customer.name) || email,
+          externalRecipientEmail: email,
+          externalRecipientRole: "Client",
+        } satisfies ResolvedContact
+      : {
+          // Snapshot-only contacts are still on file, but their local ID cannot
+          // be written into the relational FK until the profile row exists.
+          externalRecipientName: stringValue(customer.name) || email,
+          externalRecipientEmail: email,
+          externalRecipientRole: "Client",
+        } satisfies ResolvedContact;
+    add(email, contact);
+    for (const additional of objectArray(customer.additionalContacts)) {
+      const additionalEmail = stringValue(additional.email);
+      if (!additionalEmail) continue;
+      add(additionalEmail, {
+        ...contact,
+        externalRecipientName: stringValue(additional.name) || contact.externalRecipientName,
+        externalRecipientEmail: additionalEmail,
+      });
+    }
   }
   for (const prospect of objectArray(snapshot.prospects)) {
     if (stringValue(prospect.tenantId) !== tenantId) continue;

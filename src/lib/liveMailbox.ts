@@ -34,9 +34,11 @@ export type LiveMailboxCapability = {
 const capabilityCache = new Map<string, Promise<LiveMailboxCapability>>();
 const retryInFlight = new Set<string>();
 const mailboxSyncInFlight = new Map<string, Promise<LiveMailboxSyncResult>>();
+const mailboxSyncRecent = new Map<string, { completedAt: number; result: LiveMailboxSyncResult }>();
 const carrierReplySyncInFlight = new Map<string, Promise<ExactCarrierReplySyncResult>>();
 
 const OUTBOX_RETRY_DELAYS_MS = [15_000, 60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000];
+const AUTOMATIC_MAILBOX_SYNC_COOLDOWN_MS = 15_000;
 
 export function getLiveMailboxCapability(input: {
   tenantId: string;
@@ -194,6 +196,7 @@ type LiveMailboxSyncInput = {
   connectionId?: string;
   maxResults?: number;
   quotingSessionId?: string;
+  automatic?: boolean;
 };
 
 export type LiveMailboxSyncResult =
@@ -215,9 +218,22 @@ export function syncCommunicationsFromLiveMailbox(input: LiveMailboxSyncInput): 
   const key = `${input.tenantId}:${input.connectionId ?? input.user.id}`;
   const current = mailboxSyncInFlight.get(key);
   if (current) return current;
-  const request = syncCommunicationsFromLiveMailboxOnce(input).finally(() => {
-    if (mailboxSyncInFlight.get(key) === request) mailboxSyncInFlight.delete(key);
-  });
+  const recent = mailboxSyncRecent.get(key);
+  if (
+    input.automatic &&
+    recent &&
+    Date.now() - recent.completedAt < AUTOMATIC_MAILBOX_SYNC_COOLDOWN_MS
+  ) {
+    return Promise.resolve(recent.result);
+  }
+  const request = syncCommunicationsFromLiveMailboxOnce(input)
+    .then((result) => {
+      if (result.ok) mailboxSyncRecent.set(key, { completedAt: Date.now(), result });
+      return result;
+    })
+    .finally(() => {
+      if (mailboxSyncInFlight.get(key) === request) mailboxSyncInFlight.delete(key);
+    });
   mailboxSyncInFlight.set(key, request);
   return request;
 }

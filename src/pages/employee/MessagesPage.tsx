@@ -652,6 +652,7 @@ export function MessagesPage() {
         user,
         connectionId: mailbox.connectionId,
         maxResults: 25,
+        automatic: options.silent,
       });
       if (sync.ok) {
         if (sync.deferred) {

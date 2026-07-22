@@ -434,6 +434,7 @@ export function ContactMessageThread({
           user,
           connectionId: mailbox.connectionId,
           maxResults: 25,
+          automatic: options.silent,
         });
         if (!sync.ok && mailbox.status === "connected") setSyncNotice("Mailbox check will retry automatically.");
         else if (sync.ok && sync.deferred) setSyncNotice("Mailbox check is continuing automatically.");

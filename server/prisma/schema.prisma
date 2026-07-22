@@ -337,6 +337,8 @@ model MailboxConnection {
   lastSyncAt        DateTime? @map("last_sync_at")
   lastSendAt        DateTime? @map("last_send_at")
   lastError         String?   @map("last_error") @db.Text
+  syncLeaseId       String?   @map("sync_lease_id") @db.Text
+  syncLeaseUntil    DateTime? @map("sync_lease_until")
   updatedById       String?   @map("updated_by_id") @db.Text
   createdAt         DateTime  @default(now()) @map("created_at")
   updatedAt         DateTime  @updatedAt @map("updated_at")
@@ -348,6 +350,7 @@ model MailboxConnection {
   @@unique([tenantId, userId, provider])
   @@index([tenantId])
   @@index([tenantId, userId])
+  @@index([syncLeaseUntil])
   @@map("mailbox_connections")
 }
 
