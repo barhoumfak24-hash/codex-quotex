@@ -922,7 +922,17 @@ function QuotingWorkflowsPanel({
                   <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-ink-100">
                     <div
                       className={`h-full rounded-full ${
-                        row.summary.tone === "success" ? "bg-emerald-500" : "bg-gold-500"
+                        row.summary.tone === "success"
+                          ? "bg-emerald-500"
+                          : row.summary.tone === "info"
+                            ? "bg-blue-500"
+                            : row.summary.tone === "warn"
+                              ? "bg-amber-500"
+                              : row.summary.tone === "error"
+                                ? "bg-red-500"
+                                : row.summary.tone === "neutral"
+                                  ? "bg-ink-400"
+                                  : "bg-gold-500"
                       }`}
                       style={{ width: `${Math.max(0, Math.min(100, row.summary.progress))}%` }}
                       aria-label={

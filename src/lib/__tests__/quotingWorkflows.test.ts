@@ -67,7 +67,7 @@ describe("summarizeQuotingWorkflow", () => {
     expect(summary.stage).toBe("Accepted ranking live");
     expect(summary.currentStep).toBe(5);
     expect(summary.totalSteps).toBe(6);
-    expect(summary.progress).toBe(83);
+    expect(summary.progress).toBe(67);
     expect(summary.acceptedCount).toBe(1);
     expect(summary.waitingCount).toBe(1);
     expect(summary.quoteCount).toBe(1);
@@ -132,7 +132,7 @@ describe("summarizeQuotingWorkflow", () => {
     expect(summary.detail).toBe("1 of 2 carrier replies received.");
     expect(summary.currentStep).toBe(4);
     expect(summary.totalSteps).toBe(6);
-    expect(summary.progress).toBe(67);
+    expect(summary.progress).toBe(50);
   });
 
   it("turns the ranking summary green after every involved carrier replies", () => {
@@ -173,9 +173,10 @@ describe("summarizeQuotingWorkflow", () => {
     );
 
     expect(summary.stage).toBe("Running quotes");
+    expect(summary.tone).toBe("gold");
     expect(summary.currentStep).toBe(4);
     expect(summary.totalSteps).toBe(4);
-    expect(summary.progress).toBe(100);
+    expect(summary.progress).toBe(75);
   });
 });
 
