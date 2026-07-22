@@ -84,7 +84,7 @@ export function QuotexWordmark({
       aria-label={label}
       className={`inline-flex items-baseline font-display text-lg leading-tight tracking-normal ${toneTextClass(tone)} ${className}`}
     >
-      <QuotexQGlyph className="mr-[-0.01em] h-[0.96em] w-[0.82em] translate-y-[0.1em]" />
+      <QuotexQGlyph className="mr-[-0.01em] h-[0.96em] w-[0.82em] translate-y-[0.17em]" />
       <span aria-hidden="true">{suffix}</span>
     </span>
   );
