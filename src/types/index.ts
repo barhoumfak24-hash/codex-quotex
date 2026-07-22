@@ -2113,7 +2113,9 @@ export interface Communication {
     | "certificate_of_insurance"
     | "insurance_id_card"
     | "declarations_page"
-    | "policy_copy";
+    | "policy_copy"
+    | "vehicle_quote_intake";
+  aiDraftMissingFields?: ("vin" | "policy_line")[];
   aiReplyDraftId?: string;
   aiDraftSourceCommunicationId?: string;
   createdAt: string;

@@ -71,6 +71,35 @@ describe("aiClassifyInboundForActivity", () => {
     expect(out.serviceIntent).toBe("certificate_of_insurance");
   });
 
+  it("recognizes a vehicle quote request and asks only for missing intake details", async () => {
+    const { aiClassifyInboundForActivity } = await import("../ai");
+    const missingBoth = aiClassifyInboundForActivity({
+      subject: "Need quote for my truck",
+      body: "I need a quote for my new Ford F150.",
+      contactKind: "client",
+    });
+    expect(missingBoth.disposition).toBe("notification");
+    expect(missingBoth.serviceIntent).toBe("vehicle_quote_intake");
+    expect(missingBoth.serviceQuestions).toEqual(["vin", "policy_line"]);
+
+    const missingLineOnly = aiClassifyInboundForActivity({
+      subject: "Need quote for my truck",
+      body: "Please quote my Ford F-150. VIN 1HGCM82633A004352.",
+      contactKind: "client",
+    });
+    expect(missingLineOnly.serviceIntent).toBe("vehicle_quote_intake");
+    expect(missingLineOnly.serviceQuestions).toEqual(["policy_line"]);
+
+    const complete = aiClassifyInboundForActivity({
+      subject: "Personal auto quote",
+      body: "Please quote my Ford F-150 on a personal policy. VIN 1HGCM82633A004352.",
+      contactKind: "client",
+    });
+    expect(complete.disposition).toBe("activity");
+    expect(complete.serviceIntent).toBeUndefined();
+    expect(complete.serviceQuestions).toBeUndefined();
+  });
+
   it("still opens activities for failed payments and carrier supplementals", async () => {
     const { aiClassifyInboundForActivity } = await import("../ai");
     expect(
@@ -246,6 +275,91 @@ describe("communications.sweepInboundForActivities", () => {
         .listByCustomer(customer.id)
         .filter((row) => row.aiDraftSourceCommunicationId === inbound.id)
     ).toHaveLength(1);
+  });
+
+  it("prepares one unsent vehicle-quote intake draft for the exact inbound email", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const ownerId = customer.assignedAgentId!;
+    const beforeOutbox = api.mailboxOutbox.listByTenant(agency.id).length;
+    const inbound = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      subject: "Need quote for my truck",
+      body: "I need a quote for my new Ford F150.",
+    });
+
+    const created = api.communications.sweepInboundForActivities(agency.id);
+    expect(created).toHaveLength(1);
+    expect(created[0].task).toBeUndefined();
+    const fresh = api.communications.listByCustomer(customer.id).find((row) => row.id === inbound.id)!;
+    expect(fresh.aiTriageDisposition).toBe("notification");
+    expect(fresh.aiServiceIntent).toBe("vehicle_quote_intake");
+    expect(fresh.aiDraftMissingFields).toEqual(["vin", "policy_line"]);
+    expect(fresh.aiReplyDraftId).toBeTruthy();
+    const draft = api.communications
+      .listByCustomer(customer.id)
+      .find((row) => row.id === fresh.aiReplyDraftId)!;
+    expect(draft).toEqual(
+      expect.objectContaining({
+        deliveryStatus: "draft",
+        createdById: ownerId,
+        replyToId: inbound.id,
+        aiDraftSourceCommunicationId: inbound.id,
+        aiServiceIntent: "vehicle_quote_intake",
+        aiDraftMissingFields: ["vin", "policy_line"],
+      })
+    );
+    expect(draft.body).toMatch(/17-character VIN/i);
+    expect(draft.body).toMatch(/personal or commercial policy/i);
+    expect(draft.attachments).toBeUndefined();
+    expect(draft.outboxJobId).toBeUndefined();
+    expect(api.mailboxOutbox.listByTenant(agency.id)).toHaveLength(beforeOutbox);
+    expect(created[0].notification).toEqual(
+      expect.objectContaining({
+        messageId: draft.id,
+        communicationId: inbound.id,
+        assignedToId: ownerId,
+      })
+    );
+    expect(api.communications.sweepInboundForActivities(agency.id)).toHaveLength(0);
+    expect(
+      api.communications
+        .listByCustomer(customer.id)
+        .filter((row) => row.aiDraftSourceCommunicationId === inbound.id)
+    ).toHaveLength(1);
+  });
+
+  it("rechecks a vehicle quote email scanned by the older triage rule", async () => {
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const inbound = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      subject: "Need quote for my truck",
+      body: "I need a quote for my new Ford F150.",
+    });
+    db.update("communications", inbound.id, {
+      aiActivityScannedAt: "2026-07-21T12:00:00.000Z",
+      aiTriageVersion: "2026-07-22-v2",
+      aiTriageDisposition: "activity",
+      aiTriageTopic: "coverage_change",
+    });
+
+    const created = api.communications.sweepInboundForActivities(agency.id);
+    expect(created).toHaveLength(1);
+    expect(created[0].notification?.messageId).toBeTruthy();
+    const fresh = api.communications.listByCustomer(customer.id).find((row) => row.id === inbound.id)!;
+    expect(fresh.aiTriageVersion).toBe("2026-07-22-v3");
+    expect(fresh.aiReplyDraftId).toBeTruthy();
+    expect(api.communications.sweepInboundForActivities(agency.id)).toHaveLength(0);
   });
 
   it("opens a review activity instead of drafting when no approved document exists", async () => {

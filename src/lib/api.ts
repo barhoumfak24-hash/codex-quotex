@@ -14,6 +14,7 @@ import {
   aiGenerateCommercialQuestionnaire,
   aiMapAcordFields,
   aiParseCarrierReply,
+  INBOUND_TRIAGE_VERSION,
 } from "./ai";
 import { ACORD_FORM_CATALOG, type AcordFormSeed } from "./seed";
 import {
@@ -24,6 +25,8 @@ import {
 import type {
   ActivityResolution,
   AiAcordFieldMapping,
+  InboundDocumentServiceIntent,
+  InboundQuoteIntakeQuestion,
   InboundServiceIntent,
 } from "./ai";
 import { db } from "./db";
@@ -4657,14 +4660,14 @@ function topicLabel(t: import("@/types").TaskTopic): string {
   return map[t] ?? "their policy";
 }
 
-const INBOUND_SERVICE_DOCUMENT_TYPES: Record<InboundServiceIntent, string[]> = {
+const INBOUND_SERVICE_DOCUMENT_TYPES: Record<InboundDocumentServiceIntent, string[]> = {
   certificate_of_insurance: ["proof_of_insurance"],
   insurance_id_card: ["insurance_id_card"],
   declarations_page: ["declarations_page"],
   policy_copy: ["policy_document", "policy_booklet"],
 };
 
-const INBOUND_SERVICE_FILE_PATTERNS: Record<InboundServiceIntent, RegExp> = {
+const INBOUND_SERVICE_FILE_PATTERNS: Record<InboundDocumentServiceIntent, RegExp> = {
   certificate_of_insurance: /\b(certificate of insurance|proof of insurance|coi)\b/i,
   insurance_id_card: /\b(insurance id card|auto id card|vehicle id card|insurance card)\b/i,
   declarations_page: /\b(declarations? page|dec page)\b/i,
@@ -4677,6 +4680,7 @@ function inboundServiceLabel(intent: InboundServiceIntent): string {
     insurance_id_card: "insurance ID card",
     declarations_page: "declarations page",
     policy_copy: "policy copy",
+    vehicle_quote_intake: "vehicle quote details",
   };
   return labels[intent];
 }
@@ -4684,7 +4688,7 @@ function inboundServiceLabel(intent: InboundServiceIntent): string {
 function findApprovedInboundServiceDocument(input: {
   tenantId: string;
   customerId: string;
-  intent: InboundServiceIntent;
+  intent: InboundDocumentServiceIntent;
 }): Document | undefined {
   const policies = db
     .list("policies")
@@ -4726,9 +4730,9 @@ function findApprovedInboundServiceDocument(input: {
   })[0];
 }
 
-function inboundServiceDraftBody(intent: InboundServiceIntent, customerName: string): string {
+function inboundServiceDraftBody(intent: InboundDocumentServiceIntent, customerName: string): string {
   const firstName = customerName.trim().split(/\s+/)[0] || "there";
-  const messages: Record<InboundServiceIntent, string> = {
+  const messages: Record<InboundDocumentServiceIntent, string> = {
     certificate_of_insurance:
       `Hi ${firstName},\n\nI've attached the certificate of insurance you requested. Please review it and let me know if you need a certificate holder added or any other changes.\n\nThank you,`,
     insurance_id_card:
@@ -4745,7 +4749,7 @@ function createInboundServiceDraft(input: {
   inbound: Communication;
   customer: CustomerProfile;
   assignedToId: string;
-  intent: InboundServiceIntent;
+  intent: InboundDocumentServiceIntent;
   document: Document;
 }): Communication {
   const existing = db
@@ -4792,6 +4796,69 @@ function createInboundServiceDraft(input: {
     attachments: [attachment],
     aiDraftSourceCommunicationId: input.inbound.id,
     aiServiceIntent: input.intent,
+    createdAt: nowIso(),
+    createdById: input.assignedToId,
+  };
+  db.insert("communications", row);
+  return row;
+}
+
+function inboundQuoteIntakeDraftBody(
+  contactName: string,
+  questions: InboundQuoteIntakeQuestion[]
+): string {
+  const firstName = contactName.trim().split(/\s+/)[0] || "there";
+  const requestedDetails = questions.map((question) =>
+    question === "vin"
+      ? "- The vehicle's 17-character VIN"
+      : "- Whether the vehicle should be quoted on a personal or commercial policy"
+  );
+  return `Hi ${firstName},\n\nI can get the vehicle quote started. Please send me:\n\n${requestedDetails.join(
+    "\n"
+  )}\n\nOnce I have ${questions.length === 1 ? "that detail" : "those details"}, I can begin the quote.\n\nThank you,`;
+}
+
+function createInboundQuoteIntakeDraft(input: {
+  inbound: Communication;
+  contact: CustomerProfile | Prospect;
+  assignedToId: string;
+  questions: InboundQuoteIntakeQuestion[];
+}): Communication {
+  const existing = db
+    .list("communications")
+    .find((row) => row.aiDraftSourceCommunicationId === input.inbound.id);
+  if (existing) return existing;
+  const senderMailbox = mailboxForUser(input.assignedToId);
+  const rawSubject = input.inbound.subject?.trim() || "Vehicle quote request";
+  const subject = /^re:/i.test(rawSubject) ? rawSubject : `Re: ${rawSubject}`;
+  const references = [
+    ...(input.inbound.references ?? []),
+    input.inbound.messageIdHeader,
+    input.inbound.externalMessageId,
+  ].filter((value): value is string => Boolean(value));
+  const row: Communication = {
+    id: uid("comm"),
+    tenantId: input.inbound.tenantId,
+    customerId: input.inbound.customerId,
+    prospectId: input.inbound.prospectId,
+    channel: "email",
+    direction: "outbound",
+    subject,
+    threadId: input.inbound.threadId ?? `thread_msg_${input.inbound.id}`,
+    replyToId: input.inbound.id,
+    mailboxOrigin: "app",
+    mailboxAccount: senderMailbox.account,
+    mailboxProvider: senderMailbox.provider,
+    mailboxConnectionId: senderMailbox.connectionId,
+    deliveryStatus: "draft",
+    externalThreadId: input.inbound.externalThreadId,
+    inReplyToHeader: input.inbound.messageIdHeader ?? input.inbound.externalMessageId,
+    references,
+    to: input.contact.email ? [input.contact.email] : undefined,
+    body: inboundQuoteIntakeDraftBody(input.contact.name, input.questions),
+    aiDraftSourceCommunicationId: input.inbound.id,
+    aiServiceIntent: "vehicle_quote_intake",
+    aiDraftMissingFields: input.questions,
     createdAt: nowIso(),
     createdById: input.assignedToId,
   };
@@ -5183,6 +5250,24 @@ function communicationHasKnownMailboxContact(row: Communication): boolean {
     db.list("carrierContacts").some((contact) => contact.id === row.carrierContactId && contact.tenantId === row.tenantId)
   ) return true;
   return !!resolveEmailContact(row.tenantId, row.externalRecipientEmail ?? "");
+}
+
+function communicationNeedsInboundTriage(row: Communication): boolean {
+  if (!row.aiActivityScannedAt) return true;
+  if (row.aiTriageVersion === INBOUND_TRIAGE_VERSION || row.aiReplyDraftId) return false;
+  const contactKind: "client" | "prospect" | "carrier" = row.customerId
+    ? "client"
+    : row.prospectId
+      ? "prospect"
+      : "carrier";
+  return (
+    aiClassifyInboundForActivity({
+      body: row.body,
+      subject: row.subject,
+      channel: typeof row.channel === "string" ? row.channel : undefined,
+      contactKind,
+    }).serviceIntent === "vehicle_quote_intake"
+  );
 }
 
 function commercialApplicationSentAtForSession(session: QuotingSession): string | undefined {
@@ -14793,7 +14878,7 @@ export const api = {
             c.tenantId === tenantId &&
             c.direction === "inbound" &&
             c.createdById !== "ai" &&
-            !c.aiActivityScannedAt
+            communicationNeedsInboundTriage(c)
         );
       const created: { communicationId: string; task?: Task; notification?: AiNotification }[] = [];
       for (const c of inbound) {
@@ -14806,7 +14891,7 @@ export const api = {
             aiTriageConfidence: "high",
             aiTriageEvidence: ["tenant_contact_match:none"],
             aiTriageRequiresHumanReview: false,
-            aiTriageVersion: "2026-07-22-v2",
+            aiTriageVersion: INBOUND_TRIAGE_VERSION,
           });
           continue;
         }
@@ -14841,9 +14926,112 @@ export const api = {
           aiTriageRequiresHumanReview: triage.requiresHumanReview,
           aiTriageVersion: triage.version,
           aiServiceIntent: triage.serviceIntent,
+          aiDraftMissingFields: triage.serviceQuestions,
         };
         const assignedToId = assignedContactOwner(customer ?? prospect);
-        if (triage.serviceIntent) {
+        if (triage.serviceIntent === "vehicle_quote_intake") {
+          const contact = customer ?? prospect;
+          const questions = triage.serviceQuestions ?? [];
+          const canPrepareDraft =
+            !!contact && !!contact.email && !!assignedToId && questions.length > 0;
+
+          if (canPrepareDraft) {
+            if (c.aiActivityTaskId) {
+              const priorTask = db.list("tasks").find((row) => row.id === c.aiActivityTaskId);
+              if (
+                priorTask?.createdById === "ai" &&
+                priorTask.source === "ai_notification" &&
+                priorTask.status !== "resolved"
+              ) {
+                db.remove("tasks", priorTask.id);
+                patch.aiActivityTaskId = undefined;
+              }
+            }
+            const draft = createInboundQuoteIntakeDraft({
+              inbound: c,
+              contact,
+              assignedToId,
+              questions,
+            });
+            const existingNotification = db
+              .list("aiNotifications")
+              .find(
+                (row) =>
+                  row.communicationId === c.id && row.messageId === draft.id
+              );
+            const missingLabel = questions
+              .map((question) => (question === "vin" ? "the VIN" : "personal or commercial use"))
+              .join(" and ");
+            const notification: AiNotification =
+              existingNotification ?? {
+                id: uid("ain"),
+                tenantId,
+                kind: "inbound_notice",
+                title: `Draft ready: vehicle quote details - ${contact.name}`,
+                summary: `Quotex prepared an unsent reply asking for ${missingLabel}. Review it before sending.`,
+                customerId: c.customerId,
+                prospectId: c.prospectId,
+                messageId: draft.id,
+                communicationId: c.id,
+                topic: "coverage_change",
+                severity: "info",
+                severityReason:
+                  "A vehicle quote request was missing required intake details, so Quotex prepared an unsent reply for staff review.",
+                aiSummary: triage.reason,
+                originalMessageContent: c.body,
+                originalMessageId: c.id,
+                aiReplyBody: draft.body,
+                aiReplySubject: draft.subject,
+                assignedToId,
+                createdAt: nowIso(),
+              };
+            if (!existingNotification) db.insert("aiNotifications", notification);
+            patch.aiReplyDraftId = draft.id;
+            patch.aiActivityNotificationId = notification.id;
+            created.push({ communicationId: c.id, notification });
+          } else {
+            const missing = !contact
+              ? "The sender is not linked to a client or prospect."
+              : !contact.email
+                ? "The contact does not have an email address on file."
+                : !assignedToId
+                  ? "The contact does not have an active assigned staff owner."
+                  : "No missing quote-intake questions were identified.";
+            const taskRow: Task = {
+              id: uid("task"),
+              tenantId,
+              title: `${contact?.name ?? carrierContact?.name ?? "Contact"}: vehicle quote request needs review`,
+              description: `${triage.reason} ${missing}`,
+              customerId: c.customerId,
+              prospectId: c.prospectId,
+              messageId: c.id,
+              source: "ai_notification",
+              topic: "coverage_change",
+              severity: "warning",
+              severityReason:
+                "Quotex could not safely prepare the quote-intake draft because required contact or ownership information was unavailable.",
+              status: "open",
+              assignedToId,
+              awaitingManagerAssignment: !assignedToId || undefined,
+              createdById: "ai",
+              createdAt: nowIso(),
+            };
+            db.insert("tasks", taskRow);
+            logTaskAudit({
+              tenantId,
+              actorId: actorId ?? "ai",
+              action: "task.created_from_inbound_quote_request",
+              taskId: taskRow.id,
+              metadata: {
+                communicationId: c.id,
+                missingQuestions: questions,
+              },
+            });
+            patch.aiTriageDisposition = "activity";
+            patch.aiActivityTaskId = taskRow.id;
+            created.push({ communicationId: c.id, task: taskRow });
+          }
+        } else if (triage.serviceIntent) {
           const requestedDocument = customer
             ? findApprovedInboundServiceDocument({
                 tenantId,

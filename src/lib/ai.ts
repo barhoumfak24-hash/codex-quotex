@@ -6461,11 +6461,17 @@ function audienceFirstWord(audience: DraftCampaignAudience[]): string {
 // severity so the auto-creator can stamp a useful card.
 // =====================================================================
 
-export type InboundServiceIntent =
+export type InboundDocumentServiceIntent =
   | "certificate_of_insurance"
   | "insurance_id_card"
   | "declarations_page"
   | "policy_copy";
+
+export type InboundServiceIntent =
+  | InboundDocumentServiceIntent
+  | "vehicle_quote_intake";
+
+export type InboundQuoteIntakeQuestion = "vin" | "policy_line";
 
 export interface InboundTriage {
   disposition: "ignore" | "notification" | "activity";
@@ -6479,9 +6485,10 @@ export interface InboundTriage {
   requiresHumanReview: boolean;
   version: string;
   serviceIntent?: InboundServiceIntent;
+  serviceQuestions?: InboundQuoteIntakeQuestion[];
 }
 
-const INBOUND_TRIAGE_VERSION = "2026-07-22-v2";
+export const INBOUND_TRIAGE_VERSION = "2026-07-22-v3";
 
 export function newestInboundMessageText(value: string): string {
   const normalized = (value ?? "")
@@ -6621,6 +6628,45 @@ export function aiClassifyInboundForActivity(input: {
       ...mk("document_upload", "info", "policy copy requested", "notification"),
       serviceIntent: "policy_copy",
     };
+  }
+  const vehicleQuoteRequest =
+    has(/\b(quote|estimate|pricing|rate|proposal)\b/) &&
+    has(
+      /\b(vehicle|car|auto|truck|pickup|suv|van|ford|chev(?:y|rolet)|gmc|ram|dodge|toyota|honda|nissan|tesla|bmw|mercedes|audi|jeep|subaru|hyundai|kia|volkswagen|volvo|lexus|acura|mazda|f[\s-]?150|silverado|sierra|tacoma|tundra|ranger)\b/
+    );
+  if (vehicleQuoteRequest) {
+    const serviceQuestions: InboundQuoteIntakeQuestion[] = [];
+    const hasVin = /\b[A-HJ-NPR-Z0-9]{17}\b/i.test(`${subject} ${body}`);
+    const hasPolicyLine = has(
+      /\b(personal|private passenger|family|household|commercial|business|company|business use|work use)\b/
+    );
+    if (!hasVin) serviceQuestions.push("vin");
+    if (!hasPolicyLine) serviceQuestions.push("policy_line");
+    if (serviceQuestions.length > 0) {
+      return {
+        ...mk(
+          "coverage_change",
+          "info",
+          "vehicle quote details needed",
+          "notification",
+          "high",
+          [
+            "intent:vehicle_quote_request",
+            ...serviceQuestions.map((question) => `missing:${question}`),
+          ]
+        ),
+        serviceIntent: "vehicle_quote_intake",
+        serviceQuestions,
+      };
+    }
+    return mk(
+      "coverage_change",
+      "warning",
+      "vehicle quote request ready for review",
+      "activity",
+      "high",
+      ["intent:vehicle_quote_request", "intake:complete"]
+    );
   }
   if (has(/\b(add|adding|insure|cover|new)\b[\s\S]{0,40}\b(vehicle|car|auto|truck|suv|driver|boat|yacht|jewelry|ring|watch|home|house|property|condo|asset|rv|motorcycle)\b/)) {
     return mk("coverage_change", "warning", "wants to add to their policy", "activity", "high", ["intent:explicit_add_asset_or_driver"]);
