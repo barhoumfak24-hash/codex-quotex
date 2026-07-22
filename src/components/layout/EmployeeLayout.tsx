@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { PortalShell } from "./PortalShell";
 import { PortalAssistant } from "@/components/help/PortalAssistant";
+import { MailboxInboxSyncAgent } from "@/components/messages/MailboxInboxSyncAgent";
 import { MailboxOutboxRetryAgent } from "@/components/messages/MailboxOutboxRetryAgent";
 import { ErrorBoundary } from "@/components/ui/ErrorBoundary";
 import { useAuth } from "@/lib/auth";
@@ -356,6 +357,7 @@ export function EmployeeLayout() {
     <ErrorBoundary compact>
       <PortalAssistant />
     </ErrorBoundary>
+    <MailboxInboxSyncAgent />
     <MailboxOutboxRetryAgent />
     </>
   );

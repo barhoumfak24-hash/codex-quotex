@@ -685,16 +685,6 @@ export function MessagesPage() {
       .catch((error) => console.error("Carrier-response catch-up failed", error));
   }, [agency?.id]);
 
-  useEffect(() => {
-    if (!agency || !user || mailbox.status !== "connected") return;
-    const interval = window.setInterval(() => {
-      void refreshMessages({ silent: true });
-    }, 60_000);
-    return () => window.clearInterval(interval);
-    // Polling is intentionally keyed to the connected mailbox identity.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agency?.id, user?.id, mailbox.connectionId, mailbox.status]);
-
   return (
     <div className="space-y-4">
       <EmployeeBackButton />
