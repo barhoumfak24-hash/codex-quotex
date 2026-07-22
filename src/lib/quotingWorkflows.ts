@@ -38,12 +38,18 @@ export interface QuotingWorkflowSummary {
   detail: string;
   blocker: string;
   progress: number;
+  currentStep?: number;
+  totalSteps?: number;
   acceptedCount: number;
   waitingCount: number;
   quoteCount: number;
   implemented: boolean;
   isClosed: boolean;
   sortPriority: number;
+}
+
+function workflowStepProgress(currentStep: number, totalSteps: number): number {
+  return Math.round((currentStep / totalSteps) * 100);
 }
 
 export function quotingWorkflowContactKey(
@@ -97,6 +103,7 @@ export function summarizeQuotingWorkflow(session: QuotingSession): QuotingWorkfl
   const quoteCount = session.quotes.length;
   const implemented = session.quotes.some((quote) => !!quote.implementation?.policyId);
   const line = session.lineOfBusiness === "commercial" ? "commercial" : "personal";
+  const totalSteps = session.lineOfBusiness === "commercial" ? 6 : 4;
 
   if (implemented) {
     return {
@@ -104,7 +111,9 @@ export function summarizeQuotingWorkflow(session: QuotingSession): QuotingWorkfl
       tone: "success",
       detail: "Quote workflow finished and policy/billing records were created.",
       blocker: "No blocker",
-      progress: 100,
+      progress: workflowStepProgress(totalSteps, totalSteps),
+      currentStep: totalSteps,
+      totalSteps,
       acceptedCount,
       waitingCount,
       quoteCount,
@@ -130,7 +139,9 @@ export function summarizeQuotingWorkflow(session: QuotingSession): QuotingWorkfl
         waitingCount > 0
           ? `${waitingCount} carrier${waitingCount === 1 ? "" : "s"} waiting on supplemental info.`
           : "Waiting on second-round client answers.",
-      progress: acceptedCount > 0 ? 78 : 68,
+      progress: workflowStepProgress(5, totalSteps),
+      currentStep: 5,
+      totalSteps,
       acceptedCount,
       waitingCount,
       quoteCount,
@@ -143,8 +154,6 @@ export function summarizeQuotingWorkflow(session: QuotingSession): QuotingWorkfl
   if (session.status === "complete") {
     if (session.lineOfBusiness === "commercial" && !allCarrierRepliesReceived) {
       const remainingCount = Math.max(0, submissions.length - repliedCount);
-      const replyProgress =
-        submissions.length > 0 ? Math.round((repliedCount / submissions.length) * 18) : 0;
 
       return {
         stage: "Awaiting carrier replies",
@@ -159,7 +168,9 @@ export function summarizeQuotingWorkflow(session: QuotingSession): QuotingWorkfl
           remainingCount > 0
             ? `${remainingCount} carrier repl${remainingCount === 1 ? "y" : "ies"} still outstanding.`
             : "Waiting for carrier submission records.",
-        progress: 76 + replyProgress,
+        progress: workflowStepProgress(4, totalSteps),
+        currentStep: 4,
+        totalSteps,
         acceptedCount,
         waitingCount,
         quoteCount,
@@ -177,7 +188,9 @@ export function summarizeQuotingWorkflow(session: QuotingSession): QuotingWorkfl
           ? `${quoteCount} carrier option${quoteCount === 1 ? "" : "s"} ranked for review.`
           : "Carrier ranking finished with no active market match.",
       blocker: quoteCount > 0 ? "Ready for agent review." : "Review carrier appetite/API setup.",
-      progress: 96,
+      progress: workflowStepProgress(totalSteps, totalSteps),
+      currentStep: totalSteps,
+      totalSteps,
       acceptedCount,
       waitingCount,
       quoteCount,
@@ -193,7 +206,9 @@ export function summarizeQuotingWorkflow(session: QuotingSession): QuotingWorkfl
       tone: "info",
       detail: `AI is running ${line} carrier ranking.`,
       blocker: "No blocker",
-      progress: 84,
+      progress: workflowStepProgress(totalSteps, totalSteps),
+      currentStep: totalSteps,
+      totalSteps,
       acceptedCount,
       waitingCount,
       quoteCount,
@@ -214,7 +229,9 @@ export function summarizeQuotingWorkflow(session: QuotingSession): QuotingWorkfl
       blocker: `${session.missingFields.length} missing field${
         session.missingFields.length === 1 ? "" : "s"
       } outstanding.`,
-      progress: session.questionnaireSentAt ? 52 : 42,
+      progress: workflowStepProgress(3, totalSteps),
+      currentStep: 3,
+      totalSteps,
       acceptedCount,
       waitingCount,
       quoteCount,
@@ -232,7 +249,9 @@ export function summarizeQuotingWorkflow(session: QuotingSession): QuotingWorkfl
       session.missingFields.length > 0
         ? `${session.missingFields.length} detail${session.missingFields.length === 1 ? "" : "s"} needed.`
         : "No blocker",
-    progress: 24,
+    progress: workflowStepProgress(2, totalSteps),
+    currentStep: 2,
+    totalSteps,
     acceptedCount,
     waitingCount,
     quoteCount,

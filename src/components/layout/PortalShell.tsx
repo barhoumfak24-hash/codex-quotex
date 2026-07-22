@@ -348,7 +348,9 @@ function SyncStatusBanner({ compact = false }: { compact?: boolean }) {
           : status.reason === "local_quota"
             ? "This device is low on storage. Your cloud save will continue when space is available."
             : "Cloud sync is temporarily unavailable. You can keep working while Quotex retries.";
-  const visible = status.status === "error" || status.status === "local-only" || status.reason === "unauthorized";
+  const visible =
+    status.reason !== "too_large" &&
+    (status.status === "error" || status.status === "local-only" || status.reason === "unauthorized");
   if (!visible) return null;
   const canRetry = !["not_configured", "too_large", "local_quota", "unauthorized"].includes(status.reason ?? "");
 

@@ -65,6 +65,9 @@ describe("summarizeQuotingWorkflow", () => {
     );
 
     expect(summary.stage).toBe("Accepted ranking live");
+    expect(summary.currentStep).toBe(5);
+    expect(summary.totalSteps).toBe(6);
+    expect(summary.progress).toBe(83);
     expect(summary.acceptedCount).toBe(1);
     expect(summary.waitingCount).toBe(1);
     expect(summary.quoteCount).toBe(1);
@@ -98,6 +101,7 @@ describe("summarizeQuotingWorkflow", () => {
 
     expect(summary.stage).toBe("Policy implemented");
     expect(summary.isClosed).toBe(true);
+    expect(summary.progress).toBe(100);
   });
 
   it("keeps a completed commercial workflow pending until every carrier replies", () => {
@@ -126,6 +130,9 @@ describe("summarizeQuotingWorkflow", () => {
     expect(summary.stage).toBe("Awaiting carrier replies");
     expect(summary.tone).toBe("info");
     expect(summary.detail).toBe("1 of 2 carrier replies received.");
+    expect(summary.currentStep).toBe(4);
+    expect(summary.totalSteps).toBe(6);
+    expect(summary.progress).toBe(67);
   });
 
   it("turns the ranking summary green after every involved carrier replies", () => {
@@ -153,6 +160,22 @@ describe("summarizeQuotingWorkflow", () => {
 
     expect(summary.stage).toBe("Ranking ready");
     expect(summary.tone).toBe("success");
+    expect(summary.currentStep).toBe(6);
+    expect(summary.progress).toBe(100);
+  });
+
+  it("matches personal progress to the exact workflow step", () => {
+    const summary = summarizeQuotingWorkflow(
+      session({
+        lineOfBusiness: "personal",
+        status: "quoting",
+      })
+    );
+
+    expect(summary.stage).toBe("Running quotes");
+    expect(summary.currentStep).toBe(4);
+    expect(summary.totalSteps).toBe(4);
+    expect(summary.progress).toBe(100);
   });
 });
 

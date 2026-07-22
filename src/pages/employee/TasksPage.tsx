@@ -925,6 +925,11 @@ function QuotingWorkflowsPanel({
                         row.summary.tone === "success" ? "bg-emerald-500" : "bg-gold-500"
                       }`}
                       style={{ width: `${Math.max(0, Math.min(100, row.summary.progress))}%` }}
+                      aria-label={
+                        row.summary.currentStep && row.summary.totalSteps
+                          ? `Step ${row.summary.currentStep} of ${row.summary.totalSteps}`
+                          : "Quote flow progress"
+                      }
                     />
                   </div>
                 </div>
