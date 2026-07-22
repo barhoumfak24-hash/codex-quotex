@@ -4866,6 +4866,68 @@ function createInboundQuoteIntakeDraft(input: {
   return row;
 }
 
+function ensureInboundDraftFollowUpTask(input: {
+  inbound: Communication;
+  assignedToId?: string;
+  title: string;
+  description: string;
+  topic: NonNullable<Task["topic"]>;
+  severityReason: string;
+  draft: Communication;
+  documentId?: string;
+  actorId?: string;
+}): Task {
+  const activityKey = `inbound-draft-follow-up:${input.inbound.id}`;
+  const existing = db
+    .list("tasks")
+    .find(
+      (row) =>
+        row.tenantId === input.inbound.tenantId &&
+        (row.activityKey === activityKey ||
+          (!!input.inbound.aiActivityTaskId && row.id === input.inbound.aiActivityTaskId))
+    );
+  if (existing) return existing;
+
+  const task: Task = {
+    id: uid("task"),
+    tenantId: input.inbound.tenantId,
+    title: input.title,
+    description: input.description,
+    customerId: input.inbound.customerId,
+    prospectId: input.inbound.prospectId,
+    documentId: input.documentId,
+    messageId: input.inbound.id,
+    activityKey,
+    source: "ai_notification",
+    topic: input.topic,
+    severity: "warning",
+    severityReason: input.severityReason,
+    status: "open",
+    aiSummary: input.description,
+    originalMessageContent: input.inbound.body,
+    originalMessageId: input.inbound.id,
+    aiReplyBody: input.draft.body,
+    aiReplySubject: input.draft.subject,
+    assignedToId: input.assignedToId,
+    awaitingManagerAssignment: !input.assignedToId || undefined,
+    createdById: "ai",
+    createdAt: nowIso(),
+  };
+  db.insert("tasks", task);
+  logTaskAudit({
+    tenantId: input.inbound.tenantId,
+    actorId: input.actorId ?? "ai",
+    action: "task.created_from_inbound_draft_follow_up",
+    taskId: task.id,
+    metadata: {
+      communicationId: input.inbound.id,
+      draftMessageId: input.draft.id,
+      topic: input.topic,
+    },
+  });
+  return task;
+}
+
 function fieldSlug(s: string): string {
   return s
     .toLowerCase()
@@ -14936,17 +14998,6 @@ export const api = {
             !!contact && !!contact.email && !!assignedToId && questions.length > 0;
 
           if (canPrepareDraft) {
-            if (c.aiActivityTaskId) {
-              const priorTask = db.list("tasks").find((row) => row.id === c.aiActivityTaskId);
-              if (
-                priorTask?.createdById === "ai" &&
-                priorTask.source === "ai_notification" &&
-                priorTask.status !== "resolved"
-              ) {
-                db.remove("tasks", priorTask.id);
-                patch.aiActivityTaskId = undefined;
-              }
-            }
             const draft = createInboundQuoteIntakeDraft({
               inbound: c,
               contact,
@@ -14986,9 +15037,22 @@ export const api = {
                 createdAt: nowIso(),
               };
             if (!existingNotification) db.insert("aiNotifications", notification);
+            const task = ensureInboundDraftFollowUpTask({
+              inbound: c,
+              assignedToId,
+              title: `${contact.name}: vehicle quote request`,
+              description: `${triage.reason} Quotex prepared an unsent reply asking for ${missingLabel}. Keep this activity open until the requested quote intake is completed.`,
+              topic: "coverage_change",
+              severityReason:
+                "The draft requests missing intake details but does not complete the client's quote request.",
+              draft,
+              actorId,
+            });
+            patch.aiTriageDisposition = "activity";
             patch.aiReplyDraftId = draft.id;
             patch.aiActivityNotificationId = notification.id;
-            created.push({ communicationId: c.id, notification });
+            patch.aiActivityTaskId = task.id;
+            created.push({ communicationId: c.id, task, notification });
           } else {
             const missing = !contact
               ? "The sender is not linked to a client or prospect."
@@ -15081,9 +15145,23 @@ export const api = {
                 createdAt: nowIso(),
               };
             if (!existingNotification) db.insert("aiNotifications", notification);
+            const task = ensureInboundDraftFollowUpTask({
+              inbound: c,
+              assignedToId,
+              title: `${customer.name}: ${inboundServiceLabel(triage.serviceIntent)} request`,
+              description: `${triage.reason} Quotex prepared an unsent reply with ${requestedDocument.fileName} attached. Keep this activity open until the client's request is completed.`,
+              topic: "document_upload",
+              severityReason:
+                "Preparing a draft does not confirm that the requested client service has been completed.",
+              draft,
+              documentId: requestedDocument.id,
+              actorId,
+            });
+            patch.aiTriageDisposition = "activity";
             patch.aiReplyDraftId = draft.id;
             patch.aiActivityNotificationId = notification.id;
-            created.push({ communicationId: c.id, notification });
+            patch.aiActivityTaskId = task.id;
+            created.push({ communicationId: c.id, task, notification });
           } else {
             const missing = !customer
               ? "The sender is not linked to a client."

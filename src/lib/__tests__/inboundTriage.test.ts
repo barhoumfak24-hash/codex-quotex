@@ -240,11 +240,20 @@ describe("communications.sweepInboundForActivities", () => {
 
     const created = api.communications.sweepInboundForActivities(agency.id);
     expect(created).toHaveLength(1);
-    expect(created[0].task).toBeUndefined();
+    expect(created[0].task).toEqual(
+      expect.objectContaining({
+        customerId: customer.id,
+        messageId: inbound.id,
+        topic: "document_upload",
+        status: "open",
+        assignedToId: ownerId,
+      })
+    );
     const fresh = api.communications.listByCustomer(customer.id).find((row) => row.id === inbound.id)!;
-    expect(fresh.aiTriageDisposition).toBe("notification");
+    expect(fresh.aiTriageDisposition).toBe("activity");
     expect(fresh.aiServiceIntent).toBe("certificate_of_insurance");
     expect(fresh.aiReplyDraftId).toBeTruthy();
+    expect(fresh.aiActivityTaskId).toBe(created[0].task!.id);
     const draft = api.communications
       .listByCustomer(customer.id)
       .find((row) => row.id === fresh.aiReplyDraftId)!;
@@ -271,6 +280,9 @@ describe("communications.sweepInboundForActivities", () => {
     );
     expect(api.communications.sweepInboundForActivities(agency.id)).toHaveLength(0);
     expect(
+      api.tasks.listByTenant(agency.id).filter((task) => task.messageId === inbound.id)
+    ).toHaveLength(1);
+    expect(
       api.communications
         .listByCustomer(customer.id)
         .filter((row) => row.aiDraftSourceCommunicationId === inbound.id)
@@ -294,12 +306,21 @@ describe("communications.sweepInboundForActivities", () => {
 
     const created = api.communications.sweepInboundForActivities(agency.id);
     expect(created).toHaveLength(1);
-    expect(created[0].task).toBeUndefined();
+    expect(created[0].task).toEqual(
+      expect.objectContaining({
+        customerId: customer.id,
+        messageId: inbound.id,
+        topic: "coverage_change",
+        status: "open",
+        assignedToId: ownerId,
+      })
+    );
     const fresh = api.communications.listByCustomer(customer.id).find((row) => row.id === inbound.id)!;
-    expect(fresh.aiTriageDisposition).toBe("notification");
+    expect(fresh.aiTriageDisposition).toBe("activity");
     expect(fresh.aiServiceIntent).toBe("vehicle_quote_intake");
     expect(fresh.aiDraftMissingFields).toEqual(["vin", "policy_line"]);
     expect(fresh.aiReplyDraftId).toBeTruthy();
+    expect(fresh.aiActivityTaskId).toBe(created[0].task!.id);
     const draft = api.communications
       .listByCustomer(customer.id)
       .find((row) => row.id === fresh.aiReplyDraftId)!;
@@ -326,6 +347,9 @@ describe("communications.sweepInboundForActivities", () => {
       })
     );
     expect(api.communications.sweepInboundForActivities(agency.id)).toHaveLength(0);
+    expect(
+      api.tasks.listByTenant(agency.id).filter((task) => task.messageId === inbound.id)
+    ).toHaveLength(1);
     expect(
       api.communications
         .listByCustomer(customer.id)
@@ -355,11 +379,23 @@ describe("communications.sweepInboundForActivities", () => {
 
     const created = api.communications.sweepInboundForActivities(agency.id);
     expect(created).toHaveLength(1);
+    expect(created[0].task).toEqual(
+      expect.objectContaining({
+        customerId: customer.id,
+        messageId: inbound.id,
+        topic: "coverage_change",
+        status: "open",
+      })
+    );
     expect(created[0].notification?.messageId).toBeTruthy();
     const fresh = api.communications.listByCustomer(customer.id).find((row) => row.id === inbound.id)!;
     expect(fresh.aiTriageVersion).toBe("2026-07-22-v3");
     expect(fresh.aiReplyDraftId).toBeTruthy();
+    expect(fresh.aiActivityTaskId).toBe(created[0].task!.id);
     expect(api.communications.sweepInboundForActivities(agency.id)).toHaveLength(0);
+    expect(
+      api.tasks.listByTenant(agency.id).filter((task) => task.messageId === inbound.id)
+    ).toHaveLength(1);
   });
 
   it("opens a review activity instead of drafting when no approved document exists", async () => {
