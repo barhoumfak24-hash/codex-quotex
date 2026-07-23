@@ -452,37 +452,23 @@ describe("Codex ACORD mapping guardrails", () => {
     expect(result.missingFields).toContain("Losses, claims, or incidents in the last 5 years");
   });
 
-  it("rejects OpenAI web-researched questionnaire answers when no source URL is captured", async () => {
+  it("keeps high-confidence uncited OpenAI research in editable questionnaire review", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(
         JSON.stringify({
           output_text: JSON.stringify({
             summary: "OpenAI public sweep found review-only property facts.",
             confidence: 0.82,
-            mappings: [
-              {
-                targetId: "year-built",
-                targetField: "Year built",
-                value: "2007",
-                sourceLabel: "OpenAI public data sweep - Oakland County property record",
-                sourceUrl: "",
-                sourceKind: "web_search",
+            answers: {
+              "Year built": {
+                answer: "2007",
                 confidence: 0.78,
-                verified: false,
-                rationale: "County assessor/property record result found during OpenAI web search; review before binding.",
               },
-              {
-                targetId: "square-footage",
-                targetField: "Square footage",
-                value: "4,100 above grade / 6,500 total listed living area",
-                sourceLabel: "OpenAI public data sweep - property listing",
-                sourceUrl: "",
-                sourceKind: "web_search",
+              "Square footage": {
+                answer: "4,100 above grade / 6,500 total listed living area",
                 confidence: 0.76,
-                verified: false,
-                rationale: "Public listing and property record wording found during OpenAI web search.",
               },
-            ],
+            },
             missingFields: [],
             webSources: [],
           }),
@@ -505,8 +491,21 @@ describe("Codex ACORD mapping guardrails", () => {
       intent: "questionnaire_prefill",
     });
 
-    expect(result.mappings).toEqual([]);
-    expect(result.missingFields).toEqual(["Year built", "Square footage"]);
+    expect(result.mappings).toEqual([
+      expect.objectContaining({
+        targetId: "year-built",
+        targetField: "Year built",
+        value: "2007",
+        verified: false,
+      }),
+      expect.objectContaining({
+        targetId: "square-footage",
+        targetField: "Square footage",
+        value: "4,100 above grade / 6,500 total listed living area",
+        verified: false,
+      }),
+    ]);
+    expect(result.missingFields).toEqual([]);
   });
 
   it("reports OpenAI quota failures instead of pretending mapping succeeded", async () => {

@@ -888,9 +888,17 @@ function questionnaireEvidenceFromMapping(
     mapping.sourceKind && mapping.sourceKind !== "unknown" ? mapping.sourceKind : "model_estimate";
   const sourceUrl = cleanQuestionnairePrefillValue(mapping.sourceUrl);
   const confidence = Math.max(0.45, Math.min(1, Number(mapping.confidence) || 0.72));
+  const reviewOnlyUncitedResearch =
+    !sourceUrl &&
+    confidence >= 0.7 &&
+    (sourceKind === "web_search" ||
+      sourceKind === "public_web" ||
+      sourceKind === "government_api" ||
+      sourceKind === "commercial_provider");
   if (
     questionnaireMappingRequiresCitation(sourceKind) &&
-    !sourceUrl
+    !sourceUrl &&
+    !reviewOnlyUncitedResearch
   ) {
     return undefined;
   }
@@ -904,7 +912,13 @@ function questionnaireEvidenceFromMapping(
     verified: mapping.verified === true,
     allowDocumentAutofill: false,
     collectedAt: updatedAt,
-    notes: [rationale || "Editable questionnaire prefill from OpenAI research. Review before carrier submission.", sourceUrl ? `Source URL: ${sourceUrl}` : ""]
+    notes: [
+      rationale || "Editable questionnaire prefill from OpenAI research. Review before carrier submission.",
+      sourceUrl ? `Source URL: ${sourceUrl}` : "",
+      reviewOnlyUncitedResearch
+        ? "Review-only questionnaire prefill from OpenAI research without a per-field citation. Confirm before carrier submission."
+        : "",
+    ]
       .filter(Boolean)
       .join(" "),
   };

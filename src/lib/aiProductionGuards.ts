@@ -112,9 +112,15 @@ export function aiEvidenceAllowsQuestionnairePrefill(
 ): boolean {
   if (!item) return true;
   if (UNSAFE_QUESTIONNAIRE_PREFILL_SOURCE_KINDS.has(item.sourceKind)) return false;
+  const reviewOnlyUncitedOpenAiResearch =
+    item.confidence >= 0.7 &&
+    /\breview-only questionnaire prefill from openai research without a per-field citation\b/i.test(
+      item.notes ?? ""
+    );
   if (
     (item.sourceKind === "web_search" || item.sourceKind === "public_web") &&
-    !evidenceHasCitationUrl(item)
+    !evidenceHasCitationUrl(item) &&
+    !reviewOnlyUncitedOpenAiResearch
   ) {
     return false;
   }

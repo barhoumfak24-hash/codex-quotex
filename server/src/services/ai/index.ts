@@ -1632,8 +1632,22 @@ function questionnaireReviewCanUseUncitedOpenAiResearch(input: {
   sourceLabel?: string;
   rationale?: string;
 }): boolean {
-  void input;
-  return false;
+  if (input.sourceUrl) return false;
+  if (input.confidence < 0.7) return false;
+  if (
+    input.sourceKind !== "web_search" &&
+    input.sourceKind !== "public_web" &&
+    input.sourceKind !== "government_api" &&
+    input.sourceKind !== "commercial_provider"
+  ) {
+    return false;
+  }
+  if (!input.targetField || !input.value) return false;
+  if (!isSafeQuestionnairePrefillTarget(input.targetField)) return false;
+  if (valueIsOnlyUnavailableResearchNote(input.value)) return false;
+  return acordMappedValueFitsTarget(input.targetField, input.value, {
+    questionnairePrefill: true,
+  });
 }
 
 function cleanAcordAiValue(value: unknown): string {
@@ -1762,6 +1776,9 @@ function questionnaireSourceKindFromAcordAiRow(row: Record<string, unknown>, val
     .join(" ");
   if (sourceUrl) return "web_search";
   if (/\b(client|dossier|quotex|profile|intake|selected category)\b/.test(sourceText)) return "client_intake";
+  if (/\b(openai|questionnaire research|public data sweep|web search|web research)\b/.test(sourceText)) {
+    return "web_search";
+  }
   if (/\b(county|assessor|parcel|property record|public record|fema|flood|government|municipal|city)\b/.test(sourceText)) {
     return "web_search";
   }

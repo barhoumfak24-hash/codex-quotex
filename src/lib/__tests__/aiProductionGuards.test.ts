@@ -64,7 +64,8 @@ const evidence: PublicDataEvidenceMap = {
     verified: false,
     allowDocumentAutofill: false,
     collectedAt: "2026-06-22T12:00:00.000Z",
-    notes: "Review-only questionnaire prefill from OpenAI web search.",
+    notes:
+      "Review-only questionnaire prefill from OpenAI research without a per-field citation. Confirm before carrier submission.",
   },
 };
 
@@ -75,7 +76,7 @@ describe("aiProductionGuards", () => {
     expect(aiEvidenceAllowsDocumentAutofill(findAiPublicEvidence(evidence, "roof year"))).toBe(false);
   });
 
-  it("allows cited review facts to prefill questionnaires and rejects uncited OpenAI web answers", () => {
+  it("allows safe research facts into questionnaire review without treating them as document-ready", () => {
     const webEvidence = findAiPublicEvidence(evidence, "website");
     const imageryEvidence = findAiPublicEvidence(evidence, "pool");
     const estimateEvidence = findAiPublicEvidence(evidence, "roof year");
@@ -85,7 +86,7 @@ describe("aiProductionGuards", () => {
     expect(aiEvidenceAllowsDocumentAutofill(webEvidence)).toBe(false);
     expect(aiEvidenceAllowsQuestionnairePrefill(imageryEvidence)).toBe(true);
     expect(aiEvidenceAllowsDocumentAutofill(imageryEvidence)).toBe(false);
-    expect(aiEvidenceAllowsQuestionnairePrefill(uncitedOpenAiEvidence)).toBe(false);
+    expect(aiEvidenceAllowsQuestionnairePrefill(uncitedOpenAiEvidence)).toBe(true);
     expect(aiEvidenceAllowsDocumentAutofill(uncitedOpenAiEvidence)).toBe(false);
     expect(aiEvidenceAllowsQuestionnairePrefill(estimateEvidence)).toBe(false);
     expect(aiEvidenceAllowsDocumentAutofill(estimateEvidence)).toBe(false);
