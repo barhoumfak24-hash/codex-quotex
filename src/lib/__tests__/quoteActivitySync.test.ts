@@ -80,4 +80,92 @@ describe("quote-flow activity synchronization", () => {
       expect(result.api.tasks.get(result.unrelatedActivityId)?.quoteSessionId).toBeUndefined();
     }
   );
+
+  it("links the newest unresolved coverage-change activity even when its text does not mention quoting", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((user) => user.role === "agent")!;
+    const customer = api.customers.list(agency.id)[0];
+    const older = api.tasks.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      assignedToId: agent.id,
+      title: `Coverage change — ${customer.name}`,
+      topic: "coverage_change",
+      createdById: agent.id,
+    });
+    const newest = api.tasks.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      assignedToId: agent.id,
+      title: `Coverage change — ${customer.name}`,
+      topic: "coverage_change",
+      createdById: agent.id,
+    });
+
+    const session = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: agent.id,
+      assetType: "coastal_home",
+      contactName: customer.name,
+      address: "901 Test Street, Northville, MI 48167",
+      lineOfBusiness: "personal",
+    });
+
+    expect(api.tasks.get(newest.id)).toMatchObject({
+      status: "in_progress",
+      quoteSessionId: session.id,
+    });
+    expect(api.tasks.get(older.id)?.status).toBe("open");
+    expect(api.tasks.get(older.id)?.quoteSessionId).toBeUndefined();
+  });
+
+  it("repairs an existing ranking-ready flow without resolving the underlying client activity", async () => {
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((user) => user.role === "agent")!;
+    const user = api.users.create({
+      role: "customer",
+      tenantId: agency.id,
+      email: "quote-sync@example.com",
+      name: "Quote Sync Client",
+    });
+    const customer = api.customers.create({
+      tenantId: agency.id,
+      userId: user.id,
+      name: user.name,
+      email: user.email,
+      marketingOptInEmail: false,
+      marketingOptInSms: false,
+      assignedAgentId: agent.id,
+    });
+    const session = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: agent.id,
+      assetType: "coastal_home",
+      contactName: customer.name,
+      address: "902 Test Street, Northville, MI 48167",
+      lineOfBusiness: "personal",
+    });
+    db.update("quotingSessions", session.id, { status: "complete" });
+    const activity = api.tasks.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      assignedToId: agent.id,
+      title: `Coverage change — ${customer.name}`,
+      topic: "coverage_change",
+      createdById: agent.id,
+    });
+
+    expect(api.quoting.reconcileActivities(agency.id, agent.id)).toBe(1);
+    expect(api.tasks.get(activity.id)).toMatchObject({
+      status: "in_progress",
+      quoteSessionId: session.id,
+    });
+    expect(api.tasks.get(activity.id)?.completedAt).toBeFalsy();
+    expect(api.quoting.reconcileActivities(agency.id, agent.id)).toBe(0);
+  });
 });

@@ -106,7 +106,11 @@ import {
   vinValidationIssue,
 } from "./assetLabels";
 import { isLockingMasterAccount } from "./masterAccount";
-import { isDocumentOnlyAcordSession, isQuotingWorkflowOpen } from "./quotingWorkflows";
+import {
+  isDocumentOnlyAcordSession,
+  isQuotingWorkflowOpen,
+  newestOpenQuotingSessionsPerContact,
+} from "./quotingWorkflows";
 import {
   extractQuoteReplyIntake,
   normalizedQuoteIdentifier,
@@ -3324,12 +3328,11 @@ function quoteActivityDescription(session: QuotingSession): string {
 function syncQuoteActivityStatus(
   session: QuotingSession,
   options?: { taskIds?: string[]; actorId?: string }
-) {
+): number {
   const explicitTaskIds = new Set(options?.taskIds ?? []);
   const milestonePrefix = `quote-session:${session.id}:`;
   const actorId = options?.actorId ?? "ai";
   const description = quoteActivityDescription(session);
-  const completed = session.status === "complete";
   const quoteRequest = session.quoteRequestId
     ? db.list("quoteRequests").find((row) => row.id === session.quoteRequestId)
     : undefined;
@@ -3344,9 +3347,10 @@ function syncQuoteActivityStatus(
         (!!session.quoteRequestId && task.quoteRequestId === session.quoteRequestId))
   );
 
-  // A staff-started flow can begin before its Activity Center row has a
-  // session ID. Link only the newest unresolved quote-related activity for
-  // the same contact, and never take a task already owned by another flow.
+  // A flow can begin before its Activity Center row has a session ID. Link
+  // only the newest unresolved activity that represents the same quote need,
+  // and never take a task already owned by another flow. Coverage-change
+  // requests often start a quote without using the word "quote" in the task.
   const fallbackTask = directlyLinkedTasks.length
     ? undefined
     : db
@@ -3363,44 +3367,37 @@ function syncQuoteActivityStatus(
               : false;
           if (!sameContact) return false;
           const quoteText = `${task.title} ${task.description ?? ""} ${task.aiSummary ?? ""}`;
-          return task.expressQuoteFollowUp === true || /\bquot(?:e|ing)\b/i.test(quoteText);
+          return (
+            task.expressQuoteFollowUp === true ||
+            task.topic === "coverage_change" ||
+            /\bquot(?:e|ing)\b/i.test(quoteText)
+          );
         })
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
 
   const tasks = fallbackTask ? [...directlyLinkedTasks, fallbackTask] : directlyLinkedTasks;
 
+  let changedCount = 0;
   tasks.forEach((task) => {
       // Autonomous retries must never reopen work that a user already closed.
       if (task.status === "resolved" || task.completedAt) return;
 
       const changedAt = nowIso();
-      if (completed) {
-        db.update("tasks", task.id, {
-          description,
-          quoteSessionId: session.id,
-          assetId: task.assetId ?? session.assetId,
-          status: "resolved",
-          completedAt: changedAt,
-          completedById: actorId,
-        });
-        logTaskAudit({
-          tenantId: task.tenantId,
-          actorId,
-          action:
-            session.lineOfBusiness === "personal"
-              ? "task.resolved_by_personal_quote_automation"
-              : "task.resolved_by_quote_flow",
-          taskId: task.id,
-          metadata: { quoteSessionId: session.id, quoteStatus: session.status },
-        });
-        return;
-      }
-
       const wasInProgress = task.status === "in_progress";
+      const nextAssetId = task.assetId ?? session.assetId;
+      const alreadySynced =
+        wasInProgress &&
+        task.description === description &&
+        task.quoteSessionId === session.id &&
+        task.assetId === nextAssetId &&
+        !!task.startedAt &&
+        !task.snoozedUntil;
+      if (alreadySynced) return;
+
       db.update("tasks", task.id, {
         description,
         quoteSessionId: session.id,
-        assetId: task.assetId ?? session.assetId,
+        assetId: nextAssetId,
         status: "in_progress",
         startedAt: task.startedAt ?? changedAt,
         startedById: task.startedById ?? actorId,
@@ -3418,7 +3415,9 @@ function syncQuoteActivityStatus(
           metadata: { quoteSessionId: session.id, quoteStatus: session.status },
         });
       }
+      changedCount += 1;
     });
+  return changedCount;
 }
 
 function actorName(userId?: string): string {
@@ -18022,6 +18021,17 @@ export const api = {
       return tenantFilter(db.list("quotingSessions"), tenantId)
         .map(ensureQuotingSessionConsistency)
         .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+    },
+    reconcileActivities(tenantId: string, actorId = "ai"): number {
+      return newestOpenQuotingSessionsPerContact(
+        tenantFilter(db.list("quotingSessions"), tenantId)
+          .filter((session) => !isDocumentOnlyAcordSession(session))
+          .map(ensureQuotingSessionConsistency)
+      ).reduce(
+        (changed, session) =>
+          changed + syncQuoteActivityStatus(session, { actorId }),
+        0
+      );
     },
     getForProspect(prospectId: string): QuotingSession | undefined {
       const session = db

@@ -240,9 +240,8 @@ describe("communications.automatePersonalQuoteReplies", () => {
     expect(completedSession.status).toBe("complete");
     expect(db.list("tasks").find((task) => task.id === linkedActivity.id)).toMatchObject({
       quoteSessionId: session.id,
-      status: "resolved",
+      status: "in_progress",
       assignedToId: owner.id,
-      completedById: "ai",
     });
     expect(
       db
@@ -270,7 +269,7 @@ describe("communications.automatePersonalQuoteReplies", () => {
             entry.entityId === linkedActivity.id &&
             entry.action === "task.resolved_by_personal_quote_automation"
         )
-    ).toHaveLength(1);
+    ).toHaveLength(0);
   });
 
   it("keeps an explicitly commercial identifier reply manual", async () => {

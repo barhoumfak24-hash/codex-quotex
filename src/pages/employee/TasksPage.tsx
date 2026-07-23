@@ -182,6 +182,7 @@ export function TasksPage() {
     api.aiNotifications.autoPromote(agency.id, user.id);
     api.renewals.ensureActivities(agency.id);
     api.routing.reconcileAccountWorkOwnership(agency.id);
+    api.quoting.reconcileActivities(agency.id, user.id);
     // AI triage of inbound messages opens activities only for owned work.
     api.communications.sweepInboundForActivities(agency.id, user.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
