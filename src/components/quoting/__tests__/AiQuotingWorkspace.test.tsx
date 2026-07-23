@@ -175,6 +175,60 @@ describe("AiQuotingWorkspace component", () => {
     host.remove();
   });
 
+  it("lists every usable AI-mapped questionnaire answer shown in the mapped count", async () => {
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    const root = createRoot(host);
+    const session = {
+      lineOfBusiness: "personal",
+      publicFields: {
+        "Year / make / model": "2023 Dodge Charger",
+        "VIN-decoded trim": "GT",
+      },
+      questionnaireQuestions: [
+        { id: "year", section: "Vehicle", label: "Year", kind: "text", required: true },
+        { id: "make", section: "Vehicle", label: "Make", kind: "text", required: true },
+        { id: "model", section: "Vehicle", label: "Model", kind: "text", required: true },
+        { id: "usage", section: "Vehicle", label: "Vehicle use", kind: "text", required: true },
+        { id: "losses", section: "History", label: "Prior losses", kind: "text", required: true },
+      ],
+      questionnaireResponses: {
+        year: "2023",
+        make: "Dodge",
+        model: "Charger",
+        usage: "Pleasure",
+        losses: "Not publicly available; requires client",
+      },
+      questionnaireResponseMeta: {
+        year: { updatedByRole: "ai" },
+        make: { updatedByRole: "ai" },
+        model: { updatedByRole: "ai" },
+        usage: { updatedByRole: "ai" },
+        losses: { updatedByRole: "ai" },
+      },
+    } as unknown as QuotingSession;
+
+    await act(async () => {
+      root.render(<PublicFields session={session} />);
+    });
+
+    expect(host.textContent).toContain("Year");
+    expect(host.textContent).toContain("2023");
+    expect(host.textContent).toContain("Make");
+    expect(host.textContent).toContain("Dodge");
+    expect(host.textContent).toContain("Model");
+    expect(host.textContent).toContain("Charger");
+    expect(host.textContent).toContain("Vehicle use");
+    expect(host.textContent).toContain("Pleasure");
+    expect(host.textContent).not.toContain("Prior losses");
+    expect(host.textContent).not.toContain("Year / make / model");
+
+    await act(async () => {
+      root.unmount();
+    });
+    host.remove();
+  });
+
   it("uses a launcher on the profile and keeps the full workflow on its routed page", async () => {
     const { customer, host, root } = await renderClientQuotingCard(undefined, {
       launcher: true,
