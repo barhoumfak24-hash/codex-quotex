@@ -199,6 +199,19 @@ describe("communications.automatePersonalQuoteReplies", () => {
     expect(session.questionnaireMessageId).toBeTruthy();
     expect(session.personalQuestionnairePreparedAt).toBeTruthy();
     expect(session.questionnaireQuestions?.every((question) => question.required)).toBe(true);
+    const processedInbound = db
+      .list("communications")
+      .find((communication) => communication.id === inbound.id)!;
+    const linkedActivity = db
+      .list("tasks")
+      .find((task) => task.id === processedInbound.aiActivityTaskId)!;
+    expect(linkedActivity).toMatchObject({
+      quoteSessionId: session.id,
+      status: "in_progress",
+      assignedToId: owner.id,
+      startedById: "ai",
+    });
+    expect(linkedActivity.startedAt).toBeTruthy();
     const questionnaireOutbox = db
       .list("mailboxOutbox")
       .find((job) => job.communicationId === session.questionnaireMessageId);
@@ -212,6 +225,52 @@ describe("communications.automatePersonalQuoteReplies", () => {
     expect(
       db.list("quotingSessions").filter((candidate) => candidate.customerId === customer.id)
     ).toHaveLength(sessionsBefore + 1);
+
+    const responses = Object.fromEntries(
+      (session.questionnaireQuestions ?? []).map((question) => [
+        question.id,
+        question.options?.[0] ?? "Provided by client",
+      ])
+    );
+    const completedSession = api.quoting.submitQuestionnaireResponses(
+      session.id,
+      responses,
+      { id: customer.id, name: customer.name, role: "customer" }
+    )!;
+    expect(completedSession.status).toBe("complete");
+    expect(db.list("tasks").find((task) => task.id === linkedActivity.id)).toMatchObject({
+      quoteSessionId: session.id,
+      status: "resolved",
+      assignedToId: owner.id,
+      completedById: "ai",
+    });
+    expect(
+      db
+        .list("tasks")
+        .filter(
+          (task) =>
+            task.messageId === inbound.id ||
+            (task.quoteSessionId === session.id && !task.activityKey?.startsWith("quote-session:"))
+        )
+    ).toHaveLength(1);
+    expect(
+      db
+        .list("audit")
+        .filter(
+          (entry) =>
+            entry.entityId === linkedActivity.id &&
+            entry.action === "task.in_progress_by_personal_quote_automation"
+        )
+    ).toHaveLength(1);
+    expect(
+      db
+        .list("audit")
+        .filter(
+          (entry) =>
+            entry.entityId === linkedActivity.id &&
+            entry.action === "task.resolved_by_personal_quote_automation"
+        )
+    ).toHaveLength(1);
   });
 
   it("keeps an explicitly commercial identifier reply manual", async () => {
@@ -249,5 +308,11 @@ describe("communications.automatePersonalQuoteReplies", () => {
     expect(
       db.list("quotingSessions").filter((candidate) => candidate.customerId === customer.id)
     ).toHaveLength(sessionsBefore);
+    const processedInbound = db
+      .list("communications")
+      .find((communication) => communication.id === inbound.id)!;
+    expect(
+      db.list("tasks").find((task) => task.id === processedInbound.aiActivityTaskId)
+    ).toMatchObject({ status: "open", assignedToId: owner.id });
   });
 });

@@ -3306,6 +3306,85 @@ function isLegacyQuoteReadyActivity(task: Task): boolean {
   return !!task.activityKey?.startsWith("quote-session:") && task.activityKey.endsWith(":quote_ready");
 }
 
+function personalQuoteActivityDescription(session: QuotingSession): string {
+  switch (session.status) {
+    case "awaiting_reply":
+      return "Quotex sent the personal-lines questionnaire and is waiting for the client to respond.";
+    case "quoting":
+      return "Quotex received the required information and is running the personal-lines carrier quotes.";
+    case "complete":
+      return "Quotex completed the personal-lines quote flow and prepared the carrier ranking for review.";
+    case "gathering_info":
+    default:
+      return "Quotex is autonomously mapping the selected personal-lines assets and preparing the questionnaire.";
+  }
+}
+
+function syncPersonalQuoteActivityStatus(
+  session: QuotingSession,
+  options?: { taskIds?: string[]; actorId?: string }
+) {
+  if (session.lineOfBusiness !== "personal") return;
+
+  const explicitTaskIds = new Set(options?.taskIds ?? []);
+  const milestonePrefix = `quote-session:${session.id}:`;
+  const actorId = options?.actorId ?? "ai";
+  const description = personalQuoteActivityDescription(session);
+  const completed = session.status === "complete";
+
+  db.list("tasks")
+    .filter(
+      (task) =>
+        task.tenantId === session.tenantId &&
+        (explicitTaskIds.has(task.id) || task.quoteSessionId === session.id) &&
+        !task.activityKey?.startsWith(milestonePrefix)
+    )
+    .forEach((task) => {
+      // Autonomous retries must never reopen work that a user already closed.
+      if (task.status === "resolved" || task.completedAt) return;
+
+      const changedAt = nowIso();
+      if (completed) {
+        db.update("tasks", task.id, {
+          description,
+          quoteSessionId: session.id,
+          assetId: task.assetId ?? session.assetId,
+          status: "resolved",
+          completedAt: changedAt,
+          completedById: actorId,
+        });
+        logTaskAudit({
+          tenantId: task.tenantId,
+          actorId,
+          action: "task.resolved_by_personal_quote_automation",
+          taskId: task.id,
+          metadata: { quoteSessionId: session.id, quoteStatus: session.status },
+        });
+        return;
+      }
+
+      const wasInProgress = task.status === "in_progress";
+      db.update("tasks", task.id, {
+        description,
+        quoteSessionId: session.id,
+        assetId: task.assetId ?? session.assetId,
+        status: "in_progress",
+        startedAt: task.startedAt ?? changedAt,
+        startedById: task.startedById ?? actorId,
+        snoozedUntil: undefined,
+      });
+      if (!wasInProgress) {
+        logTaskAudit({
+          tenantId: task.tenantId,
+          actorId,
+          action: "task.in_progress_by_personal_quote_automation",
+          taskId: task.id,
+          metadata: { quoteSessionId: session.id, quoteStatus: session.status },
+        });
+      }
+    });
+}
+
 function actorName(userId?: string): string {
   if (!userId) return "System";
   if (userId === "ai") return "AI";
@@ -15302,6 +15381,15 @@ export const api = {
             awaitingManagerAssignment: !(task?.assignedToId ?? operatorId) || undefined,
           };
           if (task) db.update("tasks", task.id, taskPatch);
+          if (task && sessionId) {
+            const linkedSession = api.quoting.get(sessionId);
+            if (linkedSession) {
+              syncPersonalQuoteActivityStatus(linkedSession, {
+                taskIds: [task.id],
+                actorId: "ai",
+              });
+            }
+          }
           const result = {
             communicationId: original.id,
             status,
@@ -15411,6 +15499,10 @@ export const api = {
               categoryLabels: category ? [category.label] : undefined,
               lineOfBusiness: "personal",
             }));
+          syncPersonalQuoteActivityStatus(session, {
+            taskIds: [task.id],
+            actorId: "ai",
+          });
           let mappedSession = api.quoting.get(session.id) ?? session;
           if (mappedSession.aiProviderError) {
             mappedSession =
@@ -18586,6 +18678,7 @@ export const api = {
           createdAt: preparedAt,
           createdById: session.createdById,
         });
+        syncPersonalQuoteActivityStatus(updated, { actorId: "ai" });
       }
       return updated;
     },
@@ -18770,6 +18863,7 @@ export const api = {
           communicationId: comm.id,
           source: "agent",
         });
+        syncPersonalQuoteActivityStatus(updated, { actorId: "ai" });
       }
       return updated;
     },
@@ -19571,13 +19665,16 @@ export const api = {
         });
         return supplementalSession;
       }
-      db.update("quotingSessions", sessionId, {
+      const quotingSession = db.update("quotingSessions", sessionId, {
         questionnaireResponses: { ...(session.questionnaireResponses ?? {}), ...responses },
         questionnaireResponseMeta: responseMeta,
         replyReceivedAt: updatedAt,
         status: "quoting",
         updatedAt,
       });
+      if (quotingSession) {
+        syncPersonalQuoteActivityStatus(quotingSession, { actorId: "ai" });
+      }
       const contact = session.prospectId
         ? db.list("prospects").find((p) => p.id === session.prospectId)
         : session.customerId
@@ -19662,6 +19759,7 @@ export const api = {
           createdAt: sentAt,
           createdById: session.createdById,
         });
+        syncPersonalQuoteActivityStatus(updated, { actorId: "ai" });
       }
       return updated;
     },
@@ -19670,12 +19768,15 @@ export const api = {
       const session = this.get(sessionId);
       if (!session) return null;
       const receivedAt = nowIso();
-      db.update("quotingSessions", sessionId, {
+      const quotingSession = db.update("quotingSessions", sessionId, {
         replyReceivedAt: receivedAt,
         status: "quoting",
         updatedAt: receivedAt,
       });
-      logQuotingWorkflowProgress(session, {
+      if (quotingSession) {
+        syncPersonalQuoteActivityStatus(quotingSession, { actorId: "ai" });
+      }
+      logQuotingWorkflowProgress(quotingSession ?? session, {
         message: "Client reply received; AI carrier ranking started.",
         detail: "The workflow moved from awaiting reply to quoting.",
         createdAt: receivedAt,
@@ -19763,6 +19864,7 @@ export const api = {
         status: options?.status ?? "complete",
         updatedAt: rankedAt,
       })!;
+      syncPersonalQuoteActivityStatus(updated, { actorId: "ai" });
       logQuotingWorkflowProgress(updated, {
         message:
           updated.status === "awaiting_reply"
