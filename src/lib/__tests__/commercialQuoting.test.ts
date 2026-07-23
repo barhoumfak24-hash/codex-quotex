@@ -896,7 +896,15 @@ describe("commercial quoting session", () => {
     const comm = api.communications
       .listByTenant(agency.id)
       .find((c) => c.id === updated?.questionnaireMessageId);
-    expect(comm?.body).toContain("https://app.example/customer/questionnaire/abc");
+    expect(updated?.questionnaireAccessToken).toMatch(/^[a-f0-9]{48}$/);
+    expect(comm?.body).toContain(
+      `https://app.example/customer/questionnaire/${updated?.questionnaireAccessToken}`
+    );
+    expect(comm?.body).not.toContain("https://app.example/customer/questionnaire/abc");
+    expect(comm?.bodyHtml).toContain("Complete questionnaire");
+    expect(comm?.bodyHtml).toContain(
+      `https://app.example/customer/questionnaire/${updated?.questionnaireAccessToken}`
+    );
     expect(comm?.subject).toMatch(/questionnaire/i);
   });
 
@@ -942,7 +950,11 @@ describe("commercial quoting session", () => {
     const comm = api.communications
       .listByTenant(agency.id)
       .find((c) => c.id === updated?.questionnaireMessageId);
-    expect(comm?.body).toContain("https://app.example/customer/questionnaire/abc");
+    expect(updated?.questionnaireAccessToken).toMatch(/^[a-f0-9]{48}$/);
+    expect(comm?.body).toContain(
+      `https://app.example/customer/questionnaire/${updated?.questionnaireAccessToken}`
+    );
+    expect(comm?.bodyHtml).toContain("Complete questionnaire");
   });
 
   it("recommends commercial-ready carriers in AI leaderboard order with underwriters on file", async () => {

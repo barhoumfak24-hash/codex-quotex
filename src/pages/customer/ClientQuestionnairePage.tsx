@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom";
 import { AlertTriangle, ArrowLeft, CheckCircle2, ClipboardList, Loader2, Send, Sparkles } from "lucide-react";
 import { Card, CardHeader, EmptyState } from "@/components/ui/Card";
@@ -6,10 +6,25 @@ import { Badge } from "@/components/ui/Badge";
 import { Modal } from "@/components/ui/Modal";
 import { useAuth } from "@/lib/auth";
 import { api } from "@/lib/api";
+import { apiBaseUrl } from "@/lib/apiBase";
 import { subscribeToDbChanges } from "@/lib/db";
 import { fmt } from "@/lib/format";
 import { getAppSurface, toAppRoute, toSurfaceRoute } from "@/lib/appSurface";
 import type { QuestionnaireResponseMeta, QuotingQuestion, QuotingSession } from "@/types";
+
+interface RemoteQuestionnaire {
+  status: string;
+  lineOfBusiness: "personal" | "commercial";
+  questions: QuotingQuestion[];
+  responses: Record<string, string>;
+  responseMeta: Record<string, QuestionnaireResponseMeta>;
+  contactName: string;
+  commercialApplicationSentAt?: string;
+  commercialSecondRoundSentAt?: string;
+  commercialSupplementalsCompletedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
 
 // =====================================================================
 // Customer portal — commercial quoting questionnaire. Auth-gated;
@@ -82,7 +97,80 @@ export function ClientQuestionnairePage() {
   const [submitted, setSubmitted] = useState(false);
   const [incompleteWarningOpen, setIncompleteWarningOpen] = useState(false);
   const [incompleteFieldsRevealed, setIncompleteFieldsRevealed] = useState(false);
-  const session = sessionId ? api.quoting.get(sessionId) : undefined;
+  const [remoteQuestionnaire, setRemoteQuestionnaire] = useState<RemoteQuestionnaire | null>(null);
+  const [remoteLoading, setRemoteLoading] = useState(false);
+  const [remoteError, setRemoteError] = useState("");
+  const remoteSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const localSession = sessionId ? api.quoting.get(sessionId) : undefined;
+  const session = useMemo<QuotingSession | undefined>(() => {
+    if (localSession) return localSession;
+    if (!sessionId || !remoteQuestionnaire) return undefined;
+    return {
+      id: sessionId,
+      tenantId: "public-questionnaire",
+      assetType: "other",
+      estimatedValue: 0,
+      lineOfBusiness: remoteQuestionnaire.lineOfBusiness,
+      createdById: "questionnaire-recipient",
+      status: remoteQuestionnaire.status as QuotingSession["status"],
+      publicFields: {},
+      missingFields: [],
+      questionnaireQuestions: remoteQuestionnaire.questions,
+      questionnaireResponses: remoteQuestionnaire.responses,
+      questionnaireResponseMeta: remoteQuestionnaire.responseMeta,
+      commercialApplicationSentAt: remoteQuestionnaire.commercialApplicationSentAt,
+      commercialSecondRoundSentAt: remoteQuestionnaire.commercialSecondRoundSentAt,
+      commercialSupplementalsCompletedAt: remoteQuestionnaire.commercialSupplementalsCompletedAt,
+      quotes: [],
+      createdAt: remoteQuestionnaire.createdAt,
+      updatedAt: remoteQuestionnaire.updatedAt,
+    };
+  }, [localSession, remoteQuestionnaire, sessionId]);
+  const isRemoteQuestionnaire = !localSession && Boolean(remoteQuestionnaire);
+
+  useEffect(() => {
+    if (!sessionId || localSession) {
+      setRemoteLoading(false);
+      setRemoteError("");
+      return;
+    }
+    const controller = new AbortController();
+    setRemoteLoading(true);
+    setRemoteError("");
+    void fetch(`${apiBaseUrl()}/questionnaires/${encodeURIComponent(sessionId)}`, {
+      credentials: "omit",
+      signal: controller.signal,
+      headers: { accept: "application/json" },
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(response.status === 404 ? "not_found" : "unavailable");
+        const payload = (await response.json()) as {
+          found?: boolean;
+          questionnaire?: RemoteQuestionnaire;
+        };
+        if (!payload.found || !payload.questionnaire) throw new Error("not_found");
+        setRemoteQuestionnaire(payload.questionnaire);
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        setRemoteError(
+          error instanceof Error && error.message === "not_found"
+            ? "This questionnaire link is no longer available. Please ask your agent to send a new link."
+            : "The questionnaire is temporarily unavailable. Please try again in a moment."
+        );
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setRemoteLoading(false);
+      });
+    return () => controller.abort();
+  }, [localSession, sessionId]);
+
+  useEffect(
+    () => () => {
+      if (remoteSaveTimer.current) clearTimeout(remoteSaveTimer.current);
+    },
+    []
+  );
   const linkedCustomer =
     session?.customerId
       ? api.customers.list(session.tenantId).find((c) => c.id === session.customerId)
@@ -106,7 +194,13 @@ export function ClientQuestionnairePage() {
     return Array.from(map.entries());
   }, [questions]);
   const actor =
-    user && myCustomer
+    isRemoteQuestionnaire
+      ? {
+          id: "questionnaire-recipient",
+          name: remoteQuestionnaire?.contactName || "Client",
+          role: "customer" as const,
+        }
+      : user && myCustomer
       ? { id: user.id, name: myCustomer.name, role: "customer" as const }
       : linkedCustomer
       ? { id: linkedCustomer.id, name: linkedCustomer.name, role: "customer" as const }
@@ -134,12 +228,22 @@ export function ClientQuestionnairePage() {
   if (!sessionId) {
     return <EmptyState title="Questionnaire link is invalid or expired." />;
   }
-  if (!session || (!session.customerId && !session.prospectId)) {
-    return <EmptyState title="Questionnaire not found." />;
+  if (remoteLoading) {
+    return (
+      <Card>
+        <div className="flex min-h-40 items-center justify-center gap-2 text-sm text-ink-500">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Opening your questionnaire…
+        </div>
+      </Card>
+    );
+  }
+  if (!session || (!isRemoteQuestionnaire && !session.customerId && !session.prospectId)) {
+    return <EmptyState title={remoteError || "Questionnaire not found."} />;
   }
   // If the visitor is already signed in as a customer, keep the account ownership check.
   // Anonymous emailed links can still open the questionnaire directly.
-  if (user?.role === "customer" && (!myCustomer || myCustomer.id !== session.customerId)) {
+  if (!isRemoteQuestionnaire && user?.role === "customer" && (!myCustomer || myCustomer.id !== session.customerId)) {
     return (
       <EmptyState title="This questionnaire isn't tied to your account. Reach out to your agent if you got the link in error." />
     );
@@ -173,16 +277,43 @@ export function ClientQuestionnairePage() {
 
   function setAnswer(id: string, value: string) {
     setResponses((s) => ({ ...s, [id]: value }));
-    if (actor && session) {
+    if (isRemoteQuestionnaire && sessionId) {
+      if (remoteSaveTimer.current) clearTimeout(remoteSaveTimer.current);
+      remoteSaveTimer.current = setTimeout(() => {
+        void fetch(`${apiBaseUrl()}/questionnaires/${encodeURIComponent(sessionId)}`, {
+          method: "PATCH",
+          credentials: "omit",
+          headers: { "content-type": "application/json", accept: "application/json" },
+          body: JSON.stringify({ responses: { [id]: value } }),
+        }).catch(() => undefined);
+      }, 350);
+    } else if (actor && session) {
       api.quoting.saveQuestionnaireResponses(session.id, { [id]: value }, actor);
     }
   }
 
-  function submitNow() {
+  async function submitNow() {
     if (!actor || !session) return;
     setSubmitting(true);
     try {
-      api.quoting.submitQuestionnaireResponses(session.id, responses, actor);
+      if (isRemoteQuestionnaire && sessionId) {
+        if (remoteSaveTimer.current) clearTimeout(remoteSaveTimer.current);
+        const response = await fetch(
+          `${apiBaseUrl()}/questionnaires/${encodeURIComponent(sessionId)}/submit`,
+          {
+            method: "POST",
+            credentials: "omit",
+            headers: { "content-type": "application/json", accept: "application/json" },
+            body: JSON.stringify({ responses }),
+          }
+        );
+        if (!response.ok) {
+          setRemoteError("Your answers could not be submitted yet. Please try again.");
+          return;
+        }
+      } else {
+        api.quoting.submitQuestionnaireResponses(session.id, responses, actor);
+      }
       setSubmitted(true);
     } finally {
       setSubmitting(false);
@@ -198,7 +329,7 @@ export function ClientQuestionnairePage() {
       }
       return;
     }
-    submitNow();
+    void submitNow();
   }
 
   if (submitted) {
@@ -231,6 +362,12 @@ export function ClientQuestionnairePage() {
           pre-filled what we could from public records — please confirm or fill in the rest.
         </p>
       </div>
+
+      {remoteError && (
+        <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-950">
+          {remoteError}
+        </div>
+      )}
 
       <Card>
         <div className="rounded-md border border-violet-100 bg-violet-50 px-3 py-2 text-xs text-violet-900 flex items-start gap-2">
@@ -399,7 +536,7 @@ export function ClientQuestionnairePage() {
         onBack={() => setIncompleteWarningOpen(false)}
         onProceed={() => {
           setIncompleteWarningOpen(false);
-          submitNow();
+          void submitNow();
         }}
       />
     </div>

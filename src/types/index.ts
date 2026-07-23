@@ -2581,6 +2581,11 @@ export interface QuotingSession {
   questionnaireMessageId?: string;
   questionnaireDraft?: string;
   questionnaireSentAt?: string;
+  // Opaque bearer credential used by emailed questionnaire links. The
+  // recipient-facing route never exposes the internal session id or the
+  // rest of the tenant snapshot.
+  questionnaireAccessToken?: string;
+  questionnaireAccessTokenCreatedAt?: string;
   replyReceivedAt?: string;
   // Ranked carrier quotes, written when status flips to "complete".
   quotes: CarrierQuote[];

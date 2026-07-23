@@ -39,6 +39,7 @@ import { notesRoutes } from "./routes/notes.js";
 import { paymentsRoutes } from "./routes/payments.js";
 import { policiesRoutes } from "./routes/policies.js";
 import { prospectsRoutes } from "./routes/prospects.js";
+import { questionnairesRoutes } from "./routes/questionnaires.js";
 import { quotesRoutes } from "./routes/quotes.js";
 import { renewalsRoutes } from "./routes/renewals.js";
 import { signingPacketsRoutes } from "./routes/signingPackets.js";
@@ -215,6 +216,7 @@ app.use(
   authRoutes
 );
 app.use("/api/communications", publicWorkflowLimiter, communicationsRoutes);
+app.use("/api/questionnaires", publicWorkflowLimiter, questionnairesRoutes);
 app.use("/api/signing-packets", publicWorkflowLimiter, signingPacketsRoutes);
 app.use("/api/state", stateSyncLimiter, stateRoutes);
 app.use("/api/website", publicWorkflowLimiter, websiteRoutes);

@@ -5283,6 +5283,84 @@ function visibleQuotingQuestions(session: QuotingSession): QuotingQuestion[] {
   return questions.filter((q) => q.round === "second_round");
 }
 
+function createQuestionnaireAccessToken(): string {
+  const cryptoApi = globalThis.crypto;
+  if (!cryptoApi?.getRandomValues) {
+    throw new Error("Secure questionnaire links are unavailable in this browser.");
+  }
+  const bytes = new Uint8Array(24);
+  cryptoApi.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function questionnaireRecipientUrl(portalUrl: string, accessToken: string): string {
+  return portalUrl.replace(
+    /(\/customer\/questionnaire\/)[^/?#]+/i,
+    `$1${encodeURIComponent(accessToken)}`
+  );
+}
+
+function escapeQuestionnaireEmailHtml(value: unknown): string {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function questionnaireEmailHtml(input: {
+  firstName: string;
+  creatorName?: string;
+  agencyName: string;
+  portalUrl: string;
+  questionCount: number;
+  sectionCount: number;
+  supplemental: boolean;
+}): string {
+  const firstName = escapeQuestionnaireEmailHtml(input.firstName);
+  const senderName = escapeQuestionnaireEmailHtml(input.creatorName || input.agencyName);
+  const portalUrl = escapeQuestionnaireEmailHtml(input.portalUrl);
+  const questionnaireLabel = input.supplemental
+    ? "supplemental questionnaire"
+    : "quoting questionnaire";
+  const buttonLabel = input.supplemental
+    ? "Complete supplemental questionnaire"
+    : "Complete questionnaire";
+  const followUp = input.supplemental
+    ? "Once submitted, the requested carrier supplementals will be updated for your agent."
+    : "Once submitted, your agent can continue the quote process and review the available carrier options.";
+
+  return `<!doctype html>
+<html>
+  <body style="margin:0;padding:0;background:#ffffff;color:#171714;font-family:Arial,Helvetica,sans-serif;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#ffffff;">
+      <tr>
+        <td align="left" style="padding:24px;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="max-width:620px;">
+            <tr><td style="font-size:16px;line-height:1.6;padding-bottom:18px;">Hi ${firstName},</td></tr>
+            <tr><td style="font-size:16px;line-height:1.6;padding-bottom:20px;">We need a few additional details to continue your quote. Your ${questionnaireLabel} has ${input.questionCount} question${input.questionCount === 1 ? "" : "s"} across ${input.sectionCount} section${input.sectionCount === 1 ? "" : "s"}, with the information already on file pre-filled for you.</td></tr>
+            <tr>
+              <td style="padding:4px 0 24px;">
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+                  <tr>
+                    <td bgcolor="#11110f" style="border-radius:6px;">
+                      <a href="${portalUrl}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#11110f;color:#ffffff;text-decoration:none;font-size:16px;font-weight:700;line-height:1;padding:16px 22px;border-radius:6px;">${buttonLabel}</a>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <tr><td style="font-size:15px;line-height:1.6;padding-bottom:22px;color:#4f4d47;">${followUp}</td></tr>
+            <tr><td style="font-size:16px;line-height:1.5;">Best,<br>${senderName}</td></tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
+}
+
 function sortQuotingSessionsByWorkRecency(a: QuotingSession, b: QuotingSession): number {
   const aStamp = a.updatedAt || a.createdAt;
   const bStamp = b.updatedAt || b.createdAt;
@@ -18573,9 +18651,8 @@ export const api = {
       return updated;
     },
     // Questionnaire-link delivery used by both personal + commercial
-    // sessions. Builds an outbound Communication pointing the
-    // client/prospect directly at /customer/questionnaire/<sessionId>
-    // instead of pasting questions inline.
+    // sessions. The email receives an opaque access token rather than the
+    // browser-local session id so the questionnaire works on another device.
     sendPortalLink(sessionId: string, portalUrl: string): QuotingSession | null {
       const current = this.get(sessionId);
       const session =
@@ -18599,6 +18676,10 @@ export const api = {
         session.lineOfBusiness === "commercial" &&
         !!session.commercialSecondRoundSentAt &&
         !session.commercialSupplementalsCompletedAt;
+      const accessToken = session.questionnaireAccessToken ?? createQuestionnaireAccessToken();
+      const accessTokenCreatedAt =
+        session.questionnaireAccessTokenCreatedAt ?? nowIso();
+      const recipientPortalUrl = questionnaireRecipientUrl(portalUrl, accessToken);
       const subject =
         isSupplementalPortalLink
           ? `Action needed: complete supplemental carrier questions`
@@ -18611,7 +18692,7 @@ export const api = {
         `To run firm quotes for you, we need a few additional details. I've put together a short questionnaire (${questionCount} questions across ${sectionCount} sections — pre-filled with what we already have on file).`,
         ``,
         `Open and complete the questionnaire here:`,
-        portalUrl,
+        recipientPortalUrl,
         ``,
         `Once you submit, our AI runs the answers through every carrier we work with and I'll follow up with the top recommendations.`,
         ``,
@@ -18624,13 +18705,32 @@ export const api = {
         `A few carriers reviewed the commercial application and asked for supplemental form details that are not already on file. I put those follow-up questions into one short supplemental questionnaire (${questionCount} questions across ${sectionCount} sections).`,
         ``,
         `Open and complete the supplemental questions here:`,
-        portalUrl,
+        recipientPortalUrl,
         ``,
         `Once you submit, Quotex completes the requested carrier supplementals, sends the information back to those markets, and updates the accepted-carrier ranking for your agent.`,
         ``,
         creator?.name ? `Best,\n${creator.name}` : `Best,\n${agencyName}`,
       ].join("\n");
       const body = isSupplementalPortalLink ? supplementalBody : originalBody;
+      const bodyHtml = questionnaireEmailHtml({
+        firstName,
+        creatorName: creator?.name,
+        agencyName,
+        portalUrl: recipientPortalUrl,
+        questionCount,
+        sectionCount,
+        supplemental: isSupplementalPortalLink,
+      });
+
+      // Persist the bearer token before dispatching the email so a fast click on
+      // another device can resolve the questionnaire as soon as the message arrives.
+      if (!session.questionnaireAccessToken) {
+        db.update("quotingSessions", sessionId, {
+          questionnaireAccessToken: accessToken,
+          questionnaireAccessTokenCreatedAt: accessTokenCreatedAt,
+          updatedAt: nowIso(),
+        });
+      }
 
       const comm = api.communications.create({
         tenantId: session.tenantId,
@@ -18640,6 +18740,7 @@ export const api = {
         direction: "outbound",
         subject,
         body,
+        bodyHtml,
         createdById: session.createdById,
       });
       const sentAt = nowIso();
@@ -18647,6 +18748,8 @@ export const api = {
         questionnaireMessageId: comm.id,
         questionnaireDraft: `Subject: ${subject}\n\n${body}`,
         questionnaireSentAt: sentAt,
+        questionnaireAccessToken: accessToken,
+        questionnaireAccessTokenCreatedAt: accessTokenCreatedAt,
         status: "awaiting_reply",
         updatedAt: sentAt,
       });
