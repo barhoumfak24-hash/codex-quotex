@@ -40,20 +40,23 @@ describe("category questionnaire templates", () => {
     const keys = questions.map((question) => question.key);
 
     expect(keys).toContain("vin");
-    expect(keys).toContain("yearMakeModel");
-    expect(keys).toContain("purchaseAndOwnership");
-    expect(keys).toContain("garagingAddressIfDifferent");
-    expect(keys).toContain("primaryUse");
-    expect(keys).toContain("coverageLimits");
-    expect(keys).toContain("physicalDamageDeductibles");
-    expect(keys).toContain("driverOneDetails");
-    expect(keys).toContain("additionalDriversAndHousehold");
-    expect(keys).toContain("ticketsAccidentsClaims");
-    expect(keys).toContain("priorAutoCarrier");
-    expect(keys).toContain("autoDiscountsAndPayment");
-    expect(keys).toContain("currentCoverage");
+    expect(keys).toContain("primaryFirstName");
+    expect(keys).toContain("preferredContactMethod");
+    expect(keys).toContain("authorizeMvr");
+    expect(keys).toContain("currentStreetAddress");
+    expect(keys).toContain("ratingState");
+    expect(keys).toContain("currentlyInsured");
+    expect(keys).toContain("multiPolicyDiscount");
+    expect(keys).toContain("recommendedRepairShops");
+    expect(keys).toContain("driverLicenseNumber");
+    expect(keys).toContain("vehicleYear");
+    expect(keys).toContain("bodilyInjuryLimits");
+    expect(keys).toContain("comprehensiveDeductible");
+    expect(keys).toContain("incidentType");
+    expect(keys).toContain("applicantInformationVerified");
     expect(keys).toContain("targetEffectiveDate");
-    expect(questions.length).toBeGreaterThanOrEqual(22);
+    expect(new Set(questions.map((question) => question.section)).size).toBe(14);
+    expect(questions.length).toBeGreaterThanOrEqual(130);
   });
 
   it("generates a bounded questionnaire for every active category", async () => {
@@ -74,7 +77,7 @@ describe("category questionnaire templates", () => {
           : category.assetType === "coastal_home"
           ? 30
           : category.assetType === "luxury_vehicle"
-          ? 28
+          ? 160
           : 8;
       expect(questions.length).toBeGreaterThanOrEqual(3);
       expect(questions.length).toBeLessThanOrEqual(maxQuestions);

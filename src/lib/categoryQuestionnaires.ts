@@ -16,6 +16,16 @@ function q(
   return { key, label, inputType, ...patch };
 }
 
+function sectionQuestion(
+  section: string,
+  key: string,
+  label: string,
+  inputType: CategoryQuestion["inputType"] = "text",
+  patch: QuestionPatch = {}
+): CategoryQuestion {
+  return q(key, label, inputType, { required: true, ...patch, section });
+}
+
 function norm(text: string): string {
   return text.toLowerCase().replace(/&/g, "and");
 }
@@ -112,49 +122,229 @@ function homeQuoteSheetQuestions(): CategoryQuestion[] {
 }
 
 function autoQuoteSheetQuestions(): CategoryQuestion[] {
+  const applicant = "1. Applicant Information";
+  const contact = "2. Contact Information";
+  const reports = "3. Third Party Reports";
+  const address = "4. Address Information";
+  const policy = "5. Policy Information";
+  const currentInsurance = "6. Current Insurance";
+  const discounts = "7. Discounts";
+  const carrier = "8. Carrier Questions";
+  const driver = "9. Driver Information (repeat for every licensed driver)";
+  const vehicle = "10. Vehicle Information (repeat for every vehicle)";
+  const coverage = "11. Coverage Selection";
+  const vehicleCoverage = "12. Vehicle Specific Coverages (per vehicle)";
+  const incidents = "13. Accident / Incident History (repeat for every incident)";
+  const review = "14. Final Review";
+
   return [
-    q("vin", "VIN", "text", { required: true, placeholder: "17-character VIN" }),
-    q("yearMakeModel", "Year, make, model, and stated value", "textarea"),
-    q("purchaseAndOwnership", "Purchase date, new/used, own/lien/lease, and name on title", "textarea"),
-    q("garagingAddressIfDifferent", "Garaging address if different from home", "address"),
-    q("lienholderOrLessor", "Lienholder or lessor name and address", "textarea"),
-    q("primaryUse", "Primary use", "select", {
-      options: ["Pleasure", "Work or school", "Business", "Artisan", "Farm", "Seasonal / collector"],
+    sectionQuestion(applicant, "primaryFirstName", "Primary applicant first name"),
+    sectionQuestion(applicant, "primaryMiddleInitial", "Primary applicant middle initial"),
+    sectionQuestion(applicant, "primaryLastName", "Primary applicant last name"),
+    sectionQuestion(applicant, "primarySuffix", "Primary applicant suffix"),
+    sectionQuestion(applicant, "primaryDateOfBirth", "Primary applicant date of birth", "date"),
+    sectionQuestion(applicant, "primarySsnLastFour", "Primary applicant Social Security number (optional / last four)", "text", {
+      required: false,
+      placeholder: "Last four digits",
     }),
-    q("businessDeliveryRideshareUse", "Business, delivery, rideshare, advertising, or wrapped vehicle use", "textarea"),
-    q("commuteAndAnnualMileage", "Distance one way, days per week, and annual mileage", "textarea"),
-    q("principalOperator", "Principal operator", "text"),
-    q("vehicleSafetyAndDamage", "Safety features and existing damage", "textarea", {
-      placeholder: "Blind spot, automatic braking, OnStar/telematics, current damage",
+    sectionQuestion(applicant, "primaryGender", "Primary applicant gender", "select", {
+      options: ["Female", "Male", "Nonbinary", "Prefer not to answer"],
     }),
-    q("customEquipmentOrModifications", "Customized equipment or modifications", "textarea", {
-      placeholder: "Lift, cap, tires, snow plow, custom value, performance parts",
+    sectionQuestion(applicant, "primaryMaritalStatus", "Primary applicant marital status", "select", {
+      options: ["Single", "Married", "Divorced", "Separated", "Widowed", "Domestic partner"],
     }),
-    q("coverageLimits", "Requested liability, property damage, and UM/UIM limits", "textarea", {
-      placeholder: "Split limits, CSL, property damage, uninsured/underinsured motorist",
+    sectionQuestion(applicant, "primaryOccupation", "Primary applicant occupation"),
+    sectionQuestion(applicant, "coApplicantFirstName", "Co-applicant first name (if applicable)", "text", { required: false }),
+    sectionQuestion(applicant, "coApplicantMiddleInitial", "Co-applicant middle initial (if applicable)", "text", { required: false }),
+    sectionQuestion(applicant, "coApplicantLastName", "Co-applicant last name (if applicable)", "text", { required: false }),
+    sectionQuestion(applicant, "coApplicantSuffix", "Co-applicant suffix (if applicable)", "text", { required: false }),
+    sectionQuestion(applicant, "coApplicantDateOfBirth", "Co-applicant date of birth (if applicable)", "date", { required: false }),
+    sectionQuestion(applicant, "coApplicantSsn", "Co-applicant Social Security number (if applicable)", "text", { required: false }),
+    sectionQuestion(applicant, "coApplicantGender", "Co-applicant gender (if applicable)", "select", {
+      required: false,
+      options: ["Female", "Male", "Nonbinary", "Prefer not to answer"],
     }),
-    q("physicalDamageDeductibles", "Comprehensive and collision coverage / deductibles", "textarea", {
-      placeholder: "Comp, collision regular/broad, glass, selected deductibles",
+    sectionQuestion(applicant, "coApplicantMaritalStatus", "Co-applicant marital status (if applicable)", "select", {
+      required: false,
+      options: ["Single", "Married", "Divorced", "Separated", "Widowed", "Domestic partner"],
     }),
-    q("roadsideRentalGap", "Roadside, rental, glass, gap, and travel coverage", "textarea"),
-    q("driverOneDetails", "Driver 1 details", "textarea", {
-      placeholder: "Relation, license number, DOB, occupation/city, education, student GPA, student distance",
+    sectionQuestion(applicant, "coApplicantOccupation", "Co-applicant occupation (if applicable)", "text", { required: false }),
+
+    sectionQuestion(contact, "cellPhone", "Cell phone"),
+    sectionQuestion(contact, "homePhone", "Home phone", "text", { required: false }),
+    sectionQuestion(contact, "workPhone", "Work phone", "text", { required: false }),
+    sectionQuestion(contact, "emailAddress", "Email address"),
+    sectionQuestion(contact, "preferredContactMethod", "Preferred contact method", "select", {
+      options: ["Cell", "Home", "Work", "Email"],
     }),
-    q("driverTwoDetails", "Driver 2 details", "textarea", {
-      placeholder: "Relation, license number, DOB, occupation/city, education, student GPA, student distance",
+
+    sectionQuestion(reports, "authorizeMvr", "Authorize Motor Vehicle Reports (MVR)?", "boolean"),
+    sectionQuestion(reports, "authorizeClue", "Authorize CLUE claims reports?", "boolean"),
+    sectionQuestion(reports, "authorizeCredit", "Authorize credit reports where permitted?", "boolean"),
+    sectionQuestion(reports, "thirdPartyReportAuthorization", "Third-party report authorization", "select", {
+      options: ["Yes", "No"],
     }),
-    q("additionalDriversAndHousehold", "Additional drivers and household members", "textarea", {
-      placeholder: "Household size, all household members, youthful drivers, company cars, dependents",
+
+    sectionQuestion(address, "currentStreetAddress", "Current residence street address", "address"),
+    sectionQuestion(address, "currentCity", "Current residence city"),
+    sectionQuestion(address, "currentState", "Current residence state"),
+    sectionQuestion(address, "currentZipCode", "Current residence ZIP code"),
+    sectionQuestion(address, "uspsValidated", "USPS validated?", "boolean"),
+    sectionQuestion(address, "yearsAtAddress", "Years at current address", "number"),
+    sectionQuestion(address, "monthsAtAddress", "Months at current address", "number"),
+    sectionQuestion(address, "residenceType", "Residence type", "select", {
+      options: ["Own Home", "Rent", "Condo", "Apartment", "Other"],
     }),
-    q("ticketsAccidentsClaims", "Tickets, accidents, PIP, deer, glass, or other claims", "textarea"),
-    q("priorAutoCarrier", "Prior carrier, policy number, expiration date, term, and loss-free years", "textarea"),
-    q("autoDiscountsAndPayment", "Discounts, groups, payment plan, health insurance, and deductible choices", "textarea"),
-    q("ratingResidence", "Residence/rating details", "textarea", {
-      placeholder: "Own/rent/other, house/apartment/condo/manufactured home/other, multi-policy details",
+    sectionQuestion(address, "mailingSameAsCurrent", "Mailing address same as current address?", "boolean"),
+    sectionQuestion(address, "mailingAddress", "Mailing address (if different)", "address", { required: false }),
+    sectionQuestion(address, "previousAddress", "Previous address if at current residence less than 3 years", "address", { required: false }),
+    sectionQuestion(address, "previousCity", "Previous city", "text", { required: false }),
+    sectionQuestion(address, "previousState", "Previous state", "text", { required: false }),
+    sectionQuestion(address, "previousZipCode", "Previous ZIP code", "text", { required: false }),
+    sectionQuestion(address, "alternateGarageStreet", "Alternate garage street address (if vehicle kept elsewhere)", "address", { required: false }),
+    sectionQuestion(address, "alternateGarageCity", "Alternate garage city", "text", { required: false }),
+    sectionQuestion(address, "alternateGarageState", "Alternate garage state", "text", { required: false }),
+    sectionQuestion(address, "alternateGarageZip", "Alternate garage ZIP code", "text", { required: false }),
+
+    sectionQuestion(policy, "ratingState", "Rating state"),
+    sectionQuestion(policy, "ratingCounty", "County"),
+    sectionQuestion(policy, "targetEffectiveDate", "Effective date", "date"),
+    sectionQuestion(policy, "policyTerm", "Policy term", "select", {
+      options: ["6 Months", "12 Months"],
     }),
-    q("motorcycleOrSpecialVehicleDetails", "Motorcycle or special vehicle details, if applicable", "textarea", {
-      placeholder: "Custom value, years owned/riding, medical benefits, helmet, cycle endorsement",
+
+    sectionQuestion(currentInsurance, "currentlyInsured", "Are you currently insured?", "boolean"),
+    sectionQuestion(currentInsurance, "continuousCoverageYears", "Continuous coverage years", "number", { required: false }),
+    sectionQuestion(currentInsurance, "continuousCoverageMonths", "Continuous coverage months", "number", { required: false }),
+    sectionQuestion(currentInsurance, "currentPremium", "Current premium", "currency", { required: false }),
+    sectionQuestion(currentInsurance, "currentCarrier", "Current carrier", "text", { required: false }),
+    sectionQuestion(currentInsurance, "timeWithCurrentCarrier", "Time with current carrier", "text", { required: false }),
+    sectionQuestion(currentInsurance, "currentPolicyExpirationDate", "Policy expiration date", "date", { required: false }),
+    sectionQuestion(currentInsurance, "currentPolicyNumber", "Current policy number", "text", { required: false }),
+    sectionQuestion(currentInsurance, "currentLiabilityLimits", "Current liability limits", "textarea", { required: false }),
+
+    sectionQuestion(discounts, "multiPolicyDiscount", "Do you currently have a multi-policy discount?", "boolean"),
+    sectionQuestion(discounts, "homeownersPolicy", "Do you currently have a homeowners policy?", "boolean"),
+    sectionQuestion(discounts, "homeownersPolicyType", "Type of homeowners policy", "text", { required: false }),
+
+    sectionQuestion(carrier, "recommendedRepairShops", "Will you use recommended repair shops?", "boolean"),
+    sectionQuestion(carrier, "householdResidentCount", "Number of residents in household", "number"),
+    sectionQuestion(carrier, "autoOwnersCompanySelection", "Auto-Owners company selection"),
+    sectionQuestion(carrier, "autoOwnersGroupProgram", "Auto-Owners group program"),
+    sectionQuestion(carrier, "progressiveSpinOffReason", "Progressive spin-off reason", "textarea"),
+    sectionQuestion(carrier, "progressivePolicyInForce", "Is another Progressive policy already in force?", "boolean"),
+    sectionQuestion(carrier, "paperlessBilling", "Paperless billing?", "boolean"),
+    sectionQuestion(carrier, "twoOrMorePipClaims59Months", "Have you had 2 or more PIP claims within the last 59 months?", "boolean"),
+    sectionQuestion(carrier, "pipClaimsLastThreeYears", "Number of PIP claims in the last 3 years", "number"),
+    sectionQuestion(carrier, "floridaLessThanTenMonths", "Do you reside in Florida less than 10 months per year?", "boolean"),
+
+    sectionQuestion(driver, "driverFirstName", "Driver first name"),
+    sectionQuestion(driver, "driverLastName", "Driver last name"),
+    sectionQuestion(driver, "driverDateOfBirth", "Driver date of birth", "date"),
+    sectionQuestion(driver, "driverSsn", "Driver Social Security number", "text", { required: false }),
+    sectionQuestion(driver, "driverGender", "Driver gender", "select", {
+      options: ["Female", "Male", "Nonbinary", "Prefer not to answer"],
     }),
+    sectionQuestion(driver, "driverRelationshipToApplicant", "Driver relationship to applicant"),
+    sectionQuestion(driver, "driverIsCoApplicant", "Is this driver the co-applicant?", "boolean"),
+    sectionQuestion(driver, "driverOccupation", "Driver occupation"),
+    sectionQuestion(driver, "driverEducationLevel", "Driver education level", "select", {
+      options: ["High school", "Some college", "Associate degree", "Bachelor degree", "Graduate degree", "Other"],
+    }),
+    sectionQuestion(driver, "driverStatus", "Driver status", "select", {
+      options: ["Rated", "Excluded", "Permit", "Non-driver", "Other"],
+    }),
+    sectionQuestion(driver, "driverLicenseState", "Driver license state issued"),
+    sectionQuestion(driver, "driverLicenseNumber", "Driver license number"),
+    sectionQuestion(driver, "driverLicenseStatus", "Driver license status", "select", {
+      options: ["Valid", "Suspended", "Revoked", "Expired", "Permit", "Other"],
+    }),
+    sectionQuestion(driver, "driverAgeFirstLicensed", "Driver age first licensed", "number"),
+    sectionQuestion(driver, "driverGoodStudent", "Good student discount?", "boolean"),
+    sectionQuestion(driver, "driverAwayAtSchool", "Away at school?", "boolean"),
+    sectionQuestion(driver, "driverTrainingCompleted", "Driver training completed?", "boolean"),
+    sectionQuestion(driver, "driverDefensiveDriving", "Defensive driving course completed?", "boolean"),
+    sectionQuestion(driver, "driverGoodDriverDiscount", "Good driver discount?", "boolean"),
+    sectionQuestion(driver, "driverSr22Required", "SR-22 filing required?", "boolean"),
+    sectionQuestion(driver, "driverFr44Required", "FR-44 filing required?", "boolean"),
+
+    sectionQuestion(vehicle, "vin", "VIN", "text", { placeholder: "17-character VIN" }),
+    sectionQuestion(vehicle, "vehicleYear", "Vehicle year", "number"),
+    sectionQuestion(vehicle, "vehicleMake", "Vehicle make"),
+    sectionQuestion(vehicle, "vehicleModel", "Vehicle model"),
+    sectionQuestion(vehicle, "vehicleTrim", "Vehicle trim"),
+    sectionQuestion(vehicle, "vehicleBodyStyle", "Vehicle body style"),
+    sectionQuestion(vehicle, "vehiclePurchaseDate", "Vehicle purchase date", "date"),
+    sectionQuestion(vehicle, "vehicleOwnershipStatus", "Vehicle ownership status", "select", {
+      options: ["Owned", "Financed", "Leased"],
+    }),
+    sectionQuestion(vehicle, "vehicleRegisteredState", "Vehicle registered state"),
+    sectionQuestion(vehicle, "vehicleOriginalMsrp", "Original MSRP", "currency"),
+    sectionQuestion(vehicle, "vehicleEngine", "Engine"),
+    sectionQuestion(vehicle, "vehicleCylinders", "Cylinders", "number"),
+    sectionQuestion(vehicle, "vehicleDisplacement", "Displacement"),
+    sectionQuestion(vehicle, "vehicleFuelType", "Fuel type"),
+    sectionQuestion(vehicle, "vehicleDriveType", "Drive type"),
+    sectionQuestion(vehicle, "vehicleDoorCount", "Number of doors", "number"),
+    sectionQuestion(vehicle, "principalOperator", "Principal operator"),
+    sectionQuestion(vehicle, "occasionalOperator", "Occasional operator", "text", { required: false }),
+    sectionQuestion(vehicle, "vehicleUsage", "Vehicle usage", "select", {
+      options: ["Pleasure", "Commute", "Business", "Farm"],
+    }),
+    sectionQuestion(vehicle, "oneWayCommuteMiles", "One-way commute miles", "number"),
+    sectionQuestion(vehicle, "daysDrivenPerWeek", "Days driven per week", "number"),
+    sectionQuestion(vehicle, "annualMileage", "Annual mileage", "number"),
+    sectionQuestion(vehicle, "vehicleGaraged", "Vehicle garaged?", "boolean"),
+    sectionQuestion(vehicle, "garageLocation", "Garage location", "select", {
+      options: ["Residence", "Other"],
+    }),
+    sectionQuestion(vehicle, "antiLockBrakes", "Anti-lock brakes?", "boolean"),
+    sectionQuestion(vehicle, "antiTheftDevice", "Anti-theft device?", "boolean"),
+    sectionQuestion(vehicle, "airbags", "Airbags?", "boolean"),
+
+    sectionQuestion(coverage, "bodilyInjuryLimits", "Bodily injury limits"),
+    sectionQuestion(coverage, "propertyDamageLimits", "Property damage limits"),
+    sectionQuestion(coverage, "pipDeductible", "Personal Injury Protection (PIP) deductible", "currency"),
+    sectionQuestion(coverage, "pipAppliesTo", "PIP applies to"),
+    sectionQuestion(coverage, "pipWageLoss", "PIP wage loss"),
+    sectionQuestion(coverage, "pipType", "PIP type"),
+    sectionQuestion(coverage, "umLimits", "Uninsured / underinsured motorist limits"),
+    sectionQuestion(coverage, "umStacked", "Uninsured / underinsured motorist stacked?", "boolean"),
+    sectionQuestion(coverage, "medicalPayments", "Medical payments", "currency"),
+    sectionQuestion(coverage, "accidentalDeathCoverage", "Accidental death coverage", "currency"),
+    sectionQuestion(coverage, "usageBasedInsurance", "Enroll in usage-based insurance?", "boolean"),
+    sectionQuestion(coverage, "telematicsEnrollmentSettings", "Telematics enrollment settings", "textarea", { required: false }),
+
+    sectionQuestion(vehicleCoverage, "comprehensiveDeductible", "Comprehensive deductible", "currency"),
+    sectionQuestion(vehicleCoverage, "collisionDeductible", "Collision deductible", "currency"),
+    sectionQuestion(vehicleCoverage, "rentalReimbursement", "Rental reimbursement", "currency"),
+    sectionQuestion(vehicleCoverage, "towingCoverage", "Towing coverage", "currency"),
+    sectionQuestion(vehicleCoverage, "customEquipmentCoverage", "Custom equipment coverage", "currency"),
+    sectionQuestion(vehicleCoverage, "fullGlassCoverage", "Full glass coverage?", "boolean"),
+    sectionQuestion(vehicleCoverage, "leaseCoverage", "Lease coverage?", "boolean"),
+    sectionQuestion(vehicleCoverage, "excludeLiability", "Exclude liability?", "boolean"),
+
+    sectionQuestion(incidents, "incidentType", "Incident type", "select", {
+      required: false,
+      options: ["Accident", "Comprehensive", "Theft", "Other"],
+    }),
+    sectionQuestion(incidents, "incidentDate", "Incident date", "date", { required: false }),
+    sectionQuestion(incidents, "incidentDriver", "Driver involved", "text", { required: false }),
+    sectionQuestion(incidents, "incidentVehicle", "Vehicle involved", "text", { required: false }),
+    sectionQuestion(incidents, "incidentDescription", "Incident description", "textarea", { required: false }),
+    sectionQuestion(incidents, "incidentFault", "Incident fault", "select", {
+      required: false,
+      options: ["At Fault", "Not At Fault"],
+    }),
+    sectionQuestion(incidents, "incidentPropertyDamageAmount", "Property damage amount", "currency", { required: false }),
+    sectionQuestion(incidents, "incidentBodilyInjuryAmount", "Bodily injury amount", "currency", { required: false }),
+
+    sectionQuestion(review, "applicantInformationVerified", "Applicant information verified?", "boolean"),
+    sectionQuestion(review, "addressVerified", "Address verified?", "boolean"),
+    sectionQuestion(review, "driversVerified", "Drivers verified?", "boolean"),
+    sectionQuestion(review, "vehiclesVerified", "Vehicles verified?", "boolean"),
+    sectionQuestion(review, "coveragesVerified", "Coverages verified?", "boolean"),
+    sectionQuestion(review, "incidentsVerified", "Incidents verified?", "boolean"),
   ];
 }
 
@@ -386,12 +576,16 @@ export function categoryQuestionnaire(
     : category.assetType === "coastal_home"
     ? 30
     : category.assetType === "luxury_vehicle"
-    ? 28
+    ? 160
     : 8;
+  const closingQuestions =
+    category.lineOfBusiness === "personal" && category.assetType === "luxury_vehicle"
+      ? []
+      : sharedClosingQuestions();
 
   return dedupe([
     ...categorySpecific,
-    ...sharedClosingQuestions(),
+    ...closingQuestions,
   ]).slice(0, maxQuestions);
 }
 
@@ -405,7 +599,7 @@ function questionKind(inputType: CategoryQuestion["inputType"]): QuotingQuestion
 export function categoryQuotingQuestions(category: InsuranceCategory): QuotingQuestion[] {
   return categoryQuestionnaire(category).map((question) => ({
     id: `category-${category.id}-${question.key}`,
-    section: `${category.label} intake`,
+    section: question.section ?? `${category.label} intake`,
     label: question.label,
     kind: questionKind(question.inputType),
     options:

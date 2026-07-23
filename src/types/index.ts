@@ -180,6 +180,7 @@ export interface CategoryQuestion {
   key: string;                              // camelCase field name in parsedData
   label: string;                            // shown to customer
   inputType: "text" | "number" | "currency" | "boolean" | "select" | "date" | "address" | "textarea";
+  section?: string;                         // optional questionnaire section heading
   options?: string[];                       // for `select`
   required?: boolean;
   placeholder?: string;
