@@ -3306,40 +3306,70 @@ function isLegacyQuoteReadyActivity(task: Task): boolean {
   return !!task.activityKey?.startsWith("quote-session:") && task.activityKey.endsWith(":quote_ready");
 }
 
-function personalQuoteActivityDescription(session: QuotingSession): string {
+function quoteActivityDescription(session: QuotingSession): string {
+  const lineLabel = session.lineOfBusiness === "commercial" ? "commercial-lines" : "personal-lines";
   switch (session.status) {
     case "awaiting_reply":
-      return "Quotex sent the personal-lines questionnaire and is waiting for the client to respond.";
+      return `Quotex sent the ${lineLabel} questionnaire and is waiting for the client to respond.`;
     case "quoting":
-      return "Quotex received the required information and is running the personal-lines carrier quotes.";
+      return `Quotex received the required information and is running the ${lineLabel} carrier quotes.`;
     case "complete":
-      return "Quotex completed the personal-lines quote flow and prepared the carrier ranking for review.";
+      return `Quotex completed the ${lineLabel} quote flow and prepared the carrier ranking for review.`;
     case "gathering_info":
     default:
-      return "Quotex is autonomously mapping the selected personal-lines assets and preparing the questionnaire.";
+      return `The ${lineLabel} quote flow has started and is gathering the information needed for the next step.`;
   }
 }
 
-function syncPersonalQuoteActivityStatus(
+function syncQuoteActivityStatus(
   session: QuotingSession,
   options?: { taskIds?: string[]; actorId?: string }
 ) {
-  if (session.lineOfBusiness !== "personal") return;
-
   const explicitTaskIds = new Set(options?.taskIds ?? []);
   const milestonePrefix = `quote-session:${session.id}:`;
   const actorId = options?.actorId ?? "ai";
-  const description = personalQuoteActivityDescription(session);
+  const description = quoteActivityDescription(session);
   const completed = session.status === "complete";
+  const quoteRequest = session.quoteRequestId
+    ? db.list("quoteRequests").find((row) => row.id === session.quoteRequestId)
+    : undefined;
+  if (quoteRequest?.recoveryTaskId) explicitTaskIds.add(quoteRequest.recoveryTaskId);
 
-  db.list("tasks")
-    .filter(
-      (task) =>
-        task.tenantId === session.tenantId &&
-        (explicitTaskIds.has(task.id) || task.quoteSessionId === session.id) &&
-        !task.activityKey?.startsWith(milestonePrefix)
-    )
-    .forEach((task) => {
+  const directlyLinkedTasks = db.list("tasks").filter(
+    (task) =>
+      task.tenantId === session.tenantId &&
+      !task.activityKey?.startsWith(milestonePrefix) &&
+      (explicitTaskIds.has(task.id) ||
+        task.quoteSessionId === session.id ||
+        (!!session.quoteRequestId && task.quoteRequestId === session.quoteRequestId))
+  );
+
+  // A staff-started flow can begin before its Activity Center row has a
+  // session ID. Link only the newest unresolved quote-related activity for
+  // the same contact, and never take a task already owned by another flow.
+  const fallbackTask = directlyLinkedTasks.length
+    ? undefined
+    : db
+        .list("tasks")
+        .filter((task) => {
+          if (task.tenantId !== session.tenantId || task.status === "resolved" || task.completedAt) {
+            return false;
+          }
+          if (task.quoteSessionId && task.quoteSessionId !== session.id) return false;
+          const sameContact = session.customerId
+            ? task.customerId === session.customerId
+            : session.prospectId
+              ? task.prospectId === session.prospectId
+              : false;
+          if (!sameContact) return false;
+          const quoteText = `${task.title} ${task.description ?? ""} ${task.aiSummary ?? ""}`;
+          return task.expressQuoteFollowUp === true || /\bquot(?:e|ing)\b/i.test(quoteText);
+        })
+        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
+
+  const tasks = fallbackTask ? [...directlyLinkedTasks, fallbackTask] : directlyLinkedTasks;
+
+  tasks.forEach((task) => {
       // Autonomous retries must never reopen work that a user already closed.
       if (task.status === "resolved" || task.completedAt) return;
 
@@ -3356,7 +3386,10 @@ function syncPersonalQuoteActivityStatus(
         logTaskAudit({
           tenantId: task.tenantId,
           actorId,
-          action: "task.resolved_by_personal_quote_automation",
+          action:
+            session.lineOfBusiness === "personal"
+              ? "task.resolved_by_personal_quote_automation"
+              : "task.resolved_by_quote_flow",
           taskId: task.id,
           metadata: { quoteSessionId: session.id, quoteStatus: session.status },
         });
@@ -3377,7 +3410,10 @@ function syncPersonalQuoteActivityStatus(
         logTaskAudit({
           tenantId: task.tenantId,
           actorId,
-          action: "task.in_progress_by_personal_quote_automation",
+          action:
+            session.lineOfBusiness === "personal"
+              ? "task.in_progress_by_personal_quote_automation"
+              : "task.in_progress_by_quote_flow",
           taskId: task.id,
           metadata: { quoteSessionId: session.id, quoteStatus: session.status },
         });
@@ -15384,7 +15420,7 @@ export const api = {
           if (task && sessionId) {
             const linkedSession = api.quoting.get(sessionId);
             if (linkedSession) {
-              syncPersonalQuoteActivityStatus(linkedSession, {
+              syncQuoteActivityStatus(linkedSession, {
                 taskIds: [task.id],
                 actorId: "ai",
               });
@@ -15498,8 +15534,10 @@ export const api = {
               categoryIds: category ? [category.id] : undefined,
               categoryLabels: category ? [category.label] : undefined,
               lineOfBusiness: "personal",
+              activityTaskIds: [task.id],
+              activityActorId: "ai",
             }));
-          syncPersonalQuoteActivityStatus(session, {
+          syncQuoteActivityStatus(session, {
             taskIds: [task.id],
             actorId: "ai",
           });
@@ -18204,6 +18242,10 @@ export const api = {
           quoteSessionId: session.id,
         });
       }
+      syncQuoteActivityStatus(session, {
+        taskIds: quoteRequest?.recoveryTaskId ? [quoteRequest.recoveryTaskId] : undefined,
+        actorId: input.createdById,
+      });
       return session;
     },
     // Phase 1: AI pulls public records + identifies missing fields.
@@ -18234,6 +18276,8 @@ export const api = {
       categoryLabels?: string[];
       lineOfBusiness?: QuotingLineOfBusiness;
       selectedAcordTemplateIds?: string[];
+      activityTaskIds?: string[];
+      activityActorId?: string;
     }): Promise<QuotingSession> {
       const startKey = quotingSessionStartKey(input);
       const existingOpenSession = startKey
@@ -18250,7 +18294,14 @@ export const api = {
             )
             .sort(sortQuotingSessionsByWorkRecency)[0]
         : undefined;
-      if (existingOpenSession) return ensureQuotingSessionConsistency(existingOpenSession);
+      if (existingOpenSession) {
+        const consistentSession = ensureQuotingSessionConsistency(existingOpenSession);
+        syncQuoteActivityStatus(consistentSession, {
+          taskIds: input.activityTaskIds,
+          actorId: input.activityActorId ?? input.createdById,
+        });
+        return consistentSession;
+      }
 
       const inFlightStart = startKey ? quotingSessionStartsInFlight.get(startKey) : undefined;
       if (inFlightStart) return inFlightStart;
@@ -18530,6 +18581,10 @@ export const api = {
         createdById: input.createdById,
       });
       // No missing fields + not commercial → run quotes immediately.
+      syncQuoteActivityStatus(activeRow, {
+        taskIds: input.activityTaskIds,
+        actorId: input.activityActorId ?? input.createdById,
+      });
       if (activeRow.status === "quoting" && !aiProviderErrorBlocksWorkflow(activeRow)) {
         return this.runQuotes(activeRow.id);
       }
@@ -18678,7 +18733,7 @@ export const api = {
           createdAt: preparedAt,
           createdById: session.createdById,
         });
-        syncPersonalQuoteActivityStatus(updated, { actorId: "ai" });
+        syncQuoteActivityStatus(updated, { actorId: "ai" });
       }
       return updated;
     },
@@ -18863,7 +18918,7 @@ export const api = {
           communicationId: comm.id,
           source: "agent",
         });
-        syncPersonalQuoteActivityStatus(updated, { actorId: "ai" });
+        syncQuoteActivityStatus(updated, { actorId: "ai" });
       }
       return updated;
     },
@@ -19673,7 +19728,7 @@ export const api = {
         updatedAt,
       });
       if (quotingSession) {
-        syncPersonalQuoteActivityStatus(quotingSession, { actorId: "ai" });
+        syncQuoteActivityStatus(quotingSession, { actorId: "ai" });
       }
       const contact = session.prospectId
         ? db.list("prospects").find((p) => p.id === session.prospectId)
@@ -19759,7 +19814,7 @@ export const api = {
           createdAt: sentAt,
           createdById: session.createdById,
         });
-        syncPersonalQuoteActivityStatus(updated, { actorId: "ai" });
+        syncQuoteActivityStatus(updated, { actorId: "ai" });
       }
       return updated;
     },
@@ -19774,7 +19829,7 @@ export const api = {
         updatedAt: receivedAt,
       });
       if (quotingSession) {
-        syncPersonalQuoteActivityStatus(quotingSession, { actorId: "ai" });
+        syncQuoteActivityStatus(quotingSession, { actorId: "ai" });
       }
       logQuotingWorkflowProgress(quotingSession ?? session, {
         message: "Client reply received; AI carrier ranking started.",
@@ -19864,7 +19919,7 @@ export const api = {
         status: options?.status ?? "complete",
         updatedAt: rankedAt,
       })!;
-      syncPersonalQuoteActivityStatus(updated, { actorId: "ai" });
+      syncQuoteActivityStatus(updated, { actorId: "ai" });
       logQuotingWorkflowProgress(updated, {
         message:
           updated.status === "awaiting_reply"
