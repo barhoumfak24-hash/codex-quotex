@@ -1650,26 +1650,19 @@ function workflowCompletedStepNumbers(session: QuotingSession): number[] {
 
 export function QuoteWorkflowProgress({ session }: { session: QuotingSession }) {
   const steps = workflowStepsForLine(session.lineOfBusiness ?? "personal");
-  const isPersonal = session.lineOfBusiness !== "commercial";
   const page =
     session.lineOfBusiness === "commercial"
       ? commercialFlowPage(session)
       : personalFlowPage(session);
 
   return (
-    <div
-      className={
-        isPersonal
-          ? "flex min-w-0 flex-wrap items-center gap-2"
-          : "flex min-w-max items-center gap-2"
-      }
-    >
+    <div className="flex min-w-max items-center gap-2">
       <WorkflowStepIcons
         steps={steps}
         currentStep={page.step}
         totalSteps={page.total}
         completedStepNumbers={workflowCompletedStepNumbers(session)}
-        wrap={isPersonal}
+        wrap={false}
       />
       <span className="shrink-0">
         <Badge tone="info">

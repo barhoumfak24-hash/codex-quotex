@@ -451,7 +451,7 @@ function ContactQuotingCard({
         <div
           className={
             existing
-              ? "grid min-w-0 gap-4 lg:grid-cols-[minmax(220px,300px)_minmax(0,1fr)_auto] lg:items-center"
+              ? "grid min-w-0 gap-4 lg:grid-cols-[minmax(230px,0.75fr)_minmax(0,1.75fr)_auto] lg:items-center"
               : "flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between"
           }
         >
@@ -469,13 +469,7 @@ function ContactQuotingCard({
             </div>
           </div>
           {existing ? (
-            <div
-              className={
-                existing.lineOfBusiness === "personal"
-                  ? "min-w-0 py-1 lg:justify-self-stretch"
-                  : "workflow-scroll-pane min-w-0 overflow-x-auto py-1 lg:justify-self-stretch"
-              }
-            >
+            <div className="workflow-scroll-pane min-w-0 overflow-x-auto py-1 lg:justify-self-stretch">
               <QuoteWorkflowProgress session={existing} />
             </div>
           ) : null}

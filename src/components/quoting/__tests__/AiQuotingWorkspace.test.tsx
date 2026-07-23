@@ -226,11 +226,11 @@ describe("AiQuotingWorkspace component", () => {
     expect(host.textContent).not.toContain("Quote flow in progress");
     expect(host.querySelector('[aria-label="Questionnaire: current"]')).toBeTruthy();
     expect(host.querySelector('[aria-label^="Workflow progress"]')?.className).toContain(
-      "flex-wrap"
+      "flex-nowrap"
     );
     expect(
       host.querySelector('[aria-label^="Workflow progress"]')?.closest(".overflow-x-auto")
-    ).toBeNull();
+    ).toBeTruthy();
     expect(
       host.querySelector('[aria-label^="Workflow progress"]')?.closest('[class*="lg:grid-cols-"]')
     ).toBeTruthy();
