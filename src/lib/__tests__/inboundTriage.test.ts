@@ -224,6 +224,20 @@ describe("communications.sweepInboundForActivities", () => {
       .find((row) => row.id === second.id)!;
     expect(freshFirst.aiActivityTaskId).toBe(activeEmailTasks[0].id);
     expect(freshSecond.aiActivityTaskId).toBe(activeEmailTasks[0].id);
+    const inboundRemarks = api.customers
+      .fullHistory(customer.id)
+      .filter(
+        (event) =>
+          event.inboundEmailIdentity === "message:same-real-email@example.com"
+      );
+    expect(inboundRemarks).toHaveLength(1);
+    expect(inboundRemarks[0]).toEqual(
+      expect.objectContaining({
+        message: "Inbound email remark: Please cancel my policy.",
+        taskId: activeEmailTasks[0].id,
+      })
+    );
+    expect([first.id, second.id]).toContain(inboundRemarks[0].communicationId);
   });
 
   it("consolidates existing duplicate email activities without deleting their history", async () => {
@@ -300,18 +314,34 @@ describe("communications.sweepInboundForActivities", () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     const customer = api.customers.list(agency.id)[0];
-    api.communications.create({
+    const acknowledgement = api.communications.create({
       tenantId: agency.id,
       customerId: customer.id,
       channel: "email",
       direction: "inbound",
+      subject: "Thank you",
       body: "Thank you so much!",
+      messageIdHeader: "<acknowledgement@example.com>",
     });
     const before = api.tasks.listByTenant(agency.id).length;
     api.communications.sweepInboundForActivities(agency.id);
     expect(api.tasks.listByTenant(agency.id).length).toBe(before);
     // Second sweep is a no-op (already scanned).
     expect(api.communications.sweepInboundForActivities(agency.id).length).toBe(0);
+    expect(
+      api.customers
+        .fullHistory(customer.id)
+        .filter(
+          (event) =>
+            event.inboundEmailIdentity === "message:acknowledgement@example.com"
+        )
+    ).toEqual([
+      expect.objectContaining({
+        communicationId: acknowledgement.id,
+        message: "Inbound email remark: Thank you.",
+        taskId: undefined,
+      }),
+    ]);
   });
 
   it("logs a notification instead of an activity for informational inbound messages", async () => {

@@ -118,7 +118,7 @@ describe("communications.create auto-emits a status event", () => {
     });
     const event = api.status.listFor({ customerId: customer.id })[0];
     expect(event.source).toBe("customer");
-    expect(event.message).toMatch(/Email received/);
+    expect(event.message).toMatch(/Inbound email remark/);
   });
 
   it("internal channel=note stays internal so customers don't see staff scratch", async () => {

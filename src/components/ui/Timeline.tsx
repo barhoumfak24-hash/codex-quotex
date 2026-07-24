@@ -359,6 +359,13 @@ function StatusDetail({
   const currentUrl = `${location.pathname}${location.search}${location.hash}`;
   const navigableRelatedTarget = relatedTarget?.to === currentUrl ? null : relatedTarget;
   const providerTarget = providerMessageTargetForCommunication(comm);
+  const activityTarget =
+    context === "employee" && event.taskId
+      ? {
+          to: `/employee/tasks?focus=${encodeURIComponent(event.taskId)}`,
+          label: openTo("activity"),
+        }
+      : null;
 
   return (
     <div className="space-y-4">
@@ -374,8 +381,18 @@ function StatusDetail({
         {policy && <Field label="Policy">{fmt.policyRef(policy)}</Field>}
       </dl>
 
-      {(navigableRelatedTarget || providerTarget) && (
+      {(activityTarget || navigableRelatedTarget || providerTarget) && (
         <div className="flex flex-wrap gap-2">
+          {activityTarget && (
+            <Link
+              to={activityTarget.to}
+              onClick={onNavigate}
+              className="btn-outline inline-flex text-sm"
+            >
+              <ArrowUpRight className="h-3.5 w-3.5" />
+              {activityTarget.label}
+            </Link>
+          )}
           {navigableRelatedTarget && (
             <Link
               to={navigableRelatedTarget.to}

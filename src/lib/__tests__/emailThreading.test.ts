@@ -131,7 +131,7 @@ describe("communications threading", () => {
     const inboundRemark = api.status
       .listFor({ customerId: customer.id })
       .find((event) => event.communicationId === inbound?.id);
-    expect(inboundRemark?.message).toBe("Email received: Question about renewal.");
+    expect(inboundRemark?.message).toBe("Inbound email remark: Question about renewal.");
     expect(inboundRemark?.source).toBe("customer");
     expect(inboundRemark?.createdAt).toBe("2026-05-31T12:00:00.000Z");
     const mirrored = api.communications

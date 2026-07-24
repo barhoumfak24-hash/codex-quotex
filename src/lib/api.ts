@@ -3359,6 +3359,10 @@ function normalizeMessageHeaderId(value?: string): string {
 
 function communicationStatusEvent(row: Communication) {
   if (!row.customerId && !row.prospectId) return;
+  if (row.direction === "inbound" && row.channel === "email") {
+    ensureInboundEmailRemark(row);
+    return;
+  }
   const existing = db
     .list("statusEvents")
     .find((event) => event.communicationId === row.id);
@@ -3527,6 +3531,98 @@ function inboundEmailCopies(row: Communication): Communication[] {
     );
 }
 
+function preferredInboundEmailCommunication(
+  communications: Communication[]
+): Communication | undefined {
+  return [...communications].sort((a, b) => {
+    const score = (candidate: Communication) =>
+      (candidate.externalUrl ? 8 : 0) +
+      (candidate.externalMessageId ? 4 : 0) +
+      (candidate.messageIdHeader || candidate.rfc822MessageId ? 2 : 0) +
+      ((candidate.attachments?.length ?? 0) > 0 ? 1 : 0);
+    const scoreDifference = score(b) - score(a);
+    if (scoreDifference !== 0) return scoreDifference;
+    const createdDifference = a.createdAt.localeCompare(b.createdAt);
+    return createdDifference !== 0 ? createdDifference : a.id.localeCompare(b.id);
+  })[0];
+}
+
+function inboundEmailStatusEvents(row: Communication): StatusEvent[] {
+  const identity = inboundEmailIdentity(row);
+  const communicationIds = new Set(inboundEmailCopies(row).map((copy) => copy.id));
+  return db
+    .list("statusEvents")
+    .filter(
+      (event) =>
+        event.tenantId === row.tenantId &&
+        (event.inboundEmailIdentity === identity ||
+          (!!event.communicationId &&
+            communicationIds.has(event.communicationId) &&
+            /^(?:email received|inbound email remark)\b/i.test(event.message)))
+    );
+}
+
+function ensureInboundEmailRemark(
+  inbound: Communication,
+  taskId?: string
+): StatusEvent | undefined {
+  if (
+    inbound.direction !== "inbound" ||
+    inbound.channel !== "email" ||
+    (!inbound.customerId && !inbound.prospectId)
+  ) {
+    return undefined;
+  }
+
+  const copies = inboundEmailCopies(inbound);
+  const canonicalCommunication =
+    preferredInboundEmailCommunication(copies) ?? inbound;
+  const identity = inboundEmailIdentity(inbound);
+  const linkedTaskId =
+    taskId ??
+    preferredInboundEmailTask(inboundEmailTasks(inbound))?.id ??
+    canonicalCommunication.aiActivityTaskId;
+  const subject = canonicalCommunication.subject?.trim() || "(no subject)";
+  const patch: Omit<StatusEvent, "id"> = {
+    tenantId: inbound.tenantId,
+    source: "customer",
+    message: `Inbound email remark: ${subject}.`,
+    visibility: "internal",
+    customerId:
+      canonicalCommunication.customerId ??
+      copies.find((copy) => copy.customerId)?.customerId,
+    prospectId:
+      canonicalCommunication.prospectId ??
+      copies.find((copy) => copy.prospectId)?.prospectId,
+    communicationId: canonicalCommunication.id,
+    taskId: linkedTaskId,
+    inboundEmailIdentity: identity,
+    createdAt: canonicalCommunication.createdAt || inbound.createdAt || nowIso(),
+    createdById: canonicalCommunication.createdById,
+  };
+  const existing = inboundEmailStatusEvents(inbound).sort((a, b) => {
+    const score = (event: StatusEvent) =>
+      (event.inboundEmailIdentity ? 4 : 0) +
+      (event.taskId ? 2 : 0) +
+      (event.communicationId === canonicalCommunication.id ? 1 : 0);
+    const scoreDifference = score(b) - score(a);
+    if (scoreDifference !== 0) return scoreDifference;
+    return a.createdAt.localeCompare(b.createdAt);
+  })[0];
+
+  if (existing) {
+    return db.update("statusEvents", existing.id, patch) ?? {
+      ...existing,
+      ...patch,
+    };
+  }
+
+  return db.insert("statusEvents", {
+    id: uid("se"),
+    ...patch,
+  });
+}
+
 function inboundEmailTasks(row: Communication): Task[] {
   const communicationIds = new Set(inboundEmailCopies(row).map((candidate) => candidate.id));
   const activityKey = inboundEmailActivityKey(row);
@@ -3562,6 +3658,7 @@ function linkInboundEmailCopiesToTask(
       db.update("communications", copy.id, { aiActivityTaskId: taskId });
     }
   });
+  ensureInboundEmailRemark(inbound, taskId);
 }
 
 function consolidateInboundEmailActivities(tenantId: string, actorId?: string) {
@@ -3584,9 +3681,9 @@ function consolidateInboundEmailActivities(tenantId: string, actorId?: string) {
   grouped.forEach((communications) => {
     const reference = communications[0];
     const tasks = inboundEmailTasks(reference);
-    if (tasks.length === 0) return;
-
     const keeper = preferredInboundEmailTask(tasks);
+    ensureInboundEmailRemark(reference, keeper?.id);
+    if (tasks.length === 0) return;
     if (!keeper) return;
 
     const activityKey = inboundEmailActivityKey(reference);
@@ -5193,15 +5290,42 @@ function comprehensiveClientHistory(customerId: string): StatusEvent[] {
 
   const seen = new Map<string, StatusEvent>();
   for (const event of events) {
-    const key = [
-      event.id,
-      event.message,
-      event.createdAt,
-      event.customerId ?? "",
-      event.prospectId ?? "",
-      event.communicationId ?? "",
-    ].join("|");
-    if (!seen.has(key)) seen.set(key, event);
+    const linkedCommunication = event.communicationId
+      ? db
+          .list("communications")
+          .find((communication) => communication.id === event.communicationId)
+      : undefined;
+    const inboundIdentity =
+      event.inboundEmailIdentity ??
+      (linkedCommunication?.direction === "inbound" &&
+      linkedCommunication.channel === "email"
+        ? inboundEmailIdentity(linkedCommunication)
+        : undefined);
+    const isInboundEmailRemark =
+      !!inboundIdentity &&
+      /^(?:email received|inbound email remark)\b/i.test(event.message);
+    const key = isInboundEmailRemark
+      ? `inbound-email-remark|${event.tenantId}|${inboundIdentity}`
+      : [
+          event.id,
+          event.message,
+          event.createdAt,
+          event.customerId ?? "",
+          event.prospectId ?? "",
+          event.communicationId ?? "",
+        ].join("|");
+    const existing = seen.get(key);
+    if (!existing) {
+      seen.set(key, event);
+      continue;
+    }
+    if (isInboundEmailRemark) {
+      const score = (candidate: StatusEvent) =>
+        (candidate.inboundEmailIdentity ? 4 : 0) +
+        (candidate.taskId ? 2 : 0) +
+        (candidate.message.startsWith("Inbound email remark:") ? 1 : 0);
+      if (score(event) > score(existing)) seen.set(key, event);
+    }
   }
   return [...seen.values()].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
 }

@@ -160,7 +160,7 @@ describe("Timeline", () => {
     });
 
     const timelineButton = Array.from(container.querySelectorAll("button")).find((button) =>
-      button.textContent?.includes("Email received: Updated roof photos.")
+      button.textContent?.includes("Inbound email remark: Updated roof photos.")
     ) as HTMLButtonElement;
     expect(timelineButton).toBeTruthy();
 
@@ -175,5 +175,59 @@ describe("Timeline", () => {
     expect(providerLink.getAttribute("href")).toBe(
       "https://mail.google.com/mail/u/0/#inbox/gmail_timeline_msg_1"
     );
+  });
+
+  it("opens the activity created for the exact inbound email remark", async () => {
+    const { api } = await import("@/lib/api");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const inbound = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      subject: "Please cancel my policy",
+      body: "Please cancel my policy at the end of this month.",
+      messageIdHeader: "<timeline-activity@example.com>",
+    });
+    api.communications.sweepInboundForActivities(agency.id);
+    const fresh = api.communications
+      .listByCustomer(customer.id)
+      .find((row) => row.id === inbound.id)!;
+    const event = api.customers
+      .fullHistory(customer.id)
+      .find((row) => row.inboundEmailIdentity === "message:timeline-activity@example.com");
+    expect(event).toEqual(
+      expect.objectContaining({
+        communicationId: inbound.id,
+        taskId: fresh.aiActivityTaskId,
+      })
+    );
+
+    act(() => {
+      root.render(
+        <MemoryRouter initialEntries={[`/employee/clients/${customer.id}#client-remarks`]}>
+          <Timeline events={[event!]} />
+        </MemoryRouter>
+      );
+    });
+
+    const timelineButton = Array.from(container.querySelectorAll("button")).find((button) =>
+      button.textContent?.includes("Inbound email remark: Please cancel my policy.")
+    ) as HTMLButtonElement;
+    expect(timelineButton).toBeTruthy();
+
+    act(() => {
+      timelineButton.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    const activityLink = Array.from(container.querySelectorAll("a")).find((anchor) =>
+      anchor.textContent?.includes("Open to activity")
+    ) as HTMLAnchorElement;
+    expect(activityLink).toBeTruthy();
+    expect(activityLink.getAttribute("href")).toBe(
+      `/employee/tasks?focus=${fresh.aiActivityTaskId}`
+    );
+    expect(container.textContent).toContain("View message");
   });
 });

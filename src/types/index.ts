@@ -1586,6 +1586,14 @@ export interface StatusEvent {
   // sent" / "Email received" auto-events). Lets the timeline modal
   // deep-link to the exact message in the Messages card.
   communicationId?: string;
+  // Activity Center work item created from the same event. Inbound
+  // email remarks use this alongside communicationId so the remark can
+  // open both the exact email and the work it created.
+  taskId?: string;
+  // Stable tenant-wide identity for an inbound email. Provider sync can
+  // mirror the same RFC message into multiple staff mailboxes; this key
+  // keeps the client timeline to one durable remark for the actual email.
+  inboundEmailIdentity?: string;
   // Outbound MarketingMessage tied to the event (AI sends, custom
   // message sends). Mirrors communicationId for the marketing side.
   marketingMessageId?: string;
