@@ -5723,6 +5723,22 @@ function ensureInboundDraftFollowUpTask(input: {
   documentId?: string;
   actorId?: string;
 }): Task {
+  if (input.topic === "coverage_change") {
+    const existingQuoteTask = existingQuoteIntakeTaskForInbound(input.inbound);
+    if (existingQuoteTask) {
+      const updated =
+        db.update("tasks", existingQuoteTask.id, {
+          assignedToId: existingQuoteTask.assignedToId ?? input.assignedToId,
+          awaitingManagerAssignment:
+            !(existingQuoteTask.assignedToId ?? input.assignedToId) || undefined,
+          aiReplyBody: input.draft.body,
+          aiReplySubject: input.draft.subject,
+        }) ?? existingQuoteTask;
+      linkInboundEmailCopiesToTask(input.inbound, updated.id);
+      consolidateQuoteIntakeActivity(input.inbound, updated);
+      return updated;
+    }
+  }
   return ensureInboundEmailTask({
     inbound: input.inbound,
     title: input.title,
@@ -6254,6 +6270,180 @@ function normalizedEmailSubject(value?: string): string {
     .replace(/\s+/g, " ");
 }
 
+function activeQuoteIntakeTask(task: Task, inbound: Communication): boolean {
+  if (
+    task.tenantId !== inbound.tenantId ||
+    task.completedAt ||
+    task.status === "resolved"
+  ) {
+    return false;
+  }
+  const sameContact =
+    (!!inbound.customerId && task.customerId === inbound.customerId) ||
+    (!!inbound.prospectId && task.prospectId === inbound.prospectId);
+  if (!sameContact || task.topic !== "coverage_change") return false;
+  return /\b(?:quote|vehicle|vin|auto|truck|property|home)\b/i.test(
+    `${task.title}\n${task.description ?? ""}\n${task.aiSummary ?? ""}\n${
+      task.originalMessageContent ?? ""
+    }`
+  );
+}
+
+function communicationsShareQuoteConversation(
+  candidate: Communication,
+  inbound: Communication
+): boolean {
+  if (
+    candidate.tenantId !== inbound.tenantId ||
+    !communicationContactMatches(candidate, inbound)
+  ) {
+    return false;
+  }
+  if (candidate.id === inbound.id) return true;
+  if (candidate.threadId && candidate.threadId === inbound.threadId) return true;
+  if (
+    candidate.externalThreadId &&
+    candidate.externalThreadId === inbound.externalThreadId
+  ) {
+    return true;
+  }
+  if (
+    candidate.aiDraftSourceCommunicationId === inbound.id ||
+    inbound.aiDraftSourceCommunicationId === candidate.id ||
+    candidate.replyToId === inbound.id ||
+    inbound.replyToId === candidate.id
+  ) {
+    return true;
+  }
+
+  const inboundHeaders = new Set(
+    [
+      inbound.messageIdHeader,
+      inbound.externalMessageId,
+      inbound.inReplyToHeader,
+      ...(inbound.references ?? []),
+    ]
+      .map((value) => normalizeMessageHeaderId(value))
+      .filter(Boolean)
+  );
+  const sharesHeader = [
+    candidate.messageIdHeader,
+    candidate.externalMessageId,
+    candidate.inReplyToHeader,
+    ...(candidate.references ?? []),
+  ]
+    .map((value) => normalizeMessageHeaderId(value))
+    .some((value) => value && inboundHeaders.has(value));
+  if (sharesHeader) return true;
+
+  const candidateSubject = normalizedEmailSubject(candidate.subject);
+  const inboundSubject = normalizedEmailSubject(inbound.subject);
+  return (
+    !!candidateSubject &&
+    candidateSubject === inboundSubject &&
+    /\b(?:quote|vehicle|vin|auto|truck|property|home)\b/i.test(candidateSubject)
+  );
+}
+
+function existingQuoteIntakeTaskForInbound(inbound: Communication): Task | undefined {
+  const conversation = db
+    .list("communications")
+    .filter((candidate) => communicationsShareQuoteConversation(candidate, inbound));
+  const communicationIds = new Set(conversation.map((candidate) => candidate.id));
+  const linkedTaskIds = new Set(
+    conversation
+      .map((candidate) => candidate.aiActivityTaskId)
+      .filter((value): value is string => Boolean(value))
+  );
+  const candidates = db
+    .list("tasks")
+    .filter((task) => activeQuoteIntakeTask(task, inbound));
+  const linked = candidates
+    .filter(
+      (task) =>
+        linkedTaskIds.has(task.id) ||
+        communicationIds.has(task.messageId ?? "") ||
+        communicationIds.has(task.originalMessageId ?? "")
+    )
+    .sort((a, b) => (a.createdAt > b.createdAt ? 1 : -1));
+  if (linked[0]) return linked[0];
+
+  const openSessionIds = new Set(
+    db
+      .list("quotingSessions")
+      .filter(
+        (session) =>
+          session.tenantId === inbound.tenantId &&
+          ((!inbound.customerId || session.customerId === inbound.customerId) &&
+            (!inbound.prospectId || session.prospectId === inbound.prospectId)) &&
+          isQuotingWorkflowOpen(session)
+      )
+      .map((session) => session.id)
+  );
+  const sessionLinked = candidates
+    .filter((task) => openSessionIds.has(task.quoteSessionId ?? ""))
+    .sort((a, b) => (a.createdAt > b.createdAt ? 1 : -1));
+  if (sessionLinked[0]) return sessionLinked[0];
+
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+function consolidateQuoteIntakeActivity(inbound: Communication, canonical: Task): void {
+  const duplicateIds = new Set(
+    db
+      .list("tasks")
+      .filter(
+        (task) =>
+          task.id !== canonical.id &&
+          activeQuoteIntakeTask(task, inbound) &&
+          (task.id === inbound.aiActivityTaskId ||
+            task.messageId === inbound.id ||
+            task.originalMessageId === inbound.id)
+      )
+      .map((task) => task.id)
+  );
+
+  db
+    .list("communications")
+    .filter(
+      (communication) =>
+        communication.tenantId === inbound.tenantId &&
+        (communication.id === inbound.id ||
+          duplicateIds.has(communication.aiActivityTaskId ?? ""))
+    )
+    .forEach((communication) =>
+      db.update("communications", communication.id, {
+        aiActivityTaskId: canonical.id,
+      })
+    );
+  db
+    .list("statusEvents")
+    .filter((event) => duplicateIds.has(event.taskId ?? ""))
+    .forEach((event) => db.update("statusEvents", event.id, { taskId: canonical.id }));
+
+  duplicateIds.forEach((duplicateId) => {
+    const completedAt = nowIso();
+    db.update("tasks", duplicateId, {
+      status: "resolved",
+      completedAt,
+      completedById: "ai",
+      resolutionNote:
+        "Automatically consolidated with the existing activity for this quote request.",
+      resolutionNoteAt: completedAt,
+    });
+    logTaskAudit({
+      tenantId: inbound.tenantId,
+      actorId: "ai",
+      action: "task.resolved_duplicate_quote_reply",
+      taskId: duplicateId,
+      metadata: {
+        canonicalTaskId: canonical.id,
+        communicationId: inbound.id,
+      },
+    });
+  });
+}
+
 function priorQuoteContextForCommunication(row: Communication): string {
   const subject = normalizedEmailSubject(row.subject);
   const recentOutbound = db
@@ -6292,12 +6482,19 @@ function quoteAutomationCanRun(row: Communication): boolean {
 }
 
 function removeStaleQuoteIntakeDrafts(inbound: Communication): void {
+  const conversationIds = new Set(
+    db
+      .list("communications")
+      .filter((candidate) => communicationsShareQuoteConversation(candidate, inbound))
+      .map((candidate) => candidate.id)
+  );
+  conversationIds.add(inbound.id);
   const drafts = db
     .list("communications")
     .filter(
       (candidate) =>
         candidate.tenantId === inbound.tenantId &&
-        candidate.aiDraftSourceCommunicationId === inbound.id &&
+        conversationIds.has(candidate.aiDraftSourceCommunicationId ?? "") &&
         candidate.aiServiceIntent === "vehicle_quote_intake" &&
         candidate.deliveryStatus === "draft"
     );
@@ -6310,14 +6507,16 @@ function removeStaleQuoteIntakeDrafts(inbound: Communication): void {
       (notification) =>
         notification.tenantId === inbound.tenantId &&
         (draftIds.has(notification.messageId ?? "") ||
-          notification.communicationId === inbound.id)
+          conversationIds.has(notification.communicationId ?? ""))
     )
     .forEach((notification) => db.remove("aiNotifications", notification.id));
   drafts.forEach((draft) => db.remove("communications", draft.id));
-  db.update("communications", inbound.id, {
-    aiReplyDraftId: undefined,
-    aiDraftMissingFields: undefined,
-  });
+  conversationIds.forEach((communicationId) =>
+    db.update("communications", communicationId, {
+      aiReplyDraftId: undefined,
+      aiDraftMissingFields: undefined,
+    })
+  );
 }
 
 function processImportedInboundCommunication(
@@ -16158,13 +16357,16 @@ export const api = {
 
         const claimedAt = nowIso();
         const attempts = (original.aiQuoteAutomationAttempts ?? 0) + 1;
-        let task = db
+        const directlyLinkedTask = db
           .list("tasks")
           .find(
             (candidate) =>
               candidate.tenantId === tenantId &&
               (candidate.id === original.aiActivityTaskId || candidate.messageId === original.id)
           );
+        let task =
+          existingQuoteIntakeTaskForInbound(original) ?? directlyLinkedTask;
+        if (task) consolidateQuoteIntakeActivity(original, task);
         const assignedOwnerId = assignedContactOwner(contact);
         const actor = actorId
           ? db
