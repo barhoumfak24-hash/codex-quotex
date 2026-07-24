@@ -781,6 +781,7 @@ describe("communications.automatePersonalQuoteReplies", () => {
     const processedInbound = db
       .list("communications")
       .find((communication) => communication.id === inbound.id)!;
+    expect(processedInbound.aiQuoteAutomationInputSignature).toMatch(/^v2:/);
     const linkedActivity = db
       .list("tasks")
       .find((task) => task.id === processedInbound.aiActivityTaskId)!;

@@ -6254,6 +6254,7 @@ type PersonalQuoteAutomationResult = {
 
 const PERSONAL_QUOTE_AUTOMATION_MAX_ATTEMPTS = 3;
 const PERSONAL_QUOTE_AUTOMATION_PENDING_TIMEOUT_MS = 5 * 60_000;
+const PERSONAL_QUOTE_AUTOMATION_VERSION = 2;
 
 function communicationContactMatches(a: Communication, b: Communication): boolean {
   return (
@@ -6482,6 +6483,7 @@ function priorQuoteContextForCommunication(row: Communication): string {
 
 function quoteAutomationInputSignature(row: Communication): string {
   const input = [
+    `v${PERSONAL_QUOTE_AUTOMATION_VERSION}`,
     normalizedEmailSubject(row.subject),
     row.body.trim().replace(/\r\n/g, "\n"),
     row.customerId ?? "",
@@ -6492,7 +6494,7 @@ function quoteAutomationInputSignature(row: Communication): string {
     hash ^= input.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
   }
-  return `${input.length}:${(hash >>> 0).toString(36)}`;
+  return `v${PERSONAL_QUOTE_AUTOMATION_VERSION}:${input.length}:${(hash >>> 0).toString(36)}`;
 }
 
 function quoteAutomationCanRun(row: Communication): boolean {

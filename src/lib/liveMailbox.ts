@@ -643,9 +643,10 @@ async function mirrorSyncedMailboxMessages(
       mirroredCommunicationIds.push(mirrored.id);
     }
 
-    if (mirroredCommunicationIds.length > 0) {
-      await api.communications.automatePersonalQuoteReplies(tenantId, user.id);
-    }
+    // Reconsider locally stored inbound replies on every sync. The automation
+    // signature keeps completed work idempotent while allowing corrected
+    // automation versions to safely repair an older reply.
+    await api.communications.automatePersonalQuoteReplies(tenantId, user.id);
 
     const processing = mirroredCommunicationIds.length > 0
       ? await api.quoting.processInboundCarrierCommunications(tenantId, {
