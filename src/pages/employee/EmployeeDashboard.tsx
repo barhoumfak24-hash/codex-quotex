@@ -1014,7 +1014,7 @@ function PastReminderRow({
 // inbound customer messages + unread internal DMs, sorted newest
 // first. Each row deep-links to the right place — Activity Center
 // for tasks, Messages page for the client / internal threads.
-function NotificationsList({
+export function NotificationsList({
   tenantId,
   userId,
   visibleCustomerIds,
@@ -1034,7 +1034,8 @@ function NotificationsList({
       (t) =>
         (t.assignedToId === userId || (t.additionalAssignedToIds ?? []).includes(userId)) &&
         new Date(t.createdAt).getTime() >= sevenDaysAgo &&
-        !t.startedAt
+        !t.startedAt &&
+        !(t.dashboardDismissedByUserIds ?? []).includes(userId)
     );
 
   // Pending inbound customer messages for clients the user can see.
@@ -1094,8 +1095,8 @@ function NotificationsList({
       title: incompleteQuote ? "Incomplete customer quote" : "New activity assigned",
       detail: t.title,
       href: `/employee/tasks?focus=${t.id}`,
-      onDismiss: () => api.tasks.deleteActivity(t.id, userId),
-      dismissLabel: "Delete activity notification",
+      onDismiss: () => api.tasks.dismissFromDashboard(t.id, userId),
+      dismissLabel: "Dismiss activity notification",
     });
   });
   pendingComms.forEach((c) => {

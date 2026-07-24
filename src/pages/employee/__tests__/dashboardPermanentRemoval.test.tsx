@@ -5,7 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { api } from "@/lib/api";
 import { db } from "@/lib/db";
-import { ActivityQuickList } from "../EmployeeDashboard";
+import { ActivityQuickList, NotificationsList } from "../EmployeeDashboard";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -29,6 +29,46 @@ afterEach(() => {
 });
 
 describe("dashboard activity dismissal", () => {
+  it("dismisses an activity notification without deleting the activity", () => {
+    const agency = api.agencies.list()[0]!;
+    const user = api.users.list(agency.id)[0]!;
+    const task = api.tasks.create({
+      tenantId: agency.id,
+      title: "Keep the underlying activity",
+      assignedToId: user.id,
+    });
+    const onChanged = vi.fn();
+
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <NotificationsList
+            tenantId={agency.id}
+            userId={user.id}
+            visibleCustomerIds={new Set()}
+            onChanged={onChanged}
+          />
+        </MemoryRouter>
+      );
+    });
+
+    expect(container.textContent).toContain("Keep the underlying activity");
+    const dismissButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Dismiss activity notification"]'
+    );
+    expect(dismissButton).not.toBeNull();
+
+    act(() => dismissButton!.click());
+
+    expect(api.tasks.get(task.id)).toMatchObject({
+      id: task.id,
+      dashboardDismissedByUserIds: [user.id],
+    });
+    expect(api.tasks.listOpen(agency.id).some((item) => item.id === task.id)).toBe(true);
+    expect(container.textContent).not.toContain("Keep the underlying activity");
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
   it("dismisses an activity from one user's dashboard without deleting it", () => {
     const agency = api.agencies.list()[0]!;
     const user = api.users.list(agency.id)[0]!;
