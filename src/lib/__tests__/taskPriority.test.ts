@@ -108,4 +108,48 @@ describe("tasks priority + severity", () => {
     expect(actions).toContain("task.moved_to_front");
     expect(actions).toContain("task.severity_changed");
   });
+
+  it("deletes only the activity and preserves its remarks with a final deletion remark", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const user = api.users.list(agency.id).find((candidate) => candidate.role === "manager")!;
+    const customer = api.customers.list(agency.id)[0];
+    const task = api.tasks.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      title: "Call client about renewal",
+      createdById: user.id,
+    });
+    const existingRemark = api.status.create({
+      tenantId: agency.id,
+      source: "agent",
+      message: "Client asked for a callback",
+      visibility: "internal",
+      customerId: customer.id,
+      taskId: task.id,
+      createdById: user.id,
+    });
+
+    expect(api.tasks.deleteActivity(task.id, user.id)).toBe(true);
+    expect(api.tasks.get(task.id)).toBeUndefined();
+
+    const remarks = api.status.listFor({ customerId: customer.id });
+    expect(remarks.some((remark) => remark.id === existingRemark.id)).toBe(true);
+    expect(
+      remarks.filter(
+        (remark) =>
+          remark.message === "Activity deleted" &&
+          remark.visibility === "internal" &&
+          remark.createdById === user.id
+      )
+    ).toHaveLength(1);
+    expect(api.tasks.history(task.id).map((entry) => entry.action)).toContain("task.deleted");
+
+    expect(api.tasks.deleteActivity(task.id, user.id)).toBe(false);
+    expect(
+      api.status
+        .listFor({ customerId: customer.id })
+        .filter((remark) => remark.message === "Activity deleted")
+    ).toHaveLength(1);
+  });
 });

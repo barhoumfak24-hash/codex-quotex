@@ -28,6 +28,7 @@ import {
   Plus,
   RotateCcw,
   Sparkles,
+  Trash2,
   Umbrella,
   User,
   UserCog,
@@ -1418,7 +1419,7 @@ function RoutingCard({
   function removeRoutingItem(kind: "prospect" | "client" | "activity", row: RoutingRow) {
     if (kind === "activity" || (row.assignId && row.assignId === row.id)) {
       const taskId = row.assignId ?? row.id;
-      api.tasks.remove(taskId);
+      api.tasks.deleteActivity(taskId, currentUserId);
       setHiddenRoutingRows((current) => {
         const next = new Set(current);
         next.add(`activity:${taskId}`);
@@ -2830,6 +2831,14 @@ function ActivityCard({
               {task.reassignRequestedAt ? "Reassignment requested" : "Request reassignment"}
             </button>
           )}
+          <button
+            type="button"
+            className="btn-outline text-xs !border-red-200 !text-red-700 hover:!border-red-300 hover:!bg-red-50"
+            onClick={() => api.tasks.deleteActivity(task.id, user?.id)}
+            title="Permanently delete this activity. Its existing remarks will remain in the client or prospect record."
+          >
+            <Trash2 className="h-3.5 w-3.5" /> Delete activity
+          </button>
         </div>
           </div>
         </div>

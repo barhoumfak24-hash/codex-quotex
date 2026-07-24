@@ -18257,6 +18257,39 @@ export const api = {
         .filter((a) => a.entityType === "task" && a.entityId === taskId)
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
     },
+    deleteActivity(id: string, actorId?: string): boolean {
+      const row = db.list("tasks").find((task) => task.id === id);
+      if (!row) return false;
+
+      // Activity remarks are durable records of what happened. Deleting the
+      // work item removes only the task itself and adds one final timeline
+      // entry; existing status events, notes, messages, and attachments remain.
+      db.insert("statusEvents", {
+        id: uid("se"),
+        tenantId: row.tenantId,
+        source: actorId ? "agent" : "system",
+        message: "Activity deleted",
+        visibility: "internal",
+        customerId: row.customerId,
+        prospectId: row.prospectId,
+        assetId: row.assetId,
+        policyId: row.policyId,
+        claimId: row.claimId,
+        documentId: row.documentId,
+        quoteSessionId: row.quoteSessionId,
+        quoteRequestId: row.quoteRequestId,
+        createdAt: nowIso(),
+        createdById: actorId,
+      });
+      logTaskAudit({
+        tenantId: row.tenantId,
+        actorId,
+        action: "task.deleted",
+        taskId: row.id,
+        metadata: { title: row.title },
+      });
+      return db.remove("tasks", id);
+    },
     remove(id: string) {
       return db.remove("tasks", id);
     },

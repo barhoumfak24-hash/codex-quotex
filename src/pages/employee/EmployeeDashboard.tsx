@@ -700,7 +700,7 @@ export function ActivityQuickList({
       href: `/employee/tasks?focus=${t.id}`,
       tone: t.severity,
       removeLabel: "Delete activity",
-      onRemove: () => api.tasks.remove(t.id),
+      onRemove: () => api.tasks.deleteActivity(t.id, userId),
     })),
     ...routingTasks.map((t) => ({
       id: `routing-task:${t.id}`,
@@ -715,7 +715,7 @@ export function ActivityQuickList({
       href: `/employee/tasks?focus=${t.id}`,
       tone: (t.routeRequestMode === "reroute" ? "warning" : "info") as import("@/types").TaskSeverity,
       removeLabel: "Delete routing activity",
-      onRemove: () => api.tasks.remove(t.id),
+      onRemove: () => api.tasks.deleteActivity(t.id, userId),
     })),
     ...routingProspects.map((p) => ({
       id: `routing-prospect:${p.id}`,
@@ -1082,7 +1082,7 @@ function NotificationsList({
       title: incompleteQuote ? "Incomplete customer quote" : "New activity assigned",
       detail: t.title,
       href: `/employee/tasks?focus=${t.id}`,
-      onDismiss: () => api.tasks.remove(t.id),
+      onDismiss: () => api.tasks.deleteActivity(t.id, userId),
       dismissLabel: "Delete activity notification",
     });
   });
