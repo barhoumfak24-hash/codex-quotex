@@ -6358,15 +6358,6 @@ function existingQuoteIntakeTaskForInbound(inbound: Communication): Task | undef
   const candidates = db
     .list("tasks")
     .filter((task) => activeQuoteIntakeTask(task, inbound));
-  const linked = candidates
-    .filter(
-      (task) =>
-        linkedTaskIds.has(task.id) ||
-        communicationIds.has(task.messageId ?? "") ||
-        communicationIds.has(task.originalMessageId ?? "")
-    )
-    .sort((a, b) => (a.createdAt > b.createdAt ? 1 : -1));
-  if (linked[0]) return linked[0];
 
   const openSessionIds = new Set(
     db
@@ -6385,7 +6376,31 @@ function existingQuoteIntakeTaskForInbound(inbound: Communication): Task | undef
     .sort((a, b) => (a.createdAt > b.createdAt ? 1 : -1));
   if (sessionLinked[0]) return sessionLinked[0];
 
-  return candidates.length === 1 ? candidates[0] : undefined;
+  const linked = candidates
+    .filter(
+      (task) =>
+        linkedTaskIds.has(task.id) ||
+        communicationIds.has(task.messageId ?? "") ||
+        communicationIds.has(task.originalMessageId ?? "")
+    )
+    .sort((a, b) => {
+      const aCreatedFromReply =
+        a.id === inbound.aiActivityTaskId ||
+        a.messageId === inbound.id ||
+        a.originalMessageId === inbound.id;
+      const bCreatedFromReply =
+        b.id === inbound.aiActivityTaskId ||
+        b.messageId === inbound.id ||
+        b.originalMessageId === inbound.id;
+      if (aCreatedFromReply !== bCreatedFromReply) return aCreatedFromReply ? 1 : -1;
+      return a.createdAt > b.createdAt ? 1 : -1;
+    });
+  if (linked[0]) return linked[0];
+
+  // A client can only have one active quote flow. If provider threading is
+  // incomplete, prefer the oldest unresolved quote-intake activity instead
+  // of opening another activity for the reply.
+  return candidates.sort((a, b) => (a.createdAt > b.createdAt ? 1 : -1))[0];
 }
 
 function consolidateQuoteIntakeActivity(inbound: Communication, canonical: Task): void {
@@ -6465,8 +6480,37 @@ function priorQuoteContextForCommunication(row: Communication): string {
   return recentOutbound ? `${recentOutbound.subject ?? ""}\n${recentOutbound.body}` : "";
 }
 
+function quoteAutomationInputSignature(row: Communication): string {
+  const input = [
+    normalizedEmailSubject(row.subject),
+    row.body.trim().replace(/\r\n/g, "\n"),
+    row.customerId ?? "",
+    row.prospectId ?? "",
+  ].join("\u241f");
+  let hash = 2166136261;
+  for (let index = 0; index < input.length; index += 1) {
+    hash ^= input.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${input.length}:${(hash >>> 0).toString(36)}`;
+}
+
 function quoteAutomationCanRun(row: Communication): boolean {
+  const currentSignature = quoteAutomationInputSignature(row);
+  if (
+    row.aiQuoteAutomationInputSignature &&
+    row.aiQuoteAutomationInputSignature !== currentSignature
+  ) {
+    return true;
+  }
   if (!row.aiQuoteAutomationStatus) return true;
+  if (
+    !row.aiQuoteAutomationInputSignature &&
+    (row.aiQuoteAutomationStatus === "skipped" ||
+      row.aiQuoteAutomationStatus === "manual")
+  ) {
+    return true;
+  }
   if (
     row.aiQuoteAutomationStatus === "skipped" &&
     row.aiTriageVersion !== INBOUND_TRIAGE_VERSION
@@ -16322,6 +16366,7 @@ export const api = {
       const outcomes: PersonalQuoteAutomationResult[] = [];
 
       for (const original of inbound) {
+        const automationInputSignature = quoteAutomationInputSignature(original);
         const customer = original.customerId
           ? db
               .list("customers")
@@ -16350,6 +16395,7 @@ export const api = {
             aiQuoteAutomationStatus: "skipped",
             aiQuoteAutomationProcessedAt: nowIso(),
             aiQuoteAutomationReason: "No quote identifier reply was detected.",
+            aiQuoteAutomationInputSignature: automationInputSignature,
           });
           outcomes.push({ communicationId: original.id, status: "skipped" });
           continue;
@@ -16425,6 +16471,7 @@ export const api = {
           aiQuoteAutomationProcessedAt: claimedAt,
           aiQuoteAutomationReason: "Personal-lines quote automation is in progress.",
           aiQuoteAutomationAttempts: attempts,
+          aiQuoteAutomationInputSignature: automationInputSignature,
           aiActivityScannedAt: claimedAt,
           aiTriageDisposition: "activity",
           aiTriageTopic: "coverage_change",
@@ -16451,6 +16498,7 @@ export const api = {
             aiQuoteAutomationReason: reason,
             aiQuoteAutomationSessionId: sessionId,
             aiQuoteAutomationAssetId: assetId,
+            aiQuoteAutomationInputSignature: automationInputSignature,
           });
           const taskPatch: Partial<Task> = {
             description: reason,
@@ -18491,6 +18539,15 @@ export const api = {
         metadata: { title: row.title },
       });
       return db.remove("tasks", id);
+    },
+    dismissFromDashboard(id: string, userId: string): Task | null {
+      const row = db.list("tasks").find((task) => task.id === id);
+      if (!row || !userId) return null;
+      const dismissedBy = new Set(row.dashboardDismissedByUserIds ?? []);
+      dismissedBy.add(userId);
+      return db.update("tasks", id, {
+        dashboardDismissedByUserIds: [...dismissedBy],
+      });
     },
     remove(id: string) {
       return db.remove("tasks", id);

@@ -2136,6 +2136,7 @@ export interface Communication {
   aiQuoteAutomationAssetId?: string;
   aiQuoteAutomationReason?: string;
   aiQuoteAutomationAttempts?: number;
+  aiQuoteAutomationInputSignature?: string;
   createdAt: string;
   createdById?: string;
 }
@@ -2873,6 +2874,9 @@ export interface Task {
   queuePosition?: number;
   queueChangedAt?: string;
   queueChangedById?: string;
+  // Staff can clear an activity from their dashboard quick view without
+  // deleting or changing the underlying Activity Center work item.
+  dashboardDismissedByUserIds?: string[];
   // Tracks whether severity was last touched by a human (vs. the AI
   // that originally seeded it). Surfaces a small "Edited" hint on
   // the severity chip so it's obvious the importance was promoted

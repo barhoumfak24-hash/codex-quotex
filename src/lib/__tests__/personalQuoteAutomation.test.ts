@@ -352,6 +352,142 @@ describe("communications.automatePersonalQuoteReplies", () => {
     ).toHaveLength(0);
   });
 
+  it("reprocesses a provider message when its full VIN reply replaces a partial body", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/ai/enrich-asset") {
+          return new Response(
+            JSON.stringify({
+              fields: {},
+              evidence: {},
+              sources: [],
+              confidence: 0,
+              unavailableFields: [],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+        if (url === "/api/ai/acord-map") {
+          return new Response(
+            JSON.stringify({
+              fields: {},
+              publicFieldEvidence: {},
+              mappings: [],
+              missingFields: [],
+              webSources: [],
+              summary: "No additional verified public answers were found.",
+              confidence: 0,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const owner = api.users.list(agency.id).find((user) => user.active && user.role === "agent")!;
+    api.customers.update(customer.id, {
+      lineOfBusiness: "personal",
+      assignedAgentId: owner.id,
+    });
+
+    const threadId = "thread_provider_body_upgrade";
+    const request = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      subject: "Need quote for my truck",
+      body: "I need a quote for my new Ford F150.",
+      threadId,
+      externalThreadId: "gmail-provider-body-upgrade",
+    });
+    api.communications.sweepInboundForActivities(agency.id, owner.id);
+    const originalTaskId = db
+      .list("communications")
+      .find((communication) => communication.id === request.id)?.aiActivityTaskId;
+    expect(originalTaskId).toBeTruthy();
+
+    const reply = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      subject: "Re: Need quote for my truck",
+      body: "Hello, this is the information you requested.",
+      threadId,
+      externalThreadId: "gmail-provider-body-upgrade",
+      replyToId: request.id,
+    });
+    expect(
+      await api.communications.automatePersonalQuoteReplies(
+        agency.id,
+        owner.id,
+        reply.id
+      )
+    ).toEqual([
+      expect.objectContaining({
+        communicationId: reply.id,
+        status: "skipped",
+      }),
+    ]);
+    api.communications.sweepInboundForActivities(agency.id, owner.id);
+
+    db.update("communications", reply.id, {
+      body:
+        "Hello, it's a personal vehicle and the vin number is 2C3 CDXMG3PH675983 Culture",
+    });
+    const result = await api.communications.automatePersonalQuoteReplies(
+      agency.id,
+      owner.id,
+      reply.id
+    );
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        communicationId: reply.id,
+        status: "completed",
+      }),
+    ]);
+    const session = api.quoting.get(result[0].sessionId!)!;
+    const processedReply = db
+      .list("communications")
+      .find((communication) => communication.id === reply.id)!;
+    expect(processedReply.aiActivityTaskId).toBe(originalTaskId);
+    expect(processedReply.aiQuoteAutomationInputSignature).toBeTruthy();
+    expect(db.list("tasks").find((task) => task.id === originalTaskId)).toMatchObject({
+      status: "in_progress",
+      quoteSessionId: session.id,
+    });
+    expect(
+      db
+        .list("tasks")
+        .filter(
+          (task) =>
+            task.customerId === customer.id &&
+            task.topic === "coverage_change" &&
+            task.status !== "resolved" &&
+            !task.completedAt
+        )
+    ).toHaveLength(1);
+    expect(
+      db
+        .list("communications")
+        .filter(
+          (communication) =>
+            communication.aiServiceIntent === "vehicle_quote_intake" &&
+            communication.deliveryStatus === "draft" &&
+            communication.customerId === customer.id
+        )
+    ).toHaveLength(0);
+  });
+
   it("starts one personal flow and sends one questionnaire for an address reply", async () => {
     vi.stubGlobal(
       "fetch",

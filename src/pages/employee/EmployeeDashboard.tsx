@@ -692,17 +692,21 @@ export function ActivityQuickList({
       removeLabel: "Delete notification",
       onRemove: () => api.aiNotifications.remove(n.id),
     })),
-    ...tasks.map((t) => ({
+    ...tasks
+      .filter((t) => !(t.dashboardDismissedByUserIds ?? []).includes(userId))
+      .map((t) => ({
       id: `task:${t.id}`,
       at: t.createdAt,
       title: t.title,
       detail: t.aiSummary ?? t.description ?? fmt.titleCase(t.status ?? "open"),
       href: `/employee/tasks?focus=${t.id}`,
       tone: t.severity,
-      removeLabel: "Delete activity",
-      onRemove: () => api.tasks.deleteActivity(t.id, userId),
+      removeLabel: "Dismiss from dashboard",
+      onRemove: () => api.tasks.dismissFromDashboard(t.id, userId),
     })),
-    ...routingTasks.map((t) => ({
+    ...routingTasks
+      .filter((t) => !(t.dashboardDismissedByUserIds ?? []).includes(userId))
+      .map((t) => ({
       id: `routing-task:${t.id}`,
       at: t.routeRequestedAt ?? t.createdAt,
       title:
@@ -714,8 +718,8 @@ export function ActivityQuickList({
       detail: t.description ?? "Manager routing confirmation needed.",
       href: `/employee/tasks?focus=${t.id}`,
       tone: (t.routeRequestMode === "reroute" ? "warning" : "info") as import("@/types").TaskSeverity,
-      removeLabel: "Delete routing activity",
-      onRemove: () => api.tasks.deleteActivity(t.id, userId),
+      removeLabel: "Dismiss routing activity from dashboard",
+      onRemove: () => api.tasks.dismissFromDashboard(t.id, userId),
     })),
     ...routingProspects.map((p) => ({
       id: `routing-prospect:${p.id}`,
