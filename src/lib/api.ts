@@ -3496,6 +3496,199 @@ function createActionTaskOnce(input: {
   return row;
 }
 
+function inboundEmailIdentity(row: Communication): string {
+  const messageHeader = normalizeMessageHeaderId(
+    row.messageIdHeader ?? row.rfc822MessageId
+  );
+  if (messageHeader) return `message:${messageHeader}`;
+
+  const externalMessageId = normalizeMessageHeaderId(row.externalMessageId);
+  if (externalMessageId) {
+    return `provider:${row.mailboxProvider ?? "unknown"}:${externalMessageId}`;
+  }
+
+  return `communication:${row.id}`;
+}
+
+function inboundEmailActivityKey(row: Communication): string {
+  return `inbound-email:${inboundEmailIdentity(row)}`;
+}
+
+function inboundEmailCopies(row: Communication): Communication[] {
+  const identity = inboundEmailIdentity(row);
+  return db
+    .list("communications")
+    .filter(
+      (candidate) =>
+        candidate.tenantId === row.tenantId &&
+        candidate.direction === "inbound" &&
+        candidate.channel === "email" &&
+        inboundEmailIdentity(candidate) === identity
+    );
+}
+
+function inboundEmailTasks(row: Communication): Task[] {
+  const communicationIds = new Set(inboundEmailCopies(row).map((candidate) => candidate.id));
+  const activityKey = inboundEmailActivityKey(row);
+  return db
+    .list("tasks")
+    .filter(
+      (task) =>
+        task.tenantId === row.tenantId &&
+        (task.activityKey === activityKey ||
+          (!!task.messageId && communicationIds.has(task.messageId)) ||
+          (!!task.originalMessageId && communicationIds.has(task.originalMessageId)))
+    );
+}
+
+function preferredInboundEmailTask(tasks: Task[]): Task | undefined {
+  return [...tasks].sort((a, b) => {
+    const activeA = !a.completedAt && a.status !== "resolved" ? 0 : 1;
+    const activeB = !b.completedAt && b.status !== "resolved" ? 0 : 1;
+    if (activeA !== activeB) return activeA - activeB;
+    const inProgressA = a.status === "in_progress" ? 0 : 1;
+    const inProgressB = b.status === "in_progress" ? 0 : 1;
+    if (inProgressA !== inProgressB) return inProgressA - inProgressB;
+    return a.createdAt.localeCompare(b.createdAt);
+  })[0];
+}
+
+function linkInboundEmailCopiesToTask(
+  inbound: Communication,
+  taskId: string
+) {
+  inboundEmailCopies(inbound).forEach((copy) => {
+    if (copy.aiActivityTaskId !== taskId) {
+      db.update("communications", copy.id, { aiActivityTaskId: taskId });
+    }
+  });
+}
+
+function consolidateInboundEmailActivities(tenantId: string, actorId?: string) {
+  const grouped = new Map<string, Communication[]>();
+  db
+    .list("communications")
+    .filter(
+      (row) =>
+        row.tenantId === tenantId &&
+        row.direction === "inbound" &&
+        row.channel === "email"
+    )
+    .forEach((row) => {
+      const identity = inboundEmailIdentity(row);
+      const group = grouped.get(identity) ?? [];
+      group.push(row);
+      grouped.set(identity, group);
+    });
+
+  grouped.forEach((communications) => {
+    const reference = communications[0];
+    const tasks = inboundEmailTasks(reference);
+    if (tasks.length === 0) return;
+
+    const keeper = preferredInboundEmailTask(tasks);
+    if (!keeper) return;
+
+    const activityKey = inboundEmailActivityKey(reference);
+    if (keeper.activityKey !== activityKey) {
+      db.update("tasks", keeper.id, { activityKey });
+    }
+    linkInboundEmailCopiesToTask(reference, keeper.id);
+
+    tasks
+      .filter(
+        (task) =>
+          task.id !== keeper.id &&
+          !task.completedAt &&
+          task.status !== "resolved"
+      )
+      .forEach((duplicate) => {
+        const completedAt = nowIso();
+        db.update("tasks", duplicate.id, {
+          status: "resolved",
+          completedAt,
+          completedById: actorId ?? "system",
+          resolutionNote:
+            "Automatically consolidated with the single activity for this inbound email.",
+          resolutionNoteAt: completedAt,
+        });
+        logTaskAudit({
+          tenantId,
+          actorId: actorId ?? "system",
+          action: "task.resolved_duplicate_inbound_email",
+          taskId: duplicate.id,
+          metadata: {
+            canonicalTaskId: keeper.id,
+            canonicalActivityKey: activityKey,
+          },
+        });
+      });
+  });
+}
+
+function ensureInboundEmailTask(input: {
+  inbound: Communication;
+  title: string;
+  description?: string;
+  topic?: Task["topic"];
+  severity?: TaskSeverity;
+  severityReason?: string;
+  assignedToId?: string;
+  awaitingManagerAssignment?: boolean;
+  documentId?: string;
+  actorId?: string;
+  auditAction: string;
+  auditMetadata?: Record<string, unknown>;
+  aiSummary?: string;
+  originalMessageContent?: string;
+  originalMessageId?: string;
+  aiReplyBody?: string;
+  aiReplySubject?: string;
+}): Task {
+  const activityKey = inboundEmailActivityKey(input.inbound);
+  const existing = preferredInboundEmailTask(inboundEmailTasks(input.inbound));
+  if (existing) {
+    if (existing.activityKey !== activityKey) {
+      db.update("tasks", existing.id, { activityKey });
+    }
+    linkInboundEmailCopiesToTask(input.inbound, existing.id);
+    return db.list("tasks").find((task) => task.id === existing.id) ?? existing;
+  }
+
+  const task = createActionTaskOnce({
+    tenantId: input.inbound.tenantId,
+    activityKey,
+    title: input.title,
+    description: input.description,
+    customerId: input.inbound.customerId,
+    prospectId: input.inbound.prospectId,
+    documentId: input.documentId,
+    messageId: input.inbound.id,
+    topic: input.topic,
+    severity: input.severity,
+    severityReason: input.severityReason,
+    assignedToId: input.assignedToId,
+    awaitingManagerAssignment: input.awaitingManagerAssignment,
+    createdById: "ai",
+    createdAt: input.inbound.createdAt,
+    auditAction: input.auditAction,
+    auditMetadata: {
+      communicationId: input.inbound.id,
+      emailIdentity: inboundEmailIdentity(input.inbound),
+      ...(input.auditMetadata ?? {}),
+    },
+  });
+  const updated = db.update("tasks", task.id, {
+    aiSummary: input.aiSummary,
+    originalMessageContent: input.originalMessageContent,
+    originalMessageId: input.originalMessageId,
+    aiReplyBody: input.aiReplyBody,
+    aiReplySubject: input.aiReplySubject,
+  });
+  linkInboundEmailCopiesToTask(input.inbound, task.id);
+  return updated ?? task;
+}
+
 function resolveActionTasks(
   tenantId: string,
   activityKeys: string[],
@@ -5406,55 +5599,28 @@ function ensureInboundDraftFollowUpTask(input: {
   documentId?: string;
   actorId?: string;
 }): Task {
-  const activityKey = `inbound-draft-follow-up:${input.inbound.id}`;
-  const existing = db
-    .list("tasks")
-    .find(
-      (row) =>
-        row.tenantId === input.inbound.tenantId &&
-        (row.activityKey === activityKey ||
-          (!!input.inbound.aiActivityTaskId && row.id === input.inbound.aiActivityTaskId))
-    );
-  if (existing) return existing;
-
-  const task: Task = {
-    id: uid("task"),
-    tenantId: input.inbound.tenantId,
+  return ensureInboundEmailTask({
+    inbound: input.inbound,
     title: input.title,
     description: input.description,
-    customerId: input.inbound.customerId,
-    prospectId: input.inbound.prospectId,
     documentId: input.documentId,
-    messageId: input.inbound.id,
-    activityKey,
-    source: "ai_notification",
     topic: input.topic,
     severity: "warning",
     severityReason: input.severityReason,
-    status: "open",
+    assignedToId: input.assignedToId,
+    awaitingManagerAssignment: !input.assignedToId || undefined,
     aiSummary: input.description,
     originalMessageContent: input.inbound.body,
     originalMessageId: input.inbound.id,
     aiReplyBody: input.draft.body,
     aiReplySubject: input.draft.subject,
-    assignedToId: input.assignedToId,
-    awaitingManagerAssignment: !input.assignedToId || undefined,
-    createdById: "ai",
-    createdAt: nowIso(),
-  };
-  db.insert("tasks", task);
-  logTaskAudit({
-    tenantId: input.inbound.tenantId,
     actorId: input.actorId ?? "ai",
-    action: "task.created_from_inbound_draft_follow_up",
-    taskId: task.id,
-    metadata: {
-      communicationId: input.inbound.id,
+    auditAction: "task.created_from_inbound_draft_follow_up",
+    auditMetadata: {
       draftMessageId: input.draft.id,
       topic: input.topic,
     },
   });
-  return task;
 }
 
 function fieldSlug(s: string): string {
@@ -16103,6 +16269,7 @@ export const api = {
       tenantId: string,
       actorId?: string
     ): { communicationId: string; task?: Task; notification?: AiNotification }[] {
+      consolidateInboundEmailActivities(tenantId, actorId);
       const inbound = db
         .list("communications")
         .filter(
@@ -16231,33 +16398,19 @@ export const api = {
                 : !assignedToId
                   ? "The contact does not have an active assigned staff owner."
                   : "No missing quote-intake questions were identified.";
-            const taskRow: Task = {
-              id: uid("task"),
-              tenantId,
+            const taskRow = ensureInboundEmailTask({
+              inbound: c,
               title: `${contact?.name ?? carrierContact?.name ?? "Contact"}: vehicle quote request needs review`,
               description: `${triage.reason} ${missing}`,
-              customerId: c.customerId,
-              prospectId: c.prospectId,
-              messageId: c.id,
-              source: "ai_notification",
               topic: "coverage_change",
               severity: "warning",
               severityReason:
                 "Quotex could not safely prepare the quote-intake draft because required contact or ownership information was unavailable.",
-              status: "open",
               assignedToId,
               awaitingManagerAssignment: !assignedToId || undefined,
-              createdById: "ai",
-              createdAt: nowIso(),
-            };
-            db.insert("tasks", taskRow);
-            logTaskAudit({
-              tenantId,
               actorId: actorId ?? "ai",
-              action: "task.created_from_inbound_quote_request",
-              taskId: taskRow.id,
-              metadata: {
-                communicationId: c.id,
+              auditAction: "task.created_from_inbound_quote_request",
+              auditMetadata: {
                 missingQuestions: questions,
               },
             });
@@ -16340,33 +16493,19 @@ export const api = {
                 : !assignedToId
                   ? "The client does not have an active assigned staff owner."
                   : `No approved ${inboundServiceLabel(triage.serviceIntent)} was found for this client.`;
-            const taskRow: Task = {
-              id: uid("task"),
-              tenantId,
+            const taskRow = ensureInboundEmailTask({
+              inbound: c,
               title: `${customer?.name ?? prospect?.name ?? carrierContact?.name ?? "Contact"}: ${inboundServiceLabel(triage.serviceIntent)} request needs review`,
               description: `${triage.reason} ${missing}`,
-              customerId: c.customerId,
-              prospectId: c.prospectId,
-              messageId: c.id,
-              source: "ai_notification",
               topic: "document_upload",
               severity: "warning",
               severityReason:
                 "Quotex did not create a draft because a required verified record or owner was unavailable.",
-              status: "open",
               assignedToId,
               awaitingManagerAssignment: !assignedToId || undefined,
-              createdById: "ai",
-              createdAt: nowIso(),
-            };
-            db.insert("tasks", taskRow);
-            logTaskAudit({
-              tenantId,
               actorId: actorId ?? "ai",
-              action: "task.created_from_inbound_service_request",
-              taskId: taskRow.id,
-              metadata: {
-                communicationId: c.id,
+              auditAction: "task.created_from_inbound_service_request",
+              auditMetadata: {
                 serviceIntent: triage.serviceIntent,
                 documentFound: !!requestedDocument,
               },
@@ -16379,31 +16518,18 @@ export const api = {
           // Carrier messages (and any unowned contact) route to a
           // manager via the Routing card.
           const awaiting = !assignedToId;
-          const taskRow: Task = {
-            id: uid("task"),
-            tenantId,
+          const taskRow = ensureInboundEmailTask({
+            inbound: c,
             title: triage.title,
             description: triage.reason,
-            customerId: c.customerId,
-            prospectId: c.prospectId,
-            messageId: c.id,
-            source: "ai_notification",
             topic: triage.topic,
             severity: triage.severity,
             severityReason: "Auto-created by AI from an inbound message.",
-            status: "open",
             assignedToId,
             awaitingManagerAssignment: awaiting || undefined,
-            createdById: "ai",
-            createdAt: nowIso(),
-          };
-          db.insert("tasks", taskRow);
-          logTaskAudit({
-            tenantId,
             actorId: actorId ?? "ai",
-            action: "task.created_from_inbound",
-            taskId: taskRow.id,
-            metadata: { communicationId: c.id, topic: triage.topic },
+            auditAction: "task.created_from_inbound",
+            auditMetadata: { topic: triage.topic },
           });
           patch.aiActivityTaskId = taskRow.id;
           created.push({ communicationId: c.id, task: taskRow });

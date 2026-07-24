@@ -46,8 +46,9 @@ describe("activity trigger plumbing", () => {
     api.communications.sweepInboundForActivities(agency.id);
     const matches = api.tasks
       .listByTenant(agency.id)
-      .filter((t) => t.activityKey === `claim-inquiry:${out.commId}`);
+      .filter((t) => t.messageId === out.commId || t.originalMessageId === out.commId);
     expect(matches).toHaveLength(1);
+    expect(matches[0]?.activityKey).toMatch(/^inbound-email:/);
   });
 
   it("creates an open-claim activity and resolves it when the claim closes", async () => {

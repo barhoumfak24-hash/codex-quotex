@@ -169,6 +169,133 @@ describe("communications.sweepInboundForActivities", () => {
     expect(task.messageId).toBe(comm.id);
   });
 
+  it("creates only one activity when the same email is mirrored into multiple staff mailboxes", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const sharedMessageId = "<same-real-email@example.com>";
+    const first = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      subject: "Please cancel my policy",
+      body: "Please cancel my policy at the end of this month.",
+      mailboxOrigin: "provider_sync",
+      mailboxProvider: "gmail",
+      mailboxAccount: "agent.one@example.com",
+      externalMessageId: "gmail-copy-one",
+      messageIdHeader: sharedMessageId,
+    });
+    const second = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      subject: "Please cancel my policy",
+      body: "Please cancel my policy at the end of this month.",
+      mailboxOrigin: "provider_sync",
+      mailboxProvider: "gmail",
+      mailboxAccount: "agent.two@example.com",
+      externalMessageId: "gmail-copy-two",
+      messageIdHeader: sharedMessageId,
+    });
+
+    api.communications.sweepInboundForActivities(agency.id);
+
+    const activeEmailTasks = api.tasks
+      .listByTenant(agency.id)
+      .filter(
+        (task) =>
+          [first.id, second.id].includes(task.messageId ?? "") &&
+          task.status !== "resolved" &&
+          !task.completedAt
+      );
+    expect(activeEmailTasks).toHaveLength(1);
+    expect(activeEmailTasks[0].activityKey).toBe(
+      "inbound-email:message:same-real-email@example.com"
+    );
+
+    const freshFirst = api.communications
+      .listByCustomer(customer.id)
+      .find((row) => row.id === first.id)!;
+    const freshSecond = api.communications
+      .listByCustomer(customer.id)
+      .find((row) => row.id === second.id)!;
+    expect(freshFirst.aiActivityTaskId).toBe(activeEmailTasks[0].id);
+    expect(freshSecond.aiActivityTaskId).toBe(activeEmailTasks[0].id);
+  });
+
+  it("consolidates existing duplicate email activities without deleting their history", async () => {
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const first = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      body: "Thank you.",
+      messageIdHeader: "<existing-duplicate@example.com>",
+      mailboxOrigin: "provider_sync",
+      mailboxAccount: "agent.one@example.com",
+      aiActivityScannedAt: "2026-07-24T12:00:00.000Z",
+      aiTriageVersion: "legacy",
+    });
+    const second = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      body: "Thank you.",
+      messageIdHeader: "<existing-duplicate@example.com>",
+      mailboxOrigin: "provider_sync",
+      mailboxAccount: "agent.two@example.com",
+      aiActivityScannedAt: "2026-07-24T12:00:00.000Z",
+      aiTriageVersion: "legacy",
+    });
+    db.insert("tasks", {
+      id: "task_duplicate_first",
+      tenantId: agency.id,
+      title: "First copy",
+      messageId: first.id,
+      activityKey: `legacy:${first.id}`,
+      source: "ai_notification",
+      status: "open",
+      createdAt: "2026-07-24T12:00:00.000Z",
+    });
+    db.insert("tasks", {
+      id: "task_duplicate_second",
+      tenantId: agency.id,
+      title: "Second copy",
+      messageId: second.id,
+      activityKey: `legacy:${second.id}`,
+      source: "ai_notification",
+      status: "open",
+      createdAt: "2026-07-24T12:01:00.000Z",
+    });
+
+    api.communications.sweepInboundForActivities(agency.id);
+
+    const matchingTasks = api.tasks
+      .listByTenant(agency.id)
+      .filter((task) => [first.id, second.id].includes(task.messageId ?? ""));
+    expect(matchingTasks).toHaveLength(2);
+    expect(
+      matchingTasks.filter((task) => task.status !== "resolved" && !task.completedAt)
+    ).toHaveLength(1);
+    expect(matchingTasks.find((task) => task.status === "resolved")).toEqual(
+      expect.objectContaining({
+        resolutionNote:
+          "Automatically consolidated with the single activity for this inbound email.",
+      })
+    );
+    expect(
+      matchingTasks.find((task) => task.status !== "resolved")?.activityKey
+    ).toBe("inbound-email:message:existing-duplicate@example.com");
+  });
+
   it("does not create an activity for an acknowledgement, and is idempotent", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
