@@ -1955,7 +1955,7 @@ function acordMappedValueFitsTarget(
   }
   if (/\byears in business\b/.test(label)) return valueLooksLikeMoneyOrNumber(value);
   if (/\b(square footage|living area|building area|lot size|number of stories|stories|bedrooms|bathrooms|roof age)\b/.test(label)) {
-    return valueLooksLikeMoneyOrNumber(value) || (options.questionnairePrefill && valueContainsNumber(value));
+    return valueLooksLikeMoneyOrNumber(value) || (options.questionnairePrefill === true && valueContainsNumber(value));
   }
   if (/\b(occupancy|occupied|use)\b/.test(label)) {
     return /\b(primary|secondary|seasonal|vacation|rental|tenant|owner|occupied|vacant)\b/i.test(value);
@@ -1965,7 +1965,7 @@ function acordMappedValueFitsTarget(
   }
   if (/\b(address|location|premises|risk|mailing|garaging)\b/.test(label)) return valueLooksLikeAddress(value);
   if (/\b(value|limit|premium|revenue|payroll|sales|amount|cost|price|deductible)\b/.test(label)) {
-    return valueLooksLikeMoneyOrNumber(value) || (options.questionnairePrefill && valueContainsNumber(value));
+    return valueLooksLikeMoneyOrNumber(value) || (options.questionnairePrefill === true && valueContainsNumber(value));
   }
   if (/\b(name|producer|applicant|insured|contact|agency|carrier)\b/.test(label)) return valueLooksLikeName(value);
   if (/\b(fein|federal employer|tax id|ssn|social security)\b/.test(label)) return false;
