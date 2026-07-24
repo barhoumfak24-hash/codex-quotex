@@ -242,11 +242,18 @@ export function MessagesPage() {
   // informational items become dashboard notifications.
   useEffect(() => {
     if (!agency || !user) return;
-    const created = api.communications.sweepInboundForActivities(agency.id, user.id);
-    if (created.length > 0) {
-      setAiTriaged(created.length);
-      setRev((r) => r + 1);
-    }
+    let cancelled = false;
+    void api.communications
+      .processInboundAutomation(agency.id, user.id)
+      .then(({ quoteAutomation, triage }) => {
+        if (cancelled) return;
+        if (triage.length > 0) setAiTriaged(triage.length);
+        if (quoteAutomation.length > 0 || triage.length > 0) setRev((r) => r + 1);
+      })
+      .catch((error) => console.error("Inbound automation failed", error));
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agency?.id, user?.id]);
 
@@ -670,8 +677,12 @@ export function MessagesPage() {
       } else {
         setMailboxSyncStatus("Mailbox check will retry automatically.");
       }
-      const created = api.communications.sweepInboundForActivities(agency.id, user.id);
-      if (created.length > 0) setAiTriaged((current) => current + created.length);
+      const { quoteAutomation, triage } =
+        await api.communications.processInboundAutomation(agency.id, user.id);
+      if (triage.length > 0) setAiTriaged((current) => current + triage.length);
+      if (quoteAutomation.length > 0) {
+        setMailboxSyncStatus("Mailbox checked. The personal quote flow was started.");
+      }
       setRev((r) => r + 1);
     } finally {
       if (!options.silent) window.setTimeout(() => setRefreshingMessages(false), 250);

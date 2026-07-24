@@ -157,6 +157,9 @@ export function MailboxInboxSyncAgent() {
 
       running.current = true;
       try {
+        // Process replies that were already mirrored even when the provider is
+        // temporarily disconnected or the latest mailbox request fails.
+        await api.communications.processInboundAutomation(agency.id, user.id);
         const connectionId = await resolveConnectionId();
         if (!connectionId || cancelled) {
           consecutiveFailures = 0;
@@ -179,8 +182,7 @@ export function MailboxInboxSyncAgent() {
         }
 
         consecutiveFailures = 0;
-        await api.communications.automatePersonalQuoteReplies(agency.id, user.id);
-        api.communications.sweepInboundForActivities(agency.id, user.id);
+        await api.communications.processInboundAutomation(agency.id, user.id);
         schedule(ACTIVE_MAILBOX_SYNC_INTERVAL_MS);
       } finally {
         running.current = false;

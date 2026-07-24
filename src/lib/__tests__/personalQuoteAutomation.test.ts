@@ -312,8 +312,37 @@ describe("communications.automatePersonalQuoteReplies", () => {
       replyToId: request.id,
     });
 
-    // Production background jobs can see triage and quote automation in either order.
-    api.communications.sweepInboundForActivities(agency.id, owner.id);
+    // Generic inbox triage must never claim a complete personal reply or
+    // create another activity/draft before quote automation runs.
+    const genericTriage = api.communications.sweepInboundForActivities(
+      agency.id,
+      owner.id
+    );
+    expect(
+      genericTriage.find((entry) => entry.communicationId === reply.id)
+    ).toBeUndefined();
+    expect(
+      db
+        .list("tasks")
+        .filter(
+          (task) =>
+            task.customerId === customer.id &&
+            task.topic === "coverage_change" &&
+            task.status !== "resolved" &&
+            !task.completedAt
+        )
+    ).toHaveLength(1);
+    expect(
+      db
+        .list("communications")
+        .filter(
+          (communication) =>
+            communication.aiServiceIntent === "vehicle_quote_intake" &&
+            communication.deliveryStatus === "draft" &&
+            communication.customerId === customer.id
+        )
+    ).toHaveLength(1);
+
     const result = await api.communications.automatePersonalQuoteReplies(
       agency.id,
       owner.id,
@@ -781,7 +810,7 @@ describe("communications.automatePersonalQuoteReplies", () => {
     const processedInbound = db
       .list("communications")
       .find((communication) => communication.id === inbound.id)!;
-    expect(processedInbound.aiQuoteAutomationInputSignature).toMatch(/^v2:/);
+    expect(processedInbound.aiQuoteAutomationInputSignature).toMatch(/^v3:/);
     const linkedActivity = db
       .list("tasks")
       .find((task) => task.id === processedInbound.aiActivityTaskId)!;

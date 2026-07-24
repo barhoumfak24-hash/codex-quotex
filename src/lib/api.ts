@@ -6254,7 +6254,7 @@ type PersonalQuoteAutomationResult = {
 
 const PERSONAL_QUOTE_AUTOMATION_MAX_ATTEMPTS = 3;
 const PERSONAL_QUOTE_AUTOMATION_PENDING_TIMEOUT_MS = 5 * 60_000;
-const PERSONAL_QUOTE_AUTOMATION_VERSION = 2;
+const PERSONAL_QUOTE_AUTOMATION_VERSION = 3;
 
 function communicationContactMatches(a: Communication, b: Communication): boolean {
   return (
@@ -16901,6 +16901,22 @@ export const api = {
 
       return outcomes;
     },
+    async processInboundAutomation(
+      tenantId: string,
+      actorId?: string
+    ): Promise<{
+      quoteAutomation: PersonalQuoteAutomationResult[];
+      triage: { communicationId: string; task?: Task; notification?: AiNotification }[];
+    }> {
+      // Complete personal quote replies must be claimed before generic inbox
+      // triage can prepare another draft or open a duplicate activity.
+      const quoteAutomation = await api.communications.automatePersonalQuoteReplies(
+        tenantId,
+        actorId
+      );
+      const triage = api.communications.sweepInboundForActivities(tenantId, actorId);
+      return { quoteAutomation, triage };
+    },
     // AI inbound triage. Scans every inbound message that hasn't been
     // scanned yet; if the AI judges it warrants follow-up, it auto-
     // creates an Activity Center task (assigned to the contact's
@@ -16943,6 +16959,19 @@ export const api = {
         const prospect = c.prospectId
           ? db.list("prospects").find((x) => x.id === c.prospectId)
           : undefined;
+        const contact = customer ?? prospect;
+        const completeQuoteIntake = extractQuoteReplyIntake({
+          subject: c.subject,
+          body: c.body,
+          priorQuoteContext: priorQuoteContextForCommunication(c),
+          contactLine: contact?.lineOfBusiness,
+        });
+        if (completeQuoteIntake?.line === "personal") {
+          // Quote automation owns complete personal replies regardless of how
+          // the general inbox classifier labels the message. Leaving it
+          // unscanned here prevents duplicate activities and repeat drafts.
+          continue;
+        }
         const carrierContact = c.carrierContactId
           ? db.list("carrierContacts").find((x) => x.id === c.carrierContactId)
           : undefined;
@@ -16972,7 +17001,6 @@ export const api = {
         };
         const assignedToId = assignedContactOwner(customer ?? prospect);
         if (triage.serviceIntent === "vehicle_quote_intake") {
-          const contact = customer ?? prospect;
           const questions = triage.serviceQuestions ?? [];
           const canPrepareDraft =
             !!contact && !!contact.email && !!assignedToId && questions.length > 0;

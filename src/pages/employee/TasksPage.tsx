@@ -184,8 +184,9 @@ export function TasksPage() {
     api.renewals.ensureActivities(agency.id);
     api.routing.reconcileAccountWorkOwnership(agency.id);
     api.quoting.reconcileActivities(agency.id, user.id);
-    // AI triage of inbound messages opens activities only for owned work.
-    api.communications.sweepInboundForActivities(agency.id, user.id);
+    void api.communications
+      .processInboundAutomation(agency.id, user.id)
+      .catch((error) => console.error("Inbound automation failed", error));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agency?.id, user?.id]);
 

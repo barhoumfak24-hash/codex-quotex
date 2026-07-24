@@ -88,11 +88,19 @@ export function EmployeeDashboard() {
   // dashboard first; idempotent thereafter).
   useEffect(() => {
     if (!agency || !user) return;
+    let cancelled = false;
     const celebrated = sweepGoalAchievements(agency.id);
     const reassigned = api.routing.reconcileAccountWorkOwnership(agency.id);
-    // AI triage of inbound messages opens activities only for owned work.
-    const triaged = api.communications.sweepInboundForActivities(agency.id, user.id);
-    if (celebrated.length > 0 || reassigned > 0 || triaged.length > 0) refresh();
+    if (celebrated.length > 0 || reassigned > 0) refresh();
+    void api.communications
+      .processInboundAutomation(agency.id, user.id)
+      .then(({ quoteAutomation, triage }) => {
+        if (!cancelled && (quoteAutomation.length > 0 || triage.length > 0)) refresh();
+      })
+      .catch((error) => console.error("Inbound automation failed", error));
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agency?.id, user?.id]);
   const navigate = useNavigate();
