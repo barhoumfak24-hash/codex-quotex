@@ -684,6 +684,14 @@ function questionnaireAnswerLooksCompatible(question: QuotingQuestion, rawValue:
   if (lookup.includes("businessidentity") || lookup.includes("legalbusinessnameentitytype")) {
     return labeledLines.some((line) => /^Legal business name:\s+.+/i.test(line));
   }
+  if (
+    lookup.includes("yearsataddress") ||
+    lookup.includes("monthsataddress") ||
+    lookup.includes("yearsatcurrentaddress") ||
+    lookup.includes("monthsatcurrentaddress")
+  ) {
+    return /^\d+(?:\.\d+)?(?:\s*(?:years?|months?))?$/i.test(value.trim());
+  }
   if (valueLooksLikeAddress(value)) {
     if (
       /\b(operation|operations|product|products|service|services|revenue|payroll|employee|employees)\b/.test(
@@ -788,12 +796,6 @@ function questionnaireAnswerLooksConcreteForAiPrefill(
     return false;
   }
   return questionnaireAnswerLooksCompatible(question, value);
-}
-
-function requireEveryQuestion(questions: QuotingQuestion[]): QuotingQuestion[] {
-  return questions.map((question) =>
-    question.required ? question : { ...question, required: true }
-  );
 }
 
 function questionSpecificAcordLabelMatchesRecordKey(question: QuotingQuestion, recordKey: string): boolean {
@@ -1213,6 +1215,9 @@ function compositeKnownQuestionnaireAnswerFor(
     return input.contactPhone.trim();
   }
   if (lookup.includes("propertylocation") || lookup.includes("propertyaddresslocationoccupancydescription")) {
+    if (propertyAddress && !occupancy && !description) {
+      return propertyAddress;
+    }
     return joinKnownLines([
       line("Property address", propertyAddress),
       line("Occupancy", occupancy),
@@ -1225,9 +1230,301 @@ function compositeKnownQuestionnaireAnswerFor(
   return undefined;
 }
 
+function personalAutoQuestionKey(
+  session: QuotingSession | undefined,
+  question: QuotingQuestion
+): string | undefined {
+  if (!session || session.lineOfBusiness === "commercial" || session.assetType !== "luxury_vehicle") {
+    return undefined;
+  }
+  return cleanQuestionnairePrefillValue(question.acordFieldKey) || undefined;
+}
+
+function exactQuestionnaireRecordValue(
+  record: Record<string, unknown> | undefined,
+  keys: string[]
+): string | undefined {
+  if (!record) return undefined;
+  const normalizedKeys = new Set(keys.map(compactQuestionnaireLookup).filter(Boolean));
+  for (const [recordKey, rawValue] of Object.entries(record)) {
+    if (!normalizedKeys.has(compactQuestionnaireLookup(recordKey))) continue;
+    const value = cleanQuestionnairePrefillValue(rawValue);
+    if (value && !valueLooksLikeUnavailableAiAnswer(value) && !valueLooksLikeUncertainAiAnswer(value)) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function splitPersonName(name?: string): { first?: string; middle?: string; last?: string; suffix?: string } {
+  const parts = String(name ?? "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return {};
+  const suffix = /^(jr\.?|sr\.?|ii|iii|iv)$/i.test(parts[parts.length - 1]) ? parts.pop() : undefined;
+  if (parts.length === 1) return { first: parts[0], suffix };
+  return {
+    first: parts[0],
+    middle: parts.length > 2 ? parts.slice(1, -1).join(" ") : undefined,
+    last: parts[parts.length - 1],
+    suffix,
+  };
+}
+
+function parseVerifiedUsAddress(address?: string): {
+  street?: string;
+  city?: string;
+  state?: string;
+  zip?: string;
+} {
+  const value = String(address ?? "").trim();
+  if (!value) return {};
+  const match = value.match(/^(.+?),\s*([^,]+?),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)$/i);
+  if (!match) return {};
+  return {
+    street: match[1].trim(),
+    city: match[2].trim(),
+    state: match[3].toUpperCase(),
+    zip: match[4],
+  };
+}
+
+function personalAutoAssetMappingForQuestion(
+  session: QuotingSession,
+  question: QuotingQuestion
+): QuotingSessionAssetMapping | undefined {
+  const selected = session.selectedAssetMappings ?? [];
+  if (selected.length === 0) return undefined;
+  return selected.find((asset, index) =>
+    question.id.endsWith(`__asset_${asset.assetId ?? index}`)
+  ) ?? selected[0];
+}
+
+function personalAutoKnownQuestionnaireAnswerFor(
+  session: QuotingSession,
+  question: QuotingQuestion,
+  input: {
+    contactName?: string;
+    contactEmail?: string;
+    contactPhone?: string;
+    address?: string;
+    assetDetails?: Record<string, string>;
+    publicFields: Record<string, unknown>;
+    publicFieldEvidence?: PublicDataEvidenceMap;
+  }
+): string | undefined {
+  const key = personalAutoQuestionKey(session, question);
+  if (!key) return undefined;
+
+  const contact = contactForQuotingSession(session);
+  const contactName = input.contactName ?? contact?.name;
+  const name = splitPersonName(contactName);
+  const selectedMapping = personalAutoAssetMappingForQuestion(session, question);
+  const storedAssetId = selectedMapping?.assetId ?? session.assetId;
+  const storedAsset = storedAssetId
+    ? tenantFilter(db.list("assets"), session.tenantId).find((asset) => asset.id === storedAssetId)
+    : undefined;
+  const assetDetails = {
+    ...(storedAsset?.details ?? {}),
+    ...(input.assetDetails ?? {}),
+    ...(selectedMapping?.assetDetails ?? {}),
+  } as Record<string, unknown>;
+  const publicFields = {
+    ...(input.publicFields ?? {}),
+    ...(selectedMapping?.publicFields ?? {}),
+  };
+  const publicEvidence = {
+    ...(input.publicFieldEvidence ?? {}),
+    ...(selectedMapping?.publicFieldEvidence ?? {}),
+  };
+  const exact = (...keys: string[]) =>
+    exactQuestionnaireRecordValue(assetDetails, [key, ...keys]) ??
+    (() => {
+      const candidate = exactQuestionnaireRecordValue(publicFields, [key, ...keys]);
+      if (!candidate) return undefined;
+      const evidence = [key, ...keys]
+        .map((candidateKey) => findAiPublicEvidence(publicEvidence, candidateKey))
+        .find((item) => item && aiEvidenceAllowsQuestionnairePrefill(item));
+      return evidence ? candidate : undefined;
+    })();
+
+  const contactMailingAddress =
+    contact && "mailingAddress" in contact
+      ? cleanQuestionnairePrefillValue(contact.mailingAddress)
+      : undefined;
+  const garagingAddressText =
+    exactQuestionnaireRecordValue(assetDetails, ["garagingAddress", "garageAddress"]) ??
+    selectedMapping?.address;
+  const residenceAddressText =
+    exactQuestionnaireRecordValue(assetDetails, [
+      "currentResidenceAddress",
+      "residenceAddress",
+      "primaryResidenceAddress",
+    ]) ??
+    input.address ??
+    selectedMapping?.address ??
+    garagingAddressText ??
+    contactMailingAddress;
+  const residenceAddress = parseVerifiedUsAddress(residenceAddressText);
+  const garagingAddress = parseVerifiedUsAddress(garagingAddressText);
+  const mailingMatchesResidence = Boolean(
+    contactMailingAddress &&
+      residenceAddressText &&
+      normalizeQuestionnaireLookup(contactMailingAddress) ===
+        normalizeQuestionnaireLookup(residenceAddressText)
+  );
+  const garageMatchesResidence = Boolean(
+    garagingAddressText &&
+      residenceAddressText &&
+      normalizeQuestionnaireLookup(garagingAddressText) ===
+        normalizeQuestionnaireLookup(residenceAddressText)
+  );
+  const policies = tenantFilter(db.list("policies"), session.tenantId)
+    .filter((policy) => policy.customerId === session.customerId)
+    .filter((policy) => !selectedMapping?.assetId || policy.assetId === selectedMapping.assetId)
+    .sort((a, b) => Number(b.status === "bound") - Number(a.status === "bound"));
+  const policy = policies[0];
+  const carrier = policy
+    ? db.list("carriers").find((candidate) => candidate.id === policy.carrierId)
+    : undefined;
+  const driver = policy?.participants?.find(
+    (participant) =>
+      (participant.participantType === "driver" || participant.participantType === "operator") &&
+      (!selectedMapping?.assetId ||
+        !participant.assignedAssetId ||
+        participant.assignedAssetId === selectedMapping.assetId)
+  );
+  const driverName = splitPersonName(driver?.name ?? contactName);
+  const coverage = (...names: string[]) =>
+    policy?.coverages?.find((item) =>
+      names.some((name) => compactQuestionnaireLookup(item.name) === compactQuestionnaireLookup(name))
+    );
+  const coverageText = (...names: string[]) => {
+    const item = coverage(...names);
+    if (!item) return undefined;
+    if (item.description?.trim()) return item.description.trim();
+    if (typeof item.limit === "number" && item.limit > 0) return `$${item.limit.toLocaleString()}`;
+    if (typeof item.deductible === "number" && item.deductible >= 0) {
+      return `$${item.deductible.toLocaleString()}`;
+    }
+    return undefined;
+  };
+  const exactBoolean = (...keys: string[]) => {
+    const value = exact(...keys);
+    if (!value) return undefined;
+    if (/^(yes|true|1)$/i.test(value)) return "Yes";
+    if (/^(no|false|0)$/i.test(value)) return "No";
+    return undefined;
+  };
+
+  const direct: Record<string, string | undefined> = {
+    primaryFirstName: name.first,
+    primaryMiddleInitial: name.middle?.charAt(0),
+    primaryLastName: name.last,
+    primarySuffix: name.suffix,
+    primaryDateOfBirth: exact("primaryDateOfBirth", "dateOfBirth", "dob"),
+    primarySsnLastFour: exact("primarySsnLastFour", "ssnLastFour"),
+    primaryGender: exact("primaryGender", "gender"),
+    primaryMaritalStatus: exact("primaryMaritalStatus", "maritalStatus"),
+    primaryOccupation: exact("primaryOccupation", "occupation"),
+    cellPhone: input.contactPhone ?? contact?.phone,
+    emailAddress: input.contactEmail ?? contact?.email,
+    currentStreetAddress: residenceAddress.street,
+    currentCity: residenceAddress.city,
+    currentState: residenceAddress.state,
+    currentZipCode: residenceAddress.zip,
+    mailingAddress: mailingMatchesResidence ? undefined : contactMailingAddress,
+    mailingSameAsCurrent:
+      contactMailingAddress && residenceAddressText
+        ? mailingMatchesResidence
+          ? "Yes"
+          : "No"
+        : undefined,
+    alternateGarageStreet: garageMatchesResidence ? undefined : garagingAddress.street,
+    alternateGarageCity: garageMatchesResidence ? undefined : garagingAddress.city,
+    alternateGarageState: garageMatchesResidence ? undefined : garagingAddress.state,
+    alternateGarageZip: garageMatchesResidence ? undefined : garagingAddress.zip,
+    ratingState: session.state ?? residenceAddress.state,
+    targetEffectiveDate: policy?.effectiveDate ?? exact("targetEffectiveDate", "effectiveDate"),
+    currentlyInsured: policy ? "Yes" : exactBoolean("currentlyInsured"),
+    currentPremium:
+      policy?.finalPremium && policy.finalPremium > 0
+        ? String(policy.finalPremium)
+        : policy?.premiumEstimate && policy.premiumEstimate > 0
+        ? String(policy.premiumEstimate)
+        : undefined,
+    currentCarrier: carrier?.name,
+    currentPolicyExpirationDate: policy?.renewalDate,
+    currentPolicyNumber: policy?.policyNumber,
+    currentLiabilityLimits: coverageText("Liability", "Bodily Injury", "Bodily Injury Liability"),
+    driverFirstName: driverName.first,
+    driverLastName: driverName.last,
+    driverDateOfBirth: driver?.dateOfBirth ?? exact("driverDateOfBirth", "dateOfBirth", "dob"),
+    driverRelationshipToApplicant: driver?.relationship,
+    driverStatus: driver?.status,
+    driverLicenseState: driver?.licenseState ?? exact("driverLicenseState", "licenseState"),
+    driverLicenseNumber: driver?.licenseNumber ?? exact("driverLicenseNumber", "licenseNumber"),
+    driverLicenseStatus: exact("driverLicenseStatus", "licenseStatus"),
+    vin: normalizeVin(exact("vin") ?? ""),
+    vehicleYear: exact("vehicleYear", "year"),
+    vehicleMake: exact("vehicleMake", "make"),
+    vehicleModel: exact("vehicleModel", "model"),
+    vehicleTrim: exact("vehicleTrim", "trim", "VIN-decoded trim", "series"),
+    vehicleBodyStyle: exact("vehicleBodyStyle", "bodyStyle", "vehicleType", "Body class"),
+    vehiclePurchaseDate: exact("vehiclePurchaseDate", "purchaseDate"),
+    vehicleOwnershipStatus: exact("vehicleOwnershipStatus", "ownershipStatus"),
+    vehicleRegisteredState: exact("vehicleRegisteredState", "registeredState"),
+    vehicleOriginalMsrp: exact("vehicleOriginalMsrp", "originalMsrp", "msrp"),
+    vehicleEngine: exact("vehicleEngine", "engine", "Engine model", "Engine configuration"),
+    vehicleCylinders: exact(
+      "vehicleCylinders",
+      "cylinders",
+      "engineCylinders",
+      "Engine cylinders",
+      "Cylinders"
+    ),
+    vehicleDisplacement: exact(
+      "vehicleDisplacement",
+      "displacement",
+      "displacementL",
+      "Engine displacement (L)",
+      "Displacement (L)",
+      "Displacement"
+    ),
+    vehicleFuelType: exact("vehicleFuelType", "fuelType", "Fuel type", "Primary fuel type"),
+    vehicleDriveType: exact("vehicleDriveType", "driveType", "Drive type"),
+    vehicleDoorCount: exact("vehicleDoorCount", "doorCount", "doors", "Doors"),
+    principalOperator: driver?.name ?? exact("principalOperator"),
+    occasionalOperator: exact("occasionalOperator"),
+    vehicleUsage: exact("vehicleUsage", "usage", "primaryUse"),
+    oneWayCommuteMiles: exact("oneWayCommuteMiles", "commuteMiles"),
+    daysDrivenPerWeek: exact("daysDrivenPerWeek"),
+    annualMileage: exact("annualMileage", "annualMiles", "mileage"),
+    vehicleGaraged: exactBoolean("vehicleGaraged", "garaged"),
+    garageLocation:
+      exact("garageLocation") ??
+      (garagingAddressText && residenceAddressText
+        ? garageMatchesResidence
+          ? "Residence"
+          : "Other"
+        : undefined),
+    antiLockBrakes: exactBoolean("antiLockBrakes", "abs"),
+    antiTheftDevice: exactBoolean("antiTheftDevice", "antiTheft"),
+    airbags: exactBoolean("airbags"),
+    bodilyInjuryLimits: coverageText("Bodily Injury", "Bodily Injury Liability"),
+    propertyDamageLimits: coverageText("Property Damage", "Property Damage Liability"),
+    comprehensiveDeductible: coverageText("Comprehensive"),
+    collisionDeductible: coverageText("Collision"),
+    rentalReimbursement: coverageText("Rental Reimbursement", "Rental"),
+    towingCoverage: coverageText("Towing", "Roadside Assistance"),
+    fullGlassCoverage: coverageText("Full Glass", "Glass"),
+  };
+
+  return cleanQuestionnairePrefillValue(direct[key] ?? exact(key)) || undefined;
+}
+
 function knownQuestionnaireAnswerFor(
   question: QuotingQuestion,
   input: {
+    session?: QuotingSession;
     contactName?: string;
     contactEmail?: string;
     contactPhone?: string;
@@ -1239,6 +1536,10 @@ function knownQuestionnaireAnswerFor(
     publicFieldEvidence?: PublicDataEvidenceMap;
   }
 ): string | undefined {
+  const strictPersonalAutoKey = personalAutoQuestionKey(input.session, question);
+  if (strictPersonalAutoKey && input.session) {
+    return personalAutoKnownQuestionnaireAnswerFor(input.session, question, input);
+  }
   const composite = compositeKnownQuestionnaireAnswerFor(question, input);
   if (composite) return composite;
   const fromAssetDetails = questionnaireRecordEntryFor(question, input.assetDetails);
@@ -1282,14 +1583,15 @@ function knownQuestionnaireAnswerFor(
 }
 
 function seedKnownQuestionnaireResponses(input: {
+  session?: QuotingSession;
   questions: QuotingQuestion[];
   contactName?: string;
-    contactEmail?: string;
-    contactPhone?: string;
-    businessName?: string;
-    address?: string;
-    estimatedValue?: number;
-    assetDetails?: Record<string, string>;
+  contactEmail?: string;
+  contactPhone?: string;
+  businessName?: string;
+  address?: string;
+  estimatedValue?: number;
+  assetDetails?: Record<string, string>;
   publicFields: Record<string, unknown>;
   publicFieldEvidence?: PublicDataEvidenceMap;
   updatedAt: string;
@@ -1344,6 +1646,7 @@ function mergeSeededQuestionnaireResponses(input: {
   missingFields: string[];
 } {
   const seeded = seedKnownQuestionnaireResponses({
+    session: input.session,
     questions: input.questions,
     contactName: input.contactName,
     contactEmail: input.contactEmail,
@@ -1358,25 +1661,48 @@ function mergeSeededQuestionnaireResponses(input: {
   });
   const questionIds = new Set(input.questions.map((question) => question.id));
   const questionsById = new Map(input.questions.map((question) => [question.id, question]));
+  const seededResponses = seeded.questionnaireResponses ?? {};
+  const responseMeta = input.session.questionnaireResponseMeta ?? {};
   const existingResponses = Object.fromEntries(
     Object.entries(input.session.questionnaireResponses ?? {}).filter(([questionId, value]) => {
       if (!questionIds.has(questionId)) return false;
       const question = questionsById.get(questionId);
+      if (!question || !questionnaireAnswerLooksCompatible(question, value)) return false;
+      const meta = responseMeta[questionId];
+      if (meta?.updatedByRole !== "ai") return true;
+
+      // A fresh deterministic QuoteX seed outranks an older AI answer, while
+      // human and customer edits always remain authoritative.
+      if (seededResponses[questionId]) return false;
+      const cleaned = cleanQuestionnairePrefillValue(value);
+      const strictPersonalAutoKey = personalAutoQuestionKey(input.session, question);
       if (
-        question &&
-        input.session.questionnaireResponseMeta?.[questionId]?.updatedByRole === "ai" &&
-        (questionnaireAnswerHasUnsafeAiEvidence(question, input.publicFieldEvidence) ||
-          valueLooksLikeUnavailableAiAnswer(cleanQuestionnairePrefillValue(value)) ||
-          valueLooksLikeUncertainAiAnswer(cleanQuestionnairePrefillValue(value)))
+        strictPersonalAutoKey &&
+        !aiEvidenceAllowsQuestionnairePrefill(
+          findAiPublicEvidence(input.publicFieldEvidence, strictPersonalAutoKey)
+        )
       ) {
         return false;
       }
-      return question ? questionnaireAnswerLooksCompatible(question, value) : false;
+      if (
+        questionnaireAnswerHasUnsafeAiEvidence(question, input.publicFieldEvidence) ||
+        valueLooksLikeUnavailableAiAnswer(cleaned) ||
+        valueLooksLikeUncertainAiAnswer(cleaned) ||
+        !questionnaireAnswerLooksConcreteForAiPrefill(question, cleaned)
+      ) {
+        return false;
+      }
+
+      return Boolean(
+        questionnaireEvidenceForQuestion(question, input.publicFieldEvidence) ||
+          questionnaireResponseMetaIsTrustedAiSeed(meta)
+      );
     })
   );
+  const survivingResponseIds = new Set(Object.keys(existingResponses));
   const existingMeta = Object.fromEntries(
     Object.entries(input.session.questionnaireResponseMeta ?? {}).filter(([questionId]) =>
-      questionIds.has(questionId)
+      survivingResponseIds.has(questionId)
     )
   );
   const questionnaireResponses: Record<string, string> = {
@@ -1420,12 +1746,37 @@ function humanizeQuestionnaireSeedLabel(label: string): string {
 
 function completePersonalQuestionnaireQuestions(input: {
   assetType: AssetType;
-  category?: InsuranceCategory;
+  categories?: InsuranceCategory[];
   publicFields: Record<string, unknown>;
   missingFields: string[];
   existingQuestions?: QuotingQuestion[];
 }): QuotingQuestion[] {
+  const categoryQuestions = (input.categories ?? []).flatMap(categoryQuotingQuestions);
+  const retainedExistingQuestions =
+    categoryQuestions.length > 0
+      ? (input.existingQuestions ?? []).filter(
+          (question) => Boolean(question.sourceDocumentId || question.carrierId)
+        )
+      : input.existingQuestions ?? [];
+  if (categoryQuestions.length > 0) {
+    return dedupeQuotingQuestionsByLabel([
+      ...categoryQuestions,
+      ...retainedExistingQuestions,
+    ]);
+  }
+
+  const internalKeys = new Set([
+    "categoryid",
+    "categorylabel",
+    "lineofbusiness",
+    "assetidentifier",
+    "assetid",
+    "contactname",
+    "customerid",
+    "prospectid",
+  ]);
   const labels = [...Object.keys(input.publicFields), ...input.missingFields]
+    .filter((label) => !internalKeys.has(compactQuestionnaireLookup(label)))
     .map(humanizeQuestionnaireSeedLabel)
     .filter(Boolean);
   const aiQuestions =
@@ -1435,11 +1786,116 @@ function completePersonalQuestionnaireQuestions(input: {
           missingFields: labels,
         })
       : [];
-  return requireEveryQuestion(dedupeQuotingQuestionsByLabel([
-    ...(input.category ? categoryQuotingQuestions(input.category) : []),
+  return dedupeQuotingQuestionsByLabel([
     ...aiQuestions,
-    ...(input.existingQuestions ?? []),
-  ]));
+    ...retainedExistingQuestions,
+  ]);
+}
+
+function personalQuestionnaireCategories(session: QuotingSession): InsuranceCategory[] {
+  const tenantCategories = api.categories
+    .listActiveForTenant(session.tenantId)
+    .filter((category) => category.lineOfBusiness === "personal");
+  const allPersonalCategories = api.categories
+    .listActive()
+    .filter((category) => category.lineOfBusiness === "personal");
+  const selectedIds = new Set(
+    [
+      session.categoryId,
+      ...(session.categoryIds ?? []),
+      ...(session.selectedAssetMappings ?? []).map((mapping) => mapping.categoryId),
+    ].filter((value): value is string => Boolean(value))
+  );
+  const selectedLabels = new Set(
+    [
+      session.categoryLabel,
+      ...(session.categoryLabels ?? []),
+      ...(session.selectedAssetMappings ?? []).map((mapping) => mapping.categoryLabel),
+    ]
+      .filter((value): value is string => Boolean(value))
+      .map(normalizeQuestionnaireLookup)
+  );
+  const explicit = allPersonalCategories.filter(
+    (category) =>
+      selectedIds.has(category.id) ||
+      selectedLabels.has(normalizeQuestionnaireLookup(category.label))
+  );
+  if (explicit.length > 0) return explicit;
+
+  const tenantAssetTypeCategory = tenantCategories.find(
+    (category) => category.assetType === session.assetType
+  );
+  if (tenantAssetTypeCategory) return [tenantAssetTypeCategory];
+
+  const globalAssetTypeCategory = allPersonalCategories.find(
+    (category) => category.assetType === session.assetType
+  );
+  return globalAssetTypeCategory ? [globalAssetTypeCategory] : [];
+}
+
+function personalQuestionnaireCategoryForAsset(input: {
+  tenantId: string;
+  assetType: AssetType;
+  categoryId?: string;
+  categoryLabel?: string;
+}): InsuranceCategory | undefined {
+  const explicit = input.categoryId ? api.categories.get(input.categoryId) : undefined;
+  if (explicit?.lineOfBusiness === "personal") return explicit;
+
+  const normalizedLabel = normalizeQuestionnaireLookup(input.categoryLabel ?? "");
+  const tenantCategories = api.categories
+    .listActiveForTenant(input.tenantId)
+    .filter((category) => category.lineOfBusiness === "personal");
+  const globalCategories = api.categories
+    .listActive()
+    .filter((category) => category.lineOfBusiness === "personal");
+  if (normalizedLabel) {
+    const labelMatch = [...tenantCategories, ...globalCategories].find(
+      (category) => normalizeQuestionnaireLookup(category.label) === normalizedLabel
+    );
+    if (labelMatch) return labelMatch;
+  }
+  return (
+    tenantCategories.find((category) => category.assetType === input.assetType) ??
+    globalCategories.find((category) => category.assetType === input.assetType)
+  );
+}
+
+function migrateQuestionnaireAnswersToQuestions(
+  session: QuotingSession,
+  questions: QuotingQuestion[]
+): QuotingSession {
+  const existingQuestions = session.questionnaireQuestions ?? [];
+  const existingResponses = session.questionnaireResponses ?? {};
+  const existingMeta = session.questionnaireResponseMeta ?? {};
+  const responses = { ...existingResponses };
+  const meta = { ...existingMeta };
+
+  questions.forEach((question) => {
+    if (cleanQuestionnairePrefillValue(responses[question.id])) return;
+    const acordKey = compactQuestionnaireLookup(question.acordFieldKey ?? "");
+    const labelKey = normalizeQuestionnaireLookup(question.label);
+    const sourceQuestion = existingQuestions.find((candidate) => {
+      const candidateAcordKey = compactQuestionnaireLookup(candidate.acordFieldKey ?? "");
+      return Boolean(
+        (acordKey && candidateAcordKey === acordKey) ||
+          normalizeQuestionnaireLookup(candidate.label) === labelKey
+      );
+    });
+    if (!sourceQuestion) return;
+    const value = cleanQuestionnairePrefillValue(existingResponses[sourceQuestion.id]);
+    if (!value || !questionnaireAnswerLooksCompatible(question, value)) return;
+    responses[question.id] = value;
+    if (existingMeta[sourceQuestion.id]) {
+      meta[question.id] = existingMeta[sourceQuestion.id];
+    }
+  });
+
+  return {
+    ...session,
+    questionnaireResponses: responses,
+    questionnaireResponseMeta: meta,
+  };
 }
 
 function quoteSessionAddressContext(session: QuotingSession): string | undefined {
@@ -1455,10 +1911,10 @@ function quoteSessionAddressContext(session: QuotingSession): string | undefined
 
 function ensureCompletePersonalCategoryQuestionnaire(session: QuotingSession): QuotingSession {
   if (session.lineOfBusiness === "commercial") return session;
-  const category = session.categoryId ? api.categories.get(session.categoryId) : undefined;
+  const categories = personalQuestionnaireCategories(session);
   const fullQuestions = completePersonalQuestionnaireQuestions({
     assetType: session.assetType,
-    category,
+    categories,
     publicFields: session.publicFields,
     missingFields: session.missingFields,
     existingQuestions: session.questionnaireQuestions,
@@ -1466,10 +1922,10 @@ function ensureCompletePersonalCategoryQuestionnaire(session: QuotingSession): Q
   if (fullQuestions.length === 0) return session;
 
   const existingQuestions = session.questionnaireQuestions ?? [];
-  const existingResponses = session.questionnaireResponses ?? {};
-  const existingMeta = session.questionnaireResponseMeta ?? {};
   const contact = contactForQuotingSession(session);
-  const seeded = seedKnownQuestionnaireResponses({
+  const migratedSession = migrateQuestionnaireAnswersToQuestions(session, fullQuestions);
+  const merged = mergeSeededQuestionnaireResponses({
+    session: migratedSession,
     questions: fullQuestions,
     contactName: contact?.name,
     contactEmail: contact?.email,
@@ -1482,56 +1938,10 @@ function ensureCompletePersonalCategoryQuestionnaire(session: QuotingSession): Q
     publicFieldEvidence: session.publicFieldEvidence,
     updatedAt: session.updatedAt,
   });
-  const questionnaireResponses: Record<string, string> = {
-    ...(seeded.questionnaireResponses ?? {}),
-  };
-  const questionnaireResponseMeta: Record<string, QuestionnaireResponseMeta> = {
-    ...(seeded.questionnaireResponseMeta ?? {}),
-  };
-
-  fullQuestions.forEach((question) => {
-    const exactValue = cleanQuestionnairePrefillValue(existingResponses[question.id]);
-    if (
-      exactValue &&
-      questionnaireAnswerLooksCompatible(question, exactValue) &&
-      !(
-        existingMeta[question.id]?.updatedByRole === "ai" &&
-        valueLooksLikeUnavailableAiAnswer(exactValue)
-      )
-    ) {
-      questionnaireResponses[question.id] = exactValue;
-      if (existingMeta[question.id]) questionnaireResponseMeta[question.id] = existingMeta[question.id];
-      return;
-    }
-    const labelMatch = existingQuestions.find(
-      (existingQuestion) =>
-        normalizeQuestionnaireLookup(existingQuestion.label) ===
-        normalizeQuestionnaireLookup(question.label)
-    );
-    if (!labelMatch) return;
-    const labelValue = cleanQuestionnairePrefillValue(existingResponses[labelMatch.id]);
-    if (!labelValue) return;
-    if (!questionnaireAnswerLooksCompatible(question, labelValue)) return;
-    if (
-      existingMeta[labelMatch.id]?.updatedByRole === "ai" &&
-      valueLooksLikeUnavailableAiAnswer(labelValue)
-    ) {
-      return;
-    }
-    questionnaireResponses[question.id] = labelValue;
-    questionnaireResponseMeta[question.id] =
-      existingMeta[labelMatch.id] ??
-      ({
-        updatedAt: session.updatedAt,
-        updatedById: session.createdById,
-        updatedByName: "Agent",
-        updatedByRole: "agent",
-      } satisfies QuestionnaireResponseMeta);
-  });
-
-  const missingFields = fullQuestions
-    .filter((question) => question.required && !questionnaireResponses[question.id]?.trim())
-    .map((question) => question.label);
+  const questionnaireResponses = merged.questionnaireResponses;
+  const questionnaireResponseMeta = merged.questionnaireResponseMeta;
+  const missingFields = merged.missingFields;
+  const existingResponses = session.questionnaireResponses ?? {};
   const hasCompleteQuestionSet =
     existingQuestions.length === fullQuestions.length &&
     fullQuestions.every((question) => existingQuestions.some((existing) => existing.id === question.id));
@@ -6038,10 +6448,12 @@ function commercialCarrierRecommendationsForSession(
 
 function contactForQuotingSession(session: QuotingSession): CustomerProfile | Prospect | null {
   if (session.customerId) {
-    return db.list("customers").find((customer) => customer.id === session.customerId) ?? null;
+    return tenantFilter(db.list("customers"), session.tenantId)
+      .find((customer) => customer.id === session.customerId) ?? null;
   }
   if (session.prospectId) {
-    return db.list("prospects").find((prospect) => prospect.id === session.prospectId) ?? null;
+    return tenantFilter(db.list("prospects"), session.tenantId)
+      .find((prospect) => prospect.id === session.prospectId) ?? null;
   }
   return null;
 }
@@ -6423,23 +6835,30 @@ function aiProviderErrorCodeFromCaught(error: unknown): string {
   return "provider_unavailable";
 }
 
-function personalCategoryAnswerHints(category?: InsuranceCategory): Record<string, string> {
-  if (!category || category.lineOfBusiness === "commercial") return {};
-  const text = normalizeQuestionnaireLookup(`${category.id} ${category.label} ${category.description}`);
-  if (text.includes("primaryhome") || (text.includes("primary") && text.includes("residence"))) {
-    return { occupancy: "Primary", Occupancy: "Primary" };
-  }
-  if (text.includes("vacation") || text.includes("secondary")) {
-    return { occupancy: "Secondary", Occupancy: "Secondary" };
-  }
-  if (text.includes("rental") || text.includes("investment") || text.includes("tenantoccupied")) {
-    return { occupancy: "Rental", Occupancy: "Rental" };
-  }
-  if (text.includes("vacant")) {
-    return { occupancy: "Vacant", Occupancy: "Vacant" };
-  }
+function personalCategoryAnswerHints(_category?: InsuranceCategory): Record<string, string> {
+  // Category selection routes the quote flow; it is not evidence about the actual risk.
   return {};
 }
+
+const PERSONAL_AUTO_PUBLIC_RESEARCH_KEYS = new Set([
+  "ratingCounty",
+  "uspsValidated",
+  "vehicleYear",
+  "vehicleMake",
+  "vehicleModel",
+  "vehicleTrim",
+  "vehicleBodyStyle",
+  "vehicleOriginalMsrp",
+  "vehicleEngine",
+  "vehicleCylinders",
+  "vehicleDisplacement",
+  "vehicleFuelType",
+  "vehicleDriveType",
+  "vehicleDoorCount",
+  "antiLockBrakes",
+  "antiTheftDevice",
+  "airbags",
+]);
 
 async function applyServerQuestionnaireMappingToSession(
   session: QuotingSession,
@@ -6449,6 +6868,8 @@ async function applyServerQuestionnaireMappingToSession(
   const questionnaireFields = questionnaireAiFieldsForQuestions(questions);
   if (questionnaireFields.length === 0) return session;
 
+  const strictPersonalAuto =
+    session.lineOfBusiness !== "commercial" && session.assetType === "luxury_vehicle";
   const publicFields: Record<string, unknown> = { ...(session.publicFields ?? {}) };
   const publicFieldEvidence: PublicDataEvidenceMap = { ...(session.publicFieldEvidence ?? {}) };
   let questionnaireResponses: Record<string, string> = { ...(session.questionnaireResponses ?? {}) };
@@ -6459,6 +6880,33 @@ async function applyServerQuestionnaireMappingToSession(
   let summary = "";
   let mappedProviderError: string | undefined;
   let mappedProviderErrorCode: string | undefined;
+  const contact = contactForQuotingSession(session);
+
+  if (strictPersonalAuto) {
+    const preparedAt = nowIso();
+    const prepared = mergeSeededQuestionnaireResponses({
+      session: {
+        ...session,
+        publicFields,
+        publicFieldEvidence,
+        questionnaireResponses,
+        questionnaireResponseMeta,
+      },
+      questions,
+      contactName: contact?.name,
+      contactEmail: contact?.email,
+      contactPhone: contact?.phone,
+      businessName: contact && "businessName" in contact ? contact.businessName : undefined,
+      address: quoteSessionAddressContext(session),
+      estimatedValue: session.estimatedValue,
+      assetDetails: session.assetDetails,
+      publicFields,
+      publicFieldEvidence,
+      updatedAt: preparedAt,
+    });
+    questionnaireResponses = prepared.questionnaireResponses;
+    questionnaireResponseMeta = prepared.questionnaireResponseMeta;
+  }
 
   try {
     const mapped = await aiMapAcordFields({
@@ -6475,7 +6923,16 @@ async function applyServerQuestionnaireMappingToSession(
         formNumber: session.lineOfBusiness === "commercial" ? "Commercial intake" : "Personal intake",
       },
       fields: questionnaireFields,
-      dossier: compactAcordAiDossier(session, responses),
+      dossier: compactAcordAiDossier(
+        {
+          ...session,
+          publicFields,
+          publicFieldEvidence,
+          questionnaireResponses,
+          questionnaireResponseMeta,
+        },
+        strictPersonalAuto ? questionnaireResponses : responses
+      ),
       intent: "questionnaire_prefill",
     });
     summary = mapped.summary;
@@ -6483,6 +6940,17 @@ async function applyServerQuestionnaireMappingToSession(
     mappedProviderErrorCode = mapped.providerErrorCode;
     const updatedAt = nowIso();
     const questionsById = new Map(questions.map((question) => [question.id, question]));
+    const strictQuestionsByKey = new Map(
+      questions
+        .map(
+          (question) =>
+            [
+              compactQuestionnaireLookup(personalAutoQuestionKey(session, question) ?? ""),
+              question,
+            ] as const
+        )
+        .filter(([key]) => Boolean(key))
+    );
     const mappingContext = {
       contactName: contactForQuotingSession(session)?.name,
       publicFields,
@@ -6496,16 +6964,31 @@ async function applyServerQuestionnaireMappingToSession(
       mapping?: AiAcordFieldMapping
     ) => {
       const directQuestion =
-        targetId && questionsById.has(targetId) ? questionsById.get(targetId) : undefined;
+        (targetId && questionsById.has(targetId) ? questionsById.get(targetId) : undefined) ??
+        (strictPersonalAuto
+          ? strictQuestionsByKey.get(compactQuestionnaireLookup(fieldKey))
+          : undefined);
       if (targetId && !directQuestion) return false;
+      if (strictPersonalAuto && !directQuestion) return false;
+      const strictQuestionKey = directQuestion
+        ? personalAutoQuestionKey(session, directQuestion)
+        : undefined;
+      if (
+        strictPersonalAuto &&
+        (!strictQuestionKey || !PERSONAL_AUTO_PUBLIC_RESEARCH_KEYS.has(strictQuestionKey))
+      ) {
+        return false;
+      }
       const evidence =
         findAiPublicEvidence(mapped.publicFieldEvidence, fieldKey) ??
+        (targetId ? findAiPublicEvidence(mapped.publicFieldEvidence, targetId) : undefined) ??
         (directQuestion ? questionnaireEvidenceFromMapping(mapping, fieldKey, updatedAt) : undefined);
       if (!evidence || !aiEvidenceAllowsQuestionnairePrefill(evidence)) return false;
-      const compatibilityKey = directQuestion
+      const compatibilityKey = strictQuestionKey ??
+        (directQuestion
         ? compatibleQuestionnaireMappingKey(directQuestion, fieldKey, value, mappingContext) ??
           (questionnaireAnswerLooksCompatible(directQuestion, value) ? directQuestion.label : null)
-        : fieldKey;
+        : fieldKey);
       if (!compatibilityKey) return false;
       if (!mappedFieldValueIsCompatible(compatibilityKey, value, mappingContext)) return false;
       const question =
@@ -6534,6 +7017,8 @@ async function applyServerQuestionnaireMappingToSession(
       if (!cleanedValue) return false;
       if (!questionnaireAnswerLooksConcreteForAiPrefill(question, cleanedValue)) return false;
       const existingAnswer = cleanQuestionnairePrefillValue(questionnaireResponses[question.id]);
+      const existingMeta = questionnaireResponseMeta[question.id];
+      if (existingAnswer && existingMeta?.updatedByRole !== "ai") return false;
       const existingEvidence =
         findAiPublicEvidence(publicFieldEvidence, compatibilityKey) ??
         findAiPublicEvidence(publicFieldEvidence, question.label);
@@ -6591,7 +7076,6 @@ async function applyServerQuestionnaireMappingToSession(
   }
 
   const now = nowIso();
-  const contact = contactForQuotingSession(session);
   const seeded = mergeSeededQuestionnaireResponses({
     session: {
       ...session,
@@ -18108,10 +18592,7 @@ export const api = {
       const now = nowIso();
       const category = input.categoryId ? api.categories.get(input.categoryId) : undefined;
       const categoryQuestions = category ? categoryQuotingQuestions(category) : [];
-      const questions =
-        (input.lineOfBusiness ?? category?.lineOfBusiness) === "commercial"
-          ? categoryQuestions
-          : requireEveryQuestion(categoryQuestions);
+      const questions = categoryQuestions;
       const categoryQuestionIds = new Set(questions.map((question) => question.id));
       const answers = input.questionnaireAnswers ?? {};
       const nextResponses = Object.fromEntries(
@@ -18324,7 +18805,25 @@ export const api = {
             .sort(sortQuotingSessionsByWorkRecency)[0]
         : undefined;
       if (existingOpenSession) {
-        const consistentSession = ensureQuotingSessionConsistency(existingOpenSession);
+        let consistentSession = ensureQuotingSessionConsistency(existingOpenSession);
+        if (consistentSession.lineOfBusiness !== "commercial") {
+          const canonicalSession = ensureCompletePersonalCategoryQuestionnaire(consistentSession);
+          if (canonicalSession !== consistentSession) {
+            consistentSession =
+              db.update("quotingSessions", consistentSession.id, {
+                questionnaireQuestions: canonicalSession.questionnaireQuestions,
+                questionnaireResponses: canonicalSession.questionnaireResponses,
+                questionnaireResponseMeta: canonicalSession.questionnaireResponseMeta,
+                missingFields: canonicalSession.missingFields,
+                updatedAt: nowIso(),
+              }) ?? canonicalSession;
+          }
+          consistentSession = await applyServerQuestionnaireMappingToSession(
+            consistentSession,
+            consistentSession.questionnaireQuestions ?? [],
+            consistentSession.questionnaireResponses ?? {}
+          );
+        }
         syncQuoteActivityStatus(consistentSession, {
           taskIds: input.activityTaskIds,
           actorId: input.activityActorId ?? input.createdById,
@@ -18443,9 +18942,49 @@ export const api = {
       const selectedCategories = (input.categoryIds ?? [])
         .map((categoryId) => api.categories.get(categoryId))
         .filter((category): category is InsuranceCategory => !!category);
-      const category = input.categoryId
-        ? api.categories.get(input.categoryId)
-        : selectedCategories[0];
+      if (lineOfBusiness === "personal") {
+        selectedAssetMappings.forEach((asset) => {
+          const resolvedCategory =
+            selectedCategories.find((option) => option.assetType === asset.assetType) ??
+            personalQuestionnaireCategoryForAsset({
+              tenantId: input.tenantId,
+              assetType: asset.assetType,
+              categoryId: asset.categoryId,
+              categoryLabel: asset.categoryLabel,
+            });
+          if (!resolvedCategory) return;
+          asset.categoryId = resolvedCategory.id;
+          asset.categoryLabel = resolvedCategory.label;
+        });
+      }
+      const category =
+        (input.categoryId ? api.categories.get(input.categoryId) : selectedCategories[0]) ??
+        (lineOfBusiness === "personal"
+          ? personalQuestionnaireCategoryForAsset({
+              tenantId: input.tenantId,
+              assetType: primaryAsset.assetType,
+              categoryId: primaryAsset.categoryId,
+              categoryLabel: primaryAsset.categoryLabel,
+            })
+          : undefined);
+      const resolvedCategoryIds = Array.from(
+        new Set(
+          [
+            ...(input.categoryIds ?? []),
+            input.categoryId,
+            ...selectedAssetMappings.map((asset) => asset.categoryId),
+          ].filter((value): value is string => Boolean(value))
+        )
+      );
+      const resolvedCategoryLabels = Array.from(
+        new Set(
+          [
+            ...(input.categoryLabels ?? []),
+            input.categoryLabel,
+            ...selectedAssetMappings.map((asset) => asset.categoryLabel),
+          ].filter((value): value is string => Boolean(value))
+        )
+      );
       const primaryAssetDetails = primaryAsset.assetDetails ?? {};
       const seededAssetDetails: Record<string, string> = {
         ...(lineOfBusiness === "personal" ? personalCategoryAnswerHints(category) : {}),
@@ -18477,10 +19016,16 @@ export const api = {
         selectedAssetMappings.forEach((asset, assetIndex) => {
           const assetCategory = asset.categoryId
             ? api.categories.get(asset.categoryId)
-            : selectedCategories.find((option) => option.assetType === asset.assetType) ?? category;
+            : selectedCategories.find((option) => option.assetType === asset.assetType) ??
+              personalQuestionnaireCategoryForAsset({
+                tenantId: input.tenantId,
+                assetType: asset.assetType,
+                categoryLabel: asset.categoryLabel,
+              }) ??
+              category;
           const assetQuestions = completePersonalQuestionnaireQuestions({
             assetType: asset.assetType,
-            category: assetCategory,
+            categories: assetCategory ? [assetCategory] : undefined,
             publicFields: asset.publicFields,
             missingFields: asset.missingFields,
           });
@@ -18533,11 +19078,10 @@ export const api = {
       const row: QuotingSession = {
         id: sessionId,
         tenantId: input.tenantId,
-        categoryId: input.categoryId,
-        categoryLabel: input.categoryLabel,
-        categoryIds: input.categoryIds ?? (input.categoryId ? [input.categoryId] : undefined),
-        categoryLabels:
-          input.categoryLabels ?? (input.categoryLabel ? [input.categoryLabel] : undefined),
+        categoryId: input.categoryId ?? primaryAsset.categoryId,
+        categoryLabel: input.categoryLabel ?? primaryAsset.categoryLabel,
+        categoryIds: resolvedCategoryIds.length > 0 ? resolvedCategoryIds : undefined,
+        categoryLabels: resolvedCategoryLabels.length > 0 ? resolvedCategoryLabels : undefined,
         prospectId: input.prospectId,
         customerId: input.customerId,
         assetId: primaryAsset.assetId,
@@ -18736,7 +19280,7 @@ export const api = {
       if (session.personalQuestionnairePreparedAt) return session;
 
       const preparedAt = nowIso();
-      const questions = requireEveryQuestion(session.questionnaireQuestions ?? []);
+      const questions = session.questionnaireQuestions ?? [];
       const responses = session.questionnaireResponses ?? {};
       const missingFields = questions
         .filter((question) => question.required && !(responses[question.id] ?? "").trim())

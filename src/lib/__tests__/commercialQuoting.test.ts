@@ -923,9 +923,9 @@ describe("commercial quoting session", () => {
     });
     expect(session.lineOfBusiness).toBe("personal");
     expect((session.questionnaireQuestions ?? []).length).toBeGreaterThan(0);
-    // Every personal question carries the asset-type section header.
+    // Personal questions use the selected category's human-readable section header.
     (session.questionnaireQuestions ?? []).forEach((q) => {
-      expect(q.section).toContain(session.assetType.replace(/_/g, " "));
+      expect(q.section).toBe("Primary Home intake");
     });
   });
 

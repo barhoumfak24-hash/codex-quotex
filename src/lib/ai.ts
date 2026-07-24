@@ -1779,6 +1779,8 @@ async function decodeVinViaNhtsaDetailed(vin: string): Promise<{
   doors?: string;
   driveType?: string;
   fuelType?: string;
+  engineCylinders?: string;
+  displacementL?: string;
   engineDescription?: string;
   basePrice?: string;
   curbWeightLb?: string;
@@ -1809,6 +1811,8 @@ async function decodeVinViaNhtsaDetailed(vin: string): Promise<{
       doors: get("Doors"),
       driveType: get("DriveType"),
       fuelType: get("FuelTypePrimary"),
+      engineCylinders: get("EngineCylinders"),
+      displacementL: get("DisplacementL"),
       engineDescription: vehicleEngineDescription(row),
       basePrice: get("BasePrice"),
       curbWeightLb: get("CurbWeightLB"),
@@ -1883,16 +1887,21 @@ async function enrichLuxuryVehicle(seed: Record<string, unknown>): Promise<AiAss
   if (decoded.doors) fields.doors = decoded.doors;
   if (decoded.driveType) fields.driveType = decoded.driveType;
   if (decoded.fuelType) fields.fuelType = decoded.fuelType;
+  if (decoded.engineCylinders) fields.engineCylinders = decoded.engineCylinders;
+  if (decoded.displacementL) fields.displacementL = decoded.displacementL;
   if (decoded.engineDescription) fields.engineDescription = decoded.engineDescription;
   if (decoded.basePrice) fields.basePrice = decoded.basePrice;
   if (decoded.curbWeightLb) fields.curbWeightLb = decoded.curbWeightLb;
   const evidence: PublicDataEvidenceMap = {};
+  const nhtsaSourceUrl =
+    `https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValuesExtended/${encodeURIComponent(vin)}?format=json`;
   Object.keys(fields).forEach((fieldKey) => {
     markEvidence(evidence, fieldKey, "government_api", "NHTSA VIN decoder (vpic.nhtsa.dot.gov)", {
       confidence: 0.95,
       verified: true,
       allowDocumentAutofill: true,
       notes: `Decoded from VIN ${vin}.`,
+      sourceUrl: nhtsaSourceUrl,
     });
   });
   markEvidence(evidence, "vin", "client_intake", "Client-entered VIN", {
@@ -3713,6 +3722,7 @@ function applyEnrichmentToQuotePrep(
         verified: parts.every((part) => part.verified),
         allowDocumentAutofill: parts.every((part) => part.allowDocumentAutofill),
         notes: "Derived from NHTSA year, make, and model fields.",
+        sourceUrl: parts.find((part) => part.sourceUrl)?.sourceUrl,
       });
     }
     if (assetType === "luxury_vehicle" && /vin-decoded trim|trim/i.test(label)) {
@@ -3724,6 +3734,7 @@ function applyEnrichmentToQuotePrep(
         verified: trimEvidence.verified,
         allowDocumentAutofill: trimEvidence.allowDocumentAutofill,
         notes: trimEvidence.notes,
+        sourceUrl: trimEvidence.sourceUrl,
       });
     }
     if (assetType === "luxury_vehicle" && /curb weight/i.test(label)) {
@@ -3734,6 +3745,29 @@ function applyEnrichmentToQuotePrep(
       setFromKey(label, "basePrice");
     }
   });
+
+  if (assetType === "luxury_vehicle") {
+    const canonicalVinFields: Array<[string, string]> = [
+      ["vehicleYear", "year"],
+      ["vehicleMake", "make"],
+      ["vehicleModel", "model"],
+      ["vehicleTrim", fields.trim ? "trim" : "series"],
+      ["vehicleBodyStyle", "bodyClass"],
+      ["vehicleOriginalMsrp", "basePrice"],
+      ["vehicleEngine", "engineModel"],
+      ["vehicleCylinders", "engineCylinders"],
+      ["vehicleDisplacement", "displacementL"],
+      ["vehicleFuelType", "fuelType"],
+      ["vehicleDriveType", "driveType"],
+      ["vehicleDoorCount", "doors"],
+      ["antiLockBrakes", "antiLockBrakes"],
+      ["antiTheftDevice", "antiTheftDevice"],
+      ["airbags", "airbags"],
+    ];
+    canonicalVinFields.forEach(([questionnaireKey, enrichmentKey]) => {
+      setFromKey(questionnaireKey, enrichmentKey);
+    });
+  }
 }
 
 function synthValueForLabel(
@@ -3853,10 +3887,9 @@ export function aiGeneratePersonalQuestionnaire(input: {
       label,
       kind,
       options,
-      // Public-record gaps tend to be hard requirements; AI-suggested
-      // clarifications get marked required so the client doesn't
-      // skip critical underwriting items.
-      required: true,
+      // Generic fallback questions are clarification prompts, not automatic
+      // quote blockers. Category-owned questionnaires define requiredness.
+      required: false,
       round: "initial",
     };
   });

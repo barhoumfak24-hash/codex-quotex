@@ -2256,9 +2256,7 @@ function Questionnaire({
 function visibleQuestionnaireQuestions(session: QuotingSession): QuotingQuestion[] {
   const questions = session.questionnaireQuestions ?? [];
   if (session.lineOfBusiness !== "commercial") {
-    return questions.map((question) =>
-      question.required ? question : { ...question, required: true }
-    );
+    return questions;
   }
   if (session.commercialSecondRoundSentAt && !session.commercialSupplementalsCompletedAt) {
     return questions.filter((q) => q.round === "second_round");

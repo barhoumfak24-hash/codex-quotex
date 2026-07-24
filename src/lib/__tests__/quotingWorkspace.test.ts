@@ -207,12 +207,16 @@ describe("api.quoting workspace", () => {
                 model: "Accord EX-V6",
                 bodyClass: "Coupe",
                 trim: "EX-V6",
+                fuelType: "Gasoline",
+                engineCylinders: "6",
+                displacementL: "3.0",
               },
               evidence: {
                 year: {
                   fieldKey: "year",
                   sourceKind: "government_api",
                   sourceLabel: "NHTSA VIN decoder (vpic.nhtsa.dot.gov)",
+                  sourceUrl: "https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValuesExtended/1HGCM82633A004352?format=json",
                   confidence: 0.95,
                   verified: true,
                   allowDocumentAutofill: true,
@@ -222,6 +226,7 @@ describe("api.quoting workspace", () => {
                   fieldKey: "make",
                   sourceKind: "government_api",
                   sourceLabel: "NHTSA VIN decoder (vpic.nhtsa.dot.gov)",
+                  sourceUrl: "https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValuesExtended/1HGCM82633A004352?format=json",
                   confidence: 0.95,
                   verified: true,
                   allowDocumentAutofill: true,
@@ -231,6 +236,7 @@ describe("api.quoting workspace", () => {
                   fieldKey: "model",
                   sourceKind: "government_api",
                   sourceLabel: "NHTSA VIN decoder (vpic.nhtsa.dot.gov)",
+                  sourceUrl: "https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValuesExtended/1HGCM82633A004352?format=json",
                   confidence: 0.95,
                   verified: true,
                   allowDocumentAutofill: true,
@@ -240,6 +246,37 @@ describe("api.quoting workspace", () => {
                   fieldKey: "trim",
                   sourceKind: "government_api",
                   sourceLabel: "NHTSA VIN decoder (vpic.nhtsa.dot.gov)",
+                  sourceUrl: "https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValuesExtended/1HGCM82633A004352?format=json",
+                  confidence: 0.95,
+                  verified: true,
+                  allowDocumentAutofill: true,
+                  collectedAt: "2026-06-28T00:00:00.000Z",
+                },
+                fuelType: {
+                  fieldKey: "fuelType",
+                  sourceKind: "government_api",
+                  sourceLabel: "NHTSA VIN decoder (vpic.nhtsa.dot.gov)",
+                  sourceUrl: "https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValuesExtended/1HGCM82633A004352?format=json",
+                  confidence: 0.95,
+                  verified: true,
+                  allowDocumentAutofill: true,
+                  collectedAt: "2026-06-28T00:00:00.000Z",
+                },
+                engineCylinders: {
+                  fieldKey: "engineCylinders",
+                  sourceKind: "government_api",
+                  sourceLabel: "NHTSA VIN decoder (vpic.nhtsa.dot.gov)",
+                  sourceUrl: "https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValuesExtended/1HGCM82633A004352?format=json",
+                  confidence: 0.95,
+                  verified: true,
+                  allowDocumentAutofill: true,
+                  collectedAt: "2026-06-28T00:00:00.000Z",
+                },
+                displacementL: {
+                  fieldKey: "displacementL",
+                  sourceKind: "government_api",
+                  sourceLabel: "NHTSA VIN decoder (vpic.nhtsa.dot.gov)",
+                  sourceUrl: "https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValuesExtended/1HGCM82633A004352?format=json",
                   confidence: 0.95,
                   verified: true,
                   allowDocumentAutofill: true,
@@ -317,6 +354,37 @@ describe("api.quoting workspace", () => {
     expect(session.missingFields).not.toContain("Primary use (pleasure / commute / business)");
     expect(session.aiSummary).toContain("agent-provided lookup");
     expect(api.assets.get(asset.id)?.label).toBe("2003 HONDA Accord EX-V6");
+    const answerForKey = (key: string) => {
+      const question = session.questionnaireQuestions?.find(
+        (candidate) => candidate.acordFieldKey === key
+      );
+      expect(question, `Missing personal-auto question ${key}`).toBeTruthy();
+      return {
+        answer: session.questionnaireResponses?.[question!.id],
+        meta: session.questionnaireResponseMeta?.[question!.id],
+      };
+    };
+    expect(answerForKey("vin").answer).toBe("1HGCM82633A004352");
+    expect(answerForKey("vehicleYear").answer).toBe("2003");
+    expect(answerForKey("vehicleMake").answer).toBe("HONDA");
+    expect(answerForKey("vehicleModel").answer).toBe("Accord EX-V6");
+    expect(answerForKey("vehicleTrim").answer).toBe("EX-V6");
+    expect(answerForKey("vehicleFuelType").answer).toBe("Gasoline");
+    expect(answerForKey("vehicleCylinders").answer).toBe("6");
+    expect(answerForKey("vehicleDisplacement").answer).toBe("3.0");
+    expect(answerForKey("annualMileage").answer).toBe("3500");
+    expect(answerForKey("vehicleUsage").answer).toBe("Pleasure");
+    expect(answerForKey("currentStreetAddress").answer).toBe("1 Ocean Drive");
+    expect(answerForKey("currentCity").answer).toBe("Palm Coast");
+    expect(answerForKey("currentState").answer).toBe("FL");
+    expect(answerForKey("currentZipCode").answer).toBe("32137");
+    expect(answerForKey("coApplicantFirstName").answer).toBeUndefined();
+    expect(answerForKey("coApplicantFirstName").meta).toBeUndefined();
+    expect(answerForKey("yearsAtAddress").answer).toBeUndefined();
+    expect(answerForKey("monthsAtAddress").answer).toBeUndefined();
+    expect(answerForKey("previousAddress").answer).toBeUndefined();
+    expect(answerForKey("incidentDescription").answer).toBeUndefined();
+    expect(answerForKey("incidentDescription").meta).toBeUndefined();
   });
 
   it("shows AI-filled personal questionnaire fields as editable shared answers", async () => {
@@ -380,8 +448,8 @@ describe("api.quoting workspace", () => {
       const propertyAddressId = fieldId(/property address/i);
       const yearBuiltId = fieldId(/year built/i);
       const squareFootageId = fieldId(/square footage/i);
-      const constructionTypeId = fieldId(/construction type/i);
-      const roofMaterialId = fieldId(/roof material/i);
+      const constructionTypeId = fieldId(/frame and exterior|construction type/i);
+      const roofMaterialId = fieldId(/roof.*(material|shape|pitch|skylight)/i);
       return {
         fields: {
           "Year built": "1952",
@@ -518,18 +586,17 @@ describe("api.quoting workspace", () => {
       })
     );
     expect(answerFor(/property address/i)).toBe("3901 North Nora Avenue, Chicago, IL 60634");
-    expect(answerFor(/occupancy/i)).toBe("Primary");
+    expect(answerFor(/occupancy/i)).toBeUndefined();
     expect(answerFor(/year built/i)).toBe("1952");
     expect(answerFor(/square footage/i)).toBe("2148");
-    expect(answerFor(/construction type/i)).toBe("Masonry");
+    expect(answerFor(/frame and exterior|construction type/i)).toBe("Masonry");
     expect(answerFor(/roof.*(material|shape|pitch|skylight)/i)).toBe("Asphalt shingle");
     expect(answerFor(/property address/i)).not.toBe("Quote Tester");
     const yearBuiltQuestion = questions.find((candidate) => /year built/i.test(candidate.label));
     expect(session.questionnaireResponseMeta?.[yearBuiltQuestion!.id]?.sourceUrl).toBe("https://example.com/property");
     expect(session.questionnaireResponseMeta?.[yearBuiltQuestion!.id]?.sourceKind).toBe("public_web");
-    expect(session.missingFields).not.toEqual(
-      expect.arrayContaining(["Occupancy", "Year built", "Square footage"])
-    );
+    expect(session.missingFields).toEqual(expect.arrayContaining(["Occupancy"]));
+    expect(session.missingFields).not.toEqual(expect.arrayContaining(["Year built", "Square footage"]));
   });
 
   it("trusts exact OpenAI target ids even when the returned field wording is descriptive", async () => {
@@ -762,7 +829,15 @@ describe("api.quoting workspace", () => {
 
     expect(initial.lineOfBusiness).toBe("personal");
     expect(initial.questionnaireQuestions?.length).toBeGreaterThan(0);
-    expect(initial.questionnaireQuestions?.every((question) => question.required)).toBe(true);
+    expect(initial.questionnaireQuestions?.some((question) => question.required)).toBe(true);
+    expect(initial.questionnaireQuestions?.some((question) => !question.required)).toBe(true);
+    expect(
+      initial.missingFields.every((label) =>
+        initial.questionnaireQuestions?.some(
+          (question) => question.required && question.label === label
+        )
+      )
+    ).toBe(true);
     expect(initial.personalQuestionnairePreparedAt).toBeUndefined();
 
     const prepared = api.quoting.preparePersonalQuestionnaire(initial.id)!;

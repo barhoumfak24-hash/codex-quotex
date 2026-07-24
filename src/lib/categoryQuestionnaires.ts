@@ -23,7 +23,7 @@ function sectionQuestion(
   inputType: CategoryQuestion["inputType"] = "text",
   patch: QuestionPatch = {}
 ): CategoryQuestion {
-  return q(key, label, inputType, { required: true, ...patch, section });
+  return q(key, label, inputType, { required: false, ...patch, section });
 }
 
 function norm(text: string): string {
@@ -47,7 +47,7 @@ function dedupe(questions: CategoryQuestion[]): CategoryQuestion[] {
 }
 
 function homeQuoteSheetQuestions(): CategoryQuestion[] {
-  return [
+  const questions = [
     q("propertyAddress", "Property address", "address", {
       required: true,
       placeholder: "Street, city, state, ZIP",
@@ -119,6 +119,27 @@ function homeQuoteSheetQuestions(): CategoryQuestion[] {
       placeholder: "Full pay, escrow, non-smoker, group, generator, protective devices, hydrant/fire-station distance, mortgage free, multi-policy",
     }),
   ];
+
+  const requiredKeys = new Set([
+    "propertyAddress",
+    "occupancy",
+    "ownershipAndLien",
+    "countyTownship",
+    "yearBuilt",
+    "squareFootageAndUnits",
+    "homeStyle",
+    "foundationDetails",
+    "frameAndExterior",
+    "roofShapePitchMaterial",
+    "heatingCoolingSystems",
+    "electricalAndSafetySystems",
+    "priorCarrierAndLosses",
+  ]);
+
+  return questions.map((question) => ({
+    ...question,
+    required: requiredKeys.has(question.key),
+  }));
 }
 
 function autoQuoteSheetQuestions(): CategoryQuestion[] {
@@ -137,7 +158,7 @@ function autoQuoteSheetQuestions(): CategoryQuestion[] {
   const incidents = "13. Accident / Incident History (repeat for every incident)";
   const review = "14. Final Review";
 
-  return [
+  const questions = [
     sectionQuestion(applicant, "primaryFirstName", "Primary applicant first name"),
     sectionQuestion(applicant, "primaryMiddleInitial", "Primary applicant middle initial"),
     sectionQuestion(applicant, "primaryLastName", "Primary applicant last name"),
@@ -346,6 +367,61 @@ function autoQuoteSheetQuestions(): CategoryQuestion[] {
     sectionQuestion(review, "coveragesVerified", "Coverages verified?", "boolean"),
     sectionQuestion(review, "incidentsVerified", "Incidents verified?", "boolean"),
   ];
+
+  const requiredKeys = new Set([
+    "primaryFirstName",
+    "primaryLastName",
+    "primaryDateOfBirth",
+    "primaryGender",
+    "primaryMaritalStatus",
+    "emailAddress",
+    "authorizeMvr",
+    "authorizeClue",
+    "authorizeCredit",
+    "currentStreetAddress",
+    "currentCity",
+    "currentState",
+    "currentZipCode",
+    "yearsAtAddress",
+    "monthsAtAddress",
+    "residenceType",
+    "mailingSameAsCurrent",
+    "ratingState",
+    "ratingCounty",
+    "targetEffectiveDate",
+    "policyTerm",
+    "currentlyInsured",
+    "driverFirstName",
+    "driverLastName",
+    "driverDateOfBirth",
+    "driverGender",
+    "driverRelationshipToApplicant",
+    "driverStatus",
+    "driverLicenseState",
+    "driverLicenseNumber",
+    "driverLicenseStatus",
+    "driverAgeFirstLicensed",
+    "vin",
+    "vehicleYear",
+    "vehicleMake",
+    "vehicleModel",
+    "vehicleOwnershipStatus",
+    "vehicleRegisteredState",
+    "principalOperator",
+    "vehicleUsage",
+    "oneWayCommuteMiles",
+    "daysDrivenPerWeek",
+    "annualMileage",
+    "vehicleGaraged",
+    "garageLocation",
+    "bodilyInjuryLimits",
+    "propertyDamageLimits",
+  ]);
+
+  return questions.map((question) => ({
+    ...question,
+    required: requiredKeys.has(question.key),
+  }));
 }
 
 function baseAssetQuestions(assetType: AssetType): CategoryQuestion[] {

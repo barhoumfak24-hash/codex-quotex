@@ -3032,8 +3032,8 @@ function questionnaireFieldAliases(fieldId: string): string[] {
     vehicleRegisteredState: ["vehicleRegisteredState", "registeredState"],
     vehicleOriginalMsrp: ["vehicleOriginalMsrp", "originalMsrp", "msrp"],
     vehicleEngine: ["vehicleEngine", "engine", "engineDescription"],
-    vehicleCylinders: ["vehicleCylinders", "cylinders"],
-    vehicleDisplacement: ["vehicleDisplacement", "displacement"],
+    vehicleCylinders: ["vehicleCylinders", "cylinders", "engineCylinders"],
+    vehicleDisplacement: ["vehicleDisplacement", "displacement", "displacementL"],
     vehicleFuelType: ["vehicleFuelType", "fuelType"],
     vehicleDriveType: ["vehicleDriveType", "driveType"],
     vehicleDoorCount: ["vehicleDoorCount", "numberOfDoors", "doorCount"],
@@ -4350,6 +4350,8 @@ async function decodeVinViaNhtsaServer(vin: string): Promise<Record<string, stri
       doors: get("Doors"),
       driveType: get("DriveType"),
       fuelType: get("FuelTypePrimary"),
+      engineCylinders: get("EngineCylinders"),
+      displacementL: get("DisplacementL"),
       engineDescription: vehicleEngineDescriptionServer(row) ?? "",
       basePrice: get("BasePrice"),
       curbWeightLb: get("CurbWeightLB"),
@@ -4744,6 +4746,8 @@ async function enrichLuxuryVehicleServer(
   targetQuestions: AiEnrichmentTargetQuestion[] = []
 ): Promise<AiAssetEnrichment> {
   const vin = normalizeVin(seed.vin);
+  const nhtsaSourceUrl =
+    `https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValuesExtended/${encodeURIComponent(vin)}?format=json`;
   const fields: Record<string, unknown> = {};
   const sourceEvidence: PublicDataEvidenceMap = {};
   const unavailableFields = new Set<string>(["estimatedValue"]);
@@ -4811,6 +4815,8 @@ async function enrichLuxuryVehicleServer(
           "doors",
           "driveType",
           "fuelType",
+          "engineCylinders",
+          "displacementL",
           "engineDescription",
           "basePrice",
           "curbWeightLb",
@@ -4829,6 +4835,7 @@ async function enrichLuxuryVehicleServer(
           verified: true,
           allowDocumentAutofill: true,
           notes: `Decoded from VIN ${vin}.`,
+          sourceUrl: nhtsaSourceUrl,
         });
       });
       if (targetQuestionsAllowField(targetQuestions, "vin")) {

@@ -198,7 +198,15 @@ describe("communications.automatePersonalQuoteReplies", () => {
     expect(session.status).toBe("awaiting_reply");
     expect(session.questionnaireMessageId).toBeTruthy();
     expect(session.personalQuestionnairePreparedAt).toBeTruthy();
-    expect(session.questionnaireQuestions?.every((question) => question.required)).toBe(true);
+    expect(session.questionnaireQuestions?.some((question) => question.required)).toBe(true);
+    expect(session.questionnaireQuestions?.some((question) => !question.required)).toBe(true);
+    expect(
+      session.missingFields.every((label) =>
+        session.questionnaireQuestions?.some(
+          (question) => question.required && question.label === label
+        )
+      )
+    ).toBe(true);
     const processedInbound = db
       .list("communications")
       .find((communication) => communication.id === inbound.id)!;
