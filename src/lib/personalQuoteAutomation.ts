@@ -1,4 +1,5 @@
 import type { AssetType } from "@/types";
+import { extractVinFromText } from "@/lib/assetLabels";
 
 export type QuoteReplyLine = "personal" | "commercial" | "unknown";
 export type QuoteReplyIdentifierKind = "vin" | "address" | "hin" | "asset_id";
@@ -10,7 +11,6 @@ export type PersonalQuoteReplyIntake = {
   assetType: AssetType;
 };
 
-const VIN_PATTERN = /\b[A-HJ-NPR-Z0-9]{17}\b/i;
 const ADDRESS_PATTERN =
   /\b\d{1,6}\s+[A-Z0-9][A-Z0-9.'-]*(?:\s+[A-Z0-9][A-Z0-9.'-]*){0,7}\s+(?:ST(?:REET)?|AVE(?:NUE)?|RD|ROAD|DR(?:IVE)?|LN|LANE|BLVD|BOULEVARD|CT|COURT|CIR(?:CLE)?|WAY|HWY|HIGHWAY|PKWY|PARKWAY|PL(?:ACE)?|TER(?:RACE)?|TRL|TRAIL)\b(?:[^\n\r;]{0,80})?/i;
 const HIN_PATTERN = /\b(?:HIN|HULL(?:\s+IDENTIFICATION)?(?:\s+NUMBER)?)[\s:#-]*([A-HJ-NPR-Z0-9]{12})\b/i;
@@ -79,7 +79,7 @@ export function extractQuoteReplyIntake(input: {
       ? "personal"
       : input.contactLine ?? "unknown";
 
-  const vin = currentBody.match(VIN_PATTERN)?.[0]?.toUpperCase();
+  const vin = extractVinFromText(currentBody);
   if (vin) {
     return { line, identifierKind: "vin", identifier: vin, assetType: "luxury_vehicle" };
   }

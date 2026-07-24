@@ -546,7 +546,7 @@ describe("communications.sweepInboundForActivities", () => {
     );
     expect(created[0].notification?.messageId).toBeTruthy();
     const fresh = api.communications.listByCustomer(customer.id).find((row) => row.id === inbound.id)!;
-    expect(fresh.aiTriageVersion).toBe("2026-07-22-v3");
+    expect(fresh.aiTriageVersion).toBe("2026-07-24-v4");
     expect(fresh.aiReplyDraftId).toBeTruthy();
     expect(fresh.aiActivityTaskId).toBe(created[0].task!.id);
     expect(api.communications.sweepInboundForActivities(agency.id)).toHaveLength(0);

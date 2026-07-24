@@ -40,6 +40,7 @@ import {
   summarizeQuoteAssetDetails,
 } from "@/lib/quoteAssetIntake";
 import {
+  extractVinFromText,
   normalizeVin,
   vinValidationIssue,
 } from "@/lib/assetLabels";
@@ -6523,7 +6524,7 @@ export interface InboundTriage {
   serviceQuestions?: InboundQuoteIntakeQuestion[];
 }
 
-export const INBOUND_TRIAGE_VERSION = "2026-07-22-v3";
+export const INBOUND_TRIAGE_VERSION = "2026-07-24-v4";
 
 export function newestInboundMessageText(value: string): string {
   const normalized = (value ?? "")
@@ -6671,7 +6672,7 @@ export function aiClassifyInboundForActivity(input: {
     );
   if (vehicleQuoteRequest) {
     const serviceQuestions: InboundQuoteIntakeQuestion[] = [];
-    const hasVin = /\b[A-HJ-NPR-Z0-9]{17}\b/i.test(`${subject} ${body}`);
+    const hasVin = Boolean(extractVinFromText(`${subject} ${body}`));
     const hasPolicyLine = has(
       /\b(personal|private passenger|family|household|commercial|business|company|business use|work use)\b/
     );

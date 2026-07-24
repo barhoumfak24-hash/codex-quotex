@@ -23,6 +23,18 @@ export function normalizeVin(value: unknown): string {
   return String(value ?? "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
 }
 
+export function extractVinFromText(value: unknown): string | undefined {
+  const text = String(value ?? "");
+  const labeledMatch = text.match(
+    /\bVIN(?:\s+(?:NUMBER|NO\.?))?(?:\s+IS)?[\s:#-]*([A-HJ-NPR-Z0-9](?:[\s-]*[A-HJ-NPR-Z0-9]){16})(?=[\s.,;:!?)]|$)/i
+  );
+  const labeledVin = normalizeVin(labeledMatch?.[1]);
+  if (!vinValidationIssue(labeledVin)) return labeledVin;
+
+  const contiguousVin = normalizeVin(text.match(/\b[A-HJ-NPR-Z0-9]{17}\b/i)?.[0]);
+  return vinValidationIssue(contiguousVin) ? undefined : contiguousVin;
+}
+
 export function vinValidationIssue(vin: string): string | null {
   if (!vin) return "Enter a VIN to look up vehicle records.";
   if (/[IOQ]/.test(vin)) return "VIN contains I, O, or Q, which are not valid in standard VINs.";

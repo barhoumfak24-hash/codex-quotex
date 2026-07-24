@@ -6277,12 +6277,60 @@ function priorQuoteContextForCommunication(row: Communication): string {
 
 function quoteAutomationCanRun(row: Communication): boolean {
   if (!row.aiQuoteAutomationStatus) return true;
+  if (
+    row.aiQuoteAutomationStatus === "skipped" &&
+    row.aiTriageVersion !== INBOUND_TRIAGE_VERSION
+  ) {
+    return true;
+  }
   if (row.aiQuoteAutomationStatus === "failed") {
     return (row.aiQuoteAutomationAttempts ?? 0) < PERSONAL_QUOTE_AUTOMATION_MAX_ATTEMPTS;
   }
   if (row.aiQuoteAutomationStatus !== "pending") return false;
   const attemptedAt = Date.parse(row.aiQuoteAutomationProcessedAt ?? "");
   return !Number.isFinite(attemptedAt) || Date.now() - attemptedAt > PERSONAL_QUOTE_AUTOMATION_PENDING_TIMEOUT_MS;
+}
+
+function removeStaleQuoteIntakeDrafts(inbound: Communication): void {
+  const drafts = db
+    .list("communications")
+    .filter(
+      (candidate) =>
+        candidate.tenantId === inbound.tenantId &&
+        candidate.aiDraftSourceCommunicationId === inbound.id &&
+        candidate.aiServiceIntent === "vehicle_quote_intake" &&
+        candidate.deliveryStatus === "draft"
+    );
+  const draftIds = new Set(drafts.map((draft) => draft.id));
+  if (draftIds.size === 0) return;
+
+  db
+    .list("aiNotifications")
+    .filter(
+      (notification) =>
+        notification.tenantId === inbound.tenantId &&
+        (draftIds.has(notification.messageId ?? "") ||
+          notification.communicationId === inbound.id)
+    )
+    .forEach((notification) => db.remove("aiNotifications", notification.id));
+  drafts.forEach((draft) => db.remove("communications", draft.id));
+  db.update("communications", inbound.id, {
+    aiReplyDraftId: undefined,
+    aiDraftMissingFields: undefined,
+  });
+}
+
+function processImportedInboundCommunication(
+  tenantId: string,
+  mailboxUserId: string,
+  communicationId: string
+): void {
+  void api.communications
+    .automatePersonalQuoteReplies(tenantId, mailboxUserId, communicationId)
+    .catch(() => [])
+    .finally(() => {
+      api.communications.sweepInboundForActivities(tenantId, mailboxUserId);
+    });
 }
 
 function quoteAutomationAssetDetails(intake: PersonalQuoteReplyIntake): Record<string, string> {
@@ -16186,6 +16234,7 @@ export const api = {
           aiTriageVersion: INBOUND_TRIAGE_VERSION,
           aiActivityTaskId: task.id,
         });
+        removeStaleQuoteIntakeDrafts(original);
 
         const finish = (
           status: PersonalQuoteAutomationResult["status"],
@@ -16850,12 +16899,11 @@ export const api = {
           : updatedExisting;
         communicationStatusEvent(linkedExisting);
         if (direction === "inbound") {
-          void api.communications.automatePersonalQuoteReplies(
+          processImportedInboundCommunication(
             input.tenantId,
             input.mailboxUserId,
             linkedExisting.id
           );
-          api.communications.sweepInboundForActivities(input.tenantId, input.mailboxUserId);
         }
         return linkedExisting;
       }
@@ -16922,12 +16970,11 @@ export const api = {
       const linkedRow = direction === "inbound" ? linkInboundCarrierCommunicationToSubmission(row) : row;
       communicationStatusEvent(linkedRow);
       if (direction === "inbound") {
-        void api.communications.automatePersonalQuoteReplies(
+        processImportedInboundCommunication(
           input.tenantId,
           input.mailboxUserId,
           linkedRow.id
         );
-        api.communications.sweepInboundForActivities(input.tenantId, input.mailboxUserId);
       }
       return linkedRow;
     },

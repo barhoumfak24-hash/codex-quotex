@@ -35,6 +35,23 @@ describe("extractQuoteReplyIntake", () => {
     });
   });
 
+  it("extracts a spaced VIN and personal line from the exact customer reply", () => {
+    expect(
+      extractQuoteReplyIntake({
+        subject: "Re: Vehicle quote request",
+        body:
+          "Hello, it's a personal vehicle and the vin number is 2C3 CDXMG3PH675983 Culture",
+        priorQuoteContext:
+          "Please send the vehicle's 17-character VIN and whether it is personal or commercial.",
+      })
+    ).toEqual({
+      line: "personal",
+      identifierKind: "vin",
+      identifier: "2C3CDXMG3PH675983",
+      assetType: "luxury_vehicle",
+    });
+  });
+
   it("keeps explicit commercial replies manual even for a personal contact", () => {
     expect(
       extractQuoteReplyIntake({
@@ -114,6 +131,95 @@ describe("normalizedQuoteIdentifier", () => {
 });
 
 describe("communications.automatePersonalQuoteReplies", () => {
+  it("starts the personal quote flow instead of drafting for a spaced VIN reply", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/ai/enrich-asset") {
+          return new Response(
+            JSON.stringify({
+              fields: {},
+              evidence: {},
+              sources: [],
+              confidence: 0,
+              unavailableFields: [],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+        if (url === "/api/ai/acord-map") {
+          return new Response(
+            JSON.stringify({
+              fields: {},
+              publicFieldEvidence: {},
+              mappings: [],
+              missingFields: [],
+              webSources: [],
+              summary: "No additional verified public answers were found.",
+              confidence: 0,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const owner = api.users.list(agency.id).find((user) => user.active && user.role === "agent")!;
+    api.customers.update(customer.id, {
+      lineOfBusiness: "personal",
+      assignedAgentId: owner.id,
+    });
+    api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "outbound",
+      subject: "Vehicle quote request",
+      body:
+        "Please send the vehicle's 17-character VIN and whether it is personal or commercial.",
+      createdById: owner.id,
+    });
+    const inbound = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      subject: "Re: Vehicle quote request",
+      body:
+        "Hello, it's a personal vehicle and the vin number is 2C3 CDXMG3PH675983 Culture",
+    });
+
+    const result = await api.communications.automatePersonalQuoteReplies(
+      agency.id,
+      owner.id,
+      inbound.id
+    );
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        communicationId: inbound.id,
+        status: "completed",
+      }),
+    ]);
+    const session = api.quoting.get(result[0].sessionId!)!;
+    const asset = api.assets.get(result[0].assetId!)!;
+    expect(session.lineOfBusiness).toBe("personal");
+    expect(asset.details).toEqual(
+      expect.objectContaining({ vin: "2C3CDXMG3PH675983" })
+    );
+    expect(
+      db
+        .list("communications")
+        .filter((row) => row.aiDraftSourceCommunicationId === inbound.id)
+    ).toHaveLength(0);
+  });
+
   it("starts one personal flow and sends one questionnaire for an address reply", async () => {
     vi.stubGlobal(
       "fetch",
