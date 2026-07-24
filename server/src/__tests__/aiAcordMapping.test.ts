@@ -282,7 +282,9 @@ describe("Codex ACORD mapping guardrails", () => {
     expect(requestBody.max_output_tokens).toBe(10_000);
     expect(systemContent).toContain("return a mapping for every exact question id");
     expect(systemContent).toContain("Return mappings as a structured array only");
-    expect(systemContent).toContain("Do not put 'unknown', 'not public', 'not found'");
+    expect(systemContent).toContain(
+      "Never put 'unknown', 'not public', 'not found', 'likely', 'estimated'"
+    );
     expect(userContent).toContain("Full questionnaire questions");
     expect(userContent).toContain("Losses, claims, or incidents in the last 5 years");
     expect(result.mappings.map((mapping) => mapping.targetId)).toEqual([
@@ -436,23 +438,30 @@ describe("Codex ACORD mapping guardrails", () => {
     expect(result.mappings.map((mapping) => mapping.targetId)).toEqual([
       "property-address",
       "year-built",
-      "square-footage",
       "construction-type",
-      "roof-material",
-      "roof-age",
       "lot-size",
-      "flood-zone",
     ]);
     expect(result.mappings.find((mapping) => mapping.targetId === "year-built")).toMatchObject({
       targetField: "Year built",
       value: "2007",
     });
-    expect(result.mappings.find((mapping) => mapping.targetId === "square-footage")?.value).toContain("6,500");
+    expect(result.mappings.find((mapping) => mapping.targetId === "square-footage")).toBeUndefined();
+    expect(result.mappings.find((mapping) => mapping.targetId === "roof-material")).toBeUndefined();
+    expect(result.mappings.find((mapping) => mapping.targetId === "roof-age")).toBeUndefined();
+    expect(result.mappings.find((mapping) => mapping.targetId === "flood-zone")).toBeUndefined();
     expect(result.mappings.find((mapping) => mapping.targetId === "loss-history")).toBeUndefined();
-    expect(result.missingFields).toContain("Losses, claims, or incidents in the last 5 years");
+    expect(result.missingFields).toEqual(
+      expect.arrayContaining([
+        "Square footage",
+        "Roof material",
+        "Roof age",
+        "Flood zone",
+        "Losses, claims, or incidents in the last 5 years",
+      ])
+    );
   });
 
-  it("keeps high-confidence uncited OpenAI research in editable questionnaire review", async () => {
+  it("rejects uncited OpenAI research instead of presenting it as an answer", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(
         JSON.stringify({
@@ -491,21 +500,264 @@ describe("Codex ACORD mapping guardrails", () => {
       intent: "questionnaire_prefill",
     });
 
-    expect(result.mappings).toEqual([
-      expect.objectContaining({
-        targetId: "year-built",
-        targetField: "Year built",
-        value: "2007",
-        verified: false,
-      }),
-      expect.objectContaining({
-        targetId: "square-footage",
-        targetField: "Square footage",
-        value: "4,100 above grade / 6,500 total listed living area",
-        verified: false,
-      }),
-    ]);
-    expect(result.missingFields).toEqual([]);
+    expect(result.mappings).toEqual([]);
+    expect(result.missingFields).toEqual(["Year built", "Square footage"]);
+  });
+
+  it("fills every exact personal-auto fact already present in the Quotex dossier", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            output_text: JSON.stringify({
+              summary: "No additional public facts were needed.",
+              confidence: 0,
+              mappings: [],
+              missingFields: [],
+              webSources: [],
+            }),
+          }),
+          { status: 200 }
+        )
+      )
+    );
+
+    const { aiMapAcordFields } = await import("../services/ai/index.js");
+    const result = await aiMapAcordFields({
+      template: { documentName: "Personal auto questionnaire", fileName: "personal-auto-questionnaire" },
+      fields: [
+        { id: "primaryFirstName", label: "Primary applicant first name", required: true },
+        { id: "primaryLastName", label: "Primary applicant last name", required: true },
+        { id: "primaryDateOfBirth", label: "Primary applicant date of birth", required: true },
+        { id: "cellPhone", label: "Cell phone", required: true },
+        { id: "emailAddress", label: "Email address", required: true },
+        { id: "currentlyInsured", label: "Are you currently insured?", required: true, options: ["Yes", "No"] },
+        { id: "currentCarrier", label: "Current carrier", required: false },
+        { id: "currentPolicyNumber", label: "Current policy number", required: false },
+        { id: "policyTerm", label: "Policy term", required: true, options: ["6 Months", "12 Months"] },
+        { id: "driverFirstName", label: "Driver first name", required: true },
+        { id: "driverLastName", label: "Driver last name", required: true },
+        { id: "driverStatus", label: "Driver status", required: true, options: ["Rated", "Excluded", "Permit", "Non-driver", "Other"] },
+        { id: "driverLicenseState", label: "Driver license state issued", required: true },
+        { id: "driverLicenseNumber", label: "Driver license number", required: true },
+        { id: "vin__asset_vehicle", label: "VIN", required: true },
+        { id: "vehicleYear__asset_vehicle", label: "Vehicle year", required: true },
+        { id: "vehicleMake__asset_vehicle", label: "Vehicle make", required: true },
+        { id: "vehicleModel__asset_vehicle", label: "Vehicle model", required: true },
+        { id: "vehicleTrim__asset_vehicle", label: "Vehicle trim", required: true },
+        { id: "collisionDeductible__asset_vehicle", label: "Collision deductible", required: true },
+      ],
+      dossier: {
+        contact: {
+          name: "Abe Fakhoury",
+          email: "abe@example.com",
+          phone: "5172942671",
+        },
+        session: {
+          state: "MI",
+          selectedAssets: [
+            {
+              assetId: "vehicle",
+              assetType: "luxury_vehicle",
+              assetDetails: {
+                vin: "1HGCM82633A004352",
+                year: "2003",
+                make: "Honda",
+                model: "Accord",
+                trim: "EX",
+              },
+            },
+          ],
+        },
+        policies: [
+          {
+            assetId: "vehicle",
+            carrierId: "carrier-chubb",
+            status: "active",
+            policyNumber: "AUTO-123",
+            effectiveDate: "2026-01-01",
+            renewalDate: "2027-01-01",
+            participants: [
+              {
+                name: "Abe Fakhoury",
+                participantType: "driver",
+                status: "primary",
+                assignedAssetId: "vehicle",
+                dateOfBirth: "1990-01-02",
+                relationship: "Self",
+                licenseNumber: "F123456789",
+                licenseState: "MI",
+              },
+            ],
+            coverages: [
+              { name: "Collision", deductible: "1000" },
+            ],
+          },
+        ],
+        carriers: [{ id: "carrier-chubb", name: "Chubb" }],
+      },
+      intent: "questionnaire_prefill",
+    });
+
+    const mapped = Object.fromEntries(
+      result.mappings.map((mapping) => [mapping.targetId, mapping.value])
+    );
+    expect(mapped).toMatchObject({
+      primaryFirstName: "Abe",
+      primaryLastName: "Fakhoury",
+      primaryDateOfBirth: "1990-01-02",
+      cellPhone: "5172942671",
+      emailAddress: "abe@example.com",
+      currentlyInsured: "Yes",
+      currentCarrier: "Chubb",
+      currentPolicyNumber: "AUTO-123",
+      policyTerm: "12 Months",
+      driverFirstName: "Abe",
+      driverLastName: "Fakhoury",
+      driverStatus: "Rated",
+      driverLicenseState: "MI",
+      driverLicenseNumber: "F123456789",
+      vin__asset_vehicle: "1HGCM82633A004352",
+      vehicleYear__asset_vehicle: "2003",
+      vehicleMake__asset_vehicle: "Honda",
+      vehicleModel__asset_vehicle: "Accord",
+      vehicleTrim__asset_vehicle: "EX",
+      collisionDeductible__asset_vehicle: "1000",
+    });
+  });
+
+  it("never leaks another selected asset's facts into a scoped questionnaire field", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            output_text: JSON.stringify({
+              summary: "No additional facts.",
+              confidence: 0,
+              mappings: [],
+              missingFields: [],
+              webSources: [],
+            }),
+          }),
+          { status: 200 }
+        )
+      )
+    );
+
+    const { aiMapAcordFields } = await import("../services/ai/index.js");
+    const result = await aiMapAcordFields({
+      template: { documentName: "Personal auto questionnaire", fileName: "personal-auto-questionnaire" },
+      fields: [
+        { id: "vin__asset_two", label: "VIN", required: true },
+        { id: "vehicleMake__asset_two", label: "Vehicle make", required: true },
+        { id: "vehicleModel__asset_two", label: "Vehicle model", required: true },
+        { id: "vehicleTrim__asset_two", label: "Vehicle trim", required: true },
+      ],
+      dossier: {
+        session: {
+          assetDetails: {
+            vin: "1HGCM82633A004352",
+            make: "Honda",
+            model: "Accord",
+            trim: "EX",
+          },
+          selectedAssets: [
+            {
+              assetId: "one",
+              assetType: "luxury_vehicle",
+              assetDetails: {
+                vin: "1HGCM82633A004352",
+                make: "Honda",
+                model: "Accord",
+                trim: "EX",
+              },
+            },
+            {
+              assetId: "two",
+              assetType: "luxury_vehicle",
+              assetDetails: {
+                vin: "1FTFW1E50JFA00001",
+                make: "Ford",
+                model: "F-150",
+              },
+            },
+          ],
+        },
+      },
+      intent: "questionnaire_prefill",
+    });
+
+    const mapped = Object.fromEntries(
+      result.mappings.map((mapping) => [mapping.targetId, mapping.value])
+    );
+    expect(mapped).toEqual({
+      vin__asset_two: "1FTFW1E50JFA00001",
+      vehicleMake__asset_two: "Ford",
+      vehicleModel__asset_two: "F-150",
+    });
+    expect(result.missingFields).toContain("Vehicle trim");
+  });
+
+  it("does not claim current insurance from an unrelated asset policy", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            output_text: JSON.stringify({
+              summary: "No additional facts.",
+              confidence: 0,
+              mappings: [],
+              missingFields: [],
+              webSources: [],
+            }),
+          }),
+          { status: 200 }
+        )
+      )
+    );
+
+    const { aiMapAcordFields } = await import("../services/ai/index.js");
+    const result = await aiMapAcordFields({
+      template: { documentName: "Personal auto questionnaire", fileName: "personal-auto-questionnaire" },
+      fields: [
+        {
+          id: "currentlyInsured__asset_asset-two",
+          label: "Are you currently insured?",
+          required: true,
+          options: ["Yes", "No"],
+        },
+        {
+          id: "currentPolicyNumber__asset_asset-two",
+          label: "Current policy number",
+          required: false,
+        },
+      ],
+      dossier: {
+        session: {
+          selectedAssets: [
+            {
+              assetId: "asset-two",
+              assetType: "luxury_vehicle",
+              assetDetails: { vin: "1FTFW1E50JFA00001" },
+            },
+          ],
+        },
+        policies: [
+          {
+            assetId: "asset-one",
+            status: "active",
+            policyNumber: "WRONG-ASSET-POLICY",
+          },
+        ],
+      },
+      intent: "questionnaire_prefill",
+    });
+
+    expect(result.mappings).toEqual([]);
+    expect(result.missingFields).toContain("Are you currently insured?");
   });
 
   it("reports OpenAI quota failures instead of pretending mapping succeeded", async () => {

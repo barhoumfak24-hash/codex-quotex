@@ -110,17 +110,14 @@ export function aiEvidenceAllowsDocumentAutofill(
 export function aiEvidenceAllowsQuestionnairePrefill(
   item?: PublicDataFieldEvidence
 ): boolean {
-  if (!item) return true;
+  if (!item) return false;
   if (UNSAFE_QUESTIONNAIRE_PREFILL_SOURCE_KINDS.has(item.sourceKind)) return false;
-  const reviewOnlyUncitedOpenAiResearch =
-    item.confidence >= 0.7 &&
-    /\breview-only questionnaire prefill from openai research without a per-field citation\b/i.test(
-      item.notes ?? ""
-    );
   if (
-    (item.sourceKind === "web_search" || item.sourceKind === "public_web") &&
-    !evidenceHasCitationUrl(item) &&
-    !reviewOnlyUncitedOpenAiResearch
+    (item.sourceKind === "web_search" ||
+      item.sourceKind === "public_web" ||
+      item.sourceKind === "government_api" ||
+      item.sourceKind === "commercial_provider") &&
+    !evidenceHasCitationUrl(item)
   ) {
     return false;
   }

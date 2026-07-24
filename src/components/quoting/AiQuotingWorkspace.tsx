@@ -1957,7 +1957,7 @@ function isUsableAiMappedQuestionAnswer(
   const value = (session.questionnaireResponses?.[question.id] ?? "").trim();
   if (!value) return false;
   return !/^(unknown|n\/a|none|not found|not public|not available|requires)\b/i.test(value) &&
-    !/\b(not found|not public|not publicly|no public|requires applicant|requires client|requires insured|unable to confirm|unable to determine|clue|loss runs?)\b/i.test(value);
+    !/\b(not found|not public|not publicly|no public|requires applicant|requires client|requires insured|unable to confirm|unable to determine|clue|loss runs?|likely|possibly|probably|appears|seems|may be|might be|could be|assumed|inferred|estimated|approximately|approx|unverified|verify|confirmation)\b/i.test(value);
 }
 
 function aiMappedQuestionEntries(
@@ -1978,33 +1978,58 @@ export function PublicFields({ session }: { session: QuotingSession }) {
   const visibleQuestions = visibleQuestionnaireQuestions(session);
   const mappedQuestionEntries = aiMappedQuestionEntries(session, visibleQuestions);
   if (selectedAssets.length > 0) {
+    const scopedEntryIds = new Set<string>();
+    const assetSections = selectedAssets.map((asset, index) => {
+      const scopedQuestionSuffix = `__asset_${asset.assetId ?? index}`;
+      const scopedMappedEntries =
+        selectedAssets.length === 1
+          ? mappedQuestionEntries
+          : mappedQuestionEntries.filter(
+              (entry) =>
+                entry.id.endsWith(scopedQuestionSuffix) ||
+                entry.label.startsWith(`${asset.label}: `)
+            );
+      scopedMappedEntries.forEach((entry) => scopedEntryIds.add(entry.id));
+      const entries =
+        scopedMappedEntries.length > 0
+          ? scopedMappedEntries.map((entry) => ({
+              id: entry.id,
+              label: entry.label.startsWith(`${asset.label}: `)
+                ? entry.label.slice(asset.label.length + 2)
+                : entry.label,
+              value: entry.value,
+            }))
+          : Object.entries(asset.publicFields)
+              .filter(([, value]) => String(value).trim())
+              .map(([label, value]) => ({
+                id: label,
+                label,
+                value: String(value),
+              }));
+      return { asset, index, entries };
+    });
+    const sharedEntries =
+      selectedAssets.length > 1
+        ? mappedQuestionEntries.filter((entry) => !scopedEntryIds.has(entry.id))
+        : [];
     return (
       <div className="space-y-3">
-        {selectedAssets.map((asset, index) => {
-          const scopedQuestionSuffix = `__asset_${asset.assetId ?? index}`;
-          const scopedMappedEntries =
-            selectedAssets.length === 1
-              ? mappedQuestionEntries
-              : mappedQuestionEntries.filter(
-                  (entry) =>
-                    entry.id.endsWith(scopedQuestionSuffix) ||
-                    entry.label.startsWith(`${asset.label}: `)
-                );
-          const entries =
-            scopedMappedEntries.length > 0
-              ? scopedMappedEntries.map((entry) => ({
-                  id: entry.id,
-                  label: entry.label.startsWith(`${asset.label}: `)
-                    ? entry.label.slice(asset.label.length + 2)
-                    : entry.label,
-                  value: entry.value,
-                }))
-              : Object.entries(asset.publicFields).map(([label, value]) => ({
-                  id: label,
-                  label,
-                  value: String(value),
-                }));
-          return (
+        {sharedEntries.length > 0 && (
+          <section className="rounded-md border border-blue-100 bg-blue-50/40 p-3">
+            <div className="mb-2 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-blue-800">
+              <Bot className="h-3 w-3" /> Shared applicant and policy values
+            </div>
+            <dl className="grid gap-x-4 gap-y-1.5 text-xs sm:grid-cols-2">
+              {sharedEntries.map((entry) => (
+                <div key={entry.id} className="flex justify-between gap-3">
+                  <dt className="text-ink-500">{entry.label}</dt>
+                  <dd className="text-right text-ink-800">{entry.value}</dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+        )}
+        {assetSections.map(({ asset, index, entries }) => (
             <section
               key={asset.assetId ?? `${asset.label}-${index}`}
               className="rounded-md border border-blue-100 bg-blue-50/40 p-3"
@@ -2025,8 +2050,7 @@ export function PublicFields({ session }: { session: QuotingSession }) {
                 <p className="text-xs text-ink-500">No reliable public values were found.</p>
               )}
             </section>
-          );
-        })}
+          ))}
       </div>
     );
   }

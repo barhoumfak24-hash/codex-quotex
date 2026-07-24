@@ -1539,6 +1539,8 @@ interface AcordMapField {
   label: string;
   acordFieldLabels?: string[];
   acordFieldKey?: string;
+  section?: string;
+  options?: string[];
   required?: boolean;
   kind?: string;
   page?: number;
@@ -1616,38 +1618,19 @@ function isUnsafeAcordAiTarget(label: string): boolean {
 
 function isSafeQuestionnairePrefillTarget(label: string): boolean {
   const normalized = label.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-  if (!normalized || isUnsafeAcordAiTarget(normalized)) return false;
-  if (/\b(loss|claim|incident|conviction|violation|mvr|bankruptcy|cancel|nonrenew|audit|payroll|revenue|sales|fein|tax id|ssn)\b/.test(normalized)) {
+  if (!normalized) return false;
+  if (/\b(loss|claim|incident|conviction|violation|mvr|bankruptcy|cancel|nonrenew|authorization|authorize|fein|tax id|ssn|social security)\b/.test(normalized)) {
     return false;
   }
-  return /\b(legal business name|business name|named insured|name of insured|applicant name|dba|doing business as|mailing address|property address|risk address|location address|premises address|city|state|zip|postal|phone|email|website|business description|operations|entity type|year started|years in business|naics|sic|owner of record|occupancy|year built|square footage|living area|construction type|exterior material|siding|roof material|roof type|roof shape|roof year|roof age|roof update|roof replacement|wind mitigation|wind mitigation certificate|lot size|distance to coast|distance from coast|coast distance|flood zone|protection class|number of stories|stories|bedrooms|bathrooms|garage|detached structure|pool|spa|hot tub|trampoline|attractive nuisance|security system|burglar alarm|fire alarm|central station|short term rental|str|vin|vehicle identification|year make model|make|model|model year|trim|body class|engine|gvwr|msrp|hull|vessel|yacht|marina|mooring|appraised value|estimated value|exposure value|storage location)\b/.test(normalized);
+  return true;
 }
 
-function questionnaireReviewCanUseUncitedOpenAiResearch(input: {
-  sourceKind: AcordMapSourceKind;
-  sourceUrl?: string;
-  confidence: number;
-  targetField: string;
-  value: string;
-  sourceLabel?: string;
-  rationale?: string;
-}): boolean {
-  if (input.sourceUrl) return false;
-  if (input.confidence < 0.7) return false;
-  if (
-    input.sourceKind !== "web_search" &&
-    input.sourceKind !== "public_web" &&
-    input.sourceKind !== "government_api" &&
-    input.sourceKind !== "commercial_provider"
-  ) {
-    return false;
-  }
-  if (!input.targetField || !input.value) return false;
-  if (!isSafeQuestionnairePrefillTarget(input.targetField)) return false;
-  if (valueIsOnlyUnavailableResearchNote(input.value)) return false;
-  return acordMappedValueFitsTarget(input.targetField, input.value, {
-    questionnairePrefill: true,
-  });
+function questionnairePublicResearchAllowed(label: string): boolean {
+  const normalized = label.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  if (!isSafeQuestionnairePrefillTarget(normalized)) return false;
+  return !/\b(date of birth|dob|gender|marital|occupation|phone|email|preferred contact|current premium|current carrier|policy number|liability limit|discount|resident|driver|license|coverage|deductible|pip|uninsured|medical payment|telematics|mileage|commute|purchase date|ownership|principal operator|occasional operator|effective date|policy term)\b/.test(
+    normalized
+  );
 }
 
 function cleanAcordAiValue(value: unknown): string {
@@ -1709,28 +1692,14 @@ function valueContainsNumber(value: string): boolean {
 }
 
 function valueLooksLikeUnavailableResearchNote(value: string): boolean {
-  return /\b(unknown|not public|not publicly|not found|not listed|not noted|no public|n\/a|not available|unconfirmed|requires|needed|needs verification|verify|applicant|attestation|clue|loss runs?)\b/i.test(
+  return /\b(unknown|not public|not publicly|not found|not listed|not noted|no public|n\/a|not available|unconfirmed|requires|needed|needs? verification|verify|applicant|attestation|clue|loss runs?|likely|possibly|probably|appears|seems|may be|might be|could be|assumed|inferred|estimated|estimate only|approximately|approx\.?|unverified|needs? confirmation|subject to verification)\b/i.test(
     value
   );
 }
 
 function valueIsOnlyUnavailableResearchNote(value: string): boolean {
-  const normalized = value.trim().toLowerCase();
-  if (!normalized || !valueLooksLikeUnavailableResearchNote(normalized)) return false;
-  if (valueLooksLikeAddress(value) || valueLooksLikeEmail(value) || valueLooksLikePhone(value)) return false;
-  if (/\$?\d/.test(normalized) && /\b(approx|approximately|range|market|value|sq|square|feet|ft|year|yrs|miles?|acres?)\b/.test(normalized)) {
-    return false;
-  }
-  if (/\b(likely|minimal|low|moderate|high|present|noted|listed|shown|recorded)\b/.test(normalized)) {
-    return false;
-  }
-  if (/^(unknown|not public|not publicly|not found|not listed|not available|n\/a|unconfirmed)\b/.test(normalized)) {
-    return true;
-  }
-  if (/\b(requires applicant|applicant attestation|clue|loss runs?|client or agent selection|manual verification)\b/.test(normalized)) {
-    return true;
-  }
-  return false;
+  const normalized = value.trim();
+  return Boolean(normalized && valueLooksLikeUnavailableResearchNote(normalized));
 }
 
 function valueLooksLikeName(value: string): boolean {
@@ -1841,23 +1810,52 @@ function matchAcordAiField(
   return best && best.score >= 45 ? best.field : undefined;
 }
 
+function exactAcordAiField(
+  key: string,
+  fields: AcordMapField[]
+): AcordMapField | undefined {
+  const normalized = normalizeAcordAiLookup(key);
+  const compact = compactAcordAiLookup(key);
+  if (!normalized && !compact) return undefined;
+  return fields.find((field) =>
+    [field.id, field.label, field.acordFieldKey, ...(field.acordFieldLabels ?? [])]
+      .filter((candidate): candidate is string => typeof candidate === "string" && candidate.trim().length > 0)
+      .some(
+        (candidate) =>
+          normalizeAcordAiLookup(candidate) === normalized ||
+          compactAcordAiLookup(candidate) === compact
+      )
+  );
+}
+
+function canonicalQuestionnaireFieldAnswer(field: AcordMapField, rawValue: unknown): string | null {
+  const value = cleanAcordAiValue(rawValue);
+  if (!value || valueIsOnlyUnavailableResearchNote(value)) return null;
+  if (!field.options?.length) return value;
+  const normalized = normalizeAcordAiLookup(value);
+  return (
+    field.options.find((option) => normalizeAcordAiLookup(option) === normalized) ??
+    null
+  );
+}
+
 function normalizeQuestionnaireMappingRow(
   key: string,
   rawValue: unknown,
-  fields: Array<{ id?: string; label: string; acordFieldKey?: string; acordFieldLabels?: string[] }>,
+  fields: AcordMapField[],
   base: Record<string, unknown> = {}
 ): Record<string, unknown> | null {
   const rowValue = isRecord(rawValue) ? bestAcordAiValueFromRow(rawValue) : rawValue;
-  const value = cleanAcordAiValue(rowValue);
-  if (!value) return null;
   const source = isRecord(rawValue) ? rawValue : {};
   const targetId = asString(base.targetId) || asString(source.targetId) || key;
   const targetField = asString(base.targetField) || asString(source.targetField) || asString(source.field) || key;
   const matched =
-    matchAcordAiField(targetId, fields) ||
-    matchAcordAiField(targetField, fields) ||
-    matchAcordAiField(key, fields);
-  const canonicalTargetField = matched?.label || targetField;
+    exactAcordAiField(targetId, fields) ||
+    exactAcordAiField(targetField, fields) ||
+    exactAcordAiField(key, fields);
+  if (!matched) return null;
+  const value = canonicalQuestionnaireFieldAnswer(matched, rowValue);
+  if (!value) return null;
   const sourceUrl =
     asString(base.sourceUrl) ||
     asString(source.sourceUrl) ||
@@ -1872,8 +1870,8 @@ function normalizeQuestionnaireMappingRow(
   const provisional = {
     ...base,
     ...source,
-    targetId: matched?.id || (matchAcordAiField(targetId, fields) ? targetId : asString(base.targetId) || asString(source.targetId)),
-    targetField: canonicalTargetField,
+    targetId: matched.id,
+    targetField: matched.label,
     value,
     sourceLabel,
     ...(sourceUrl ? { sourceUrl } : {}),
@@ -1898,7 +1896,7 @@ function normalizeQuestionnaireMappingRow(
 
 function normalizeQuestionnaireMappingsFromRecord(
   record: Record<string, unknown>,
-  fields: Array<{ id?: string; label: string; acordFieldKey?: string; acordFieldLabels?: string[] }>
+  fields: AcordMapField[]
 ): Record<string, unknown>[] {
   const rows: Record<string, unknown>[] = [];
   asObjectArray(record.mappings).forEach((row) => {
@@ -1937,12 +1935,15 @@ function acordMappedValueFitsTarget(
 ): boolean {
   const label = acordLabelText(targetField);
   if (!label || !value.trim()) return false;
-  const unavailableNote = options.questionnairePrefill && valueLooksLikeUnavailableResearchNote(value);
+  if (options.questionnairePrefill && valueLooksLikeUnavailableResearchNote(value)) return false;
   if (/\b(email|e mail)\b/.test(label)) return valueLooksLikeEmail(value);
   if (/\b(phone|telephone|mobile|cell)\b/.test(label)) return valueLooksLikePhone(value);
   if (/\b(zip|postal)\b/.test(label)) return valueLooksLikeZip(value);
   if (/\b(state)\b/.test(label) && !/\bstatement\b/.test(label)) return valueLooksLikeState(value);
   if (/\b(date|effective|expiration|birth)\b/.test(label)) return valueLooksLikeDate(value);
+  if (/\bvin\b|\bvehicle identification\b/.test(label)) {
+    return /^[A-HJ-NPR-Z0-9]{17}$/i.test(value.trim());
+  }
   if (valueLooksLikeAddress(value)) {
     if (/\b(operation|operations|product|products|service|services|revenue|payroll|employee|employees)\b/.test(label)) {
       return false;
@@ -1950,21 +1951,21 @@ function acordMappedValueFitsTarget(
     return /\b(address|location|premises|risk|mailing|garaging)\b/.test(label);
   }
   if (/\b(year built|roof year|model year|year started)\b/.test(label)) {
-    return valueLooksLikeYear(value) || !!unavailableNote;
+    return valueLooksLikeYear(value);
   }
-  if (/\byears in business\b/.test(label)) return valueLooksLikeMoneyOrNumber(value) || !!unavailableNote;
+  if (/\byears in business\b/.test(label)) return valueLooksLikeMoneyOrNumber(value);
   if (/\b(square footage|living area|building area|lot size|number of stories|stories|bedrooms|bathrooms|roof age)\b/.test(label)) {
-    return valueLooksLikeMoneyOrNumber(value) || (options.questionnairePrefill && valueContainsNumber(value)) || !!unavailableNote;
+    return valueLooksLikeMoneyOrNumber(value) || (options.questionnairePrefill && valueContainsNumber(value));
   }
   if (/\b(occupancy|occupied|use)\b/.test(label)) {
-    return /\b(primary|secondary|seasonal|vacation|rental|tenant|owner|occupied|vacant)\b/i.test(value) || !!unavailableNote;
+    return /\b(primary|secondary|seasonal|vacation|rental|tenant|owner|occupied|vacant)\b/i.test(value);
   }
   if (/\b(construction type|construction|roof material|roof type|flood zone|protection class)\b/.test(label)) {
     return !valueLooksLikeAddress(value) && !valueLooksLikeEmail(value) && value.trim().length <= (options.questionnairePrefill ? 220 : 80);
   }
   if (/\b(address|location|premises|risk|mailing|garaging)\b/.test(label)) return valueLooksLikeAddress(value);
   if (/\b(value|limit|premium|revenue|payroll|sales|amount|cost|price|deductible)\b/.test(label)) {
-    return valueLooksLikeMoneyOrNumber(value) || (options.questionnairePrefill && valueContainsNumber(value)) || !!unavailableNote;
+    return valueLooksLikeMoneyOrNumber(value) || (options.questionnairePrefill && valueContainsNumber(value));
   }
   if (/\b(name|producer|applicant|insured|contact|agency|carrier)\b/.test(label)) return valueLooksLikeName(value);
   if (/\b(fein|federal employer|tax id|ssn|social security)\b/.test(label)) return false;
@@ -2040,6 +2041,8 @@ export async function aiMapAcordFields(input: {
       acordFieldLabels: asStringArray(field.acordFieldLabels)
         .filter((label) => !isUnsafeAcordAiTarget(label))
         .slice(0, 12),
+      section: asString(field.section) || undefined,
+      options: asStringArray(field.options).slice(0, 80),
       required: field.required === true,
       kind: asString(field.kind, "text"),
       page: Math.max(0, Math.round(asNumber(field.page, 0))),
@@ -2076,17 +2079,20 @@ export async function aiMapAcordFields(input: {
       ? "Research path for vehicles and other asset identifiers: NHTSA VIN decode/recall data, manufacturer public specs, public auction/listing/spec sources, and any exact identifier pages. The VIN/model answer must come from a VIN-specific source when a VIN is supplied."
       : "",
     intent === "questionnaire_prefill"
-      ? "Do not fabricate private underwriting facts. If a public source supports a practical answer but it still needs verification, put the usable answer in value and put the verification note in rationale. This is editable questionnaire prefill, not final ACORD document writing."
+      ? "Do not fabricate private underwriting facts. Return a mapping only when the dossier contains the exact fact or a cited public source states the exact fact. If any verification, interpretation, estimation, or applicant confirmation is still required, omit the mapping and leave the question missing."
       : "",
     intent === "questionnaire_prefill"
       ? "Imagery findings may help editable questionnaire review only when the exact visible cue and source URL are present; never use imagery for binding-document autofill."
       : "When the dossier includes session.publicFieldEvidence, treat it as the source of truth for whether a public field may write a document. Do not use model_estimate, unknown, public_web, or imagery_vision evidence for document autofill even if a raw publicFields value exists.",
     intent === "questionnaire_prefill"
-      ? "If the answer cannot be found, do not return a mapping for that field. Put the label in missingFields instead. Do not put 'unknown', 'not public', 'not found', 'requires applicant', 'verify', or similar text in value unless the value also contains a concrete sourced fact."
+      ? "If the answer cannot be found, do not return a mapping for that field. Put the label in missingFields instead. Never put 'unknown', 'not public', 'not found', 'likely', 'estimated', 'appears', 'requires applicant', 'verify', or similar uncertainty text in value."
       : "",
     "Map only into the exact targetField labels supplied by the application.",
     intent === "questionnaire_prefill"
       ? "For questionnaire mappings, targetId must be the exact supplied question id and targetField should be that question's exact label unless an acordFieldLabels item is more specific."
+      : "",
+    intent === "questionnaire_prefill"
+      ? "When a supplied question has options, value must exactly equal one of those supplied options. Do not paraphrase, combine, or invent option values."
       : "",
     intent === "questionnaire_prefill"
       ? "Return mappings as a structured array only. For each answerable question, include targetId, targetField, value, sourceLabel, sourceUrl, sourceKind, confidence, verified, and rationale. Do not return prose-only answers."
@@ -2098,7 +2104,7 @@ export async function aiMapAcordFields(input: {
       ? "Never fill claims/losses, violations, MVR, revenue, payroll, FEIN/tax ID, or prior coverage answers from general web research."
       : "Every returned mapping must cite a sourceLabel and use a sourceKind from the allowed enum.",
     intent === "questionnaire_prefill"
-      ? "Property address answers must be addresses; names must never be used as addresses. Year and numeric fields must include a concrete number or range. Put uncertainty in rationale, not as the whole value."
+      ? "Property address answers must be addresses; names must never be used as addresses. Year and numeric fields must be single concrete values unless the question explicitly requests a range. Rationale cannot be used to make an uncertain value acceptable."
       : "",
     intent === "questionnaire_prefill"
       ? "Every public_web/web_search/government_api/commercial_provider mapping must include sourceUrl. If there is no sourceUrl, omit the mapping and list the target in missingFields. webSources should list the public pages used."
@@ -2111,7 +2117,7 @@ export async function aiMapAcordFields(input: {
       : `Allowed target fields:\n${JSON.stringify(safeFields).slice(0, 18_000)}`,
     `Quotex dossier:\n${JSON.stringify(input.dossier).slice(0, 45_000)}`,
     intent === "questionnaire_prefill"
-      ? "Return source-backed public sweep questionnaire mappings. The goal is maximum useful coverage: answer every supplied question that a careful ChatGPT web search could answer from public sources or the Quotex dossier. For unanswerable private fields, omit the mapping and list the exact question label in missingFields."
+      ? "Return source-backed public sweep questionnaire mappings. Maximize coverage only with exact facts: answer every supplied question supported by the Quotex dossier or a cited public source, and omit every question whose answer would require a guess, estimate, inference, or applicant confirmation."
       : "Return only verified field mappings. Leave doubtful fields blank.",
   ].join("\n\n");
   const schema = objectSchema({
@@ -2175,24 +2181,20 @@ export async function aiMapAcordFields(input: {
   if (intent !== "questionnaire_prefill") return parseAcordMappings(record);
   const relaxedMappings = normalizeQuestionnaireMappingsFromRecord(record, safeFields)
     .map((row): AcordMapping | null => {
-      const targetField = asString(row.targetField);
-      const value = cleanAcordAiValue(row.value);
-      const unavailableNote = valueIsOnlyUnavailableResearchNote(value);
-      const confidence = confidenceFromAcordAiValue(row.confidence, unavailableNote ? 0.55 : 0.72);
+      const matchedField =
+        exactAcordAiField(asString(row.targetId), safeFields) ||
+        exactAcordAiField(asString(row.targetField), safeFields);
+      if (!matchedField) return null;
+      const targetField = matchedField.label;
+      const value = canonicalQuestionnaireFieldAnswer(matchedField, row.value);
+      if (!value) return null;
+      const confidence = confidenceFromAcordAiValue(row.confidence, 0.72);
       const sourceKind = asAcordMapSourceKind(row.sourceKind);
       const sourceUrl = asString(row.sourceUrl);
       const verified = row.verified === true;
-      if (unavailableNote) return null;
-      const canUseUncitedReviewResearch = questionnaireReviewCanUseUncitedOpenAiResearch({
-        sourceKind,
-        sourceUrl,
-        confidence,
-        targetField,
-        value,
-        sourceLabel: asString(row.sourceLabel),
-        rationale: asString(row.rationale),
-      });
-      if (acordMapRequiresCitation(sourceKind) && !sourceUrl && !canUseUncitedReviewResearch) return null;
+      const publicResearch = acordMapRequiresCitation(sourceKind);
+      if (publicResearch && !isUsableSourceUrl(sourceUrl)) return null;
+      if (publicResearch && !questionnairePublicResearchAllowed(targetField)) return null;
       const documentReady =
         verified &&
         confidence >= 0.84 &&
@@ -2202,25 +2204,27 @@ export async function aiMapAcordFields(input: {
         sourceKind !== "model_estimate" &&
         sourceKind !== "unknown";
       const reviewReady =
-        confidence >= (unavailableNote ? 0.45 : 0.55) &&
+        confidence >= (publicResearch ? 0.75 : 0.7) &&
         sourceKind !== "unknown" &&
         sourceKind !== "model_estimate" &&
-        ((sourceKind === "web_search" && (isUsableSourceUrl(sourceUrl) || canUseUncitedReviewResearch)) ||
-          (sourceKind === "public_web" && (isUsableSourceUrl(sourceUrl) || canUseUncitedReviewResearch)) ||
+        ((sourceKind === "web_search" && isUsableSourceUrl(sourceUrl)) ||
+          (sourceKind === "public_web" && isUsableSourceUrl(sourceUrl)) ||
           (sourceKind === "public_geocoder" && verified) ||
-          (sourceKind === "commercial_provider" && (isUsableSourceUrl(sourceUrl) || canUseUncitedReviewResearch)) ||
-          (sourceKind === "government_api" && (isUsableSourceUrl(sourceUrl) || canUseUncitedReviewResearch)) ||
-          (sourceKind === "imagery_vision" && isUsableSourceUrl(sourceUrl) && confidence >= 0.65) ||
+          (sourceKind === "commercial_provider" && isUsableSourceUrl(sourceUrl)) ||
+          (sourceKind === "government_api" && isUsableSourceUrl(sourceUrl)) ||
+          (sourceKind === "imagery_vision" && isUsableSourceUrl(sourceUrl) && confidence >= 0.8) ||
+          sourceKind === "agent_seed" ||
           sourceKind === "client_intake" ||
+          sourceKind === "validated_address" ||
+          sourceKind === "carrier_api" ||
           verified) &&
         isSafeQuestionnairePrefillTarget(targetField);
       if (!targetField || !value) return null;
-      if (isUnsafeAcordAiTarget(targetField)) return null;
       if (!acordMappedValueFitsTarget(targetField, value, { questionnairePrefill: true })) return null;
       if (!documentReady && !reviewReady) return null;
       if (!documentReady && !isSafeQuestionnairePrefillTarget(targetField)) return null;
       return {
-        targetId: asString(row.targetId) || undefined,
+        targetId: matchedField.id,
         targetField,
         value,
         sourceLabel: asString(row.sourceLabel, "Source-backed Quotex AI questionnaire prefill"),
@@ -2249,9 +2253,8 @@ export async function aiMapAcordFields(input: {
       return !mappedQuestionnaireKeys.has(idKey) && !mappedQuestionnaireKeys.has(labelKey);
     })
     .map((field) => field.label)
-    .filter((field) => field && !isUnsafeAcordAiTarget(field));
+    .filter(Boolean);
   const returnedMissingFields = asStringArray(record.missingFields).filter((field) => {
-    if (isUnsafeAcordAiTarget(field)) return false;
     return !mappedQuestionnaireKeys.has(normalizeQuestionnaireFieldKey(field));
   });
   const missingFieldsByKey = new Map<string, string>();
@@ -2609,7 +2612,7 @@ Rules:
 
 function addQuestionnaireFallbackMappings(
   mappings: AcordMapping[],
-  fields: Array<{ id?: string; label: string }>,
+  fields: AcordMapField[],
   dossier: Record<string, unknown>
 ): AcordMapping[] {
   const mapped = new Set(
@@ -2633,17 +2636,18 @@ function addQuestionnaireFallbackMappings(
 }
 
 function questionnaireFallbackAnswer(
-  field: { id?: string; label: string },
+  field: AcordMapField,
   dossier: Record<string, unknown>
 ): AcordMapping | null {
   const label = asString(field.label);
   if (!label) return null;
-  const dossierValue = findQuestionnaireDossierValue(label, dossier);
-  if (dossierValue && acordMappedValueFitsTarget(label, dossierValue, { questionnairePrefill: true })) {
+  const dossierValue = findQuestionnaireDossierValue(field, dossier);
+  const canonicalValue = canonicalQuestionnaireFieldAnswer(field, dossierValue);
+  if (canonicalValue && acordMappedValueFitsTarget(label, canonicalValue, { questionnairePrefill: true })) {
     return {
       targetId: asString(field.id) || undefined,
       targetField: label,
-      value: dossierValue,
+      value: canonicalValue,
       sourceLabel: "Quotex dossier",
       sourceKind: "client_intake",
       confidence: 0.84,
@@ -2654,60 +2658,502 @@ function questionnaireFallbackAnswer(
   return null;
 }
 
-function findQuestionnaireDossierValue(label: string, dossier: Record<string, unknown>): string {
-  const labelKey = normalizeQuestionnaireFieldKey(label);
-  const labelText = label.toLowerCase();
-  const wantsGaragingAddress = /\bgaraging\b/.test(labelText);
-  const wantsAddress = /\b(address|location|premises|risk|mailing|garaging)\b/.test(labelText);
-  const wantsYearBuilt = /\byear-built|year-built|year built\b/.test(labelKey) || /\byear built\b/i.test(label);
-  const wantsSquareFootage = /\b(square footage|living area|building area)\b/i.test(label);
-  const exact = findDossierString(dossier, (key, value) => {
-    const keyLabel = normalizeQuestionnaireFieldKey(key);
-    if (wantsGaragingAddress) {
-      const vehicleGaragingKey =
-        keyLabel.includes("garaging") ||
-        keyLabel.includes("garage") ||
-        keyLabel.includes("vehiclelocation") ||
-        keyLabel.includes("storageaddress");
-      return vehicleGaragingKey && valueLooksLikeAddress(value);
-    }
-    if (wantsAddress && keyLabel.includes("address") && valueLooksLikeAddress(value)) return true;
-    if (wantsYearBuilt && /\b(yearbuilt|year-built|year)\b/.test(keyLabel) && valueLooksLikeYear(value)) return true;
-    if (wantsSquareFootage && /\b(square|footage|sqft|living-area)\b/.test(keyLabel) && valueContainsNumber(value)) return true;
-    return keyLabel === labelKey && value.trim().length > 0;
-  });
-  return exact ?? "";
+function findQuestionnaireDossierValue(field: AcordMapField, dossier: Record<string, unknown>): string {
+  const id = asString(field.id);
+  const assetScopeMarker = "__asset_";
+  const markerIndex = id.lastIndexOf(assetScopeMarker);
+  const baseId = markerIndex >= 0 ? id.slice(0, markerIndex) : id;
+  const scopedAssetId = markerIndex >= 0 ? id.slice(markerIndex + assetScopeMarker.length) : "";
+  const contact = isRecord(dossier.contact) ? dossier.contact : {};
+  const session = isRecord(dossier.session) ? dossier.session : {};
+  const legacyAsset =
+    asObjectArray(session.selectedAssets).length === 0 && isRecord(dossier.asset)
+      ? dossier.asset
+      : {};
+  const selectedAssets = asObjectArray(session.selectedAssets);
+  const selectedAsset =
+    selectedAssets.find((asset) => asString(asset.assetId) === scopedAssetId) ??
+    (selectedAssets.length === 1 ? selectedAssets[0] : undefined) ??
+    {};
+  const assetDetails = scopedAssetId
+    ? isRecord(selectedAsset.assetDetails)
+      ? selectedAsset.assetDetails
+      : {}
+    : {
+        ...(isRecord(session.assetDetails) ? session.assetDetails : {}),
+        ...(isRecord(selectedAsset.assetDetails) ? selectedAsset.assetDetails : {}),
+      };
+  const publicFields = scopedAssetId
+    ? isRecord(selectedAsset.publicFields)
+      ? selectedAsset.publicFields
+      : {}
+    : {
+        ...(isRecord(session.publicFields) ? session.publicFields : {}),
+        ...(isRecord(selectedAsset.publicFields) ? selectedAsset.publicFields : {}),
+      };
+  const publicFieldEvidence = scopedAssetId
+    ? isRecord(selectedAsset.publicFieldEvidence)
+      ? selectedAsset.publicFieldEvidence
+      : {}
+    : {
+        ...(isRecord(session.publicFieldEvidence) ? session.publicFieldEvidence : {}),
+        ...(isRecord(selectedAsset.publicFieldEvidence) ? selectedAsset.publicFieldEvidence : {}),
+      };
+  const policies = asObjectArray(dossier.policies);
+  const selectedAssetId = asString(selectedAsset.assetId);
+  const activePolicies = policies.filter((candidate) =>
+    questionnairePolicyIsActive(candidate)
+  );
+  const assetPolicy = selectedAssetId
+    ? activePolicies.find((candidate) => asString(candidate.assetId) === selectedAssetId)
+    : undefined;
+  const policy = selectedAssetId
+    ? assetPolicy ?? {}
+    : activePolicies.length === 1
+      ? activePolicies[0]
+      : {};
+  const carriers = asObjectArray(dossier.carriers);
+  const participants = asObjectArray(policy.participants);
+  const contactName = asString(contact.name);
+  const nameParts = contactName.split(/\s+/).filter(Boolean);
+  const selectedAssetType = asString(selectedAsset.assetType) || asString(session.assetType);
+  const selectedAssetIsHome = selectedAssetType === "coastal_home";
+  const currentAddress =
+    asString(contact.address) ||
+    asString(assetDetails.primaryResidenceAddress) ||
+    (selectedAssetIsHome
+      ? asString(selectedAsset.address) ||
+        asString(assetDetails.propertyAddress) ||
+        asString(assetDetails.riskAddress)
+      : "") ||
+    asString(legacyAsset.address) ||
+    asString(legacyAsset.propertyAddress) ||
+    asString(legacyAsset.riskAddress);
+  const addressParts = parseQuestionnaireUsAddress(currentAddress);
+  const garageAddress = asString(assetDetails.garagingAddress);
+  const garageParts = parseQuestionnaireUsAddress(garageAddress);
+  const applicantParticipant = participants.find(
+    (participant) =>
+      normalizeQuestionnaireFieldKey(asString(participant.name)) ===
+      normalizeQuestionnaireFieldKey(contactName)
+  );
+  const driverParticipant =
+    (selectedAssetId
+      ? participants.find(
+          (participant) =>
+            asString(participant.assignedAssetId) === selectedAssetId &&
+            /^(driver|excluded_driver)$/i.test(asString(participant.participantType))
+        )
+      : undefined) ??
+    participants.find(
+      (participant) =>
+        asString(participant.status) === "primary" &&
+        /^(driver|excluded_driver)$/i.test(asString(participant.participantType))
+    ) ??
+    (applicantParticipant &&
+    /^(driver|excluded_driver)$/i.test(asString(applicantParticipant.participantType))
+      ? applicantParticipant
+      : undefined) ??
+    {};
+  const coApplicantParticipant =
+    participants.find((participant) =>
+      /^(co[\s_-]?applicant)$/i.test(
+        asString(participant.role) ||
+          asString(participant.status) ||
+          asString(participant.relationship)
+      )
+    ) ?? {};
+  const carrierId = asString(policy.carrierId);
+  const carrier = carriers.find((candidate) => asString(candidate.id) === carrierId);
+  const policyCoverages = asObjectArray(policy.coverages);
+  const liabilityLimits = policyCoverages
+    .filter((coverage) => /\b(liability|bodily injury|property damage)\b/i.test(asString(coverage.name)))
+    .map((coverage) =>
+      [asString(coverage.name), asString(coverage.limit)].filter(Boolean).join(": ")
+    )
+    .filter(Boolean)
+    .join("; ");
+  const effectiveDate = asString(policy.effectiveDate);
+  const renewalDate = asString(policy.renewalDate);
+  const policyTerm = questionnairePolicyTerm(effectiveDate, renewalDate);
+  const currentPremium =
+    asScalarString(policy.finalPremium) || asScalarString(policy.premiumEstimate);
+  const garageMatchesResidence =
+    garageAddress &&
+    currentAddress &&
+    normalizeQuestionnaireFieldKey(garageAddress) ===
+      normalizeQuestionnaireFieldKey(currentAddress);
+  const coApplicantNameParts = asString(coApplicantParticipant.name)
+    .split(/\s+/)
+    .filter(Boolean);
+  const bodilyInjuryCoverage = questionnaireCoverage(
+    policyCoverages,
+    /\bbodily injury\b/i
+  );
+  const propertyDamageCoverage = questionnaireCoverage(
+    policyCoverages,
+    /\bproperty damage\b/i
+  );
+  const pipCoverage = questionnaireCoverage(
+    policyCoverages,
+    /\b(personal injury protection|pip)\b/i
+  );
+  const umCoverage = questionnaireCoverage(
+    policyCoverages,
+    /\b(uninsured|underinsured|um\/uim|uim)\b/i
+  );
+  const medicalPaymentsCoverage = questionnaireCoverage(
+    policyCoverages,
+    /\b(medical payments?|med pay)\b/i
+  );
+  const accidentalDeathCoverage = questionnaireCoverage(
+    policyCoverages,
+    /\baccidental death\b/i
+  );
+  const comprehensiveCoverage = questionnaireCoverage(
+    policyCoverages,
+    /\bcomprehensive\b/i
+  );
+  const collisionCoverage = questionnaireCoverage(
+    policyCoverages,
+    /\bcollision\b/i
+  );
+  const rentalCoverage = questionnaireCoverage(
+    policyCoverages,
+    /\brental (reimbursement|coverage)\b/i
+  );
+  const towingCoverage = questionnaireCoverage(
+    policyCoverages,
+    /\b(towing|roadside)\b/i
+  );
+  const customEquipmentCoverage = questionnaireCoverage(
+    policyCoverages,
+    /\bcustom equipment\b/i
+  );
+  const fullGlassCoverage = questionnaireCoverage(
+    policyCoverages,
+    /\b(full glass|glass coverage)\b/i
+  );
+  const leaseCoverage = questionnaireCoverage(
+    policyCoverages,
+    /\b(lease|loan gap|gap coverage)\b/i
+  );
+  const directValues: Record<string, string> = {
+    primaryFirstName: nameParts.length >= 2 ? nameParts[0] : "",
+    primaryMiddleInitial: nameParts.length >= 3 ? nameParts.slice(1, -1).map((part) => part[0]).join("") : "",
+    primaryLastName: nameParts.length >= 2 ? nameParts[nameParts.length - 1] : "",
+    primaryDateOfBirth:
+      asString(applicantParticipant?.dateOfBirth) || asString(applicantParticipant?.dob),
+    coApplicantFirstName: coApplicantNameParts.length >= 2 ? coApplicantNameParts[0] : "",
+    coApplicantMiddleInitial:
+      coApplicantNameParts.length >= 3
+        ? coApplicantNameParts
+            .slice(1, -1)
+            .map((part) => part[0])
+            .join("")
+        : "",
+    coApplicantLastName:
+      coApplicantNameParts.length >= 2
+        ? coApplicantNameParts[coApplicantNameParts.length - 1]
+        : "",
+    coApplicantDateOfBirth:
+      asString(coApplicantParticipant.dateOfBirth) ||
+      asString(coApplicantParticipant.dob),
+    cellPhone: asString(contact.phone),
+    emailAddress: asString(contact.email),
+    currentStreetAddress: addressParts.street || currentAddress,
+    currentCity: addressParts.city,
+    currentState: addressParts.state,
+    currentZipCode: addressParts.zip,
+    mailingAddress: asString(contact.mailingAddress),
+    ratingState: asString(session.state) || addressParts.state,
+    ratingCounty: asString(assetDetails.county),
+    targetEffectiveDate: asString(session.targetEffectiveDate),
+    policyTerm,
+    currentlyInsured: Object.keys(policy).length > 0 ? "Yes" : "",
+    currentPremium,
+    currentCarrier: asString(policy.carrierName) || asString(carrier?.name),
+    currentPolicyExpirationDate: asString(policy.renewalDate),
+    currentPolicyNumber: asString(policy.policyNumber),
+    currentLiabilityLimits: liabilityLimits,
+    driverFirstName: asString(driverParticipant.name)
+      ? asString(driverParticipant.name).split(/\s+/)[0]
+      : "",
+    driverLastName:
+      asString(driverParticipant.name)
+        ? asString(driverParticipant.name).split(/\s+/).filter(Boolean).slice(-1)[0] ?? ""
+        : "",
+    driverDateOfBirth:
+      asString(driverParticipant.dateOfBirth) || asString(driverParticipant.dob),
+    driverRelationshipToApplicant: asString(driverParticipant.relationship),
+    driverIsCoApplicant:
+      Object.keys(coApplicantParticipant).length > 0 &&
+      asString(driverParticipant.name) &&
+      normalizeQuestionnaireFieldKey(asString(driverParticipant.name)) ===
+        normalizeQuestionnaireFieldKey(asString(coApplicantParticipant.name))
+        ? "Yes"
+        : "",
+    driverLicenseState: asString(driverParticipant.licenseState),
+    driverLicenseNumber: asString(driverParticipant.licenseNumber),
+    driverStatus: questionnaireDriverStatus(driverParticipant),
+    principalOperator:
+      asString(assetDetails.principalOperator) ||
+      (asString(driverParticipant.status) === "primary"
+        ? asString(driverParticipant.name)
+        : ""),
+    vin: asString(assetDetails.vin),
+    vehicleYear: asString(assetDetails.year) || asString(assetDetails.modelYear),
+    vehicleMake: asString(assetDetails.make),
+    vehicleModel: asString(assetDetails.model),
+    vehicleTrim: asString(assetDetails.trim),
+    vehicleBodyStyle: asString(assetDetails.bodyStyle) || asString(assetDetails.bodyClass),
+    vehicleRegisteredState: asString(assetDetails.registeredState),
+    vehicleOriginalMsrp: asString(assetDetails.originalMsrp) || asString(assetDetails.msrp),
+    vehicleEngine: asString(assetDetails.engine),
+    vehicleCylinders: asString(assetDetails.cylinders),
+    vehicleDisplacement: asString(assetDetails.displacement),
+    vehicleFuelType: asString(assetDetails.fuelType),
+    vehicleDriveType: asString(assetDetails.driveType),
+    vehicleDoorCount: asString(assetDetails.numberOfDoors) || asString(assetDetails.doorCount),
+    vehiclePurchaseDate: asString(assetDetails.purchaseDate),
+    vehicleOwnershipStatus: asString(assetDetails.ownershipStatus),
+    vehicleUsage: asString(assetDetails.vehicleUsage) || asString(assetDetails.usage),
+    oneWayCommuteMiles: asString(assetDetails.oneWayCommuteMiles),
+    daysDrivenPerWeek: asString(assetDetails.daysDrivenPerWeek),
+    annualMileage: asString(assetDetails.annualMileage),
+    vehicleGaraged: typeof assetDetails.garaged === "boolean" ? (assetDetails.garaged ? "Yes" : "No") : "",
+    garageLocation: garageAddress ? (garageMatchesResidence ? "Residence" : "Other") : "",
+    alternateGarageStreet: garageAddress && !garageMatchesResidence ? garageParts.street : "",
+    alternateGarageCity: garageAddress && !garageMatchesResidence ? garageParts.city : "",
+    alternateGarageState: garageAddress && !garageMatchesResidence ? garageParts.state : "",
+    alternateGarageZip: garageAddress && !garageMatchesResidence ? garageParts.zip : "",
+    antiLockBrakes: questionnaireBooleanValue(assetDetails.antiLockBrakes),
+    antiTheftDevice: questionnaireBooleanValue(assetDetails.antiTheftDevice),
+    airbags: questionnaireBooleanValue(assetDetails.airbags),
+    bodilyInjuryLimits: questionnaireCoverageValue(bodilyInjuryCoverage, "limit"),
+    propertyDamageLimits: questionnaireCoverageValue(propertyDamageCoverage, "limit"),
+    pipDeductible: questionnaireCoverageValue(pipCoverage, "deductible"),
+    pipAppliesTo: questionnaireCoverageValue(pipCoverage, "description"),
+    pipWageLoss: questionnaireCoverageValue(pipCoverage, "wageLoss"),
+    pipType: questionnaireCoverageValue(pipCoverage, "pipType"),
+    umLimits: questionnaireCoverageValue(umCoverage, "limit"),
+    umStacked: questionnaireCoverageBoolean(umCoverage, "stacked"),
+    medicalPayments: questionnaireCoverageValue(medicalPaymentsCoverage, "limit"),
+    accidentalDeathCoverage: questionnaireCoverageValue(accidentalDeathCoverage, "limit"),
+    comprehensiveDeductible: questionnaireCoverageValue(comprehensiveCoverage, "deductible"),
+    collisionDeductible: questionnaireCoverageValue(collisionCoverage, "deductible"),
+    rentalReimbursement:
+      questionnaireCoverageValue(rentalCoverage, "limit") ||
+      questionnaireCoverageValue(rentalCoverage, "description"),
+    towingCoverage:
+      questionnaireCoverageValue(towingCoverage, "limit") ||
+      questionnaireCoverageValue(towingCoverage, "description"),
+    customEquipmentCoverage: questionnaireCoverageValue(customEquipmentCoverage, "limit"),
+    fullGlassCoverage: Object.keys(fullGlassCoverage).length > 0 ? "Yes" : "",
+    leaseCoverage: Object.keys(leaseCoverage).length > 0 ? "Yes" : "",
+  };
+  if (baseId === "mailingSameAsCurrent") {
+    const mailing = asString(contact.mailingAddress);
+    const current = currentAddress;
+    if (mailing && current) return normalizeQuestionnaireFieldKey(mailing) === normalizeQuestionnaireFieldKey(current) ? "Yes" : "No";
+    return "";
+  }
+  const normalizedBaseId = normalizeQuestionnaireFieldKey(baseId);
+  if (
+    currentAddress &&
+    (normalizedBaseId === "property-address" ||
+      normalizedBaseId === "risk-address" ||
+      normalizedBaseId === "address")
+  ) {
+    return currentAddress;
+  }
+  const directValue = directValues[baseId];
+  if (directValue) return directValue;
+
+  const scopedValue = questionnaireScopedValue(baseId, [
+    assetDetails,
+    driverParticipant,
+    applicantParticipant ?? {},
+    coApplicantParticipant,
+    contact,
+    policy,
+  ]);
+  if (scopedValue) return scopedValue;
+
+  return questionnaireVerifiedPublicValue(
+    field,
+    baseId,
+    publicFields,
+    publicFieldEvidence
+  );
 }
 
-function findDossierString(
-  value: unknown,
-  predicate: (key: string, value: string) => boolean,
-  key = "",
-  seen = new WeakSet<object>()
-): string | undefined {
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    return trimmed && predicate(key, trimmed) ? trimmed : undefined;
-  }
-  if (typeof value === "number" && Number.isFinite(value)) {
-    const stringValue = String(value);
-    return predicate(key, stringValue) ? stringValue : undefined;
-  }
-  if (!value || typeof value !== "object") return undefined;
-  if (seen.has(value)) return undefined;
-  seen.add(value);
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findDossierString(item, predicate, key, seen);
-      if (found) return found;
+function questionnaireBooleanValue(value: unknown): string {
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (typeof value === "string" && /^(yes|true)$/i.test(value.trim())) return "Yes";
+  if (typeof value === "string" && /^(no|false)$/i.test(value.trim())) return "No";
+  return "";
+}
+
+function questionnaireScopedValue(
+  fieldId: string,
+  records: Record<string, unknown>[]
+): string {
+  const aliases = questionnaireFieldAliases(fieldId);
+  for (const record of records) {
+    for (const alias of aliases) {
+      if (!Object.prototype.hasOwnProperty.call(record, alias)) continue;
+      const value = asScalarString(record[alias]);
+      if (value && !valueLooksLikeUnavailableResearchNote(value)) return value;
     }
-    return undefined;
   }
-  for (const [childKey, childValue] of Object.entries(value as Record<string, unknown>)) {
-    const found = findDossierString(childValue, predicate, childKey, seen);
-    if (found) return found;
+  return "";
+}
+
+function questionnaireFieldAliases(fieldId: string): string[] {
+  const aliases: Record<string, string[]> = {
+    primarySsnLastFour: ["primarySsnLastFour", "ssnLastFour"],
+    currentStreetAddress: ["currentStreetAddress", "propertyAddress", "riskAddress"],
+    currentZipCode: ["currentZipCode", "currentZip", "zipCode", "zip"],
+    previousZipCode: ["previousZipCode", "previousZip"],
+    alternateGarageZip: ["alternateGarageZip", "alternateGaragingZip"],
+    ratingCounty: ["ratingCounty", "county"],
+    targetEffectiveDate: ["targetEffectiveDate", "effectiveDate"],
+    currentPolicyExpirationDate: ["currentPolicyExpirationDate", "policyExpirationDate"],
+    currentPolicyNumber: ["currentPolicyNumber", "policyNumber"],
+    driverLicenseState: ["driverLicenseState", "licenseState"],
+    driverLicenseNumber: ["driverLicenseNumber", "licenseNumber"],
+    driverDateOfBirth: ["driverDateOfBirth", "dateOfBirth", "dob"],
+    vehicleYear: ["vehicleYear", "year", "modelYear"],
+    vehicleMake: ["vehicleMake", "make"],
+    vehicleModel: ["vehicleModel", "model"],
+    vehicleTrim: ["vehicleTrim", "trim", "series"],
+    vehicleBodyStyle: ["vehicleBodyStyle", "bodyStyle", "bodyClass"],
+    vehicleRegisteredState: ["vehicleRegisteredState", "registeredState"],
+    vehicleOriginalMsrp: ["vehicleOriginalMsrp", "originalMsrp", "msrp"],
+    vehicleEngine: ["vehicleEngine", "engine", "engineDescription"],
+    vehicleCylinders: ["vehicleCylinders", "cylinders"],
+    vehicleDisplacement: ["vehicleDisplacement", "displacement"],
+    vehicleFuelType: ["vehicleFuelType", "fuelType"],
+    vehicleDriveType: ["vehicleDriveType", "driveType"],
+    vehicleDoorCount: ["vehicleDoorCount", "numberOfDoors", "doorCount"],
+    vehiclePurchaseDate: ["vehiclePurchaseDate", "purchaseDate"],
+    vehicleOwnershipStatus: ["vehicleOwnershipStatus", "ownershipStatus"],
+    vehicleUsage: ["vehicleUsage", "usage"],
+    garageLocation: ["garageLocation", "garagingLocation"],
+    alternateGarageStreet: ["alternateGarageStreet", "alternateGaragingStreet"],
+    alternateGarageCity: ["alternateGarageCity", "alternateGaragingCity"],
+    alternateGarageState: ["alternateGarageState", "alternateGaragingState"],
+  };
+  return Array.from(new Set([fieldId, ...(aliases[fieldId] ?? [])]));
+}
+
+function questionnaireVerifiedPublicValue(
+  field: AcordMapField,
+  fieldId: string,
+  publicFields: Record<string, unknown>,
+  evidence: Record<string, unknown>
+): string {
+  const targetKeys = new Set(
+    [fieldId, field.id, field.label, ...(field.acordFieldLabels ?? [])]
+      .map(normalizeQuestionnaireFieldKey)
+      .filter(Boolean)
+  );
+  for (const [key, rawValue] of Object.entries(publicFields)) {
+    if (!targetKeys.has(normalizeQuestionnaireFieldKey(key))) continue;
+    const value = asScalarString(rawValue);
+    if (!value || valueLooksLikeUnavailableResearchNote(value)) continue;
+    const item =
+      (isRecord(evidence[key]) ? evidence[key] : undefined) ??
+      Object.values(evidence).find(
+        (candidate) =>
+          isRecord(candidate) &&
+          normalizeQuestionnaireFieldKey(candidate.fieldKey) ===
+            normalizeQuestionnaireFieldKey(key)
+      );
+    if (!isRecord(item) || item.verified !== true) continue;
+    const sourceKind = asString(item.sourceKind);
+    const sourceUrl = asString(item.sourceUrl);
+    if (
+      !/^(government_api|carrier_api|validated_address|client_intake|agent_seed|commercial_provider|public_web|web_search)$/i.test(
+        sourceKind
+      )
+    ) {
+      continue;
+    }
+    if (
+      /^(commercial_provider|public_web|web_search)$/i.test(sourceKind) &&
+      !isUsableSourceUrl(sourceUrl)
+    ) {
+      continue;
+    }
+    return value;
   }
-  return undefined;
+  return "";
+}
+
+function questionnaireCoverage(
+  coverages: Record<string, unknown>[],
+  namePattern: RegExp
+): Record<string, unknown> {
+  return coverages.find((coverage) => namePattern.test(asString(coverage.name))) ?? {};
+}
+
+function questionnaireCoverageValue(
+  coverage: Record<string, unknown>,
+  key: string
+): string {
+  const value = asScalarString(coverage[key]);
+  return value && !valueLooksLikeUnavailableResearchNote(value) ? value : "";
+}
+
+function questionnaireCoverageBoolean(
+  coverage: Record<string, unknown>,
+  key: string
+): string {
+  return questionnaireBooleanValue(coverage[key]);
+}
+
+function questionnaireDriverStatus(participant: Record<string, unknown>): string {
+  const participantType = asString(participant.participantType);
+  const status = asString(participant.status);
+  if (participantType === "excluded_driver" || status === "excluded") return "Excluded";
+  if (status === "active" || status === "primary" || status === "occasional") return "Rated";
+  return "";
+}
+
+function questionnairePolicyIsActive(policy: Record<string, unknown>): boolean {
+  const status = asString(policy.status);
+  if (!status) return Boolean(asString(policy.policyNumber));
+  if (/^(closed|declined|deposit_refunded)$/i.test(status)) return false;
+  if (asString(policy.policyNumber)) return true;
+  return /^(bound|renewal_upcoming|renewed|claim_opened|claim_closed)$/i.test(status);
+}
+
+function questionnairePolicyTerm(effectiveDate: string, renewalDate: string): string {
+  const start = new Date(effectiveDate);
+  const end = new Date(renewalDate);
+  if (!effectiveDate || !renewalDate || Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+    return "";
+  }
+  const days = Math.round((end.getTime() - start.getTime()) / 86_400_000);
+  if (days >= 150 && days <= 215) return "6 Months";
+  if (days >= 330 && days <= 400) return "12 Months";
+  return "";
+}
+
+function parseQuestionnaireUsAddress(value: string): {
+  street: string;
+  city: string;
+  state: string;
+  zip: string;
+} {
+  const match = value
+    .trim()
+    .match(/^(.+?),\s*([^,]+?),\s*([A-Za-z]{2})\s+(\d{5}(?:-\d{4})?)$/);
+  return match
+    ? { street: match[1].trim(), city: match[2].trim(), state: match[3].toUpperCase(), zip: match[4] }
+    : { street: value.trim(), city: "", state: "", zip: "" };
 }
 
 function normalizeQuestionnaireFieldKey(value: unknown): string {

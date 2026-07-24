@@ -3212,10 +3212,12 @@ export interface AiQuotingPrep {
 export interface AiAcordFieldDescriptor {
   id?: string;
   label: string;
+  section?: string;
   acordFieldKey?: string;
   acordFieldLabels?: string[];
   required?: boolean;
   kind?: string;
+  options?: string[];
   page?: number;
 }
 
@@ -3286,7 +3288,7 @@ function acordAiValueLooksAddress(value: string): boolean {
 }
 
 function acordAiValueLooksUnavailable(value: string): boolean {
-  return /\b(unknown|not public|not publicly|not found|not listed|not noted|no public|n\/a|not available|unconfirmed|requires|needed|needs verification|verify|applicant|attestation|clue|loss runs?)\b/i.test(
+  return /\b(unknown|not public|not publicly|not found|not listed|not noted|no public|n\/a|not available|unconfirmed|requires|needed|needs verification|verify|applicant|attestation|clue|loss runs?|likely|possibly|probably|appears|seems|may be|might be|could be|assumed|inferred|estimated|estimate only|approximately|approx\.?|needs? confirmation|subject to verification)\b/i.test(
     value
   );
 }
@@ -3301,21 +3303,21 @@ function acordAiFieldValueLooksCompatible(
   options: { questionnairePrefill?: boolean } = {}
 ): boolean {
   const normalized = label.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-  const unavailableNote = options.questionnairePrefill && acordAiValueLooksUnavailable(value);
+  if (options.questionnairePrefill && acordAiValueLooksUnavailable(value)) return false;
   if (acordAiLabelLooksAddress(label)) return acordAiValueLooksAddress(value);
   if (/\b(email)\b/.test(normalized)) return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
   if (/\b(phone|telephone)\b/.test(normalized)) return value.replace(/\D/g, "").length >= 7;
   if (/\b(fein|ein|tax id)\b/.test(normalized)) return value.replace(/\D/g, "").length >= 9;
   if (/\b(year built|roof year|model year|year started)\b/.test(normalized)) {
     const year = Number(value.trim());
-    return (Number.isInteger(year) && year >= 1800 && year <= new Date().getFullYear() + 2) || !!unavailableNote;
+    return Number.isInteger(year) && year >= 1800 && year <= new Date().getFullYear() + 2;
   }
-  if (/\byears in business\b/.test(normalized)) return /^\d{1,3}$/.test(value.trim()) || !!unavailableNote;
+  if (/\byears in business\b/.test(normalized)) return /^\d{1,3}$/.test(value.trim());
   if (/\b(square footage|living area|building area|lot size|number of stories|stories|bedrooms|bathrooms|roof age)\b/.test(normalized)) {
-    return /^\$?\s*\d[\d,]*(?:\.\d+)?$/.test(value.trim()) || (options.questionnairePrefill && acordAiValueContainsNumber(value)) || !!unavailableNote;
+    return /^\$?\s*\d[\d,]*(?:\.\d+)?$/.test(value.trim()) || Boolean(options.questionnairePrefill && acordAiValueContainsNumber(value));
   }
   if (/\b(occupancy|occupied|use)\b/.test(normalized)) {
-    return /\b(primary|secondary|seasonal|vacation|rental|tenant|owner|occupied|vacant)\b/i.test(value) || !!unavailableNote;
+    return /\b(primary|secondary|seasonal|vacation|rental|tenant|owner|occupied|vacant)\b/i.test(value);
   }
   if (/\b(construction type|construction|roof material|roof type|flood zone|protection class)\b/.test(normalized)) {
     return !acordAiValueLooksAddress(value) && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value) && value.trim().length <= (options.questionnairePrefill ? 220 : 80);
@@ -3339,10 +3341,10 @@ function safeQuestionnaireAiPrefillLabel(label: string): boolean {
   const normalized = label.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   if (!normalized) return false;
   if (unsafeAcordAiFieldLabel(normalized)) return false;
-  if (/\b(loss|claim|incident|conviction|violation|mvr|bankruptcy|cancel|nonrenew|audit|payroll|revenue|sales|fein|tax id|ssn)\b/.test(normalized)) {
+  if (/\b(loss|claim|incident|conviction|violation|mvr|bankruptcy|cancel|nonrenew|authorization|authorize|fein|tax id|ssn|social security)\b/.test(normalized)) {
     return false;
   }
-  return /\b(legal business name|business name|named insured|name of insured|applicant name|dba|doing business as|mailing address|property address|risk address|location address|premises address|city|state|zip|postal|phone|email|website|business description|operations|entity type|year started|years in business|naics|sic|owner of record|occupancy|year built|square footage|living area|construction type|roof material|roof year|roof age|lot size|distance to coast|distance from coast|coast distance|flood zone|protection class|number of stories|stories|bedrooms|bathrooms|vin|vehicle identification|year make model|make|model|model year|body class|hull|vessel|yacht|marina|mooring|appraised value|estimated value|exposure value|storage location)\b/.test(normalized);
+  return true;
 }
 
 function parseAcordAiMappings(

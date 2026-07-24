@@ -86,7 +86,7 @@ describe("aiProductionGuards", () => {
     expect(aiEvidenceAllowsDocumentAutofill(webEvidence)).toBe(false);
     expect(aiEvidenceAllowsQuestionnairePrefill(imageryEvidence)).toBe(true);
     expect(aiEvidenceAllowsDocumentAutofill(imageryEvidence)).toBe(false);
-    expect(aiEvidenceAllowsQuestionnairePrefill(uncitedOpenAiEvidence)).toBe(true);
+    expect(aiEvidenceAllowsQuestionnairePrefill(uncitedOpenAiEvidence)).toBe(false);
     expect(aiEvidenceAllowsDocumentAutofill(uncitedOpenAiEvidence)).toBe(false);
     expect(aiEvidenceAllowsQuestionnairePrefill(estimateEvidence)).toBe(false);
     expect(aiEvidenceAllowsDocumentAutofill(estimateEvidence)).toBe(false);

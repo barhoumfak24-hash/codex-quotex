@@ -511,17 +511,35 @@ function valueContainsQuestionnaireNumber(value: string): boolean {
 }
 
 function valueLooksLikeQuestionnaireUnavailableNote(value: string): boolean {
-  return /\b(unknown|not public|not publicly|not found|no public|n\/a|not available|requires|needed|verify|applicant|attestation|clue|loss runs?)\b/i.test(
+  return /\b(unknown|not public|not publicly|not found|no public|n\/a|not available|unconfirmed|requires|needed|verify|applicant|attestation|clue|loss runs?)\b/i.test(
     value
   );
 }
 
 function valueLooksLikeUnavailableAiAnswer(value: string): boolean {
   return (
-    /^(unknown|n\/a|none|not found|not public|not available|requires)\b/i.test(value) ||
-    /\b(not found|not public|not publicly|no public|not available|unable to confirm|unable to determine|requires applicant|requires client|requires insured|applicant attestation|clue|loss runs?)\b/i.test(
+    /^(unknown|n\/a|none|not found|not public|not available|unconfirmed|requires)\b/i.test(value) ||
+    /\b(not found|not public|not publicly|no public|not available|unconfirmed|unable to confirm|unable to determine|requires applicant|requires client|requires insured|applicant attestation|clue|loss runs?)\b/i.test(
       value
     )
+  );
+}
+
+function valueLooksLikeUncertainAiAnswer(value: string): boolean {
+  return /\b(likely|possibly|probably|appears|seems|may be|might be|could be|assumed|inferred|estimated|estimate only|approximately|approx\.?|unverified|needs? confirmation|subject to verification)\b/i.test(
+    value
+  );
+}
+
+function canonicalQuestionnaireOptionAnswer(
+  question: QuotingQuestion,
+  rawValue: unknown
+): string | undefined {
+  const value = cleanQuestionnairePrefillValue(rawValue);
+  if (!value || !question.options?.length) return undefined;
+  const normalized = normalizeQuestionnaireLookup(value);
+  return question.options.find(
+    (option) => normalizeQuestionnaireLookup(option) === normalized
   );
 }
 
@@ -646,8 +664,8 @@ function questionRecordEntryIsCompatible(
 function questionnaireAnswerLooksCompatible(question: QuotingQuestion, rawValue: unknown): boolean {
   const value = cleanQuestionnairePrefillValue(rawValue);
   if (!value) return false;
+  if (question.options?.length) return Boolean(canonicalQuestionnaireOptionAnswer(question, value));
   const lookup = questionnaireLookupText(question);
-  const unavailableNote = valueLooksLikeQuestionnaireUnavailableNote(value);
   const normalizedQuestion = normalizeQuestionnaireLookup(
     `${question.label} ${(question.acordFieldLabels ?? []).join(" ")}`
   );
@@ -686,10 +704,10 @@ function questionnaireAnswerLooksCompatible(question: QuotingQuestion, rawValue:
     lookup.includes("modelyear") ||
     lookup.includes("yearstarted")
   ) {
-    return valueLooksLikeFourDigitYear(value) || unavailableNote;
+    return valueLooksLikeFourDigitYear(value);
   }
   if (lookup.includes("yearsinbusiness") || lookup.includes("roofage")) {
-    return valueLooksLikeNumericAnswer(value) || valueContainsQuestionnaireNumber(value) || unavailableNote;
+    return valueLooksLikeNumericAnswer(value) || valueContainsQuestionnaireNumber(value);
   }
   if (
     lookup.includes("squarefootage") ||
@@ -701,7 +719,7 @@ function questionnaireAnswerLooksCompatible(question: QuotingQuestion, rawValue:
     lookup.includes("bedrooms") ||
     lookup.includes("bathrooms")
   ) {
-    return valueLooksLikeNumericAnswer(value) || valueContainsQuestionnaireNumber(value) || unavailableNote;
+    return valueLooksLikeNumericAnswer(value) || valueContainsQuestionnaireNumber(value);
   }
   if (
     lookup.includes("occupancy") ||
@@ -709,7 +727,7 @@ function questionnaireAnswerLooksCompatible(question: QuotingQuestion, rawValue:
     lookup.includes("primaryuse") ||
     lookup.includes("propertyuse")
   ) {
-    return /\b(primary|secondary|seasonal|vacation|rental|tenant|owner|occupied|vacant)\b/i.test(value) || unavailableNote;
+    return /\b(primary|secondary|seasonal|vacation|rental|tenant|owner|occupied|vacant)\b/i.test(value);
   }
   if (
     lookup.includes("constructiontype") ||
@@ -731,7 +749,7 @@ function questionnaireAnswerLooksCompatible(question: QuotingQuestion, rawValue:
       normalizedQuestion
     )
   ) {
-    return unavailableNote;
+    return !valueLooksLikeQuestionnaireUnavailableNote(value);
   }
   if (
     lookup.includes("estimatedvalue") ||
@@ -744,7 +762,7 @@ function questionnaireAnswerLooksCompatible(question: QuotingQuestion, rawValue:
     lookup.includes("replacementcost") ||
     lookup.includes("marketvalue")
   ) {
-    return valueLooksLikeNumericAnswer(value) || valueContainsQuestionnaireNumber(value) || unavailableNote;
+    return valueLooksLikeNumericAnswer(value) || valueContainsQuestionnaireNumber(value);
   }
   if (questionRequiresRegisteredBusinessName(question) && !valueLooksLikeBusinessEntityName(value)) {
     return false;
@@ -762,7 +780,13 @@ function questionnaireAnswerLooksConcreteForAiPrefill(
   rawValue: unknown
 ): boolean {
   const value = cleanQuestionnairePrefillValue(rawValue);
-  if (!value || valueLooksLikeUnavailableAiAnswer(value)) return false;
+  if (
+    !value ||
+    valueLooksLikeUnavailableAiAnswer(value) ||
+    valueLooksLikeUncertainAiAnswer(value)
+  ) {
+    return false;
+  }
   return questionnaireAnswerLooksCompatible(question, value);
 }
 
@@ -788,12 +812,6 @@ function questionnaireLookupIsSensitive(value: string): boolean {
   return /address|location|premises|garaging|mooring|risk|name|insured|applicant|email|phone|website|fein|ein|tax|policy/.test(
     value
   );
-}
-
-function questionnaireQuestionAllowsFuzzyRecordLookup(question: QuotingQuestion): boolean {
-  const lookup = questionnaireLookupText(question);
-  if (questionnaireLookupIsSensitive(lookup)) return false;
-  return (question.acordFieldLabels ?? []).length <= 1;
 }
 
 function mappedFieldValueIsCompatible(
@@ -888,18 +906,7 @@ function questionnaireEvidenceFromMapping(
     mapping.sourceKind && mapping.sourceKind !== "unknown" ? mapping.sourceKind : "model_estimate";
   const sourceUrl = cleanQuestionnairePrefillValue(mapping.sourceUrl);
   const confidence = Math.max(0.45, Math.min(1, Number(mapping.confidence) || 0.72));
-  const reviewOnlyUncitedResearch =
-    !sourceUrl &&
-    confidence >= 0.7 &&
-    (sourceKind === "web_search" ||
-      sourceKind === "public_web" ||
-      sourceKind === "government_api" ||
-      sourceKind === "commercial_provider");
-  if (
-    questionnaireMappingRequiresCitation(sourceKind) &&
-    !sourceUrl &&
-    !reviewOnlyUncitedResearch
-  ) {
+  if (questionnaireMappingRequiresCitation(sourceKind) && !sourceUrl) {
     return undefined;
   }
   const rationale = cleanQuestionnairePrefillValue(mapping.rationale);
@@ -915,9 +922,6 @@ function questionnaireEvidenceFromMapping(
     notes: [
       rationale || "Editable questionnaire prefill from OpenAI research. Review before carrier submission.",
       sourceUrl ? `Source URL: ${sourceUrl}` : "",
-      reviewOnlyUncitedResearch
-        ? "Review-only questionnaire prefill from OpenAI research without a per-field citation. Confirm before carrier submission."
-        : "",
     ]
       .filter(Boolean)
       .join(" "),
@@ -985,27 +989,8 @@ function questionnaireRecordEntryFor(
     if (value) return { key, value };
   }
 
-  const normalizedKeys = new Set(keys.map(normalizeQuestionnaireLookup).filter(Boolean));
-  const compactKeys = new Set(keys.map(compactQuestionnaireLookup).filter(Boolean));
   for (const [recordKey, rawValue] of Object.entries(record)) {
     if (!questionnaireFieldKeyMatchesQuestion(question, recordKey)) continue;
-    const value = cleanQuestionnairePrefillValue(rawValue);
-    if (value) return { key: recordKey, value };
-  }
-  for (const [recordKey, rawValue] of Object.entries(record)) {
-    if (!questionnaireQuestionAllowsFuzzyRecordLookup(question)) break;
-    const normalizedRecordKey = normalizeQuestionnaireLookup(recordKey);
-    const compactRecordKey = compactQuestionnaireLookup(recordKey);
-    const fuzzy = [...normalizedKeys].some(
-      (key) => key.length >= 8 && normalizedRecordKey.length >= 8 && (
-        normalizedRecordKey.includes(key) || key.includes(normalizedRecordKey)
-      )
-    ) || [...compactKeys].some(
-      (key) => key.length >= 8 && compactRecordKey.length >= 8 && (
-        compactRecordKey.includes(key) || key.includes(compactRecordKey)
-      )
-    );
-    if (!fuzzy) continue;
     const value = cleanQuestionnairePrefillValue(rawValue);
     if (value) return { key: recordKey, value };
   }
@@ -1149,7 +1134,6 @@ function compositeKnownQuestionnaireAnswerFor(
       "Risk address",
       "Premises address",
       "Location address",
-      "Garaging address",
       "address",
       "propertyAddress",
       "riskAddress",
@@ -1320,7 +1304,8 @@ function seedKnownQuestionnaireResponses(input: {
     const answer = knownQuestionnaireAnswerFor(question, input);
     if (!answer) return;
     if (!questionnaireAnswerLooksConcreteForAiPrefill(question, answer)) return;
-    questionnaireResponses[question.id] = answer;
+    questionnaireResponses[question.id] =
+      canonicalQuestionnaireOptionAnswer(question, answer) ?? answer;
     questionnaireResponseMeta[question.id] = questionnaireResponseAiMetaFor(
       input.updatedAt,
       questionnaireEvidenceForQuestion(question, input.publicFieldEvidence)
@@ -1381,7 +1366,8 @@ function mergeSeededQuestionnaireResponses(input: {
         question &&
         input.session.questionnaireResponseMeta?.[questionId]?.updatedByRole === "ai" &&
         (questionnaireAnswerHasUnsafeAiEvidence(question, input.publicFieldEvidence) ||
-          valueLooksLikeUnavailableAiAnswer(cleanQuestionnairePrefillValue(value)))
+          valueLooksLikeUnavailableAiAnswer(cleanQuestionnairePrefillValue(value)) ||
+          valueLooksLikeUncertainAiAnswer(cleanQuestionnairePrefillValue(value)))
       ) {
         return false;
       }
@@ -6302,6 +6288,7 @@ function compactAcordAiDossier(
     })),
     policies: dossier.policies.slice(0, 12).map((policy) => ({
       id: policy.id,
+      assetId: policy.assetId,
       policyNumber: policy.policyNumber,
       carrierId: policy.carrierId,
       status: policy.status,
@@ -6316,7 +6303,20 @@ function compactAcordAiDossier(
         description: coverage.description,
       })),
       participants: (policy.participants ?? []).slice(0, 18).map((participant) =>
-        compactAcordAiRecord(participant, ["name", "participantType", "role", "licenseNumber", "dob", "phone", "email"])
+        compactAcordAiRecord(participant, [
+          "name",
+          "participantType",
+          "role",
+          "status",
+          "relationship",
+          "assignedAssetId",
+          "licenseNumber",
+          "licenseState",
+          "dateOfBirth",
+          "dob",
+          "phone",
+          "email",
+        ])
       ),
       additionalInsureds: (policy.additionalInsureds ?? []).slice(0, 18).map((party) =>
         compactAcordAiRecord(party, ["name", "holderType", "address", "loanNumber", "relationship"])
@@ -6388,10 +6388,12 @@ function questionnaireAiFieldsForQuestions(questions: QuotingQuestion[]) {
   return questions.map((question) => ({
     id: question.id,
     label: question.label,
+    section: question.section,
     acordFieldLabels: question.acordFieldLabels ?? [],
     acordFieldKey: question.acordFieldKey,
     required: question.required === true,
     kind: question.kind,
+    options: question.options ?? [],
   }));
 }
 
@@ -6495,6 +6497,7 @@ async function applyServerQuestionnaireMappingToSession(
     ) => {
       const directQuestion =
         targetId && questionsById.has(targetId) ? questionsById.get(targetId) : undefined;
+      if (targetId && !directQuestion) return false;
       const evidence =
         findAiPublicEvidence(mapped.publicFieldEvidence, fieldKey) ??
         (directQuestion ? questionnaireEvidenceFromMapping(mapping, fieldKey, updatedAt) : undefined);
@@ -6525,7 +6528,9 @@ async function applyServerQuestionnaireMappingToSession(
       ) {
         return false;
       }
-      const cleanedValue = cleanQuestionnairePrefillValue(value);
+      const cleanedValue =
+        canonicalQuestionnaireOptionAnswer(question, value) ??
+        cleanQuestionnairePrefillValue(value);
       if (!cleanedValue) return false;
       if (!questionnaireAnswerLooksConcreteForAiPrefill(question, cleanedValue)) return false;
       const existingAnswer = cleanQuestionnairePrefillValue(questionnaireResponses[question.id]);

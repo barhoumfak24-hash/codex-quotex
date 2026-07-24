@@ -323,6 +323,10 @@ aiRoutes.post("/document-map", async (req, res) => {
         acordFieldLabels: Array.isArray(field.acordFieldLabels)
           ? field.acordFieldLabels.filter((label): label is string => typeof label === "string")
           : undefined,
+        section: typeof field.section === "string" ? field.section : undefined,
+        options: Array.isArray(field.options)
+          ? field.options.filter((option): option is string => typeof option === "string")
+          : undefined,
         required: field.required === true,
         kind: typeof field.kind === "string" ? field.kind : typeof field.type === "string" ? field.type : undefined,
         page: typeof field.page === "number" ? field.page : undefined,
@@ -382,6 +386,10 @@ aiRoutes.post("/acord-map", async (req, res) => {
         acordFieldKey: typeof field.acordFieldKey === "string" ? field.acordFieldKey : undefined,
         acordFieldLabels: Array.isArray(field.acordFieldLabels)
           ? field.acordFieldLabels.filter((label): label is string => typeof label === "string")
+          : undefined,
+        section: typeof field.section === "string" ? field.section : undefined,
+        options: Array.isArray(field.options)
+          ? field.options.filter((option): option is string => typeof option === "string")
           : undefined,
         required: field.required === true,
         kind: typeof field.kind === "string" ? field.kind : undefined,
