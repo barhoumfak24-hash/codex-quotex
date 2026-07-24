@@ -2173,7 +2173,11 @@ export const db = {
     notify();
     return arr[idx] as DbShape[K] extends Array<infer T> ? T : never;
   },
-  remove<K extends keyof DbShape>(table: K, id: string) {
+  remove<K extends keyof DbShape>(
+    table: K,
+    id: string,
+    options?: { actorId?: string; reason?: string }
+  ) {
     const arr = cache[table] as unknown as { id: string }[];
     const idx = arr.findIndex((r) => r.id === id);
     if (idx === -1) return false;
@@ -2181,7 +2185,7 @@ export const db = {
     arr.splice(idx, 1);
     if (table !== "deletedRows") {
       const deletedAt = nowIso();
-      const actorId = currentServerSessionClaims()?.userId;
+      const actorId = options?.actorId ?? currentServerSessionClaims()?.userId;
       const tenantId =
         typeof removedRow.tenantId === "string"
           ? removedRow.tenantId
@@ -2195,7 +2199,7 @@ export const db = {
         deletedAt,
         tenantId,
         actorId,
-        reason: "explicit_user_action",
+        reason: options?.reason ?? "explicit_user_action",
         operationId: `delete_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
       };
       const existing = cache.deletedRows.findIndex((deleted) => deleted.id === row.id);

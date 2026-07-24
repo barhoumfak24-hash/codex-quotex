@@ -15,7 +15,8 @@ import { Badge } from "@/components/ui/Badge";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
-import { subscribeToDbChanges } from "@/lib/db";
+import { db, subscribeToDbChanges } from "@/lib/db";
+import { runDashboardRetention } from "@/lib/dashboardRetention";
 import { fmt } from "@/lib/format";
 import { isRoutingManagerRole } from "@/lib/roles";
 import { sweepGoalAchievements } from "@/lib/performanceGoals";
@@ -25,6 +26,10 @@ import { NewReminderModal } from "@/components/tasks/NewReminderModal";
 import { PerformanceGoalsMiniCard } from "@/components/analytics/PerformanceGoalsMiniCard";
 import { ImportanceIcon } from "@/components/tasks/ImportancePicker";
 import type { Reminder } from "@/types";
+
+const DASHBOARD_CARD_CLASS = "h-[24rem] min-h-0 overflow-hidden flex flex-col";
+const DASHBOARD_CARD_BODY_CLASS =
+  "min-h-0 flex-1 overflow-y-auto overscroll-contain invisible-scroll-pane pr-1";
 
 function quoteWorkspaceDeepLink(path: string): string {
   const separator = path.includes("?") ? "&" : "?";
@@ -47,6 +52,27 @@ export function EmployeeDashboard() {
     () => new Set()
   );
   useEffect(() => subscribeToDbChanges(() => setRev((r) => r + 1)), []);
+  useEffect(() => {
+    if (!agency || !user) return;
+    let cancelled = false;
+    void db
+      .hydrateNow()
+      .catch(() => false)
+      .finally(() => {
+        if (cancelled) return;
+        const result = runDashboardRetention(agency.id, user.id);
+        const changed =
+          result.notificationIdsToRemove.length +
+          result.reminderIdsToDismiss.length +
+          result.reminderIdsToRemove.length;
+        if (changed > 0) refresh();
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Retention runs once per dashboard visit after the latest cloud snapshot is loaded.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agency?.id, user?.id]);
   // Keep upcoming-renewal packets available, but do not send or
   // assign e-signature work just because a document was tagged as
   // requiring a signature. Sending stays behind explicit user actions.
@@ -314,7 +340,7 @@ export function EmployeeDashboard() {
       />
 
       <div className="grid gap-6 lg:grid-cols-3">
-        <Card className="h-full min-h-[17rem]">
+        <Card className={DASHBOARD_CARD_CLASS}>
           <CardHeader
             title="My reminders"
             hideSubtitle
@@ -331,7 +357,7 @@ export function EmployeeDashboard() {
               </div>
             }
           />
-          <div data-stable-removal-region>
+          <div data-stable-removal-region className={DASHBOARD_CARD_BODY_CLASS}>
             {reminders.length === 0 ? (
               <div className="text-sm text-ink-400 flex items-start gap-2">
                 <Bell className="h-4 w-4 text-ink-300 mt-0.5 shrink-0" />
@@ -410,7 +436,7 @@ export function EmployeeDashboard() {
           </div>
         </Card>
 
-        <Card className="h-full min-h-[17rem]">
+        <Card className={DASHBOARD_CARD_CLASS}>
           <CardHeader
             title="Notifications"
             action={
@@ -423,7 +449,7 @@ export function EmployeeDashboard() {
               </Link>
             }
           />
-          <div data-stable-removal-region>
+          <div data-stable-removal-region className={DASHBOARD_CARD_BODY_CLASS}>
             <NotificationsList
               tenantId={agency.id}
               userId={user.id}
@@ -434,7 +460,7 @@ export function EmployeeDashboard() {
         </Card>
 
         <ActivityCenterDashboardCard
-          className="h-full min-h-[17rem]"
+          className={DASHBOARD_CARD_CLASS}
           activityItems={activityItems}
           routingCount={routingCount}
           isManager={isManager}
@@ -467,7 +493,8 @@ export function EmployeeDashboard() {
         />
 
         <ExpandableCard
-          className="h-full min-h-[14rem]"
+          className={DASHBOARD_CARD_CLASS}
+          bodyClassName={DASHBOARD_CARD_BODY_CLASS}
           title="Internal messages"
           subtitle="Unread DMs and group threads from your teammates."
           action={
@@ -486,7 +513,7 @@ export function EmployeeDashboard() {
             </div>
           ) : (
             <ul className="divide-y divide-ink-100">
-              {unreadInternalThreads.slice(0, 5).map(({ thread, latest }) => {
+              {unreadInternalThreads.map(({ thread, latest }) => {
                 const fromName =
                   staff.find((s) => s.id === latest.fromUserId)?.name ?? "—";
                 return (
@@ -515,30 +542,34 @@ export function EmployeeDashboard() {
           )}
         </ExpandableCard>
 
-        <Card className="h-full min-h-[14rem]">
+        <Card className={DASHBOARD_CARD_CLASS}>
           <CardHeader title="AI marketing activity" action={<Link className="btn-outline text-xs inline-flex" to="/employee/marketing" state={dashboardRouteState}>View</Link>} />
-          {messages.length === 0 ? (
-            <div className="text-sm text-ink-400">No outreach yet.</div>
-          ) : (
-            <ul className="space-y-3">
-              {messages.slice(0, 5).map((m) => (
-                <li key={m.id} className="text-sm">
-                  <div className="flex items-center gap-2">
-                    <Bot className="h-3.5 w-3.5 text-gold-600" />
-                    <span className="font-medium truncate">{m.subject ?? "SMS message"}</span>
-                  </div>
-                  <div className="text-xs text-ink-500 mt-0.5">
-                    {fmt.relative(m.sentAt ?? m.createdAt)} · <Badge tone={m.deliveryStatus === "opened" ? "success" : "info"}>{fmt.titleCase(m.deliveryStatus)}</Badge>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
+          <div className={DASHBOARD_CARD_BODY_CLASS}>
+            {messages.length === 0 ? (
+              <div className="text-sm text-ink-400">No outreach yet.</div>
+            ) : (
+              <ul className="space-y-3">
+                {messages.map((m) => (
+                  <li key={m.id} className="text-sm">
+                    <div className="flex items-center gap-2">
+                      <Bot className="h-3.5 w-3.5 text-gold-600" />
+                      <span className="font-medium truncate">{m.subject ?? "SMS message"}</span>
+                    </div>
+                    <div className="text-xs text-ink-500 mt-0.5">
+                      {fmt.relative(m.sentAt ?? m.createdAt)} · <Badge tone={m.deliveryStatus === "opened" ? "success" : "info"}>{fmt.titleCase(m.deliveryStatus)}</Badge>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         </Card>
 
-        <Card className="h-full min-h-[14rem]">
+        <Card className={DASHBOARD_CARD_CLASS}>
           <CardHeader title="Documents needing review" action={<Link to="/employee/documents" state={dashboardRouteState} className="btn-outline text-xs inline-flex">View all</Link>} />
-          <DocsPending tenantId={agency.id} visibleIds={visibleIds} />
+          <div className={DASHBOARD_CARD_BODY_CLASS}>
+            <DocsPending tenantId={agency.id} visibleIds={visibleIds} />
+          </div>
         </Card>
       </div>
     </div>
@@ -718,7 +749,7 @@ export function ActivityQuickList({
         <div className="text-sm text-ink-400 text-center py-6">All caught up.</div>
       ) : (
         <ul className="divide-y divide-ink-100">
-          {visibleRows.slice(0, maxRows).map((row) => (
+          {(typeof maxRows === "number" ? visibleRows.slice(0, maxRows) : visibleRows).map((row) => (
             <li
               key={row.id}
               data-removal-item
@@ -806,7 +837,9 @@ function ActivityCenterDashboardCard({
           </Link>
         }
       />
-      <ActivityQuickList {...activityItems} maxRows={5} userId={userId} onChanged={onChanged} />
+      <div className={DASHBOARD_CARD_BODY_CLASS}>
+        <ActivityQuickList {...activityItems} userId={userId} onChanged={onChanged} />
+      </div>
     </Card>
   );
 }
@@ -968,8 +1001,7 @@ function PastReminderRow({
 // Lightweight notifications feed: newly-assigned activities + unread
 // inbound customer messages + unread internal DMs, sorted newest
 // first. Each row deep-links to the right place — Activity Center
-// for tasks, Messages page for the client / internal threads. Caps
-// at 6 rows so the card stays readable.
+// for tasks, Messages page for the client / internal threads.
 function NotificationsList({
   tenantId,
   userId,
@@ -996,8 +1028,7 @@ function NotificationsList({
   // Pending inbound customer messages for clients the user can see.
   const pendingComms = api.communications
     .listPendingForTenant(tenantId)
-    .filter((c) => !c.customerId || visibleCustomerIds.has(c.customerId))
-    .slice(0, 6);
+    .filter((c) => !c.customerId || visibleCustomerIds.has(c.customerId));
 
   // Unread internal DMs (latest message per thread).
   const unreadInternal = api.internalMessages.unreadThreadsForUser(
@@ -1188,7 +1219,7 @@ function NotificationsList({
   }
   return (
     <ul className="divide-y divide-ink-100">
-      {visibleRows.slice(0, 6).map((r) => {
+      {visibleRows.map((r) => {
         const Icon = r.icon;
         const urgencyLabel =
           r.urgency === "urgent"
@@ -1277,7 +1308,7 @@ function DocsPending({ tenantId, visibleIds }: { tenantId: string; visibleIds: S
   if (docs.length === 0) return <div className="text-sm text-ink-400">All caught up.</div>;
   return (
     <ul className="divide-y divide-ink-100">
-      {docs.slice(0, 5).map((d) => (
+      {docs.map((d) => (
         <li key={d.id} className="py-2 flex items-center gap-3 text-sm">
           <FileSearch className="h-4 w-4 text-ink-400" />
           <div className="min-w-0 flex-1 truncate">{d.fileName}</div>

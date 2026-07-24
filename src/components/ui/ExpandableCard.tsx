@@ -21,6 +21,7 @@ export function ExpandableCard({
   action,
   id,
   className = "",
+  bodyClassName = "",
   expanded: controlledExpanded,
   onExpandedChange,
   children,
@@ -30,6 +31,7 @@ export function ExpandableCard({
   action?: ReactNode;
   id?: string;
   className?: string;
+  bodyClassName?: string;
   expanded?: boolean;
   onExpandedChange?: (expanded: boolean) => void;
   children: ReactNode | ((expanded: boolean) => ReactNode);
@@ -101,7 +103,15 @@ export function ExpandableCard({
         }
       >
         {header}
-        <div className={expanded ? "flex-1 min-h-0 overflow-auto" : ""}>{body}</div>
+        <div
+          className={
+            expanded
+              ? "flex-1 min-h-0 overflow-y-auto invisible-scroll-pane"
+              : bodyClassName
+          }
+        >
+          {body}
+        </div>
       </div>
     </>
   );
