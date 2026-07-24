@@ -6563,19 +6563,6 @@ function removeStaleQuoteIntakeDrafts(inbound: Communication): void {
   );
 }
 
-function processImportedInboundCommunication(
-  tenantId: string,
-  mailboxUserId: string,
-  communicationId: string
-): void {
-  void api.communications
-    .automatePersonalQuoteReplies(tenantId, mailboxUserId, communicationId)
-    .catch(() => [])
-    .finally(() => {
-      api.communications.sweepInboundForActivities(tenantId, mailboxUserId);
-    });
-}
-
 function quoteAutomationAssetDetails(intake: PersonalQuoteReplyIntake): Record<string, string> {
   if (intake.identifierKind === "vin") return { vin: intake.identifier };
   if (intake.identifierKind === "address") {
@@ -6660,6 +6647,218 @@ function quoteAutomationSessionContainsAsset(session: QuotingSession, assetId: s
     session.assetId === assetId ||
     (session.selectedAssetMappings ?? []).some((mapping) => mapping.assetId === assetId)
   );
+}
+
+async function appendAssetToOpenPersonalQuoteSession(input: {
+  session: QuotingSession;
+  asset: Asset;
+  category?: InsuranceCategory;
+  contactName: string;
+  address?: string;
+  assetDetails: Record<string, string>;
+}): Promise<QuotingSession> {
+  if (quoteAutomationSessionContainsAsset(input.session, input.asset.id)) {
+    return input.session;
+  }
+  if (input.session.lineOfBusiness === "commercial") {
+    throw new Error("Cannot add a personal-lines asset to a commercial quote flow.");
+  }
+
+  const { aiPreparePublicFields } = await import("./ai");
+  const prep = await aiPreparePublicFields({
+    assetType: input.asset.type,
+    prospectName: input.contactName,
+    address: input.address,
+    estimatedValue: input.asset.estimatedValue,
+    assetDetails: input.assetDetails,
+    rngSeed: `${input.session.customerId ?? input.session.prospectId ?? ""}-${input.asset.type}-${input.asset.id}`,
+  });
+  const category =
+    input.category ??
+    personalQuestionnaireCategoryForAsset({
+      tenantId: input.session.tenantId,
+      assetType: input.asset.type,
+    });
+  const mapping: QuotingSessionAssetMapping = {
+    assetId: input.asset.id,
+    label: input.asset.label,
+    assetType: input.asset.type,
+    categoryId: category?.id,
+    categoryLabel: category?.label,
+    address: input.address,
+    estimatedValue: input.asset.estimatedValue ?? 0,
+    assetDetails: input.assetDetails,
+    publicFields: prep.publicFields,
+    publicFieldEvidence: prep.publicFieldEvidence,
+    missingFields: prep.missingFields,
+    aiSummary: prep.summary,
+  };
+  const questions = completePersonalQuestionnaireQuestions({
+    assetType: mapping.assetType,
+    categories: category ? [category] : undefined,
+    publicFields: mapping.publicFields,
+    missingFields: mapping.missingFields,
+  });
+  const seeded = seedKnownQuestionnaireResponses({
+    questions,
+    contactName: input.contactName,
+    contactEmail: undefined,
+    contactPhone: undefined,
+    businessName: undefined,
+    address: mapping.address,
+    estimatedValue: mapping.estimatedValue,
+    assetDetails: {
+      ...personalCategoryAnswerHints(category),
+      ...input.assetDetails,
+    },
+    publicFields: mapping.publicFields,
+    publicFieldEvidence: mapping.publicFieldEvidence,
+    updatedAt: nowIso(),
+  });
+
+  const existingQuestionIds = new Set(
+    (input.session.questionnaireQuestions ?? []).map((question) => question.id)
+  );
+  const appendedQuestions: QuotingQuestion[] = [];
+  const appendedResponses: Record<string, string> = {};
+  const appendedResponseMeta: Record<string, QuestionnaireResponseMeta> = {};
+  questions.forEach((question) => {
+    const scopedId = `${question.id}__asset_${input.asset.id}`;
+    if (existingQuestionIds.has(scopedId)) return;
+    appendedQuestions.push({
+      ...question,
+      id: scopedId,
+      section: `${mapping.label} - ${question.section}`,
+      label: `${mapping.label}: ${question.label}`,
+    });
+    const answer = seeded.questionnaireResponses?.[question.id];
+    if (answer) appendedResponses[scopedId] = answer;
+    const meta = seeded.questionnaireResponseMeta?.[question.id];
+    if (meta) appendedResponseMeta[scopedId] = meta;
+  });
+
+  const scopedPublicFields: Record<string, unknown> = {};
+  const scopedEvidence: PublicDataEvidenceMap = {};
+  Object.entries(mapping.publicFields).forEach(([field, value]) => {
+    const scopedField = `${mapping.label} - ${field}`;
+    scopedPublicFields[scopedField] = value;
+    const evidence = mapping.publicFieldEvidence?.[field];
+    if (evidence) scopedEvidence[scopedField] = { ...evidence, fieldKey: scopedField };
+  });
+  const updatedAt = nowIso();
+  const updated =
+    db.update("quotingSessions", input.session.id, {
+      selectedAssetMappings: [
+        ...(input.session.selectedAssetMappings ?? []),
+        mapping,
+      ],
+      categoryIds: Array.from(
+        new Set(
+          [
+            ...(input.session.categoryIds ?? []),
+            input.session.categoryId,
+            category?.id,
+          ].filter((value): value is string => Boolean(value))
+        )
+      ),
+      categoryLabels: Array.from(
+        new Set(
+          [
+            ...(input.session.categoryLabels ?? []),
+            input.session.categoryLabel,
+            category?.label,
+          ].filter((value): value is string => Boolean(value))
+        )
+      ),
+      assetDetails: {
+        ...(input.session.assetDetails ?? {}),
+        ...Object.fromEntries(
+          Object.entries(input.assetDetails).map(([field, value]) => [
+            `${mapping.label} - ${field}`,
+            value,
+          ])
+        ),
+      },
+      publicFields: {
+        ...input.session.publicFields,
+        ...scopedPublicFields,
+      },
+      publicFieldEvidence: {
+        ...(input.session.publicFieldEvidence ?? {}),
+        ...scopedEvidence,
+      },
+      missingFields: Array.from(
+        new Set([
+          ...input.session.missingFields,
+          ...mapping.missingFields.map((field) => `${mapping.label}: ${field}`),
+        ])
+      ),
+      questionnaireQuestions: [
+        ...(input.session.questionnaireQuestions ?? []),
+        ...appendedQuestions,
+      ],
+      questionnaireResponses: {
+        ...(input.session.questionnaireResponses ?? {}),
+        ...appendedResponses,
+      },
+      questionnaireResponseMeta: {
+        ...(input.session.questionnaireResponseMeta ?? {}),
+        ...appendedResponseMeta,
+      },
+      aiSummary: `${input.session.aiSummary} Added ${mapping.label}: ${mapping.aiSummary}`.trim(),
+      status: "gathering_info",
+      updatedAt,
+    }) ?? input.session;
+
+  return applyServerQuestionnaireMappingToSession(
+    updated,
+    updated.questionnaireQuestions ?? [],
+    updated.questionnaireResponses ?? {}
+  );
+}
+
+function ensurePersonalQuoteStartedNotification(input: {
+  inbound: Communication;
+  customer: CustomerProfile;
+  asset: Asset;
+  session: QuotingSession;
+  assignedToId: string;
+}): AiNotification {
+  const existing = db
+    .list("aiNotifications")
+    .find(
+      (notification) =>
+        notification.tenantId === input.inbound.tenantId &&
+        notification.kind === "inbound_notice" &&
+        notification.quoteSessionId === input.session.id &&
+        notification.assetId === input.asset.id &&
+        notification.title === `Quote flow started - ${input.customer.name}`
+    );
+  if (existing) return existing;
+
+  const notification: AiNotification = {
+    id: uid("ain"),
+    tenantId: input.inbound.tenantId,
+    kind: "inbound_notice",
+    title: `Quote flow started - ${input.customer.name}`,
+    summary: `Quotex received the requested ${input.asset.type === "luxury_vehicle" ? "VIN" : "asset identifier"} and automatically continued the personal-lines quote flow for ${input.asset.label}.`,
+    customerId: input.customer.id,
+    assetId: input.asset.id,
+    quoteSessionId: input.session.id,
+    communicationId: input.inbound.id,
+    topic: "coverage_change",
+    severity: "info",
+    severityReason:
+      "The client supplied the information needed to start or continue the personal-lines quote flow.",
+    aiSummary:
+      "The inbound reply was matched to the existing client, asset, activity, and quote flow.",
+    originalMessageContent: input.inbound.body,
+    originalMessageId: input.inbound.id,
+    assignedToId: input.assignedToId,
+    createdAt: nowIso(),
+  };
+  db.insert("aiNotifications", notification);
+  return notification;
 }
 
 function commercialApplicationSentAtForSession(session: QuotingSession): string | undefined {
@@ -16580,10 +16779,10 @@ export const api = {
           const latestSession = api.quoting.getForCustomer(customer.id);
           const openSession =
             latestSession && isQuotingWorkflowOpen(latestSession) ? latestSession : undefined;
-          if (openSession && !quoteAutomationSessionContainsAsset(openSession, asset.id)) {
+          if (openSession?.lineOfBusiness === "commercial") {
             finish(
               "manual",
-              "A quote flow is already open for this client. The new identifier was saved as an asset, but staff must decide whether to add it to the existing flow.",
+              "A commercial quote flow is already open for this client. Staff must finish or restart that flow before Quotex can begin this personal-lines request.",
               openSession.id,
               asset.id
             );
@@ -16591,46 +16790,65 @@ export const api = {
           }
 
           const session =
-            openSession ??
-            (await api.quoting.startSession({
-              tenantId,
-              customerId: customer.id,
-              assetId: asset.id,
-              assets: [
-                {
+            openSession && !quoteAutomationSessionContainsAsset(openSession, asset.id)
+              ? await appendAssetToOpenPersonalQuoteSession({
+                  session: openSession,
+                  asset,
+                  category,
+                  contactName: customer.name,
+                  address:
+                    intake.identifierKind === "address"
+                      ? intake.identifier
+                      : customer.mailingAddress,
+                  assetDetails: details,
+                })
+              : openSession ??
+                (await api.quoting.startSession({
+                  tenantId,
+                  customerId: customer.id,
                   assetId: asset.id,
-                  label: asset.label,
+                  assets: [
+                    {
+                      assetId: asset.id,
+                      label: asset.label,
+                      assetType: asset.type,
+                      categoryId: category?.id,
+                      categoryLabel: category?.label,
+                      address:
+                        intake.identifierKind === "address"
+                          ? intake.identifier
+                          : customer.mailingAddress,
+                      estimatedValue: asset.estimatedValue,
+                      assetDetails: details,
+                    },
+                  ],
+                  createdById: operatorId,
                   assetType: asset.type,
-                  categoryId: category?.id,
-                  categoryLabel: category?.label,
+                  contactName: customer.name,
                   address:
                     intake.identifierKind === "address"
                       ? intake.identifier
                       : customer.mailingAddress,
                   estimatedValue: asset.estimatedValue,
                   assetDetails: details,
-                },
-              ],
-              createdById: operatorId,
-              assetType: asset.type,
-              contactName: customer.name,
-              address:
-                intake.identifierKind === "address"
-                  ? intake.identifier
-                  : customer.mailingAddress,
-              estimatedValue: asset.estimatedValue,
-              assetDetails: details,
-              categoryId: category?.id,
-              categoryLabel: category?.label,
-              categoryIds: category ? [category.id] : undefined,
-              categoryLabels: category ? [category.label] : undefined,
-              lineOfBusiness: "personal",
-              activityTaskIds: [task.id],
-              activityActorId: "ai",
-            }));
+                  categoryId: category?.id,
+                  categoryLabel: category?.label,
+                  categoryIds: category ? [category.id] : undefined,
+                  categoryLabels: category ? [category.label] : undefined,
+                  lineOfBusiness: "personal",
+                  activityTaskIds: [task.id],
+                  activityActorId: "ai",
+                }));
           syncQuoteActivityStatus(session, {
             taskIds: [task.id],
             actorId: "ai",
+          });
+          ensurePersonalQuoteStartedNotification({
+            inbound: original,
+            customer,
+            asset,
+            session,
+            assignedToId: task.assignedToId ?? operatorId,
           });
           let mappedSession = api.quoting.get(session.id) ?? session;
           if (mappedSession.aiProviderError) {
@@ -17148,13 +17366,6 @@ export const api = {
           ? linkInboundCarrierCommunicationToSubmission(updatedExisting)
           : updatedExisting;
         communicationStatusEvent(linkedExisting);
-        if (direction === "inbound") {
-          processImportedInboundCommunication(
-            input.tenantId,
-            input.mailboxUserId,
-            linkedExisting.id
-          );
-        }
         return linkedExisting;
       }
 
@@ -17219,13 +17430,6 @@ export const api = {
       }
       const linkedRow = direction === "inbound" ? linkInboundCarrierCommunicationToSubmission(row) : row;
       communicationStatusEvent(linkedRow);
-      if (direction === "inbound") {
-        processImportedInboundCommunication(
-          input.tenantId,
-          input.mailboxUserId,
-          linkedRow.id
-        );
-      }
       return linkedRow;
     },
   },

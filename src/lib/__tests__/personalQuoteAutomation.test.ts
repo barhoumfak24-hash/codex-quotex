@@ -264,6 +264,19 @@ describe("communications.automatePersonalQuoteReplies", () => {
       lineOfBusiness: "personal",
       assignedAgentId: owner.id,
     });
+    const existingSession = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: owner.id,
+      assetType: "coastal_home",
+      contactName: customer.name,
+      address: customer.mailingAddress,
+      estimatedValue: 0,
+      assetDetails: {
+        propertyAddress: customer.mailingAddress ?? "",
+      },
+      lineOfBusiness: "personal",
+    });
 
     const threadId = "thread_vehicle_quote_regression";
     const request = api.communications.create({
@@ -311,9 +324,18 @@ describe("communications.automatePersonalQuoteReplies", () => {
       expect.objectContaining({
         communicationId: reply.id,
         status: "completed",
+        sessionId: existingSession.id,
       }),
     ]);
     const session = api.quoting.get(result[0].sessionId!)!;
+    expect(session.selectedAssetMappings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          assetId: result[0].assetId,
+          assetType: "luxury_vehicle",
+        }),
+      ])
+    );
     const processedReply = db
       .list("communications")
       .find((communication) => communication.id === reply.id)!;
@@ -342,6 +364,17 @@ describe("communications.automatePersonalQuoteReplies", () => {
     ).toHaveLength(1);
     expect(
       db
+        .list("aiNotifications")
+        .filter(
+          (notification) =>
+            notification.customerId === customer.id &&
+            notification.quoteSessionId === existingSession.id &&
+            notification.assetId === result[0].assetId &&
+            notification.title === `Quote flow started - ${customer.name}`
+        )
+    ).toHaveLength(1);
+    expect(
+      db
         .list("communications")
         .filter(
           (communication) =>
@@ -350,6 +383,170 @@ describe("communications.automatePersonalQuoteReplies", () => {
             communication.customerId === customer.id
         )
     ).toHaveLength(0);
+  });
+
+  it("starts the existing personal flow once when a live mailbox reply supplies the VIN", async () => {
+    vi.stubEnv("VITE_API_BASE_URL", "https://quotexinsurance.test/api");
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    const { syncCommunicationsFromLiveMailbox } = await import("../liveMailbox");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const owner = api.users.list(agency.id).find((user) => user.active && user.role === "agent")!;
+    api.customers.update(customer.id, {
+      lineOfBusiness: "personal",
+      assignedAgentId: owner.id,
+    });
+    const existingSession = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: owner.id,
+      assetType: "coastal_home",
+      contactName: customer.name,
+      address: customer.mailingAddress,
+      estimatedValue: 0,
+      assetDetails: {
+        propertyAddress: customer.mailingAddress ?? "",
+      },
+      lineOfBusiness: "personal",
+    });
+
+    const externalThreadId = "gmail-live-personal-quote-reply";
+    const request = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      subject: "Need quote for my truck",
+      body: "I need a quote for my new Ford F150.",
+      threadId: "thread_live_personal_quote_reply",
+      externalThreadId,
+    });
+    api.communications.sweepInboundForActivities(agency.id, owner.id);
+    const originalTaskId = db
+      .list("communications")
+      .find((communication) => communication.id === request.id)?.aiActivityTaskId;
+    expect(originalTaskId).toBeTruthy();
+
+    const mailboxMessageId = "gmail-live-personal-quote-reply-message";
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/mailboxes/sync")) {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              result: {
+                mailboxAccount: owner.businessEmail ?? owner.email,
+                provider: "gmail",
+                messages: [
+                  {
+                    mailboxAccount: owner.businessEmail ?? owner.email,
+                    mailboxConnectionId: `mailbox_${owner.id}`,
+                    provider: "gmail",
+                    externalMessageId: mailboxMessageId,
+                    externalThreadId,
+                    externalUrl: "https://mail.google.com/mail/u/0/#inbox/live-personal-quote-reply",
+                    from: customer.email,
+                    to: [owner.businessEmail ?? owner.email],
+                    subject: "Re: Need quote for my truck",
+                    body:
+                      "Hello, it is a personal vehicle and the VIN number is 2C3 CDXMG3PH675983.",
+                    direction: "inbound",
+                  },
+                ],
+                importSummary: { imported: 1, updated: 0, deduped: 0, failed: 0 },
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+        if (url.endsWith("/ai/enrich-asset")) {
+          return new Response(
+            JSON.stringify({
+              fields: {},
+              evidence: {},
+              sources: [],
+              confidence: 0,
+              unavailableFields: [],
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+        if (url.endsWith("/ai/acord-map")) {
+          return new Response(
+            JSON.stringify({
+              fields: {},
+              publicFieldEvidence: {},
+              mappings: [],
+              missingFields: [],
+              webSources: [],
+              summary: "No additional verified public answers were found.",
+              confidence: 0,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } }
+          );
+        }
+        return new Response("{}", { status: 404 });
+      })
+    );
+
+    const result = await syncCommunicationsFromLiveMailbox({
+      tenantId: agency.id,
+      user: owner,
+    });
+
+    expect(result).toMatchObject({ ok: true, imported: 1 });
+    const importedReply = db
+      .list("communications")
+      .find((communication) => communication.externalMessageId === mailboxMessageId)!;
+    expect(importedReply).toMatchObject({
+      aiQuoteAutomationStatus: "completed",
+      aiActivityTaskId: originalTaskId,
+      aiQuoteAutomationSessionId: existingSession.id,
+    });
+    expect(api.quoting.get(existingSession.id)?.selectedAssetMappings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          assetId: importedReply.aiQuoteAutomationAssetId,
+          assetType: "luxury_vehicle",
+        }),
+      ])
+    );
+    expect(db.list("tasks").find((task) => task.id === originalTaskId)).toMatchObject({
+      status: "in_progress",
+      quoteSessionId: existingSession.id,
+      assignedToId: owner.id,
+      startedById: "ai",
+    });
+    expect(
+      db
+        .list("tasks")
+        .filter(
+          (task) =>
+            task.customerId === customer.id &&
+            task.topic === "coverage_change" &&
+            task.status !== "resolved" &&
+            !task.completedAt
+        )
+    ).toHaveLength(1);
+    expect(
+      db
+        .list("quotingSessions")
+        .filter((session) => session.customerId === customer.id)
+    ).toHaveLength(1);
+    expect(
+      db
+        .list("aiNotifications")
+        .filter(
+          (notification) =>
+            notification.customerId === customer.id &&
+            notification.quoteSessionId === existingSession.id &&
+            notification.assetId === importedReply.aiQuoteAutomationAssetId &&
+            notification.title === `Quote flow started - ${customer.name}`
+        )
+    ).toHaveLength(1);
   });
 
   it("reprocesses a provider message when its full VIN reply replaces a partial body", async () => {
