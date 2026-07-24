@@ -4,6 +4,7 @@ packages:
   - packages/*
 
 overrides:
+  postcss: ^8.5.18
   vite: 6.4.3
 
 allowBuilds:
