@@ -29,6 +29,7 @@ import { authRoutes } from "./routes/auth.js";
 import { carriersRoutes } from "./routes/carriers.js";
 import { claimsRoutes } from "./routes/claims.js";
 import { communicationsRoutes } from "./routes/communications.js";
+import { connectExtensionRoutes, connectRoutes } from "./routes/connect.js";
 import { customersRoutes } from "./routes/customers.js";
 import { documentsRoutes } from "./routes/documents.js";
 import { mailboxOAuthCallbackRoutes, mailboxesRoutes } from "./routes/mailboxes.js";
@@ -223,8 +224,10 @@ app.use("/api/website", publicWorkflowLimiter, websiteRoutes);
 app.use("/api/stripe", webhookLimiter, stripeRoutes);
 app.use("/api/mailboxes/oauth", authLimiter, mailboxOAuthCallbackRoutes);
 app.use("/api/mailboxes/inbound", webhookLimiter, mailboxInboundRoutes);
+app.use("/api/connect/extension", strictApiLimiter, connectExtensionRoutes);
 
 app.use("/api/tenants", requireAuth, enforceTenantIsolation, tenantsRoutes);
+app.use("/api/connect", requireAuth, enforceTenantIsolation, strictApiLimiter, connectRoutes);
 app.use("/api/mailboxes", requireAuth, enforceTenantIsolation, mailboxApiLimiter, mailboxesRoutes);
 app.use("/api/customers", requireAuth, enforceTenantIsolation, customersRoutes);
 app.use("/api/quotes", requireAuth, enforceTenantIsolation, strictApiLimiter, quotesRoutes);

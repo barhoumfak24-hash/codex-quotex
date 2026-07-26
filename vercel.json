@@ -22,6 +22,7 @@
     { "source": "/api/ai/:path*", "destination": "/api/app?path=api/ai/:path*" },
     { "source": "/api/website/:path*", "destination": "/api/app?path=api/website/:path*" },
     { "source": "/api/communications/:path*", "destination": "/api/app?path=api/communications/:path*" },
+    { "source": "/api/connect/:path*", "destination": "/api/app?path=api/connect/:path*" },
     { "source": "/api/questionnaires/:path*", "destination": "/api/app?path=api/questionnaires/:path*" },
     { "source": "/api/mailboxes/:path*", "destination": "/api/app?path=api/mailboxes/:path*" },
     { "source": "/api/signing-packets/:path*", "destination": "/api/app?path=api/signing-packets/:path*" },

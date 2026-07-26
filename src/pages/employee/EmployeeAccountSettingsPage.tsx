@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import { Card, CardHeader } from "@/components/ui/Card";
 import { EmployeeBackButton } from "@/components/layout/EmployeeBackButton";
+import { QuotexConnectPairingCard } from "@/components/settings/QuotexConnectPairingCard";
 import { useAuth } from "@/lib/auth";
 import { useTenant } from "@/lib/tenant";
 import { api } from "@/lib/api";
@@ -502,6 +503,8 @@ export function EmployeeAccountSettingsPage() {
           {profileLocked ? "Locked." : "Unlocked."} Account changes update sign-in and message-center identity.
         </div>
       </Card>
+
+      <QuotexConnectPairingCard />
 
       <Card>
         <CardHeader
