@@ -25,6 +25,7 @@ describe("createQuotexConnectJob", () => {
       carrierName: "Carrier One",
       jobType: "open_portal",
       status: "queued",
+      result: null,
       errorCode: null,
       errorMessage: null,
       createdAt: "2026-07-25T12:00:00.000Z",
@@ -109,17 +110,13 @@ describe("createQuotexConnectJob", () => {
 });
 
 describe("quotexConnectQuoteCarrierIds", () => {
-  it("routes every ranked personal carrier once", async () => {
+  it("routes every linked personal carrier once", async () => {
     const { quotexConnectQuoteCarrierIds } = await import("../quotexConnect");
 
     expect(
       quotexConnectQuoteCarrierIds({
         lineOfBusiness: "personal",
-        quotes: [
-          { carrierId: "carrier-a" },
-          { carrierId: "carrier-b" },
-          { carrierId: "carrier-a" },
-        ],
+        linkedCarrierIds: ["carrier-a", "carrier-b", "carrier-a"],
       })
     ).toEqual(["carrier-a", "carrier-b"]);
   });
@@ -130,7 +127,6 @@ describe("quotexConnectQuoteCarrierIds", () => {
     expect(
       quotexConnectQuoteCarrierIds({
         lineOfBusiness: "commercial",
-        quotes: [],
         commercialCarrierSubmissions: [
           { carrierId: "carrier-a", status: "awaiting_response" },
           { carrierId: "carrier-b", status: "accepted" },
@@ -140,5 +136,111 @@ describe("quotexConnectQuoteCarrierIds", () => {
         ],
       })
     ).toEqual(["carrier-a", "carrier-b"]);
+  });
+});
+
+describe("verifiedCarrierQuoteFromConnectJob", () => {
+  const completedJob = {
+    id: "job-quote-1",
+    quoteSessionId: "quote-1",
+    carrierId: "carrier-1",
+    carrierName: "Carrier One",
+    jobType: "retrieve_quote" as const,
+    status: "completed" as const,
+    result: {
+      verification: {
+        verified: true,
+        source: "carrier_portal",
+        portalUrl: "https://carrier.example/quote/ABC-123",
+      },
+      quote: {
+        annualPremium: 4825,
+        carrierReference: "ABC-123",
+        matchScore: 91,
+        confidence: 0.98,
+        summary: "Verified carrier portal response.",
+      },
+    },
+    errorCode: null,
+    errorMessage: null,
+    createdAt: "2026-07-25T12:00:00.000Z",
+    updatedAt: "2026-07-25T12:01:00.000Z",
+    completedAt: "2026-07-25T12:01:00.000Z",
+  };
+
+  it("creates a quote only from a verified carrier portal result", async () => {
+    const { verifiedCarrierQuoteFromConnectJob } = await import("../quotexConnect");
+
+    expect(verifiedCarrierQuoteFromConnectJob(completedJob)).toMatchObject({
+      carrierId: "carrier-1",
+      premium: 4825,
+      score: 91,
+      confidence: 0.98,
+      apiStatus: "connected",
+      source: "quotex_connect",
+      carrierReference: "ABC-123",
+    });
+  });
+
+  it("rejects completed jobs that do not contain a real premium and reference", async () => {
+    const { verifiedCarrierQuoteFromConnectJob } = await import("../quotexConnect");
+
+    expect(
+      verifiedCarrierQuoteFromConnectJob({
+        ...completedJob,
+        result: {
+          ...completedJob.result,
+          quote: { annualPremium: 0, carrierReference: "" },
+        },
+      })
+    ).toBeNull();
+  });
+
+  it("rejects results not verified against a carrier portal", async () => {
+    const { verifiedCarrierQuoteFromConnectJob } = await import("../quotexConnect");
+
+    expect(
+      verifiedCarrierQuoteFromConnectJob({
+        ...completedJob,
+        result: {
+          ...completedJob.result,
+          verification: {
+            verified: true,
+            source: "fixture",
+            portalUrl: "https://carrier.example/quote/ABC-123",
+          },
+        },
+      })
+    ).toBeNull();
+  });
+});
+
+describe("listQuotexConnectJobs", () => {
+  it("lists only the requested quote flow and job type through the secure bridge", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, jobs: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { listQuotexConnectJobs } = await import("../quotexConnect");
+    await expect(
+      listQuotexConnectJobs({
+        quoteSessionId: "quote-1",
+        jobType: "retrieve_quote",
+      })
+    ).resolves.toEqual([]);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "https://api.quotex.test/connect/jobs?quoteSessionId=quote-1&jobType=retrieve_quote",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          authorization: "Bearer staff-session",
+          "x-quotex-tenant": "agency-1",
+        }),
+      })
+    );
   });
 });

@@ -1,5 +1,6 @@
 import { apiBaseUrl } from "@/lib/apiBase";
 import { serverSessionHeaders } from "@/lib/serverSession";
+import type { CarrierQuote } from "@/types";
 
 export type QuotexConnectJobType =
   | "open_portal"
@@ -25,6 +26,7 @@ export type QuotexConnectJob = {
     | "manual_required"
     | "failed"
     | "cancelled";
+  result: Record<string, unknown> | null;
   errorCode: string | null;
   errorMessage: string | null;
   createdAt: string;
@@ -44,7 +46,7 @@ export class QuotexConnectError extends Error {
 
 export function quotexConnectQuoteCarrierIds(session: {
   lineOfBusiness?: "personal" | "commercial";
-  quotes: Array<{ carrierId: string }>;
+  linkedCarrierIds?: string[];
   commercialCarrierSubmissions?: Array<{
     carrierId: string;
     status: string;
@@ -58,9 +60,108 @@ export function quotexConnectQuoteCarrierIds(session: {
               submission.status !== "send_failed" && submission.status !== "declined"
           )
           .map((submission) => submission.carrierId)
-      : session.quotes.map((quote) => quote.carrierId);
+      : session.linkedCarrierIds ?? [];
 
   return [...new Set(carrierIds.filter(Boolean))];
+}
+
+export async function listQuotexConnectJobs(input: {
+  quoteSessionId: string;
+  jobType?: QuotexConnectJobType;
+}): Promise<QuotexConnectJob[]> {
+  const query = new URLSearchParams({ quoteSessionId: input.quoteSessionId });
+  if (input.jobType) query.set("jobType", input.jobType);
+
+  let response: Response;
+  try {
+    response = await fetch(`${apiBaseUrl()}/connect/jobs?${query.toString()}`, {
+      headers: serverSessionHeaders(),
+    });
+  } catch {
+    throw new QuotexConnectError(
+      "connect_unreachable",
+      "Quotex Connect could not reach the secure carrier bridge."
+    );
+  }
+
+  const body = (await response.json().catch(() => null)) as
+    | { ok?: boolean; error?: string; jobs?: QuotexConnectJob[] }
+    | null;
+  if (!response.ok || body?.ok !== true || !Array.isArray(body.jobs)) {
+    const code = body?.error || "connect_job_failed";
+    throw new QuotexConnectError(code, connectJobErrorMessage(code));
+  }
+  return body.jobs;
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
+}
+
+function boundedRatio(value: unknown, fallback: number): number {
+  const number = finiteNumber(value);
+  if (number === undefined) return fallback;
+  const ratio = number > 1 ? number / 100 : number;
+  return Math.min(1, Math.max(0, ratio));
+}
+
+export function verifiedCarrierQuoteFromConnectJob(
+  job: QuotexConnectJob
+): CarrierQuote | null {
+  if (job.jobType !== "retrieve_quote" || job.status !== "completed" || !job.result) {
+    return null;
+  }
+  const verification =
+    job.result.verification &&
+    typeof job.result.verification === "object" &&
+    !Array.isArray(job.result.verification)
+      ? (job.result.verification as Record<string, unknown>)
+      : null;
+  if (
+    verification?.verified !== true ||
+    verification.source !== "carrier_portal" ||
+    typeof verification.portalUrl !== "string" ||
+    !/^https:\/\//i.test(verification.portalUrl)
+  ) {
+    return null;
+  }
+
+  const quote =
+    job.result.quote &&
+    typeof job.result.quote === "object" &&
+    !Array.isArray(job.result.quote)
+      ? (job.result.quote as Record<string, unknown>)
+      : job.result;
+  const premium = finiteNumber(quote.premium ?? quote.annualPremium);
+  const carrierReference = String(
+    quote.carrierReference ?? quote.quoteNumber ?? quote.reference ?? ""
+  ).trim();
+  if (!premium || premium <= 0 || !carrierReference) return null;
+
+  const fitReason =
+    String(quote.fitReason ?? quote.summary ?? "").trim() ||
+    "Verified carrier portal quote.";
+  return {
+    carrierId: job.carrierId,
+    premium,
+    confidence: boundedRatio(quote.confidence, 1),
+    score: finiteNumber(quote.matchScore ?? quote.score) ?? 0,
+    fitReason,
+    apiStatus: "connected",
+    source: "quotex_connect",
+    carrierReference,
+    providerTrace: {
+      provider: "carrier_portal_automation",
+      providerLabel: "Quotex Connect",
+      transport: "browser_automation",
+      requestId: job.id,
+      executionId: carrierReference,
+      liveReady: true,
+      submittedAt: job.completedAt ?? job.updatedAt,
+      messages: [`Verified carrier portal quote ${carrierReference}.`],
+    },
+  };
 }
 
 export async function createQuotexConnectJob(input: {

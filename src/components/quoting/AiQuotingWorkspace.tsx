@@ -63,8 +63,10 @@ import {
 } from "@/lib/quoteMatch";
 import {
   createQuotexConnectJob,
+  listQuotexConnectJobs,
   quotexConnectQuoteCarrierIds,
   QuotexConnectError,
+  verifiedCarrierQuoteFromConnectJob,
 } from "@/lib/quotexConnect";
 import { allCommercialCarrierSubmissionsHaveReplies } from "@/lib/quotingWorkflows";
 import { isVinInputField, normalizeVinFieldValue } from "@/lib/vinInput";
@@ -441,7 +443,12 @@ export function AiQuotingWorkspace({
     : api.quoting.getForCustomer(contact.id);
   const connectQuoteTargets = useMemo(() => {
     if (!session?.id) return [];
-    return quotexConnectQuoteCarrierIds(session).flatMap((carrierId) => {
+    const carrierIds = quotexConnectQuoteCarrierIds({
+      lineOfBusiness: session.lineOfBusiness,
+      linkedCarrierIds: api.carriers.listForTenant(tenantId).map((carrier) => carrier.id),
+      commercialCarrierSubmissions: session.commercialCarrierSubmissions,
+    });
+    return carrierIds.flatMap((carrierId) => {
       const carrier = api.carriers.get(carrierId);
       if (!carrier) return [];
       const portalUrl =
@@ -458,12 +465,18 @@ export function AiQuotingWorkspace({
         },
       ];
     });
-  }, [session?.id, session?.lineOfBusiness, session?.updatedAt]);
+  }, [session?.id, session?.lineOfBusiness, session?.updatedAt, tenantId]);
   const connectQuoteTargetSignature = connectQuoteTargets
     .map((target) => `${target.carrierId}:${target.portalUrl}`)
     .join("|");
   useEffect(() => {
-    if (!session?.id || connectQuoteTargets.length === 0) return;
+    if (
+      !session?.id ||
+      session.status !== "quoting" ||
+      connectQuoteTargets.length === 0
+    ) {
+      return;
+    }
 
     for (const target of connectQuoteTargets) {
       const attemptKey = `${session.id}:${target.carrierId}:retrieve_quote`;
@@ -487,7 +500,89 @@ export function AiQuotingWorkspace({
         );
       });
     }
-  }, [connectQuoteTargetSignature, session?.assetType, session?.id, session?.lineOfBusiness]);
+  }, [
+    connectQuoteTargetSignature,
+    session?.assetType,
+    session?.id,
+    session?.lineOfBusiness,
+    session?.status,
+  ]);
+  useEffect(() => {
+    if (
+      !session?.id ||
+      session.status !== "quoting" ||
+      connectQuoteTargets.length === 0
+    ) {
+      return;
+    }
+
+    let disposed = false;
+    let pollInFlight = false;
+    const terminalStatuses = new Set([
+      "completed",
+      "manual_required",
+      "failed",
+      "cancelled",
+    ]);
+    const poll = async () => {
+      if (disposed || pollInFlight) return;
+      pollInFlight = true;
+      try {
+        const jobs = await listQuotexConnectJobs({
+          quoteSessionId: session.id,
+          jobType: "retrieve_quote",
+        });
+        if (disposed) return;
+
+        const latestByCarrier = new Map<
+          string,
+          (typeof jobs)[number]
+        >();
+        const targetIds = new Set(connectQuoteTargets.map((target) => target.carrierId));
+        for (const job of jobs) {
+          if (!targetIds.has(job.carrierId) || latestByCarrier.has(job.carrierId)) continue;
+          latestByCarrier.set(job.carrierId, job);
+        }
+        const verifiedQuotes = [...latestByCarrier.values()].flatMap((job) => {
+          const quote = verifiedCarrierQuoteFromConnectJob(job);
+          return quote ? [quote] : [];
+        });
+        const allFinished = connectQuoteTargets.every((target) => {
+          const job = latestByCarrier.get(target.carrierId);
+          return Boolean(job && terminalStatuses.has(job.status));
+        });
+
+        const before = api.quoting.get(session.id);
+        const updated = api.quoting.syncVerifiedConnectQuotes(
+          session.id,
+          verifiedQuotes,
+          { allFinished }
+        );
+        if (
+          before?.status !== updated.status ||
+          before?.updatedAt !== updated.updatedAt
+        ) {
+          onChanged?.();
+        }
+      } catch (error) {
+        console.warn("[quotex-connect] Verified quote sync is temporarily unavailable.", error);
+      } finally {
+        pollInFlight = false;
+      }
+    };
+
+    void poll();
+    const timer = window.setInterval(() => void poll(), 4_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [
+    connectQuoteTargetSignature,
+    onChanged,
+    session?.id,
+    session?.status,
+  ]);
   useEffect(() => {
     if (!session?.id) return;
     void api.quoting

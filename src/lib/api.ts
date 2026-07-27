@@ -88,10 +88,7 @@ import {
   prependMarketingHeroImage,
 } from "./marketingSmartLinks";
 import { inferMailProvider } from "./mailProvider";
-import {
-  getCarrierQuoteProviderReadiness,
-  runCarrierQuoteProviders,
-} from "./quoteProviders";
+import { getCarrierQuoteProviderReadiness } from "./quoteProviders";
 import { runCarrierPortalRunner } from "./carrierPortalRunner";
 import {
   prepareCarrierPolicyBinding,
@@ -21379,98 +21376,46 @@ export const api = {
       });
       return this.runQuotes(sessionId);
     },
-    // Phase 4: call each carrier's quoting-API (simulated) and
-    // rank the responses. Commercial second-round workflows can
-    // preserve "awaiting_reply" while exposing accepted markets.
+    // Phase 4: clear stale estimates and wait for verified carrier-portal
+    // results from Quotex Connect. Eligibility never creates a quote.
     runQuotes(
       sessionId: string,
       options?: { status?: QuotingSessionStatus; aiSummary?: string }
     ): QuotingSession {
       const session = this.get(sessionId);
       if (!session) throw new Error("Quoting session not found.");
-      // Pull state late so the customer's mailing address / public-
-      // record garaging address can backfill if the session didn't
-      // capture one at start.
-      let state = session.state;
-      if (!state && session.customerId) {
-        const cust = db.list("customers").find((c) => c.id === session.customerId);
-        if (cust?.mailingAddress) state = extractStateFromString(cust.mailingAddress);
-      }
-      if (!state && session.publicFields["Garaging address"]) {
-        state = extractStateFromString(
-          String(session.publicFields["Garaging address"])
-        );
-      }
-      // Only the agency's linked + active carriers participate.
       const links = db
         .list("carrierLinks")
         .filter((l) => l.tenantId === session.tenantId && l.active);
       const linkedCarrierIds = new Set(links.map((l) => l.carrierId));
-      let eligibleCarriers = db
-        .list("carriers")
-        .filter((c) => linkedCarrierIds.has(c.id));
-      if (session.lineOfBusiness === "commercial") {
-        const submissions = session.commercialCarrierSubmissions ?? [];
-        const acceptedIds = new Set(
-          submissions
-            .filter((s) => s.status === "accepted" || s.status === "supplemental_sent")
-            .map((s) => s.carrierId)
-        );
-        if (submissions.length > 0) {
-          eligibleCarriers = eligibleCarriers.filter((c) => acceptedIds.has(c.id));
-        }
-      }
-      const { quotes, summary } = runCarrierQuoteProviders({
-        carriers: eligibleCarriers,
-        session: { ...session, state },
-        state,
-      });
-      const carrierReplyPremiums =
-        session.lineOfBusiness === "commercial"
-          ? new Map(
-              (session.commercialCarrierSubmissions ?? [])
-                .filter((submission) => submission.finalPremium ?? submission.premiumEstimate)
-                .map((submission) => [
-                  submission.carrierId,
-                  {
-                    premium: submission.finalPremium ?? submission.premiumEstimate ?? 0,
-                    confidence: submission.parseConfidence ?? submission.quote?.confidence ?? 0.82,
-                  },
-                ])
-            )
-          : new Map<string, { premium: number; confidence: number }>();
-      const groundedQuotes =
-        carrierReplyPremiums.size > 0
-          ? quotes.map((quote) => {
-              const parsed = carrierReplyPremiums.get(quote.carrierId);
-              if (!parsed) return quote;
-              return {
-                ...quote,
-                premium: parsed.premium,
-                confidence: Math.max(quote.confidence, parsed.confidence),
-                fitReason: `${quote.fitReason} - carrier reply premium captured`,
-                apiStatus: quote.apiStatus === "no_api" ? "connected" : quote.apiStatus,
-              } satisfies CarrierQuote;
-            })
-          : quotes;
+      const verifiedQuotes = (session.quotes ?? []).filter(
+        (quote) =>
+          linkedCarrierIds.has(quote.carrierId) &&
+          quote.source === "quotex_connect" &&
+          quote.apiStatus === "connected" &&
+          Number.isFinite(quote.premium) &&
+          quote.premium > 0 &&
+          Boolean(quote.carrierReference?.trim())
+      );
       const rankedAt = nowIso();
+      const waitingSummary =
+        linkedCarrierIds.size === 0
+          ? "No carriers are linked to Quotex Connect. Link a carrier before retrieving quotes."
+          : "Waiting for verified carrier portal results from Quotex Connect.";
       const updated = db.update("quotingSessions", sessionId, {
-        quotes: groundedQuotes,
-        aiSummary: options?.aiSummary ?? summary,
-        status: options?.status ?? "complete",
+        quotes: verifiedQuotes,
+        aiSummary: waitingSummary,
+        status: options?.status === "awaiting_reply" ? "awaiting_reply" : "quoting",
         updatedAt: rankedAt,
       })!;
       syncQuoteActivityStatus(updated, { actorId: "ai" });
       logQuotingWorkflowProgress(updated, {
-        message:
-          updated.status === "awaiting_reply"
-            ? `AI ranked ${groundedQuotes.length} accepted market${groundedQuotes.length === 1 ? "" : "s"} while supplemental answers remain pending.`
-            : `AI carrier ranking completed with ${groundedQuotes.length} quote option${groundedQuotes.length === 1 ? "" : "s"}.`,
-        detail: options?.aiSummary ?? summary,
+        message: "Carrier quote retrieval assigned to Quotex Connect.",
+        detail: waitingSummary,
         createdAt: rankedAt,
       });
-      const contact = quoteSessionContact(updated);
       if (updated.status === "awaiting_reply") {
+        const contact = quoteSessionContact(updated);
         createQuoteMilestoneTask(updated, {
           milestone: "supplemental_pending",
           title: `${contact.name} supplemental questionnaire pending`,
@@ -21478,24 +21423,83 @@ export const api = {
           severity: "warning",
           severityReason: "Carrier response required a second-round supplemental questionnaire.",
         });
-      } else if (updated.status === "complete") {
+      }
+      return updated;
+    },
+    syncVerifiedConnectQuotes(
+      sessionId: string,
+      incomingQuotes: CarrierQuote[],
+      options?: { allFinished?: boolean }
+    ): QuotingSession {
+      const session = this.get(sessionId);
+      if (!session) throw new Error("Quoting session not found.");
+      const linkedCarrierIds = new Set(
+        db
+          .list("carrierLinks")
+          .filter((link) => link.tenantId === session.tenantId && link.active)
+          .map((link) => link.carrierId)
+      );
+      const byCarrier = new Map<string, CarrierQuote>();
+      for (const quote of incomingQuotes) {
+        if (
+          !linkedCarrierIds.has(quote.carrierId) ||
+          quote.source !== "quotex_connect" ||
+          quote.apiStatus !== "connected" ||
+          !Number.isFinite(quote.premium) ||
+          quote.premium <= 0 ||
+          !quote.carrierReference?.trim()
+        ) {
+          continue;
+        }
+        byCarrier.set(quote.carrierId, quote);
+      }
+      const quotes = [...byCarrier.values()].sort(
+        (left, right) => right.score - left.score || left.premium - right.premium
+      );
+      const shouldComplete = options?.allFinished === true && quotes.length > 0;
+      const nextStatus: QuotingSessionStatus =
+        session.status === "awaiting_reply" && !shouldComplete
+          ? "awaiting_reply"
+          : shouldComplete
+          ? "complete"
+          : "quoting";
+      const summary =
+        quotes.length > 0
+          ? `${quotes.length} verified carrier portal quote${
+              quotes.length === 1 ? "" : "s"
+            } received through Quotex Connect.`
+          : "Waiting for verified carrier portal results from Quotex Connect.";
+      const unchanged =
+        session.status === nextStatus &&
+        session.aiSummary === summary &&
+        JSON.stringify(session.quotes ?? []) === JSON.stringify(quotes);
+      if (unchanged) return session;
+
+      const updatedAt = nowIso();
+      const updated = db.update("quotingSessions", sessionId, {
+        quotes,
+        aiSummary: summary,
+        status: nextStatus,
+        updatedAt,
+      })!;
+      syncQuoteActivityStatus(updated, { actorId: "ai" });
+      if (shouldComplete && session.status !== "complete") {
+        const contact = quoteSessionContact(updated);
         resolveQuoteMilestoneTasks(updated, ["supplemental_pending", "quote_ready"]);
         createQuoteReadyNotification(updated, {
-          title:
-            groundedQuotes.length > 0
-              ? `${contact.name} quote options ready`
-              : `${contact.name} quote review needed`,
-          summary:
-            groundedQuotes.length > 0
-              ? `AI completed carrier ranking with ${groundedQuotes.length} quote option${
-                  groundedQuotes.length === 1 ? "" : "s"
-                }. Review the ranked options when ready.`
-              : "AI completed the carrier run but no quote options returned. Review carrier eligibility and decide the next step.",
-          severity: groundedQuotes.length > 0 ? "warning" : "urgent",
-          severityReason:
-            groundedQuotes.length > 0
-              ? "Carrier ranking is complete and ready for agent review."
-              : "Carrier ranking completed without a market result.",
+          title: `${contact.name} quote options ready`,
+          summary: `${quotes.length} verified carrier portal quote${
+            quotes.length === 1 ? " is" : "s are"
+          } ready for review.`,
+          severity: "warning",
+          severityReason: "Verified carrier portal results are ready for agent review.",
+        });
+        logQuotingWorkflowProgress(updated, {
+          message: `Quotex Connect returned ${quotes.length} verified carrier quote${
+            quotes.length === 1 ? "" : "s"
+          }.`,
+          detail: summary,
+          createdAt: updatedAt,
         });
       }
       return updated;

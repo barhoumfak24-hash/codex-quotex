@@ -62,6 +62,13 @@ const jobStatusSchema = z.object({
   errorMessage: z.string().trim().max(1000).optional(),
 });
 
+const jobListQuerySchema = z.object({
+  quoteSessionId: z.string().trim().min(1).max(200),
+  jobType: z
+    .enum(["open_portal", "retrieve_quote", "retrieve_policy", "retrieve_claim", "retrieve_documents"])
+    .optional(),
+});
+
 const emailCodeLookupSchema = z.object({
   carrierHost: z.string().trim().min(1).max(255),
   excludeMessageKeys: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(5).default([]),
@@ -226,6 +233,32 @@ connectRoutes.post("/jobs", async (req, res, next) => {
       },
     });
     res.status(201).json({ ok: true, job: publicJob(job), reused: false });
+  } catch (error) {
+    next(error);
+  }
+});
+
+connectRoutes.get("/jobs", async (req, res, next) => {
+  try {
+    const auth = req.auth;
+    if (!auth?.tenantId) {
+      return res.status(403).json({ ok: false, error: "agency_account_required" });
+    }
+    const parsed = jobListQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: "invalid_job_query" });
+    }
+    const jobs = await prisma.carrierAutomationJob.findMany({
+      where: {
+        tenantId: auth.tenantId,
+        userId: auth.userId,
+        quoteSessionId: parsed.data.quoteSessionId,
+        ...(parsed.data.jobType ? { jobType: parsed.data.jobType } : {}),
+      },
+      orderBy: { createdAt: "desc" },
+      take: 250,
+    });
+    return res.json({ ok: true, jobs: jobs.map(publicJob) });
   } catch (error) {
     next(error);
   }
@@ -470,7 +503,10 @@ connectExtensionRoutes.post("/jobs/:jobId/status", async (req, res, next) => {
         requestedStatus: nextStatus,
       });
     }
-    if (nextStatus === "completed" && !isVerifiedResult(parsed.data.result)) {
+    if (
+      nextStatus === "completed" &&
+      !isVerifiedResultForJob(job.jobType, parsed.data.result)
+    ) {
       return res.status(400).json({ ok: false, error: "verified_result_required" });
     }
 
@@ -561,6 +597,24 @@ function isVerifiedResult(result: Record<string, unknown> | undefined): boolean 
     return false;
   }
   return Number.isFinite(Date.parse(record.verifiedAt));
+}
+
+function isVerifiedResultForJob(
+  jobType: string,
+  result: Record<string, unknown> | undefined
+): boolean {
+  if (!isVerifiedResult(result)) return false;
+  if (jobType !== "retrieve_quote") return true;
+
+  const quote =
+    result?.quote && typeof result.quote === "object" && !Array.isArray(result.quote)
+      ? (result.quote as Record<string, unknown>)
+      : result;
+  const premium = Number(quote?.premium ?? quote?.annualPremium);
+  const reference = String(
+    quote?.carrierReference ?? quote?.quoteNumber ?? quote?.reference ?? ""
+  ).trim();
+  return Number.isFinite(premium) && premium > 0 && reference.length > 0;
 }
 
 function publicJob(job: {

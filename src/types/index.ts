@@ -2380,6 +2380,8 @@ export interface CarrierQuote {
   score: number;
   fitReason: string;
   apiStatus: "connected" | "simulated" | "no_api";
+  source?: "quotex_connect" | "carrier_email_reply";
+  carrierReference?: string;
   providerTrace?: CarrierQuoteProviderTrace;
   implementation?: CarrierQuoteImplementation;
 }

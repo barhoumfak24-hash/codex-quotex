@@ -932,7 +932,7 @@ describe("api.quoting workspace", () => {
     expect(comm?.channel).toBe("email");
   });
 
-  it("markReplyReceivedAndQuote runs carrier quotes and ranks them best-first", async () => {
+  it("waits for verified Quotex Connect results before showing carrier quotes", async () => {
     const { api, agency, agent, prospect } = await seed();
     const s1 = await api.quoting.startSession({
       tenantId: agency.id,
@@ -945,25 +945,60 @@ describe("api.quoting workspace", () => {
     await api.quoting.draftQuestionnaire(s1.id);
     api.quoting.sendQuestionnaire(s1.id);
     const s2 = api.quoting.markReplyReceivedAndQuote(s1.id)!;
-    expect(s2.status).toBe("complete");
-    expect(s2.quotes.length).toBeGreaterThanOrEqual(0);
-    if (s2.quotes.length > 1) {
-      // Ranked: score desc.
-      expect(s2.quotes[0].score).toBeGreaterThanOrEqual(s2.quotes[1].score);
-    }
+    expect(s2.status).toBe("quoting");
+    expect(s2.quotes).toEqual([]);
+    expect(s2.aiSummary).toMatch(/Quotex Connect/i);
+    expect(
+      api.aiNotifications
+        .listUnacked(agency.id)
+        .some(
+          (notification) =>
+            notification.kind === "quote_ready" &&
+            notification.quoteSessionId === s1.id
+        )
+    ).toBe(false);
+
+    const linkedCarrier = api.carriers.listForTenant(agency.id)[0];
+    const complete = api.quoting.syncVerifiedConnectQuotes(
+      s1.id,
+      [
+        {
+          carrierId: linkedCarrier.id,
+          premium: 4_825,
+          confidence: 0.98,
+          score: 91,
+          fitReason: "Verified carrier portal response.",
+          apiStatus: "connected",
+          source: "quotex_connect",
+          carrierReference: "ABC-123",
+        },
+      ],
+      { allFinished: true }
+    );
+    expect(complete.status).toBe("complete");
+    expect(complete.quotes).toHaveLength(1);
+    expect(complete.quotes[0]).toMatchObject({
+      carrierId: linkedCarrier.id,
+      premium: 4_825,
+      source: "quotex_connect",
+      carrierReference: "ABC-123",
+    });
+
     const readyNotification = api.aiNotifications
       .listUnacked(agency.id)
       .find((notification) => notification.kind === "quote_ready" && notification.quoteSessionId === s1.id);
     expect(readyNotification?.quoteSessionId).toBe(s1.id);
     expect(readyNotification?.assignedToId).toBe(agent.id);
-    expect(readyNotification?.title).toMatch(/quote (options ready|review needed)/i);
+    expect(readyNotification?.title).toMatch(/quote options ready/i);
     expect(
       api.tasks
         .listByTenant(agency.id)
         .some((task) => task.activityKey === `quote-session:${s1.id}:quote_ready` && task.status !== "resolved")
     ).toBe(false);
 
-    api.quoting.runQuotes(s1.id);
+    api.quoting.syncVerifiedConnectQuotes(s1.id, complete.quotes, {
+      allFinished: true,
+    });
     const matches = api.aiNotifications
       .listUnacked(agency.id)
       .filter((notification) => notification.kind === "quote_ready" && notification.quoteSessionId === s1.id);
@@ -989,11 +1024,11 @@ describe("api.quoting workspace", () => {
 
     expect(events.some((event) => event.message.includes("AI quoting workflow started"))).toBe(true);
     expect(events.some((event) => event.message.includes("questionnaire sent"))).toBe(true);
-    expect(events.some((event) => event.message.includes("carrier ranking"))).toBe(true);
+    expect(events.some((event) => event.message.includes("quote retrieval"))).toBe(true);
     expect(notes.filter((note) => note.body.startsWith("AI quoting workflow:")).length).toBeGreaterThanOrEqual(4);
   });
 
-  it("ignores legacy endpoint settings and uses the carrier runner path", async () => {
+  it("does not turn legacy endpoint settings into carrier quotes", async () => {
     const { api, agency, agent, prospect } = await seed();
     const carriers = api.carriers.list();
     if (carriers.length > 0) {
@@ -1016,16 +1051,12 @@ describe("api.quoting workspace", () => {
     await api.quoting.draftQuestionnaire(s1.id);
     api.quoting.sendQuestionnaire(s1.id);
     const s2 = api.quoting.markReplyReceivedAndQuote(s1.id)!;
-    if (carriers.length > 0) {
-      const target = s2.quotes.find((q) => q.carrierId === carriers[0].id);
-      if (target) {
-        expect(target.providerTrace?.provider).toBe("carrier_portal_automation");
-        expect(target.providerTrace?.providerLabel).toBe("AI carrier portal runner");
-      }
-    }
+    expect(s2.status).toBe("quoting");
+    expect(s2.quotes).toEqual([]);
+    expect(s2.aiSummary).toMatch(/Quotex Connect/i);
   });
 
-  it("prepares AI carrier runner traces for configured carrier portals", async () => {
+  it("does not synthesize quotes from configured carrier portal metadata", async () => {
     const { api, agency, agent, prospect } = await seed();
     const chubb = api.carriers.get("carrier_chubb")!;
     expect(chubb.quotingAutomation?.provider).toBe("AI carrier portal runner");
@@ -1040,7 +1071,7 @@ describe("api.quoting workspace", () => {
       address: "210 Ocean Blvd, Palm Beach, FL 33480",
       lineOfBusiness: "personal",
     });
-    const complete =
+    const pending =
       s1.status === "complete"
         ? s1
         : api.quoting.submitQuestionnaireResponses(
@@ -1054,13 +1085,9 @@ describe("api.quoting workspace", () => {
             { id: agent.id, name: agent.name, role: "agent" }
           )!;
 
-    const quote = complete.quotes.find((q) => q.carrierId === chubb.id);
-    expect(quote?.apiStatus).toBe("simulated");
-    expect(quote?.providerTrace?.provider).toBe("carrier_portal_automation");
-    expect(quote?.providerTrace?.transport).toBe("browser_automation");
-    expect(quote?.providerTrace?.messages.join(" ")).toContain("carrier portal");
-    expect(quote?.fitReason).toContain("adapter ready");
-    expect(complete.aiSummary).toContain("AI runner workflow");
+    expect(pending.status).toBe("quoting");
+    expect(pending.quotes).toEqual([]);
+    expect(pending.aiSummary).toMatch(/Quotex Connect/i);
   });
 
   it("diagnoses personal-lines carrier runner readiness for linked carriers", async () => {
@@ -1085,7 +1112,7 @@ describe("api.quoting workspace", () => {
     expect(diagnostic.rows.some((row) => row.provider === "AI carrier portal runner")).toBe(true);
   });
 
-  it("fans a personal-lines quote through every linked carrier runner", async () => {
+  it("accepts verified Quotex Connect results only for linked personal carriers", async () => {
     const { api, agency, agent } = await seed();
     vi.stubEnv("VITE_QUOTEX_CARRIER_AUTOMATION_BRIDGE_URL", "https://runner.example/jobs");
     const linkedCarriers = api.carriers
@@ -1136,7 +1163,7 @@ describe("api.quoting workspace", () => {
         question.kind === "number" ? "1" : "Confirmed for live carrier runner test",
       ])
     );
-    const complete =
+    const pending =
       initial.status === "complete"
         ? initial
         : api.quoting.submitQuestionnaireResponses(initial.id, responses, {
@@ -1145,13 +1172,37 @@ describe("api.quoting workspace", () => {
             role: "agent",
           })!;
 
+    expect(pending.status).toBe("quoting");
+    expect(pending.quotes).toEqual([]);
+
+    const complete = api.quoting.syncVerifiedConnectQuotes(
+      pending.id,
+      linkedCarriers.map((carrier, index) => ({
+        carrierId: carrier.id,
+        premium: 4_000 + index * 100,
+        confidence: 0.95,
+        score: 95 - index,
+        fitReason: "Verified carrier portal response.",
+        apiStatus: "connected" as const,
+        source: "quotex_connect" as const,
+        carrierReference: `QTX-${index + 1}`,
+      })),
+      { allFinished: true }
+    );
     expect(complete.status).toBe("complete");
     expect(complete.lineOfBusiness).toBe("personal");
     expect(complete.quotes).toHaveLength(linkedCarriers.length);
     expect(new Set(complete.quotes.map((quote) => quote.carrierId))).toEqual(
       new Set(linkedCarriers.map((carrier) => carrier.id))
     );
-    expect(complete.quotes.every((quote) => quote.apiStatus !== "no_api")).toBe(true);
+    expect(
+      complete.quotes.every(
+        (quote) =>
+          quote.apiStatus === "connected" &&
+          quote.source === "quotex_connect" &&
+          Boolean(quote.carrierReference)
+      )
+    ).toBe(true);
     if (complete.quotes.length > 1) {
       expect(complete.quotes[0].score).toBeGreaterThanOrEqual(complete.quotes[1].score);
     }
@@ -1355,7 +1406,7 @@ describe("api.quoting workspace", () => {
       address: customer.mailingAddress,
       lineOfBusiness: "personal",
     });
-    const complete =
+    const pending =
       initial.status === "complete"
         ? initial
         : api.quoting.submitQuestionnaireResponses(
@@ -1368,6 +1419,23 @@ describe("api.quoting workspace", () => {
             ),
             { id: agent.id, name: agent.name, role: "agent" }
           )!;
+    const linkedCarrier = api.carriers.listForTenant(agency.id)[0];
+    const complete = api.quoting.syncVerifiedConnectQuotes(
+      pending.id,
+      [
+        {
+          carrierId: linkedCarrier.id,
+          premium: 5_250,
+          confidence: 0.97,
+          score: 94,
+          fitReason: "Verified carrier portal response.",
+          apiStatus: "connected",
+          source: "quotex_connect",
+          carrierReference: "IMPLEMENT-123",
+        },
+      ],
+      { allFinished: true }
+    );
     expect(complete.quotes.length).toBeGreaterThan(0);
 
     const selected = complete.quotes[0];
