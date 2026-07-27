@@ -9,6 +9,7 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import cors from "cors";
 import express from "express";
 import helmet from "helmet";
+import { isAllowedRequestOrigin } from "./corsPolicy.js";
 import { initServerErrorTracking, sentryErrorMiddleware } from "./errorTracking.js";
 import { assertValidServerEnv, frontendOrigins, isProduction } from "./env.js";
 import { enforceTenantIsolation, requireAuth, requireRole } from "./middleware/auth.js";
@@ -77,15 +78,23 @@ app.use((req, res, next) => {
 
 const allowedFrontendOrigins = frontendOrigins();
 app.use(
-  cors({
-    origin(origin, callback) {
-      if (!origin) return callback(null, true);
-      if (!isProduction() && allowedFrontendOrigins.length === 0) return callback(null, true);
-      if (allowedFrontendOrigins.includes(origin)) return callback(null, true);
-      return callback(new Error("cors_origin_not_allowed"));
-    },
-    credentials: true,
-  })
+  (req, res, next) =>
+    cors({
+      origin(origin, callback) {
+        if (
+          isAllowedRequestOrigin({
+            origin: origin ?? "",
+            requestPath: req.path,
+            allowedFrontendOrigins,
+            production: isProduction(),
+          })
+        ) {
+          return callback(null, true);
+        }
+        return callback(new Error("cors_origin_not_allowed"));
+      },
+      credentials: true,
+    })(req, res, next)
 );
 app.use(
   "/api/state-blobs",
