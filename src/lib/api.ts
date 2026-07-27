@@ -3522,17 +3522,38 @@ function inboundNotificationEventKey(row: Communication, purpose: string): strin
   return `inbound-notification:${inboundEmailIdentity(row)}:${purpose}`;
 }
 
+function stableEventHash(value: string): string {
+  let first = 2166136261;
+  let second = 2246822519;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    first = Math.imul(first ^ code, 16777619);
+    second = Math.imul(second ^ code, 3266489917);
+  }
+  return `${(first >>> 0).toString(36)}${(second >>> 0).toString(36)}`;
+}
+
+function notificationEventId(tenantId: string, eventKey: string): string {
+  return `ain_event_${stableEventHash(`${tenantId}:${eventKey}`)}`;
+}
+
 function ensureAiNotification(
   input: Omit<AiNotification, "id" | "createdAt"> & { eventKey: string },
   legacyMatch?: (notification: AiNotification) => boolean
 ): { notification: AiNotification; created: boolean } {
-  let existing = db
+  const eventMatches = db
     .list("aiNotifications")
-    .find(
+    .filter(
       (notification) =>
         notification.tenantId === input.tenantId &&
         notification.eventKey === input.eventKey
     );
+  let existing: AiNotification | undefined = [...eventMatches].sort((a, b) => {
+    const acknowledgedDifference =
+      Number(Boolean(b.acknowledgedAt)) - Number(Boolean(a.acknowledgedAt));
+    if (acknowledgedDifference !== 0) return acknowledgedDifference;
+    return a.createdAt.localeCompare(b.createdAt);
+  })[0];
   if (!existing && legacyMatch) {
     existing = db
       .list("aiNotifications")
@@ -3549,12 +3570,15 @@ function ensureAiNotification(
         ? existing
         : db.update("aiNotifications", existing.id, { eventKey: input.eventKey }) ??
           existing;
+    eventMatches
+      .filter((notification) => notification.id !== migrated.id)
+      .forEach((notification) => db.remove("aiNotifications", notification.id));
     return { notification: migrated, created: false };
   }
 
   const notification: AiNotification = {
     ...input,
-    id: uid("ain"),
+    id: notificationEventId(input.tenantId, input.eventKey),
     createdAt: nowIso(),
   };
   db.insert("aiNotifications", notification);
@@ -3572,6 +3596,44 @@ function inboundEmailCopies(row: Communication): Communication[] {
         candidate.channel === "email" &&
         inboundEmailIdentity(candidate) === identity
     );
+}
+
+const INBOUND_AUTOMATION_FIELDS = [
+  "aiActivityScannedAt",
+  "aiTriageDisposition",
+  "aiTriageTopic",
+  "aiTriageReason",
+  "aiTriageConfidence",
+  "aiTriageEvidence",
+  "aiTriageRequiresHumanReview",
+  "aiTriageVersion",
+  "aiServiceIntent",
+  "aiDraftMissingFields",
+  "aiReplyDraftId",
+  "aiActivityNotificationId",
+  "aiActivityTaskId",
+] as const satisfies readonly (keyof Communication)[];
+
+function inboundAutomationPatchFrom(
+  row: Communication
+): Partial<Communication> {
+  const patch: Partial<Communication> = {};
+  INBOUND_AUTOMATION_FIELDS.forEach((field) => {
+    const value = row[field];
+    if (value !== undefined) {
+      Object.assign(patch, { [field]: value });
+    }
+  });
+  return patch;
+}
+
+function updateInboundEmailCopies(
+  row: Communication,
+  patch: Partial<Communication>
+): Communication[] {
+  return inboundEmailCopies(row)
+    .map((copy) => db.update("communications", copy.id, patch))
+    .filter((copy): copy is Communication => Boolean(copy));
 }
 
 function preferredInboundEmailCommunication(
@@ -5625,9 +5687,17 @@ function createInboundServiceDraft(input: {
   intent: InboundDocumentServiceIntent;
   document: Document;
 }): Communication {
+  const sourceCommunicationIds = new Set(
+    inboundEmailCopies(input.inbound).map((row) => row.id)
+  );
   const existing = db
     .list("communications")
-    .find((row) => row.aiDraftSourceCommunicationId === input.inbound.id);
+    .find(
+      (row) =>
+        row.aiServiceIntent === input.intent &&
+        !!row.aiDraftSourceCommunicationId &&
+        sourceCommunicationIds.has(row.aiDraftSourceCommunicationId)
+    );
   if (existing) return existing;
   const senderMailbox = mailboxForUser(input.assignedToId);
   const rawSubject = input.inbound.subject?.trim() || inboundServiceLabel(input.intent);
@@ -5697,9 +5767,17 @@ function createInboundQuoteIntakeDraft(input: {
   assignedToId: string;
   questions: InboundQuoteIntakeQuestion[];
 }): Communication {
+  const sourceCommunicationIds = new Set(
+    inboundEmailCopies(input.inbound).map((row) => row.id)
+  );
   const existing = db
     .list("communications")
-    .find((row) => row.aiDraftSourceCommunicationId === input.inbound.id);
+    .find(
+      (row) =>
+        row.aiServiceIntent === "vehicle_quote_intake" &&
+        !!row.aiDraftSourceCommunicationId &&
+        sourceCommunicationIds.has(row.aiDraftSourceCommunicationId)
+    );
   if (existing) return existing;
   const senderMailbox = mailboxForUser(input.assignedToId);
   const rawSubject = input.inbound.subject?.trim() || "Vehicle quote request";
@@ -6264,6 +6342,16 @@ type PersonalQuoteAutomationResult = {
   sessionId?: string;
   assetId?: string;
 };
+
+type InboundAutomationResult = {
+  quoteAutomation: PersonalQuoteAutomationResult[];
+  triage: { communicationId: string; task?: Task; notification?: AiNotification }[];
+};
+
+const inboundAutomationInFlight = new Map<
+  string,
+  Promise<InboundAutomationResult>
+>();
 
 const PERSONAL_QUOTE_AUTOMATION_MAX_ATTEMPTS = 3;
 const PERSONAL_QUOTE_AUTOMATION_PENDING_TIMEOUT_MS = 5 * 60_000;
@@ -16917,18 +17005,28 @@ export const api = {
     async processInboundAutomation(
       tenantId: string,
       actorId?: string
-    ): Promise<{
-      quoteAutomation: PersonalQuoteAutomationResult[];
-      triage: { communicationId: string; task?: Task; notification?: AiNotification }[];
-    }> {
-      // Complete personal quote replies must be claimed before generic inbox
-      // triage can prepare another draft or open a duplicate activity.
-      const quoteAutomation = await api.communications.automatePersonalQuoteReplies(
-        tenantId,
-        actorId
-      );
-      const triage = api.communications.sweepInboundForActivities(tenantId, actorId);
-      return { quoteAutomation, triage };
+    ): Promise<InboundAutomationResult> {
+      const existingRun = inboundAutomationInFlight.get(tenantId);
+      if (existingRun) return existingRun;
+
+      const run = (async () => {
+        // Complete personal quote replies must be claimed before generic inbox
+        // triage can prepare another draft or open a duplicate activity.
+        const quoteAutomation = await api.communications.automatePersonalQuoteReplies(
+          tenantId,
+          actorId
+        );
+        const triage = api.communications.sweepInboundForActivities(tenantId, actorId);
+        return { quoteAutomation, triage };
+      })();
+      inboundAutomationInFlight.set(tenantId, run);
+      try {
+        return await run;
+      } finally {
+        if (inboundAutomationInFlight.get(tenantId) === run) {
+          inboundAutomationInFlight.delete(tenantId);
+        }
+      }
     },
     // AI inbound triage. Scans every inbound message that hasn't been
     // scanned yet; if the AI judges it warrants follow-up, it auto-
@@ -16942,19 +17040,35 @@ export const api = {
       actorId?: string
     ): { communicationId: string; task?: Task; notification?: AiNotification }[] {
       consolidateInboundEmailActivities(tenantId, actorId);
-      const inbound = db
+      const inboundGroups = new Map<string, Communication[]>();
+      db
         .list("communications")
         .filter(
           (c) =>
             c.tenantId === tenantId &&
             c.direction === "inbound" &&
-            c.createdById !== "ai" &&
-            communicationNeedsInboundTriage(c)
-        );
+            c.createdById !== "ai"
+        )
+        .forEach((communication) => {
+          const identity = inboundEmailIdentity(communication);
+          const group = inboundGroups.get(identity) ?? [];
+          group.push(communication);
+          inboundGroups.set(identity, group);
+        });
+      const inbound: Communication[] = [];
+      inboundGroups.forEach((copies) => {
+        const completedCopy = copies.find((copy) => !communicationNeedsInboundTriage(copy));
+        if (completedCopy) {
+          updateInboundEmailCopies(completedCopy, inboundAutomationPatchFrom(completedCopy));
+          return;
+        }
+        const preferred = preferredInboundEmailCommunication(copies);
+        if (preferred) inbound.push(preferred);
+      });
       const created: { communicationId: string; task?: Task; notification?: AiNotification }[] = [];
       for (const c of inbound) {
         if (!communicationHasKnownMailboxContact(c)) {
-          db.update("communications", c.id, {
+          updateInboundEmailCopies(c, {
             aiActivityScannedAt: nowIso(),
             aiTriageDisposition: "ignore",
             aiTriageTopic: "other",
@@ -17012,6 +17126,10 @@ export const api = {
           aiServiceIntent: triage.serviceIntent,
           aiDraftMissingFields: triage.serviceQuestions,
         };
+        // Claim every mailbox copy before creating any side effect. This keeps
+        // overlapping page, focus, and mailbox-sync runs from creating a
+        // second draft, notification, or activity for the same real email.
+        updateInboundEmailCopies(c, patch);
         const assignedToId = assignedContactOwner(customer ?? prospect);
         if (triage.serviceIntent === "vehicle_quote_intake") {
           const questions = triage.serviceQuestions ?? [];
@@ -17238,7 +17356,7 @@ export const api = {
           patch.aiActivityNotificationId = row.id;
           created.push({ communicationId: c.id, notification: row });
         }
-        db.update("communications", c.id, patch);
+        updateInboundEmailCopies(c, patch);
       }
       return created;
     },
@@ -17451,6 +17569,20 @@ export const api = {
         carrierSubmissionId: input.carrierSubmissionId,
         createdAt: input.sentAt ?? nowIso(),
       };
+      if (direction === "inbound") {
+        const existingLogicalCopy = db
+          .list("communications")
+          .find(
+            (candidate) =>
+              candidate.tenantId === row.tenantId &&
+              candidate.direction === "inbound" &&
+              candidate.channel === "email" &&
+              inboundEmailIdentity(candidate) === inboundEmailIdentity(row)
+          );
+        if (existingLogicalCopy) {
+          Object.assign(row, inboundAutomationPatchFrom(existingLogicalCopy));
+        }
+      }
       db.insert("communications", row);
       const mailboxConnectionId = input.mailboxConnectionId ?? userMailbox.connectionId;
       if (mailboxConnectionId) {

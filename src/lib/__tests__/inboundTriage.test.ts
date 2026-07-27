@@ -240,6 +240,143 @@ describe("communications.sweepInboundForActivities", () => {
     expect([first.id, second.id]).toContain(inboundRemarks[0].communicationId);
   });
 
+  it("creates one draft and one notification when a quote request exists in multiple mailboxes", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const sharedMessageId = "<same-vehicle-request@example.com>";
+    const first = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      subject: "Need quote for my truck",
+      body: "I need a quote for my new Ford F150.",
+      mailboxOrigin: "provider_sync",
+      mailboxProvider: "gmail",
+      mailboxAccount: "agent.one@example.com",
+      externalMessageId: "gmail-vehicle-copy-one",
+      messageIdHeader: sharedMessageId,
+    });
+    const second = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      subject: "Need quote for my truck",
+      body: "I need a quote for my new Ford F150.",
+      mailboxOrigin: "provider_sync",
+      mailboxProvider: "gmail",
+      mailboxAccount: "agent.two@example.com",
+      externalMessageId: "gmail-vehicle-copy-two",
+      messageIdHeader: sharedMessageId,
+    });
+
+    api.communications.sweepInboundForActivities(agency.id);
+
+    const fresh = api.communications
+      .listByCustomer(customer.id)
+      .filter((row) => [first.id, second.id].includes(row.id));
+    expect(fresh).toHaveLength(2);
+    expect(fresh[0].aiActivityScannedAt).toBeTruthy();
+    expect(fresh[1].aiActivityScannedAt).toBe(fresh[0].aiActivityScannedAt);
+    expect(fresh[1].aiActivityTaskId).toBe(fresh[0].aiActivityTaskId);
+    expect(fresh[1].aiReplyDraftId).toBe(fresh[0].aiReplyDraftId);
+    expect(fresh[1].aiActivityNotificationId).toBe(
+      fresh[0].aiActivityNotificationId
+    );
+
+    const sourceIds = new Set([first.id, second.id]);
+    const drafts = api.communications
+      .listByCustomer(customer.id)
+      .filter(
+        (row) =>
+          row.deliveryStatus === "draft" &&
+          row.aiServiceIntent === "vehicle_quote_intake" &&
+          sourceIds.has(row.aiDraftSourceCommunicationId ?? "")
+      );
+    expect(drafts).toHaveLength(1);
+
+    const notifications = api.aiNotifications
+      .listByTenant(agency.id)
+      .filter(
+        (row) =>
+          row.eventKey ===
+          "inbound-notification:message:same-vehicle-request@example.com:vehicle-quote-draft"
+      );
+    expect(notifications).toHaveLength(1);
+
+    const tasks = api.tasks
+      .listByTenant(agency.id)
+      .filter(
+        (task) =>
+          task.activityKey ===
+          "inbound-email:message:same-vehicle-request@example.com"
+      );
+    expect(tasks).toHaveLength(1);
+  });
+
+  it("propagates completed automation metadata to a mailbox copy that arrives later", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const sharedMessageId = "<late-mailbox-copy@example.com>";
+    const first = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      subject: "Document received",
+      body: "I uploaded the signed form.",
+      mailboxOrigin: "provider_sync",
+      mailboxProvider: "gmail",
+      mailboxAccount: "agent.one@example.com",
+      externalMessageId: "gmail-late-copy-one",
+      messageIdHeader: sharedMessageId,
+    });
+
+    api.communications.sweepInboundForActivities(agency.id);
+    const scannedFirst = api.communications
+      .listByCustomer(customer.id)
+      .find((row) => row.id === first.id)!;
+    expect(scannedFirst.aiActivityScannedAt).toBeTruthy();
+
+    const second = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      subject: "Document received",
+      body: "I uploaded the signed form.",
+      mailboxOrigin: "provider_sync",
+      mailboxProvider: "gmail",
+      mailboxAccount: "agent.two@example.com",
+      externalMessageId: "gmail-late-copy-two",
+      messageIdHeader: sharedMessageId,
+    });
+
+    expect(api.communications.sweepInboundForActivities(agency.id)).toHaveLength(0);
+    const freshSecond = api.communications
+      .listByCustomer(customer.id)
+      .find((row) => row.id === second.id)!;
+    expect(freshSecond.aiActivityScannedAt).toBe(
+      scannedFirst.aiActivityScannedAt
+    );
+    expect(freshSecond.aiActivityNotificationId).toBe(
+      scannedFirst.aiActivityNotificationId
+    );
+    expect(freshSecond.aiTriageVersion).toBe(scannedFirst.aiTriageVersion);
+
+    const matching = api.aiNotifications
+      .listByTenant(agency.id)
+      .filter(
+        (row) =>
+          row.eventKey ===
+          "inbound-notification:message:late-mailbox-copy@example.com:informational"
+      );
+    expect(matching).toHaveLength(1);
+  });
+
   it("consolidates existing duplicate email activities without deleting their history", async () => {
     const { api } = await import("../api");
     const { db } = await import("../db");
