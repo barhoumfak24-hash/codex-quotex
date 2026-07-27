@@ -92,6 +92,36 @@ describe("commercial quoting session", () => {
     ).toHaveLength(1);
   });
 
+  it("creates a separate open session when the user explicitly starts another quote flow", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
+    const customer = api.customers.list(agency.id)[0];
+    const input = {
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: agent.id,
+      assetType: "other" as const,
+      contactName: customer.name,
+      estimatedValue: 2_500_000,
+      lineOfBusiness: "commercial" as const,
+    };
+
+    const first = await api.quoting.startSession(input);
+    const second = await api.quoting.startSession({
+      ...input,
+      forceNew: true,
+    });
+
+    expect(second.id).not.toBe(first.id);
+    expect(
+      api.quoting
+        .listByTenant(agency.id)
+        .filter((session) => session.customerId === customer.id)
+        .map((session) => session.id)
+    ).toEqual(expect.arrayContaining([first.id, second.id]));
+  });
+
   it("prepares the structured commercial questionnaire after the ACORD fill audit", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];

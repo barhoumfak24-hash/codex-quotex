@@ -59,10 +59,7 @@ import {
   staffRoleLabel,
 } from "@/lib/roles";
 import { subscribeToDbChanges } from "@/lib/db";
-import {
-  newestOpenQuotingSessionsPerContact,
-  summarizeQuotingWorkflow,
-} from "@/lib/quotingWorkflows";
+import { summarizeQuotingWorkflow } from "@/lib/quotingWorkflows";
 import { isRoutingAssignmentTask } from "@/lib/taskFilters";
 import { preserveScrollDuring } from "@/lib/preserveScroll";
 import type {
@@ -125,8 +122,21 @@ interface QuotingWorkflowRow {
   quote?: QuoteRequest;
 }
 
-function quoteWorkspaceDeepLink(path: string): string {
-  return `${path.replace(/\/$/, "")}/quote-flow`;
+function quoteWorkspaceDeepLink(
+  path: string,
+  sessionId?: string,
+  activityTaskId?: string
+): string {
+  const base = `${path.replace(/\/$/, "")}/quote-flow`;
+  const params = new URLSearchParams();
+  if (sessionId) {
+    params.set("session", sessionId);
+  } else if (activityTaskId) {
+    params.set("new", "1");
+    params.set("activity", activityTaskId);
+  }
+  const search = params.toString();
+  return search ? `${base}?${search}` : base;
 }
 
 export function TasksPage() {
@@ -338,7 +348,9 @@ export function TasksPage() {
 
   const tenantQuotingSessions = api.quoting.listByTenant(agency.id);
   const visibleOpenSessionIds = new Set(
-    newestOpenQuotingSessionsPerContact(tenantQuotingSessions).map((session) => session.id)
+    tenantQuotingSessions
+      .filter((session) => !summarizeQuotingWorkflow(session).isClosed)
+      .map((session) => session.id)
   );
   const aiWorkflowRows = tenantQuotingSessions
     .map((session): QuotingWorkflowRow | null => {
@@ -364,9 +376,9 @@ export function TasksPage() {
       const contactName = customer?.name ?? prospect?.name ?? "Unknown contact";
       const contactKind = customer ? "Client" : prospect ? "Prospect" : "Contact";
       const href = customer
-        ? quoteWorkspaceDeepLink(`/employee/clients/${customer.id}`)
+        ? quoteWorkspaceDeepLink(`/employee/clients/${customer.id}`, session.id)
         : prospect
-        ? quoteWorkspaceDeepLink(`/employee/prospects/${prospect.id}`)
+        ? quoteWorkspaceDeepLink(`/employee/prospects/${prospect.id}`, session.id)
         : "/employee/tasks";
       const implementedAt = session.quotes.find((quote) => quote.implementation?.implementedAt)?.implementation
         ?.implementedAt;
@@ -405,13 +417,6 @@ export function TasksPage() {
   const incompleteWorkflowRows = api.quotes
     .listIncompleteWorkflows(agency.id)
     .filter((quote) => !visibleOpenSessionIds.has(quote.quoteSessionId ?? ""))
-    .filter((quote) => {
-      const contactHasOpenSession = tenantQuotingSessions.some(
-        (session) =>
-          visibleOpenSessionIds.has(session.id) && session.customerId === quote.customerId
-      );
-      return !contactHasOpenSession;
-    })
     .map((quote): QuotingWorkflowRow | null => {
       const customer = api.customers.get(quote.customerId);
       if (!api.customers.canSee(customer, viewer)) return null;
@@ -458,18 +463,12 @@ export function TasksPage() {
     })
     .filter((row): row is QuotingWorkflowRow => !!row);
 
-  const seenWorkflowContacts = new Set<string>();
   const workflowRows = [...incompleteWorkflowRows, ...activeAiWorkflowRows]
     .sort((a, b) => {
       if (a.summary.sortPriority !== b.summary.sortPriority) {
         return a.summary.sortPriority - b.summary.sortPriority;
       }
       return a.updatedAt < b.updatedAt ? 1 : -1;
-    })
-    .filter((row) => {
-      if (seenWorkflowContacts.has(row.contactKey)) return false;
-      seenWorkflowContacts.add(row.contactKey);
-      return true;
     });
 
   // Sort order:
@@ -2506,27 +2505,59 @@ function ActivityCard({
             if (task.customerId) {
               const c = api.customers.get(task.customerId);
               if (c && api.customers.canSee(c, user ? { id: user.id, role: user.role } : undefined)) {
-                const profileHref =
-                  task.quoteSessionId || task.quoteRequestId || task.expressQuoteFollowUp
-                    ? quoteWorkspaceDeepLink(`/employee/clients/${task.customerId}`)
-                    : `/employee/clients/${task.customerId}`;
+                const hasQuoteFlow =
+                  !!task.quoteSessionId ||
+                  !!task.quoteRequestId ||
+                  !!task.expressQuoteFollowUp;
+                const quoteFlowHref = quoteWorkspaceDeepLink(
+                  `/employee/clients/${task.customerId}`,
+                  task.quoteSessionId,
+                  task.id
+                );
                 return (
-                  <Link to={profileHref} className="btn-primary text-xs inline-flex">
-                    <User className="h-3.5 w-3.5" /> Go to client profile
-                  </Link>
+                  <>
+                    <Link
+                      to={`/employee/clients/${task.customerId}`}
+                      className="btn-outline text-xs inline-flex"
+                    >
+                      <User className="h-3.5 w-3.5" /> Go to client profile
+                    </Link>
+                    {hasQuoteFlow ? (
+                      <Link to={quoteFlowHref} className="btn-primary text-xs inline-flex">
+                        <Workflow className="h-3.5 w-3.5" />
+                        {task.quoteSessionId ? "Open quote flow" : "Start quote flow"}
+                      </Link>
+                    ) : null}
+                  </>
                 );
               }
               return null;
             }
             if (task.prospectId) {
-              const profileHref =
-                task.quoteSessionId || task.quoteRequestId || task.expressQuoteFollowUp
-                  ? quoteWorkspaceDeepLink(`/employee/prospects/${task.prospectId}`)
-                  : `/employee/prospects/${task.prospectId}`;
+              const hasQuoteFlow =
+                !!task.quoteSessionId ||
+                !!task.quoteRequestId ||
+                !!task.expressQuoteFollowUp;
+              const quoteFlowHref = quoteWorkspaceDeepLink(
+                `/employee/prospects/${task.prospectId}`,
+                task.quoteSessionId,
+                task.id
+              );
               return (
-                <Link to={profileHref} className="btn-primary text-xs inline-flex">
-                  <UserSearch className="h-3.5 w-3.5" /> Go to prospect profile
-                </Link>
+                <>
+                  <Link
+                    to={`/employee/prospects/${task.prospectId}`}
+                    className="btn-outline text-xs inline-flex"
+                  >
+                    <UserSearch className="h-3.5 w-3.5" /> Go to prospect profile
+                  </Link>
+                  {hasQuoteFlow ? (
+                    <Link to={quoteFlowHref} className="btn-primary text-xs inline-flex">
+                      <Workflow className="h-3.5 w-3.5" />
+                      {task.quoteSessionId ? "Open quote flow" : "Start quote flow"}
+                    </Link>
+                  ) : null}
+                </>
               );
             }
             return null;

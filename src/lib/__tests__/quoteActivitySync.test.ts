@@ -121,6 +121,89 @@ describe("quote-flow activity synchronization", () => {
     expect(api.tasks.get(older.id)?.quoteSessionId).toBeUndefined();
   });
 
+  it("keeps explicitly started quote flows linked to their own activities", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((user) => user.role === "agent")!;
+    const customer = api.customers.list(agency.id)[0];
+    const firstActivity = api.tasks.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      assignedToId: agent.id,
+      title: `${customer.name} requested an auto quote`,
+      createdById: agent.id,
+    });
+    const secondActivity = api.tasks.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      assignedToId: agent.id,
+      title: `${customer.name} requested a home quote`,
+      createdById: agent.id,
+    });
+    const baseInput = {
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: agent.id,
+      contactName: customer.name,
+      lineOfBusiness: "personal" as const,
+      forceNew: true,
+    };
+
+    const firstSession = await api.quoting.startSession({
+      ...baseInput,
+      assetType: "luxury_vehicle",
+      activityTaskIds: [firstActivity.id],
+      activityActorId: agent.id,
+    });
+    const secondSession = await api.quoting.startSession({
+      ...baseInput,
+      assetType: "coastal_home",
+      address: "903 Test Street, Northville, MI 48167",
+      activityTaskIds: [secondActivity.id],
+      activityActorId: agent.id,
+    });
+
+    expect(firstSession.id).not.toBe(secondSession.id);
+    expect(api.tasks.get(firstActivity.id)).toMatchObject({
+      status: "in_progress",
+      quoteSessionId: firstSession.id,
+    });
+    expect(api.tasks.get(secondActivity.id)).toMatchObject({
+      status: "in_progress",
+      quoteSessionId: secondSession.id,
+    });
+  });
+
+  it("does not borrow another activity when a separate quote flow is added from the client card", async () => {
+    const { api } = await import("../api");
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((user) => user.role === "agent")!;
+    const customer = api.customers.list(agency.id)[0];
+    const existingActivity = api.tasks.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      assignedToId: agent.id,
+      title: `${customer.name} requested a quote`,
+      createdById: agent.id,
+    });
+
+    await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: agent.id,
+      assetType: "coastal_home",
+      contactName: customer.name,
+      address: "904 Test Street, Northville, MI 48167",
+      lineOfBusiness: "personal",
+      forceNew: true,
+    });
+
+    expect(api.tasks.get(existingActivity.id)).toMatchObject({
+      status: "open",
+    });
+    expect(api.tasks.get(existingActivity.id)?.quoteSessionId).toBeUndefined();
+  });
+
   it("repairs an existing ranking-ready flow without resolving the underlying client activity", async () => {
     const { api } = await import("../api");
     const { db } = await import("../db");

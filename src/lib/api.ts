@@ -109,7 +109,6 @@ import { isLockingMasterAccount } from "./masterAccount";
 import {
   isDocumentOnlyAcordSession,
   isQuotingWorkflowOpen,
-  newestOpenQuotingSessionsPerContact,
 } from "./quotingWorkflows";
 import {
   extractQuoteReplyIntake,
@@ -4124,7 +4123,7 @@ function quoteActivityDescription(session: QuotingSession): string {
 
 function syncQuoteActivityStatus(
   session: QuotingSession,
-  options?: { taskIds?: string[]; actorId?: string }
+  options?: { taskIds?: string[]; actorId?: string; allowFallback?: boolean }
 ): number {
   const explicitTaskIds = new Set(options?.taskIds ?? []);
   const milestonePrefix = `quote-session:${session.id}:`;
@@ -4148,7 +4147,7 @@ function syncQuoteActivityStatus(
   // only the newest unresolved activity that represents the same quote need,
   // and never take a task already owned by another flow. Coverage-change
   // requests often start a quote without using the word "quote" in the task.
-  const fallbackTask = directlyLinkedTasks.length
+  const fallbackTask = directlyLinkedTasks.length || options?.allowFallback === false
     ? undefined
     : db
         .list("tasks")
@@ -6461,23 +6460,6 @@ function existingQuoteIntakeTaskForInbound(inbound: Communication): Task | undef
     .list("tasks")
     .filter((task) => activeQuoteIntakeTask(task, inbound));
 
-  const openSessionIds = new Set(
-    db
-      .list("quotingSessions")
-      .filter(
-        (session) =>
-          session.tenantId === inbound.tenantId &&
-          ((!inbound.customerId || session.customerId === inbound.customerId) &&
-            (!inbound.prospectId || session.prospectId === inbound.prospectId)) &&
-          isQuotingWorkflowOpen(session)
-      )
-      .map((session) => session.id)
-  );
-  const sessionLinked = candidates
-    .filter((task) => openSessionIds.has(task.quoteSessionId ?? ""))
-    .sort((a, b) => (a.createdAt > b.createdAt ? 1 : -1));
-  if (sessionLinked[0]) return sessionLinked[0];
-
   const linked = candidates
     .filter(
       (task) =>
@@ -6494,15 +6476,32 @@ function existingQuoteIntakeTaskForInbound(inbound: Communication): Task | undef
         b.id === inbound.aiActivityTaskId ||
         b.messageId === inbound.id ||
         b.originalMessageId === inbound.id;
-      if (aCreatedFromReply !== bCreatedFromReply) return aCreatedFromReply ? 1 : -1;
-      return a.createdAt > b.createdAt ? 1 : -1;
+      if (aCreatedFromReply !== bCreatedFromReply) return aCreatedFromReply ? -1 : 1;
+      return a.createdAt < b.createdAt ? 1 : -1;
     });
   if (linked[0]) return linked[0];
 
-  // A client can only have one active quote flow. If provider threading is
-  // incomplete, prefer the oldest unresolved quote-intake activity instead
-  // of opening another activity for the reply.
-  return candidates.sort((a, b) => (a.createdAt > b.createdAt ? 1 : -1))[0];
+  const openSessionIds = new Set(
+    db
+      .list("quotingSessions")
+      .filter(
+        (session) =>
+          session.tenantId === inbound.tenantId &&
+          ((!inbound.customerId || session.customerId === inbound.customerId) &&
+            (!inbound.prospectId || session.prospectId === inbound.prospectId)) &&
+          isQuotingWorkflowOpen(session)
+      )
+      .map((session) => session.id)
+  );
+  const sessionLinked = candidates
+    .filter((task) => openSessionIds.has(task.quoteSessionId ?? ""))
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  if (sessionLinked.length === 1) return sessionLinked[0];
+
+  // Multiple quote flows can be open for one contact. Without a provider
+  // thread/message match, selecting one of several activities would create
+  // cross-flow updates. Only use the fallback when it is unambiguous.
+  return candidates.length === 1 ? candidates[0] : undefined;
 }
 
 function consolidateQuoteIntakeActivity(inbound: Communication, canonical: Task): void {
@@ -19492,11 +19491,14 @@ export const api = {
         .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
     },
     reconcileActivities(tenantId: string, actorId = "ai"): number {
-      return newestOpenQuotingSessionsPerContact(
-        tenantFilter(db.list("quotingSessions"), tenantId)
-          .filter((session) => !isDocumentOnlyAcordSession(session))
-          .map(ensureQuotingSessionConsistency)
-      ).reduce(
+      return tenantFilter(db.list("quotingSessions"), tenantId)
+        .filter(
+          (session) =>
+            !isDocumentOnlyAcordSession(session) &&
+            isQuotingWorkflowOpen(session)
+        )
+        .map(ensureQuotingSessionConsistency)
+        .reduce(
         (changed, session) =>
           changed + syncQuoteActivityStatus(session, { actorId }),
         0
@@ -19586,10 +19588,7 @@ export const api = {
         .list("quotingSessions")
         .find(
           (session) =>
-            session.quoteRequestId === input.quoteRequestId ||
-            (session.customerId === input.customerId &&
-              !isDocumentOnlyAcordSession(session) &&
-              isQuotingWorkflowOpen(session))
+            session.quoteRequestId === input.quoteRequestId
         );
       const preservedResponses = Object.fromEntries(
         Object.entries(existing?.questionnaireResponses ?? {}).filter(
@@ -19754,8 +19753,9 @@ export const api = {
       selectedAcordTemplateIds?: string[];
       activityTaskIds?: string[];
       activityActorId?: string;
+      forceNew?: boolean;
     }): Promise<QuotingSession> {
-      const startKey = quotingSessionStartKey(input);
+      const startKey = input.forceNew ? null : quotingSessionStartKey(input);
       const existingOpenSession = startKey
         ? db
             .list("quotingSessions")
@@ -19793,6 +19793,7 @@ export const api = {
         syncQuoteActivityStatus(consistentSession, {
           taskIds: input.activityTaskIds,
           actorId: input.activityActorId ?? input.createdById,
+          allowFallback: !input.forceNew || Boolean(input.activityTaskIds?.length),
         });
         return consistentSession;
       }
@@ -20123,6 +20124,7 @@ export const api = {
       syncQuoteActivityStatus(activeRow, {
         taskIds: input.activityTaskIds,
         actorId: input.activityActorId ?? input.createdById,
+        allowFallback: !input.forceNew || Boolean(input.activityTaskIds?.length),
       });
       if (activeRow.status === "quoting" && !aiProviderErrorBlocksWorkflow(activeRow)) {
         return this.runQuotes(activeRow.id);

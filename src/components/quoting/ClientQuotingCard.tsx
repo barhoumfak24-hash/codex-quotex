@@ -203,20 +203,34 @@ function ContactQuotingCard({
   const convertedCustomerId = customer?.id ?? prospect?.customerId;
   const prospectQuoteRequest = prospect?.quoteRequestId ? api.quotes.get(prospect.quoteRequestId) : undefined;
   const assets = convertedCustomerId ? api.assets.listByCustomer(convertedCustomerId) : [];
-  const existing =
-    contact.kind === "client"
-      ? api.quoting.getForCustomer(contact.record.id)
-      : api.quoting.getForProspect(contact.record.id);
+  const quoteWorkspaceSearch = useMemo(
+    () => new URLSearchParams(location.search),
+    [location.search]
+  );
+  const requestedSessionId = quoteWorkspaceSearch.get("session");
+  const requestedSession = requestedSessionId
+    ? api.quoting.get(requestedSessionId)
+    : undefined;
+  const requestedSessionMatchesContact =
+    requestedSession?.tenantId === tenantId &&
+    (contact.kind === "client"
+      ? requestedSession.customerId === contact.record.id
+      : requestedSession.prospectId === contact.record.id);
+  const forceNewSession = quoteWorkspaceSearch.get("new") === "1";
+  const activityTaskId = quoteWorkspaceSearch.get("activity") ?? undefined;
+  const existing = forceNewSession
+    ? undefined
+    : requestedSessionMatchesContact
+    ? requestedSession
+    : contact.kind === "client"
+    ? api.quoting.getForCustomer(contact.record.id)
+    : api.quoting.getForProspect(contact.record.id);
   const implementedQuote = existing?.quotes.find((quote) => quote.implementation?.policyId);
   const implementedPolicy = implementedQuote?.implementation?.policyId
     ? api.policies.get(implementedQuote.implementation.policyId)
     : undefined;
   const shouldCollapseImplementedWorkspace =
     !!implementedQuote?.implementation?.policyId && !showImplementedQuoteAudit;
-  const quoteWorkspaceSearch = useMemo(
-    () => new URLSearchParams(location.search),
-    [location.search]
-  );
   const shouldExpandFocusedQuoteWorkspace =
     quoteWorkspaceSearch.get("quoteWorkspace") === "expanded";
   const quoteWorkspaceFocusKey = `${location.key}:${location.search}:${location.hash}`;
@@ -435,10 +449,14 @@ function ContactQuotingCard({
   }
 
   if (launcher) {
-    const quoteFlowPath =
+    const quoteFlowBasePath =
       contact.kind === "client"
         ? `/employee/clients/${contactId}/quote-flow`
         : `/employee/prospects/${contactId}/quote-flow`;
+    const quoteFlowPath = existing
+      ? `${quoteFlowBasePath}?session=${encodeURIComponent(existing.id)}`
+      : quoteFlowBasePath;
+    const newQuoteFlowPath = `${quoteFlowBasePath}?new=1`;
     const lineLabel =
       existing?.lineOfBusiness === "commercial"
         ? "Commercial lines"
@@ -447,7 +465,10 @@ function ContactQuotingCard({
         : "Setup pending";
 
     return (
-      <Card id="ai-quoting-workspace" className="relative">
+      <Card
+        id="ai-quoting-workspace"
+        className={`relative ${existing ? "pb-8" : ""}`}
+      >
         <div
           className={
             existing
@@ -481,6 +502,16 @@ function ContactQuotingCard({
             <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
           </Link>
         </div>
+        {existing ? (
+          <Link
+            to={newQuoteFlowPath}
+            className="btn-outline absolute bottom-2 left-1/2 flex h-8 w-8 -translate-x-1/2 items-center justify-center !p-0"
+            aria-label="Start another quote flow"
+            title="Start another quote flow"
+          >
+            <Plus className="h-4 w-4" aria-hidden="true" />
+          </Link>
+        ) : null}
       </Card>
     );
   }
@@ -733,6 +764,9 @@ function ContactQuotingCard({
           deepLinkExpanded={shouldExpandFocusedQuoteWorkspace}
           deepLinkFocusKey={`${quoteWorkspaceFocusKey}:${selectedLineOfBusiness ?? "none"}`}
           standalone={standalone}
+          sessionId={requestedSessionMatchesContact ? requestedSession?.id : undefined}
+          forceNewSession={forceNewSession}
+          activityTaskId={activityTaskId}
         />
       )}
     </Card>

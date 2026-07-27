@@ -288,9 +288,17 @@ describe("AiQuotingWorkspace component", () => {
     expect(
       host.querySelector('[aria-label^="Workflow progress"]')?.closest('[class*="lg:grid-cols-"]')
     ).toBeTruthy();
+    const activeSession = api.quoting.getForCustomer(customer.id)!;
     expect(
-      host.querySelector(`a[href="/employee/clients/${customer.id}/quote-flow"]`)?.textContent
+      host.querySelector(
+        `a[href="/employee/clients/${customer.id}/quote-flow?session=${activeSession.id}"]`
+      )?.textContent
     ).toContain("Continue quote flow");
+    expect(
+      host.querySelector(
+        `a[href="/employee/clients/${customer.id}/quote-flow?new=1"][aria-label="Start another quote flow"]`
+      )
+    ).toBeTruthy();
 
     await act(async () => {
       root.unmount();

@@ -307,6 +307,9 @@ export function AiQuotingWorkspace({
   deepLinkFocusKey,
   setupControls,
   standalone = false,
+  sessionId,
+  forceNewSession = false,
+  activityTaskId,
 }: {
   tenantId: string;
   userId: string;
@@ -346,6 +349,9 @@ export function AiQuotingWorkspace({
   deepLinkFocusKey?: string;
   setupControls?: ReactNode;
   standalone?: boolean;
+  sessionId?: string;
+  forceNewSession?: boolean;
+  activityTaskId?: string;
 }) {
   const location = useLocation();
   const navigate = useNavigate();
@@ -414,10 +420,19 @@ export function AiQuotingWorkspace({
     window.addEventListener("quotex-ai-gateway-failure", onFailure);
     return () => window.removeEventListener("quotex-ai-gateway-failure", onFailure);
   }, []);
-  const session =
-    contact.kind === "prospect"
-      ? api.quoting.getForProspect(contact.id)
-      : api.quoting.getForCustomer(contact.id);
+  const requestedSession = sessionId ? api.quoting.get(sessionId) : undefined;
+  const requestedSessionMatchesContact =
+    requestedSession?.tenantId === tenantId &&
+    (contact.kind === "prospect"
+      ? requestedSession.prospectId === contact.id
+      : requestedSession.customerId === contact.id);
+  const session = forceNewSession
+    ? undefined
+    : requestedSessionMatchesContact
+    ? requestedSession
+    : contact.kind === "prospect"
+    ? api.quoting.getForProspect(contact.id)
+    : api.quoting.getForCustomer(contact.id);
   useEffect(() => {
     if (!session?.id) return;
     void api.quoting
@@ -540,7 +555,7 @@ export function AiQuotingWorkspace({
     openWorkspace();
     setBusy("start");
     try {
-      await api.quoting.startSession({
+      const createdSession = await api.quoting.startSession({
         tenantId,
         prospectId: contact.kind === "prospect" ? contact.id : undefined,
         customerId: contact.kind === "client" ? contact.id : undefined,
@@ -559,7 +574,24 @@ export function AiQuotingWorkspace({
         selectedAcordTemplateIds:
           selectedLine === "commercial" ? selectedAcordTemplateIds : undefined,
         assets: contact.assets,
+        forceNew: forceNewSession,
+        activityTaskIds: activityTaskId ? [activityTaskId] : undefined,
+        activityActorId: userId,
       });
+      if (standalone) {
+        const params = new URLSearchParams(location.search);
+        params.set("session", createdSession.id);
+        params.delete("new");
+        params.delete("activity");
+        navigate(
+          {
+            pathname: location.pathname,
+            search: `?${params.toString()}`,
+            hash: location.hash,
+          },
+          { replace: true }
+        );
+      }
       onChanged?.();
     } catch (error) {
       handleAiFailure(quoteWorkspaceFailure("AI mapping could not start. Please try again.", error));
