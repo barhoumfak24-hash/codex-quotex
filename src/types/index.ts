@@ -2728,6 +2728,10 @@ export type AiNotificationKind =
 export interface AiNotification {
   id: string;
   tenantId: string;
+  // Stable identity for the real-world event that produced this
+  // notification. Background retries and mailbox re-syncs must reuse the
+  // same row, including after it has been acknowledged.
+  eventKey?: string;
   kind: AiNotificationKind;
   title: string;
   summary: string;

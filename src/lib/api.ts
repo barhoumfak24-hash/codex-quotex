@@ -3518,6 +3518,49 @@ function inboundEmailActivityKey(row: Communication): string {
   return `inbound-email:${inboundEmailIdentity(row)}`;
 }
 
+function inboundNotificationEventKey(row: Communication, purpose: string): string {
+  return `inbound-notification:${inboundEmailIdentity(row)}:${purpose}`;
+}
+
+function ensureAiNotification(
+  input: Omit<AiNotification, "id" | "createdAt"> & { eventKey: string },
+  legacyMatch?: (notification: AiNotification) => boolean
+): { notification: AiNotification; created: boolean } {
+  let existing = db
+    .list("aiNotifications")
+    .find(
+      (notification) =>
+        notification.tenantId === input.tenantId &&
+        notification.eventKey === input.eventKey
+    );
+  if (!existing && legacyMatch) {
+    existing = db
+      .list("aiNotifications")
+      .find(
+        (notification) =>
+          notification.tenantId === input.tenantId &&
+          !notification.eventKey &&
+          legacyMatch(notification)
+      );
+  }
+  if (existing) {
+    const migrated =
+      existing.eventKey === input.eventKey
+        ? existing
+        : db.update("aiNotifications", existing.id, { eventKey: input.eventKey }) ??
+          existing;
+    return { notification: migrated, created: false };
+  }
+
+  const notification: AiNotification = {
+    ...input,
+    id: uid("ain"),
+    createdAt: nowIso(),
+  };
+  db.insert("aiNotifications", notification);
+  return { notification, created: true };
+}
+
 function inboundEmailCopies(row: Communication): Communication[] {
   const identity = inboundEmailIdentity(row);
   return db
@@ -3962,35 +4005,27 @@ function createQuoteReadyNotification(
     severityReason?: string;
   }
 ): AiNotification {
-  const existing = db
-    .list("aiNotifications")
-    .find(
-      (notification) =>
-        notification.tenantId === session.tenantId &&
-        notification.kind === "quote_ready" &&
-        notification.quoteSessionId === session.id &&
-        !notification.acknowledgedAt
-    );
-  if (existing) return existing;
-  const row: AiNotification = {
-    id: uid("ain"),
-    tenantId: session.tenantId,
-    kind: "quote_ready",
-    title: input.title,
-    summary: input.summary,
-    customerId: session.customerId,
-    prospectId: session.prospectId,
-    assetId: session.assetId,
-    quoteSessionId: session.id,
-    quoteRequestId: session.quoteRequestId,
-    topic: "other",
-    severity: input.severity ?? "warning",
-    severityReason: input.severityReason,
-    assignedToId: quoteSessionAssignedStaff(session),
-    createdAt: nowIso(),
-  };
-  db.insert("aiNotifications", row);
-  return row;
+  return ensureAiNotification(
+    {
+      tenantId: session.tenantId,
+      eventKey: `quote-ready:${session.id}`,
+      kind: "quote_ready",
+      title: input.title,
+      summary: input.summary,
+      customerId: session.customerId,
+      prospectId: session.prospectId,
+      assetId: session.assetId,
+      quoteSessionId: session.id,
+      quoteRequestId: session.quoteRequestId,
+      topic: "other",
+      severity: input.severity ?? "warning",
+      severityReason: input.severityReason,
+      assignedToId: quoteSessionAssignedStaff(session),
+    },
+    (notification) =>
+      notification.kind === "quote_ready" &&
+      notification.quoteSessionId === session.id
+  ).notification;
 }
 
 function resolveQuoteMilestoneTasks(
@@ -4764,34 +4799,26 @@ function ensureDocumentReviewNotice(doc: Document, actorId?: string): AiNotifica
   if (uploader?.role !== "customer") return null;
   const customer = db.list("customers").find((c) => c.id === doc.customerId);
   resolveActionTasks(doc.tenantId, [key], actorId, "task.resolved_by_document_notice");
-  const existing = db
-    .list("aiNotifications")
-    .find(
-      (n) =>
-        n.tenantId === doc.tenantId &&
-        n.kind === "inbound_notice" &&
-        n.documentId === doc.id &&
-        !n.acknowledgedAt
-    );
-  if (existing) return existing;
-  const row: AiNotification = {
-    id: uid("ain"),
-    tenantId: doc.tenantId,
-    kind: "inbound_notice",
-    title: `Document uploaded: ${doc.fileName}`,
-    summary: `${customer?.name ?? "A client"} uploaded ${doc.fileName}.`,
-    customerId: doc.customerId,
-    assetId: doc.assetId,
-    policyId: doc.policyId,
-    documentId: doc.id,
-    topic: "document_upload",
-    severity: "info",
-    severityReason: "Document upload notification; no owned activity was opened.",
-    assignedToId: primaryOwnerForCustomer(customer),
-    createdAt: nowIso(),
-  };
-  db.insert("aiNotifications", row);
-  return row;
+  return ensureAiNotification(
+    {
+      tenantId: doc.tenantId,
+      eventKey: `document-review:${doc.id}`,
+      kind: "inbound_notice",
+      title: `Document uploaded: ${doc.fileName}`,
+      summary: `${customer?.name ?? "A client"} uploaded ${doc.fileName}.`,
+      customerId: doc.customerId,
+      assetId: doc.assetId,
+      policyId: doc.policyId,
+      documentId: doc.id,
+      topic: "document_upload",
+      severity: "info",
+      severityReason: "Document upload notification; no owned activity was opened.",
+      assignedToId: primaryOwnerForCustomer(customer),
+    },
+    (notification) =>
+      notification.kind === "inbound_notice" &&
+      notification.documentId === doc.id
+  ).notification;
 }
 
 function bumpRenewalTaskForDraft(draft: Document, actorId?: string) {
@@ -6228,21 +6255,7 @@ function communicationHasKnownMailboxContact(row: Communication): boolean {
 }
 
 function communicationNeedsInboundTriage(row: Communication): boolean {
-  if (!row.aiActivityScannedAt) return true;
-  if (row.aiTriageVersion === INBOUND_TRIAGE_VERSION || row.aiReplyDraftId) return false;
-  const contactKind: "client" | "prospect" | "carrier" = row.customerId
-    ? "client"
-    : row.prospectId
-      ? "prospect"
-      : "carrier";
-  return (
-    aiClassifyInboundForActivity({
-      body: row.body,
-      subject: row.subject,
-      channel: typeof row.channel === "string" ? row.channel : undefined,
-      contactKind,
-    }).serviceIntent === "vehicle_quote_intake"
-  );
+  return !row.aiActivityScannedAt;
 }
 
 type PersonalQuoteAutomationResult = {
@@ -17012,19 +17025,13 @@ export const api = {
               assignedToId,
               questions,
             });
-            const existingNotification = db
-              .list("aiNotifications")
-              .find(
-                (row) =>
-                  row.communicationId === c.id && row.messageId === draft.id
-              );
             const missingLabel = questions
               .map((question) => (question === "vin" ? "the VIN" : "personal or commercial use"))
               .join(" and ");
-            const notification: AiNotification =
-              existingNotification ?? {
-                id: uid("ain"),
+            const notification = ensureAiNotification(
+              {
                 tenantId,
+                eventKey: inboundNotificationEventKey(c, "vehicle-quote-draft"),
                 kind: "inbound_notice",
                 title: `Draft ready: vehicle quote details - ${contact.name}`,
                 summary: `Quotex prepared an unsent reply asking for ${missingLabel}. Review it before sending.`,
@@ -17042,9 +17049,9 @@ export const api = {
                 aiReplyBody: draft.body,
                 aiReplySubject: draft.subject,
                 assignedToId,
-                createdAt: nowIso(),
-              };
-            if (!existingNotification) db.insert("aiNotifications", notification);
+              },
+              (candidate) => candidate.communicationId === c.id
+            ).notification;
             const task = ensureInboundDraftFollowUpTask({
               inbound: c,
               assignedToId,
@@ -17108,16 +17115,13 @@ export const api = {
               intent: triage.serviceIntent,
               document: requestedDocument,
             });
-            const existingNotification = db
-              .list("aiNotifications")
-              .find(
-                (row) =>
-                  row.communicationId === c.id && row.messageId === draft.id
-              );
-            const notification: AiNotification =
-              existingNotification ?? {
-                id: uid("ain"),
+            const notification = ensureAiNotification(
+              {
                 tenantId,
+                eventKey: inboundNotificationEventKey(
+                  c,
+                  `service-draft:${triage.serviceIntent}`
+                ),
                 kind: "inbound_notice",
                 title: `Draft ready: ${inboundServiceLabel(triage.serviceIntent)} - ${customer.name}`,
                 summary: `Quotex prepared a reply and attached ${requestedDocument.fileName}. Review it before sending.`,
@@ -17136,9 +17140,9 @@ export const api = {
                 aiReplyBody: draft.body,
                 aiReplySubject: draft.subject,
                 assignedToId,
-                createdAt: nowIso(),
-              };
-            if (!existingNotification) db.insert("aiNotifications", notification);
+              },
+              (candidate) => candidate.communicationId === c.id
+            ).notification;
             const task = ensureInboundDraftFollowUpTask({
               inbound: c,
               assignedToId,
@@ -17209,27 +17213,28 @@ export const api = {
             .list("users")
             .find((u) => u.tenantId === tenantId && isRoutingManagerRole(u.role) && u.active)?.id;
           const preview = c.body.trim().replace(/\s+/g, " ");
-          const row: AiNotification = {
-            id: uid("ain"),
-            tenantId,
-            kind: "inbound_notice",
-            title: `Notification: ${triage.title}`,
-            summary:
-              preview.length > 120
-                ? `${preview.slice(0, 117)}...`
-                : preview || `Inbound ${topicLabel(triage.topic)} update received.`,
-            customerId: c.customerId,
-            prospectId: c.prospectId,
-            communicationId: c.id,
-            topic: triage.topic,
-            severity: triage.severity,
-            severityReason: "Informational inbound message; no owned activity was opened.",
-            originalMessageContent: c.body,
-            originalMessageId: c.id,
-            assignedToId: assignedToId ?? managerId,
-            createdAt: nowIso(),
-          };
-          db.insert("aiNotifications", row);
+          const row = ensureAiNotification(
+            {
+              tenantId,
+              eventKey: inboundNotificationEventKey(c, "informational"),
+              kind: "inbound_notice",
+              title: `Notification: ${triage.title}`,
+              summary:
+                preview.length > 120
+                  ? `${preview.slice(0, 117)}...`
+                  : preview || `Inbound ${topicLabel(triage.topic)} update received.`,
+              customerId: c.customerId,
+              prospectId: c.prospectId,
+              communicationId: c.id,
+              topic: triage.topic,
+              severity: triage.severity,
+              severityReason: "Informational inbound message; no owned activity was opened.",
+              originalMessageContent: c.body,
+              originalMessageId: c.id,
+              assignedToId: assignedToId ?? managerId,
+            },
+            (candidate) => candidate.communicationId === c.id
+          ).notification;
           patch.aiActivityNotificationId = row.id;
           created.push({ communicationId: c.id, notification: row });
         }
@@ -17569,6 +17574,12 @@ export const api = {
     // Generic insert — used for non-policy notifications like goal
     // achievements that don't go through requestEdit.
     create(input: Omit<AiNotification, "id" | "createdAt">): AiNotification {
+      if (input.eventKey) {
+        return ensureAiNotification({
+          ...input,
+          eventKey: input.eventKey,
+        }).notification;
+      }
       const row: AiNotification = { ...input, id: uid("ain"), createdAt: nowIso() };
       db.insert("aiNotifications", row);
       return row;

@@ -514,7 +514,7 @@ describe("communications.sweepInboundForActivities", () => {
     ).toHaveLength(1);
   });
 
-  it("rechecks a vehicle quote email scanned by the older triage rule", async () => {
+  it("does not turn a previously scanned email into new work after a triage update", async () => {
     const { api } = await import("../api");
     const { db } = await import("../db");
     const agency = api.agencies.list()[0];
@@ -535,24 +535,51 @@ describe("communications.sweepInboundForActivities", () => {
     });
 
     const created = api.communications.sweepInboundForActivities(agency.id);
-    expect(created).toHaveLength(1);
-    expect(created[0].task).toEqual(
-      expect.objectContaining({
-        customerId: customer.id,
-        messageId: inbound.id,
-        topic: "coverage_change",
-        status: "open",
-      })
-    );
-    expect(created[0].notification?.messageId).toBeTruthy();
+    expect(created).toHaveLength(0);
     const fresh = api.communications.listByCustomer(customer.id).find((row) => row.id === inbound.id)!;
-    expect(fresh.aiTriageVersion).toBe("2026-07-24-v4");
-    expect(fresh.aiReplyDraftId).toBeTruthy();
-    expect(fresh.aiActivityTaskId).toBe(created[0].task!.id);
-    expect(api.communications.sweepInboundForActivities(agency.id)).toHaveLength(0);
+    expect(fresh.aiTriageVersion).toBe("2026-07-22-v2");
+    expect(fresh.aiReplyDraftId).toBeUndefined();
     expect(
       api.tasks.listByTenant(agency.id).filter((task) => task.messageId === inbound.id)
-    ).toHaveLength(1);
+    ).toHaveLength(0);
+  });
+
+  it("reuses the same notification when a mailbox retry loses scan metadata", async () => {
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    const agency = api.agencies.list()[0];
+    const customer = api.customers.list(agency.id)[0];
+    const inbound = api.communications.create({
+      tenantId: agency.id,
+      customerId: customer.id,
+      channel: "email",
+      direction: "inbound",
+      body: "I uploaded the signed form.",
+      messageIdHeader: "<durable-notification@example.com>",
+    });
+
+    const first = api.communications.sweepInboundForActivities(agency.id);
+    const notification = first[0]?.notification;
+    expect(notification?.eventKey).toBe(
+      "inbound-notification:message:durable-notification@example.com:informational"
+    );
+    api.aiNotifications.dismiss(notification!.id, customer.assignedAgentId);
+    const eventKey = notification!.eventKey;
+    db.update("aiNotifications", notification!.id, { eventKey: undefined });
+
+    db.update("communications", inbound.id, {
+      aiActivityScannedAt: undefined,
+      aiActivityNotificationId: undefined,
+      aiTriageVersion: undefined,
+    });
+
+    api.communications.sweepInboundForActivities(agency.id);
+    const matching = api.aiNotifications
+      .listByTenant(agency.id)
+      .filter((row) => row.eventKey === eventKey);
+    expect(matching).toHaveLength(1);
+    expect(matching[0].id).toBe(notification!.id);
+    expect(matching[0].acknowledgedAt).toBeTruthy();
   });
 
   it("opens a review activity instead of drafting when no approved document exists", async () => {
