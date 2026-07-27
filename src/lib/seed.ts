@@ -1088,6 +1088,21 @@ const RAW_SEED_CARRIERS: Carrier[] = [
     status: "active",
     createdAt: now(176),
   },
+  {
+    id: id("carrier_insurance_agent_hub"),
+    name: "Insurance Agent Hub",
+    claimsUrl: "https://insurance-agent-hub.replit.app/sign-in",
+    agentPortalUrl: "https://insurance-agent-hub.replit.app/sign-in",
+    appetiteNotes: "Agency-configured carrier portal available through Quotex Connect.",
+    tendencyNotes: "Pricing and placement are supplied by the connected carrier portal.",
+    underwritingRules:
+      "Use only after the agency links this carrier and completes its authorized portal setup.",
+    preferredAssetTypes: [],
+    stateAvailability: [],
+    appetites: [],
+    status: "active",
+    createdAt: now(174),
+  },
 ];
 
 export const SEED_CARRIERS: Carrier[] = RAW_SEED_CARRIERS.map(applyCarrierPortalPlaybook);

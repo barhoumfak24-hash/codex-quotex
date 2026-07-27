@@ -107,3 +107,38 @@ describe("createQuotexConnectJob", () => {
     });
   });
 });
+
+describe("quotexConnectQuoteCarrierIds", () => {
+  it("routes every ranked personal carrier once", async () => {
+    const { quotexConnectQuoteCarrierIds } = await import("../quotexConnect");
+
+    expect(
+      quotexConnectQuoteCarrierIds({
+        lineOfBusiness: "personal",
+        quotes: [
+          { carrierId: "carrier-a" },
+          { carrierId: "carrier-b" },
+          { carrierId: "carrier-a" },
+        ],
+      })
+    ).toEqual(["carrier-a", "carrier-b"]);
+  });
+
+  it("routes dispatched commercial carriers and skips failed or declined markets", async () => {
+    const { quotexConnectQuoteCarrierIds } = await import("../quotexConnect");
+
+    expect(
+      quotexConnectQuoteCarrierIds({
+        lineOfBusiness: "commercial",
+        quotes: [],
+        commercialCarrierSubmissions: [
+          { carrierId: "carrier-a", status: "awaiting_response" },
+          { carrierId: "carrier-b", status: "accepted" },
+          { carrierId: "carrier-c", status: "send_failed" },
+          { carrierId: "carrier-d", status: "declined" },
+          { carrierId: "carrier-a", status: "awaiting_response" },
+        ],
+      })
+    ).toEqual(["carrier-a", "carrier-b"]);
+  });
+});

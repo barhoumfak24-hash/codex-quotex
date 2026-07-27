@@ -42,6 +42,27 @@ export class QuotexConnectError extends Error {
   }
 }
 
+export function quotexConnectQuoteCarrierIds(session: {
+  lineOfBusiness?: "personal" | "commercial";
+  quotes: Array<{ carrierId: string }>;
+  commercialCarrierSubmissions?: Array<{
+    carrierId: string;
+    status: string;
+  }>;
+}): string[] {
+  const carrierIds =
+    session.lineOfBusiness === "commercial"
+      ? (session.commercialCarrierSubmissions ?? [])
+          .filter(
+            (submission) =>
+              submission.status !== "send_failed" && submission.status !== "declined"
+          )
+          .map((submission) => submission.carrierId)
+      : session.quotes.map((quote) => quote.carrierId);
+
+  return [...new Set(carrierIds.filter(Boolean))];
+}
+
 export async function createQuotexConnectJob(input: {
   carrierId: string;
   carrierName: string;

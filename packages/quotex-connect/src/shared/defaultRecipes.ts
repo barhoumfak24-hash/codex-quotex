@@ -284,6 +284,14 @@ export const DEFAULT_RECIPES: CarrierRecipe[] = [
     name: "MEEMIC Insurance",
     loginUrl: "https://www.meemic.com",
     domainMatch: "*://*.meemic.com/*"
+  }),
+  recipe({
+    id: "carrier_insurance_agent_hub",
+    name: "Insurance Agent Hub",
+    loginUrl: "https://insurance-agent-hub.replit.app/sign-in",
+    domainMatch: "*://*.insurance-agent-hub.replit.app/*",
+    notes:
+      "Agency-configured carrier portal. Save the authorized login locally in Quotex Connect before use."
   })
 ];
 

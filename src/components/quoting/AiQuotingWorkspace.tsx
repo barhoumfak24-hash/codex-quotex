@@ -61,6 +61,11 @@ import {
   quoteMatchCriteriaTitle,
   quoteMatchPercent,
 } from "@/lib/quoteMatch";
+import {
+  createQuotexConnectJob,
+  quotexConnectQuoteCarrierIds,
+  QuotexConnectError,
+} from "@/lib/quotexConnect";
 import { allCommercialCarrierSubmissionsHaveReplies } from "@/lib/quotingWorkflows";
 import { isVinInputField, normalizeVinFieldValue } from "@/lib/vinInput";
 import type {
@@ -369,6 +374,7 @@ export function AiQuotingWorkspace({
   const [setupMappingInFlight, setSetupMappingInFlight] = useState(false);
   const activeContactIdRef = useRef(contact.id);
   const mappingClearTimerRef = useRef<number | null>(null);
+  const connectQuoteJobsAttemptedRef = useRef(new Set<string>());
   const handleAiFailure = (failure: AiGatewayFailureDetail) => {
     console.warn("[quotex-ai-quoting-workspace] AI diagnostic retained outside UI", failure);
   };
@@ -433,6 +439,55 @@ export function AiQuotingWorkspace({
     : contact.kind === "prospect"
     ? api.quoting.getForProspect(contact.id)
     : api.quoting.getForCustomer(contact.id);
+  const connectQuoteTargets = useMemo(() => {
+    if (!session?.id) return [];
+    return quotexConnectQuoteCarrierIds(session).flatMap((carrierId) => {
+      const carrier = api.carriers.get(carrierId);
+      if (!carrier) return [];
+      const portalUrl =
+        carrier.quotingAutomation?.agentPortalUrl ??
+        carrier.agentPortalUrl ??
+        carrier.billingPortalUrl ??
+        carrier.claimsUrl;
+      if (!portalUrl) return [];
+      return [
+        {
+          carrierId: carrier.id,
+          carrierName: carrier.name,
+          portalUrl,
+        },
+      ];
+    });
+  }, [session?.id, session?.lineOfBusiness, session?.updatedAt]);
+  const connectQuoteTargetSignature = connectQuoteTargets
+    .map((target) => `${target.carrierId}:${target.portalUrl}`)
+    .join("|");
+  useEffect(() => {
+    if (!session?.id || connectQuoteTargets.length === 0) return;
+
+    for (const target of connectQuoteTargets) {
+      const attemptKey = `${session.id}:${target.carrierId}:retrieve_quote`;
+      if (connectQuoteJobsAttemptedRef.current.has(attemptKey)) continue;
+      connectQuoteJobsAttemptedRef.current.add(attemptKey);
+      void createQuotexConnectJob({
+        quoteSessionId: session.id,
+        carrierId: target.carrierId,
+        carrierName: target.carrierName,
+        jobType: "retrieve_quote",
+        payload: {
+          portalUrl: target.portalUrl,
+          lineOfBusiness: session.lineOfBusiness,
+          assetType: session.assetType,
+        },
+      }).catch((error) => {
+        connectQuoteJobsAttemptedRef.current.delete(attemptKey);
+        console.warn(
+          `[quotex-connect] Quote retrieval could not be assigned for ${target.carrierName}.`,
+          error
+        );
+      });
+    }
+  }, [connectQuoteTargetSignature, session?.assetType, session?.id, session?.lineOfBusiness]);
   useEffect(() => {
     if (!session?.id) return;
     void api.quoting
@@ -6299,8 +6354,10 @@ function QuickViewQuoteModal({
   onClose: () => void;
 }) {
   const [carrierNotice, setCarrierNotice] = useState<string | null>(null);
+  const [carrierOpening, setCarrierOpening] = useState(false);
   useEffect(() => {
     setCarrierNotice(null);
+    setCarrierOpening(false);
   }, [quote?.carrierId, session.id]);
 
   if (!quote) {
@@ -6337,6 +6394,38 @@ function QuickViewQuoteModal({
     quote;
   const implementation = currentQuote.implementation;
   const carrierPortalUrl = implementation?.carrierPortalUrl ?? carrier?.agentPortalUrl;
+
+  async function openCarrierWithQuotexConnect(): Promise<void> {
+    if (!carrierPortalUrl) {
+      setCarrierNotice("No carrier portal URL is configured.");
+      return;
+    }
+
+    setCarrierOpening(true);
+    setCarrierNotice(null);
+    try {
+      const result = await createQuotexConnectJob({
+        quoteSessionId: session.id,
+        carrierId: currentQuote.carrierId,
+        carrierName: carrier?.name ?? "Carrier",
+        jobType: "retrieve_quote",
+        payload: { portalUrl: carrierPortalUrl },
+      });
+      setCarrierNotice(
+        result.reused
+          ? "This carrier action is already assigned to your paired Quotex Connect browser."
+          : "Sent securely to your paired Quotex Connect browser. Complete carrier sign-in or 2FA there if prompted."
+      );
+    } catch (error) {
+      setCarrierNotice(
+        error instanceof QuotexConnectError
+          ? error.message
+          : "Quotex Connect could not start this carrier action."
+      );
+    } finally {
+      setCarrierOpening(false);
+    }
+  }
 
   // Derive a quick coverage suggestion from the asset value so the
   // modal feels like a real quote breakdown.
@@ -6584,15 +6673,19 @@ function QuickViewQuoteModal({
               <Row
                 label="Carrier portal"
                 value={
-                  <a
-                    href={carrierPortalUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
+                  <button
+                    type="button"
+                    onClick={() => void openCarrierWithQuotexConnect()}
+                    disabled={carrierOpening}
                     className="inline-flex items-center gap-1 text-blue-700 hover:underline"
                   >
-                    Open carrier portal
-                    <ExternalLink className="h-3 w-3" />
-                  </a>
+                    {carrierOpening ? "Opening securely" : "Open carrier portal"}
+                    {carrierOpening ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <ExternalLink className="h-3 w-3" />
+                    )}
+                  </button>
                 }
               />
             )}
@@ -6728,15 +6821,15 @@ function QuickViewQuoteModal({
             <button
               type="button"
               className="btn-outline text-sm"
-              onClick={() => {
-                if (carrierPortalUrl) {
-                  window.open(carrierPortalUrl, "_blank", "noopener,noreferrer");
-                  return;
-                }
-                setCarrierNotice("No carrier portal URL is configured.");
-              }}
+              onClick={() => void openCarrierWithQuotexConnect()}
+              disabled={carrierOpening}
             >
-              <ExternalLink className="h-3.5 w-3.5" /> View on carrier
+              {carrierOpening ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <ExternalLink className="h-3.5 w-3.5" />
+              )}
+              {carrierOpening ? "Opening..." : "View on carrier"}
             </button>
             <SendQuoteToContactButton
               session={session}

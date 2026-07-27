@@ -40,4 +40,16 @@ describe("carrier directory", () => {
     expect(CARRIER_DIRECTORY_PAYLOAD.count).toBe(SEED_CARRIERS.length);
     expect(CARRIER_DIRECTORY_PAYLOAD.carriers).toHaveLength(SEED_CARRIERS.length);
   });
+
+  it("includes the agency-configured Insurance Agent Hub portal", () => {
+    const carrier = SEED_CARRIERS.find(
+      (candidate) => candidate.id === "carrier_insurance_agent_hub"
+    );
+
+    expect(carrier).toMatchObject({
+      name: "Insurance Agent Hub",
+      agentPortalUrl: "https://insurance-agent-hub.replit.app/sign-in",
+      status: "active",
+    });
+  });
 });

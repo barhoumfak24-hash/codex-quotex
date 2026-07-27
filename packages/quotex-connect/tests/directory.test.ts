@@ -12,9 +12,9 @@ const manifest = JSON.parse(
 ) as ExtensionManifest;
 
 describe("carrier directory", () => {
-  it("contains the complete 42-carrier launcher directory", () => {
-    expect(DEFAULT_RECIPES).toHaveLength(42);
-    expect(new Set(DEFAULT_RECIPES.map((recipe) => recipe.id)).size).toBe(42);
+  it("contains the complete 43-carrier launcher directory", () => {
+    expect(DEFAULT_RECIPES).toHaveLength(43);
+    expect(new Set(DEFAULT_RECIPES.map((recipe) => recipe.id)).size).toBe(43);
 
     for (const recipe of DEFAULT_RECIPES) {
       expect(recipe.id).toMatch(/^carrier_/);
@@ -22,6 +22,15 @@ describe("carrier directory", () => {
       expect(() => new URL(recipe.loginUrl)).not.toThrow();
       expect(recipe.domainMatch).toMatch(/^\*:\/\/\*\.[^/]+\/\*$/);
     }
+
+    expect(DEFAULT_RECIPES).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "carrier_insurance_agent_hub",
+          loginUrl: "https://insurance-agent-hub.replit.app/sign-in",
+        }),
+      ])
+    );
   });
 
   it("keeps manifest permissions synchronized with the directory", () => {

@@ -3,7 +3,7 @@
 
 export const CARRIER_DIRECTORY_PAYLOAD = {
   "generatedAt": "2026-07-04T00:00:00.000Z",
-  "count": 42,
+  "count": 43,
   "carriers": [
     {
       "id": "carrier_chubb",
@@ -550,6 +550,19 @@ export const CARRIER_DIRECTORY_PAYLOAD = {
       "id": "carrier_meemic",
       "name": "MEEMIC Insurance",
       "loginUrl": "https://www.meemic.com",
+      "lineOfBusiness": "personal",
+      "linesOfBusiness": [
+        "personal"
+      ],
+      "logoUrl": "",
+      "preferredAssetTypes": [],
+      "stateAvailability": [],
+      "status": "active"
+    },
+    {
+      "id": "carrier_insurance_agent_hub",
+      "name": "Insurance Agent Hub",
+      "loginUrl": "https://insurance-agent-hub.replit.app/sign-in",
       "lineOfBusiness": "personal",
       "linesOfBusiness": [
         "personal"
