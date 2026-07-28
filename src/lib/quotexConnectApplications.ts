@@ -137,7 +137,7 @@ function buildVehicle(fields: FieldBag): Record<string, unknown> | null {
   const year = numberFor(fields, "Year", "Vehicle year");
   const make = valueFor(fields, "Make", "Vehicle make");
   const model = valueFor(fields, "Model", "Vehicle model");
-  if (!/^[A-HJ-NPR-Z0-9]{17}$/.test(vin) || !year || !make || !model) return null;
+  if (!/^[A-HJ-NPR-Z0-9]{17}$/.test(vin)) return null;
 
   return compactRecord({
     vin,

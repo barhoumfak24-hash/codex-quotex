@@ -78,16 +78,33 @@ describe("buildQuotexConnectCarrierApplication", () => {
     ]);
   });
 
-  it("fails closed when an auto submission lacks carrier-required vehicle facts", () => {
+  it("allows a valid VIN to reach a carrier that performs its own VIN decode", () => {
     const application = buildQuotexConnectCarrierApplication({
       clientName: "Alexandra Whitford",
       session: session({
         assetType: "luxury_vehicle",
         assetDetails: {
           vin: "1HGCM82633A004352",
-          year: "2003",
-          make: "Honda",
         },
+      }),
+    });
+
+    expect(application).toMatchObject({
+      policyType: "auto",
+      vehicles: [{ vin: "1HGCM82633A004352" }],
+    });
+    const vehicle = (application?.vehicles as Array<Record<string, unknown>> | undefined)?.[0];
+    expect(vehicle).not.toHaveProperty("year");
+    expect(vehicle).not.toHaveProperty("make");
+    expect(vehicle).not.toHaveProperty("model");
+  });
+
+  it("still rejects a malformed VIN", () => {
+    const application = buildQuotexConnectCarrierApplication({
+      clientName: "Alexandra Whitford",
+      session: session({
+        assetType: "luxury_vehicle",
+        assetDetails: { vin: "NOT-A-VIN" },
       }),
     });
 
