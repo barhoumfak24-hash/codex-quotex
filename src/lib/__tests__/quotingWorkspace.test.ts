@@ -678,6 +678,78 @@ describe("api.quoting workspace", () => {
     expect(session.questionnaireResponseMeta?.[yearBuilt!.id]?.sourceUrl).toBe("https://example.com/property");
   });
 
+  it("accepts exact QuoteX dossier facts for personal-auto questions outside the public-research whitelist", async () => {
+    vi.resetModules();
+    const ai = await import("../ai");
+    vi.spyOn(ai, "aiMapAcordFields").mockImplementation(async (input) => {
+      const applicantOccupation = input.fields.find(
+        (field) => field.acordFieldKey === "primaryOccupation"
+      );
+      expect(applicantOccupation).toBeTruthy();
+      return {
+        fields: {},
+        publicFieldEvidence: {
+          primaryOccupation: {
+            fieldKey: "primaryOccupation",
+            sourceKind: "agent_seed",
+            sourceLabel: "QuoteX client profile",
+            confidence: 1,
+            verified: true,
+            allowDocumentAutofill: true,
+            collectedAt: "2026-06-26T12:00:00.000Z",
+          },
+        },
+        mappings: [
+          {
+            targetId: applicantOccupation!.id,
+            targetField: "primaryOccupation",
+            value: "Architect",
+            sourceLabel: "QuoteX client profile",
+            sourceKind: "agent_seed",
+            confidence: 1,
+            verified: true,
+            rationale: "Exact occupation stored on the client profile.",
+          },
+        ],
+        missingFields: [],
+        webSources: [],
+        summary: "Mapped exact QuoteX dossier facts.",
+        confidence: 1,
+      };
+    });
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    db.reset();
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((user) => user.role === "agent")!;
+    const customer = api.customers.list(agency.id)[0];
+    const category = api.categories.get("cat_standard_auto")!;
+
+    const session = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: agent.id,
+      assetType: "luxury_vehicle",
+      categoryId: category.id,
+      categoryLabel: category.label,
+      contactName: "Avery Stone",
+      assetDetails: {
+        vin: "1HGCM82633A004352",
+      },
+      lineOfBusiness: "personal",
+      forceNew: true,
+    });
+
+    const occupationQuestion = session.questionnaireQuestions?.find(
+      (question) => question.acordFieldKey === "primaryOccupation"
+    );
+    expect(occupationQuestion).toBeTruthy();
+    expect(session.questionnaireResponses?.[occupationQuestion!.id]).toBe("Architect");
+    expect(session.questionnaireResponseMeta?.[occupationQuestion!.id]?.sourceKind).toBe(
+      "agent_seed"
+    );
+  });
+
   it("does not prefill low-confidence estimate-only sweep answers into editable questionnaire responses", async () => {
     const { api, agency, agent } = await seed();
     const customer = api.customers.list(agency.id)[0];

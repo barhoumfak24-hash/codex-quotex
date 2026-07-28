@@ -7739,6 +7739,15 @@ const PERSONAL_AUTO_PUBLIC_RESEARCH_KEYS = new Set([
   "airbags",
 ]);
 
+const PERSONAL_AUTO_PUBLIC_RESEARCH_SOURCE_KINDS = new Set<PublicDataFieldSourceKind>([
+  "web_search",
+  "public_web",
+  "public_geocoder",
+  "government_api",
+  "commercial_provider",
+  "imagery_vision",
+]);
+
 async function applyServerQuestionnaireMappingToSession(
   session: QuotingSession,
   questions: QuotingQuestion[] = session.questionnaireQuestions ?? [],
@@ -7847,29 +7856,41 @@ async function applyServerQuestionnaireMappingToSession(
         (strictPersonalAuto
           ? strictQuestionsByKey.get(compactQuestionnaireLookup(fieldKey))
           : undefined);
-      if (targetId && !directQuestion) return false;
-      if (strictPersonalAuto && !directQuestion) return false;
+      if (targetId && !directQuestion) {
+        return false;
+      }
+      if (strictPersonalAuto && !directQuestion) {
+        return false;
+      }
       const strictQuestionKey = directQuestion
         ? personalAutoQuestionKey(session, directQuestion)
         : undefined;
-      if (
-        strictPersonalAuto &&
-        (!strictQuestionKey || !PERSONAL_AUTO_PUBLIC_RESEARCH_KEYS.has(strictQuestionKey))
-      ) {
-        return false;
-      }
       const evidence =
         findAiPublicEvidence(mapped.publicFieldEvidence, fieldKey) ??
         (targetId ? findAiPublicEvidence(mapped.publicFieldEvidence, targetId) : undefined) ??
         (directQuestion ? questionnaireEvidenceFromMapping(mapping, fieldKey, updatedAt) : undefined);
-      if (!evidence || !aiEvidenceAllowsQuestionnairePrefill(evidence)) return false;
+      if (
+        strictPersonalAuto &&
+        (!evidence ||
+          (PERSONAL_AUTO_PUBLIC_RESEARCH_SOURCE_KINDS.has(evidence.sourceKind) &&
+            (!strictQuestionKey || !PERSONAL_AUTO_PUBLIC_RESEARCH_KEYS.has(strictQuestionKey))))
+      ) {
+        return false;
+      }
+      if (!evidence || !aiEvidenceAllowsQuestionnairePrefill(evidence)) {
+        return false;
+      }
       const compatibilityKey = strictQuestionKey ??
         (directQuestion
         ? compatibleQuestionnaireMappingKey(directQuestion, fieldKey, value, mappingContext) ??
           (questionnaireAnswerLooksCompatible(directQuestion, value) ? directQuestion.label : null)
         : fieldKey);
-      if (!compatibilityKey) return false;
-      if (!mappedFieldValueIsCompatible(compatibilityKey, value, mappingContext)) return false;
+      if (!compatibilityKey) {
+        return false;
+      }
+      if (!mappedFieldValueIsCompatible(compatibilityKey, value, mappingContext)) {
+        return false;
+      }
       const question =
         directQuestion ??
         questions.find((candidate) => {
@@ -7878,10 +7899,17 @@ async function applyServerQuestionnaireMappingToSession(
             ? questionRecordEntryIsCompatible(candidate, entry.key, entry.value)
             : false;
         });
-      if (!question) return false;
+      if (!question) {
+        return false;
+      }
+      const exactTargetKeyMatch =
+        Boolean(targetId && directQuestion && strictQuestionKey) &&
+        compactQuestionnaireLookup(strictQuestionKey ?? "") ===
+          compactQuestionnaireLookup(fieldKey);
       if (
         targetId &&
         directQuestion &&
+        !exactTargetKeyMatch &&
         !questionRecordEntryIsCompatible(
           question,
           compatibilityKey,
@@ -7893,11 +7921,17 @@ async function applyServerQuestionnaireMappingToSession(
       const cleanedValue =
         canonicalQuestionnaireOptionAnswer(question, value) ??
         cleanQuestionnairePrefillValue(value);
-      if (!cleanedValue) return false;
-      if (!questionnaireAnswerLooksConcreteForAiPrefill(question, cleanedValue)) return false;
+      if (!cleanedValue) {
+        return false;
+      }
+      if (!questionnaireAnswerLooksConcreteForAiPrefill(question, cleanedValue)) {
+        return false;
+      }
       const existingAnswer = cleanQuestionnairePrefillValue(questionnaireResponses[question.id]);
       const existingMeta = questionnaireResponseMeta[question.id];
-      if (existingAnswer && existingMeta?.updatedByRole !== "ai") return false;
+      if (existingAnswer && existingMeta?.updatedByRole !== "ai") {
+        return false;
+      }
       const existingEvidence =
         findAiPublicEvidence(publicFieldEvidence, compatibilityKey) ??
         findAiPublicEvidence(publicFieldEvidence, question.label);
@@ -7909,7 +7943,9 @@ async function applyServerQuestionnaireMappingToSession(
         aiEvidenceAllowsQuestionnairePrefill(evidence);
       const canReplaceEstimateOnlyPublicField =
         existingEvidence?.sourceKind === "model_estimate" && evidence.sourceKind !== "model_estimate";
-      if (existingAnswer && !canReplaceEstimateOnlyAnswer) return false;
+      if (existingAnswer && !canReplaceEstimateOnlyAnswer) {
+        return false;
+      }
       questionnaireResponses[question.id] = cleanedValue;
       const acceptedEvidence = {
         ...evidence,

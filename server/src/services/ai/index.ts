@@ -2113,9 +2113,9 @@ export async function aiMapAcordFields(input: {
   const user = [
     `Template: ${templateLabel}`,
     intent === "questionnaire_prefill"
-      ? `Full questionnaire questions:\n${JSON.stringify(safeFields).slice(0, 22_000)}`
+      ? `Full questionnaire questions:\n${JSON.stringify(safeFields)}`
       : `Allowed target fields:\n${JSON.stringify(safeFields).slice(0, 18_000)}`,
-    `Quotex dossier:\n${JSON.stringify(input.dossier).slice(0, 45_000)}`,
+    `Quotex dossier:\n${JSON.stringify(input.dossier)}`,
     intent === "questionnaire_prefill"
       ? "Return source-backed public sweep questionnaire mappings. Maximize coverage only with exact facts: answer every supplied question supported by the Quotex dossier or a cited public source, and omit every question whose answer would require a guess, estimate, inference, or applicant confirmation."
       : "Return only verified field mappings. Leave doubtful fields blank.",
