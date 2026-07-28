@@ -68,6 +68,7 @@ import {
   QuotexConnectError,
   verifiedCarrierQuoteFromConnectJob,
 } from "@/lib/quotexConnect";
+import { buildQuotexConnectCarrierApplication } from "@/lib/quotexConnectApplications";
 import { allCommercialCarrierSubmissionsHaveReplies } from "@/lib/quotingWorkflows";
 import { isVinInputField, normalizeVinFieldValue } from "@/lib/vinInput";
 import type {
@@ -364,6 +365,7 @@ export function AiQuotingWorkspace({
   const navigate = useNavigate();
   const [busy, setBusy] = useState<null | string>(null);
   const [, setDbRev] = useState(0);
+  const [connectQuoteJobRetryTick, setConnectQuoteJobRetryTick] = useState(0);
   const lockedLineOfBusiness = contact.lineOfBusiness;
   const [lineOfBusiness, setLineOfBusiness] = useState<QuotingLineSelection>(
     lockedLineOfBusiness ?? "none"
@@ -377,6 +379,8 @@ export function AiQuotingWorkspace({
   const activeContactIdRef = useRef(contact.id);
   const mappingClearTimerRef = useRef<number | null>(null);
   const connectQuoteJobsAttemptedRef = useRef(new Set<string>());
+  const connectQuoteJobRetryCountsRef = useRef(new Map<string, number>());
+  const connectQuoteJobRetryTimersRef = useRef(new Map<string, number>());
   const handleAiFailure = (failure: AiGatewayFailureDetail) => {
     console.warn("[quotex-ai-quoting-workspace] AI diagnostic retained outside UI", failure);
   };
@@ -416,6 +420,10 @@ export function AiQuotingWorkspace({
       if (mappingClearTimerRef.current !== null) {
         window.clearTimeout(mappingClearTimerRef.current);
       }
+      for (const timer of connectQuoteJobRetryTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      connectQuoteJobRetryTimersRef.current.clear();
     };
   }, []);
   useEffect(() => {
@@ -469,6 +477,16 @@ export function AiQuotingWorkspace({
   const connectQuoteTargetSignature = connectQuoteTargets
     .map((target) => `${target.carrierId}:${target.portalUrl}`)
     .join("|");
+  const connectCarrierApplication = useMemo(
+    () =>
+      session
+        ? buildQuotexConnectCarrierApplication({
+            clientName: contact.name,
+            session,
+          })
+        : null,
+    [contact.name, session?.id, session?.updatedAt]
+  );
   useEffect(() => {
     if (
       !session?.id ||
@@ -491,17 +509,37 @@ export function AiQuotingWorkspace({
           portalUrl: target.portalUrl,
           lineOfBusiness: session.lineOfBusiness,
           assetType: session.assetType,
+          carrierApplication: connectCarrierApplication,
         },
-      }).catch((error) => {
-        connectQuoteJobsAttemptedRef.current.delete(attemptKey);
-        console.warn(
-          `[quotex-connect] Quote retrieval could not be assigned for ${target.carrierName}.`,
-          error
-        );
-      });
+      })
+        .then(() => {
+          connectQuoteJobRetryCountsRef.current.delete(attemptKey);
+          const timer = connectQuoteJobRetryTimersRef.current.get(attemptKey);
+          if (timer !== undefined) window.clearTimeout(timer);
+          connectQuoteJobRetryTimersRef.current.delete(attemptKey);
+        })
+        .catch((error) => {
+          const retryCount = (connectQuoteJobRetryCountsRef.current.get(attemptKey) ?? 0) + 1;
+          connectQuoteJobRetryCountsRef.current.set(attemptKey, retryCount);
+          const retryDelayMs = Math.min(30_000 * 2 ** (retryCount - 1), 300_000);
+          const existingTimer = connectQuoteJobRetryTimersRef.current.get(attemptKey);
+          if (existingTimer !== undefined) window.clearTimeout(existingTimer);
+          const timer = window.setTimeout(() => {
+            connectQuoteJobRetryTimersRef.current.delete(attemptKey);
+            connectQuoteJobsAttemptedRef.current.delete(attemptKey);
+            setConnectQuoteJobRetryTick((tick) => tick + 1);
+          }, retryDelayMs);
+          connectQuoteJobRetryTimersRef.current.set(attemptKey, timer);
+          console.warn(
+            `[quotex-connect] Quote retrieval could not be assigned for ${target.carrierName}; retrying after a short delay.`,
+            error
+          );
+        });
     }
   }, [
+    connectQuoteJobRetryTick,
     connectQuoteTargetSignature,
+    connectCarrierApplication,
     session?.assetType,
     session?.id,
     session?.lineOfBusiness,
@@ -6499,12 +6537,21 @@ function QuickViewQuoteModal({
     setCarrierOpening(true);
     setCarrierNotice(null);
     try {
+      const carrierApplication = buildQuotexConnectCarrierApplication({
+        clientName: quotePdfContactName(session),
+        session,
+      });
       const result = await createQuotexConnectJob({
         quoteSessionId: session.id,
         carrierId: currentQuote.carrierId,
         carrierName: carrier?.name ?? "Carrier",
         jobType: "retrieve_quote",
-        payload: { portalUrl: carrierPortalUrl },
+        payload: {
+          portalUrl: carrierPortalUrl,
+          lineOfBusiness: session.lineOfBusiness,
+          assetType: session.assetType,
+          carrierApplication,
+        },
       });
       setCarrierNotice(
         result.reused

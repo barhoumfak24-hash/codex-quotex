@@ -11,12 +11,15 @@ import {
 } from "./shared/crypto";
 import { isCustomCarrierRecipe } from "./shared/customCarriers";
 import { recipeHasUsableSelectors, urlMatchesPattern } from "./shared/match";
+import { normalizeCarrierRecipe } from "./shared/recipes";
 import {
   buildVerifiedQuoteResult,
+  buildVerifiedQuoteResultFromSubmission,
   isAllowedRunnerUrl,
   jobReadinessIssue,
   runnerTimeoutMs,
-  validateQuoteExtractionRecipe
+  validateQuoteExtractionRecipe,
+  validateQuoteSubmissionRecipe
 } from "./shared/runner";
 import {
   clearBridgeConfig,
@@ -34,6 +37,7 @@ import {
   toggleFavorite
 } from "./shared/storage";
 import type {
+  CarrierQuoteSubmissionRecipe,
   CarrierRecipe,
   ConnectBridgeConfig,
   ConnectBridgeJob,
@@ -376,6 +380,12 @@ async function startConnectJob(
     await saveBridgeRuntime(runtime);
     await waitForTabComplete(tab.id, 15_000);
 
+    if (job.jobType === "retrieve_quote" && recipe.automation?.submission) {
+      await saveBridgeRuntime(runtime);
+      await resumeConnectJob();
+      return;
+    }
+
     if (!entry || !key || !recipeHasUsableSelectors(recipe)) {
       runtime.activeJob = await reportJobStatus(config, runtime.activeJob, "waiting_for_login");
       await saveBridgeRuntime(runtime);
@@ -462,8 +472,63 @@ async function resumeConnectJob(): Promise<any> {
       }
     });
   } else if (runtime.activeJob.jobType === "retrieve_quote") {
+    const submissionRecipe = recipe.automation?.submission;
     const quoteRecipe = recipe.automation?.quote;
-    if (!quoteRecipe) {
+    if (submissionRecipe) {
+      const recipeIssue = validateQuoteSubmissionRecipe(submissionRecipe);
+      const carrierApplication = runtime.activeJob.payload.carrierApplication;
+      if (recipeIssue) {
+        runtime.activeJob = await reportJobStatus(config, runtime.activeJob, "manual_required", {
+          errorCode: recipeIssue,
+          errorMessage: `${runtime.activeJob.carrierName} does not have a verified quote submission recipe.`
+        });
+      } else if (
+        !carrierApplication ||
+        typeof carrierApplication !== "object" ||
+        Array.isArray(carrierApplication)
+      ) {
+        runtime.activeJob = await reportJobStatus(config, runtime.activeJob, "manual_required", {
+          errorCode: "carrier_quote_application_missing",
+          errorMessage: "The quote does not have enough verified application data to submit."
+        });
+      } else if (!isAllowedRunnerUrl(recipe, String(tab.url ?? ""))) {
+        runtime.activeJob = await reportJobStatus(config, runtime.activeJob, "failed", {
+          errorCode: "carrier_domain_not_allowed",
+          errorMessage: "The carrier page is outside the verified domain allowlist."
+        });
+      } else {
+        const submission = await executeCarrierQuoteSubmission(
+          runtime.activeTabId,
+          submissionRecipe,
+          carrierApplication as Record<string, unknown>
+        );
+        if (submission.state === "login_required") {
+          runtime.activeJob = await reportJobStatus(config, runtime.activeJob, "waiting_for_login", {
+            errorCode: "carrier_login_required",
+            errorMessage: "Sign in to the carrier portal in the open tab, then resume the quote."
+          });
+        } else if (submission.state !== "completed") {
+          runtime.activeJob = await reportJobStatus(config, runtime.activeJob, "manual_required", {
+            errorCode: submission.errorCode || "carrier_quote_submit_failed",
+            errorMessage: submission.errorMessage || "The carrier did not return a verified quote."
+          });
+        } else {
+          try {
+            const result = buildVerifiedQuoteResultFromSubmission(
+              submission.payload,
+              submission.portalUrl,
+              submissionRecipe
+            );
+            runtime.activeJob = await reportJobStatus(config, runtime.activeJob, "completed", { result });
+          } catch (error) {
+            runtime.activeJob = await reportJobStatus(config, runtime.activeJob, "manual_required", {
+              errorCode: error instanceof Error ? error.message : "carrier_quote_schema_invalid",
+              errorMessage: "The carrier result was incomplete and was not added to rankings."
+            });
+          }
+        }
+      }
+    } else if (!quoteRecipe) {
       runtime.activeJob = await reportJobStatus(config, runtime.activeJob, "manual_required", {
         errorCode: "carrier_quote_recipe_missing",
         errorMessage: `${runtime.activeJob.carrierName} does not have a verified quote extraction recipe.`
@@ -519,6 +584,150 @@ async function resumeConnectJob(): Promise<any> {
   runtime.lastError = "";
   await saveBridgeRuntime(runtime);
   return { ok: true, state: await getPopupState() };
+}
+
+type CarrierQuoteSubmissionExecution =
+  | {
+      state: "completed";
+      payload: Record<string, unknown>;
+      portalUrl: string;
+    }
+  | {
+      state: "login_required";
+      errorCode: string;
+      errorMessage: string;
+    }
+  | {
+      state: "failed";
+      errorCode: string;
+      errorMessage: string;
+    };
+
+async function executeCarrierQuoteSubmission(
+  tabId: number,
+  recipe: CarrierQuoteSubmissionRecipe,
+  application: Record<string, unknown>
+): Promise<CarrierQuoteSubmissionExecution> {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: async (
+      submissionRecipe: CarrierQuoteSubmissionRecipe,
+      quoteApplication: Record<string, unknown>
+    ) => {
+      const readBody = async (response: Response): Promise<Record<string, unknown>> => {
+        try {
+          const value = await response.json();
+          return value && typeof value === "object" && !Array.isArray(value)
+            ? (value as Record<string, unknown>)
+            : {};
+        } catch {
+          return {};
+        }
+      };
+      const request = async (path: string, init: RequestInit = {}) =>
+        fetch(path, {
+          ...init,
+          credentials: "include",
+          headers: {
+            accept: "application/json",
+            ...Object.fromEntries(new Headers(init.headers).entries())
+          }
+        });
+
+      try {
+        const sessionProbe = await request(submissionRecipe.createEndpoint);
+        if (sessionProbe.status === 401 || sessionProbe.status === 403) {
+          return {
+            state: "login_required",
+            errorCode: "carrier_login_required",
+            errorMessage: "The carrier portal session is not signed in."
+          };
+        }
+
+        const createdResponse = await request(submissionRecipe.createEndpoint, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(quoteApplication)
+        });
+        if (createdResponse.status === 401 || createdResponse.status === 403) {
+          return {
+            state: "login_required",
+            errorCode: "carrier_login_required",
+            errorMessage: "The carrier portal session is not signed in."
+          };
+        }
+        const createdBody = await readBody(createdResponse);
+        if (!createdResponse.ok) {
+          return {
+            state: "failed",
+            errorCode: `carrier_quote_submit_${createdResponse.status}`,
+            errorMessage:
+              createdResponse.status === 400 || createdResponse.status === 422
+                ? "The carrier requires additional application information."
+                : "The carrier could not complete this quote submission."
+          };
+        }
+
+        const created =
+          createdBody.data &&
+          typeof createdBody.data === "object" &&
+          !Array.isArray(createdBody.data)
+            ? (createdBody.data as Record<string, unknown>)
+            : createdBody;
+        const quoteId = String(created.id ?? created.quoteId ?? "").trim();
+        let verifiedPayload = created;
+        if (quoteId) {
+          const detailEndpoint = submissionRecipe.detailEndpointTemplate.replace(
+            "{id}",
+            encodeURIComponent(quoteId)
+          );
+          const detailResponse = await request(detailEndpoint);
+          if (detailResponse.status === 401 || detailResponse.status === 403) {
+            return {
+              state: "login_required",
+              errorCode: "carrier_login_required",
+              errorMessage: "The carrier portal session expired before the quote could be verified."
+            };
+          }
+          if (detailResponse.ok) {
+            const detailBody = await readBody(detailResponse);
+            verifiedPayload =
+              detailBody.data &&
+              typeof detailBody.data === "object" &&
+              !Array.isArray(detailBody.data)
+                ? (detailBody.data as Record<string, unknown>)
+                : detailBody;
+          }
+        }
+
+        return {
+          state: "completed",
+          payload: verifiedPayload,
+          portalUrl: quoteId
+            ? `${location.origin}/quotes/${encodeURIComponent(quoteId)}`
+            : location.href
+        };
+      } catch {
+        return {
+          state: "failed",
+          errorCode: "carrier_quote_request_failed",
+          errorMessage: "The signed-in carrier portal did not complete the quote request."
+        };
+      }
+    },
+    args: [recipe, application]
+  });
+
+  const result = results.find((item: any) => item?.result)?.result;
+  if (!result || typeof result !== "object") {
+    return {
+      state: "failed",
+      errorCode: "carrier_quote_request_failed",
+      errorMessage: "The signed-in carrier portal did not return a quote result."
+    };
+  }
+  return result as CarrierQuoteSubmissionExecution;
 }
 
 async function attemptEmailCodeAutofill(
@@ -1011,7 +1220,7 @@ function delay(milliseconds: number): Promise<void> {
 }
 
 async function saveCarrier(recipeInput: CarrierRecipe, username: string, password: string): Promise<any> {
-  const recipe = normalizeRecipe(recipeInput);
+  const recipe = normalizeCarrierRecipe(recipeInput);
   validateRecipe(recipe);
 
   const config = await loadConfig();
@@ -1044,7 +1253,7 @@ async function saveCarrier(recipeInput: CarrierRecipe, username: string, passwor
 }
 
 async function addCarrier(recipeInput: CarrierRecipe): Promise<any> {
-  const recipe = normalizeRecipe(recipeInput);
+  const recipe = normalizeCarrierRecipe(recipeInput);
   validateRecipe(recipe);
   if (!isCustomCarrierRecipe(recipe)) {
     return { ok: false, error: "Only user-added carrier websites can be created here." };
@@ -1238,31 +1447,6 @@ async function setCarrierStatus(
     updatedAt: Date.now()
   };
   await saveStatus(status);
-}
-
-function normalizeRecipe(recipe: CarrierRecipe): CarrierRecipe {
-  const id = String(recipe.id || recipe.name || "carrier")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return {
-    id,
-    name: String(recipe.name ?? "").trim(),
-    logoUrl: String(recipe.logoUrl ?? "").trim(),
-    loginUrl: String(recipe.loginUrl ?? "").trim(),
-    domainMatch: String(recipe.domainMatch ?? "").trim(),
-    selectors: {
-      username: String(recipe.selectors?.username ?? "").trim(),
-      password: String(recipe.selectors?.password ?? "").trim(),
-      submit: String(recipe.selectors?.submit ?? "").trim(),
-      otp: String(recipe.selectors?.otp ?? "").trim(),
-      otpSubmit: String(recipe.selectors?.otpSubmit ?? "").trim()
-    },
-    preSteps: Array.isArray(recipe.preSteps) ? recipe.preSteps : [],
-    postLoginSelector: String(recipe.postLoginSelector ?? "").trim(),
-    notes: String(recipe.notes ?? "").trim()
-  };
 }
 
 function validateRecipe(recipe: CarrierRecipe): void {

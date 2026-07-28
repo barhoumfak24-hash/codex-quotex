@@ -17,6 +17,8 @@ import {
   apiLimiter,
   appLimiter,
   authLimiter,
+  connectApiLimiter,
+  connectExtensionLimiter,
   diagnosticsLimiter,
   mailboxApiLimiter,
   publicWorkflowLimiter,
@@ -233,10 +235,10 @@ app.use("/api/website", publicWorkflowLimiter, websiteRoutes);
 app.use("/api/stripe", webhookLimiter, stripeRoutes);
 app.use("/api/mailboxes/oauth", authLimiter, mailboxOAuthCallbackRoutes);
 app.use("/api/mailboxes/inbound", webhookLimiter, mailboxInboundRoutes);
-app.use("/api/connect/extension", strictApiLimiter, connectExtensionRoutes);
+app.use("/api/connect/extension", connectExtensionLimiter, connectExtensionRoutes);
 
 app.use("/api/tenants", requireAuth, enforceTenantIsolation, tenantsRoutes);
-app.use("/api/connect", requireAuth, enforceTenantIsolation, strictApiLimiter, connectRoutes);
+app.use("/api/connect", requireAuth, enforceTenantIsolation, connectApiLimiter, connectRoutes);
 app.use("/api/mailboxes", requireAuth, enforceTenantIsolation, mailboxApiLimiter, mailboxesRoutes);
 app.use("/api/customers", requireAuth, enforceTenantIsolation, customersRoutes);
 app.use("/api/quotes", requireAuth, enforceTenantIsolation, strictApiLimiter, quotesRoutes);

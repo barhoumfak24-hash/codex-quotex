@@ -3,6 +3,7 @@ import type { NextFunction, Request, Response } from "express";
 import { Router } from "express";
 import { Prisma } from "@prisma/client";
 import { z } from "zod";
+import { ensureConnectQuoteSession } from "../services/connectQuoteSession.js";
 import { findCarrierEmailVerificationCode } from "../services/mailboxOneTimeCode.js";
 import { prisma } from "../services/prisma.js";
 
@@ -185,11 +186,10 @@ connectRoutes.post("/jobs", async (req, res, next) => {
     }
 
     if (parsed.data.quoteSessionId) {
-      const quoteSession = await prisma.quotingSession.findFirst({
-        where: { id: parsed.data.quoteSessionId, tenantId: auth.tenantId },
-        select: { id: true },
-      });
-      if (!quoteSession) return res.status(404).json({ ok: false, error: "quote_session_not_found" });
+      const quoteSessionAvailable = await ensureConnectQuoteSession(auth, parsed.data.quoteSessionId);
+      if (!quoteSessionAvailable) {
+        return res.status(404).json({ ok: false, error: "quote_session_not_found" });
+      }
     }
 
     const device = await prisma.connectDevice.findFirst({

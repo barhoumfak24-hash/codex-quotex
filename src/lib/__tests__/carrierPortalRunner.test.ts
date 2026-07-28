@@ -12,7 +12,7 @@ afterEach(() => {
 });
 
 describe("carrier portal runner", () => {
-  it("adds a mapped runner trace to carrier-portal automation quotes", async () => {
+  it("does not create a synthetic personal quote before Quotex Connect returns verified carrier evidence", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     const agent = api.users.list(agency.id).find((user) => user.role === "agent")!;
@@ -49,15 +49,14 @@ describe("carrier portal runner", () => {
             { id: agent.id, name: agent.name, role: "agent" }
           )!;
 
-    const progressiveQuote = complete.quotes.find((quote) => quote.carrierId === "carrier_progressive");
-    expect(progressiveQuote?.providerTrace?.provider).toBe("carrier_portal_automation");
-    expect(progressiveQuote?.providerTrace?.runnerTrace?.jobId).toMatch(/^RPA-/);
-    expect(progressiveQuote?.providerTrace?.runnerTrace?.surface).toBe("agent_portal");
-    expect(progressiveQuote?.providerTrace?.runnerTrace?.mappedFieldCount).toBeGreaterThan(5);
-    expect(progressiveQuote?.providerTrace?.runnerTrace?.fieldMappings.some((field) => field.carrierField === "VIN")).toBe(true);
-    expect(progressiveQuote?.providerTrace?.runnerTrace?.validationChecks.some((check) => check.label === "Signed-in browser session" && check.status === "warn")).toBe(true);
-    expect(progressiveQuote?.providerTrace?.runnerTrace?.extractedQuote?.quoteNumber).toMatch(/^QT-/);
-    expect(progressiveQuote?.fitReason).toContain("adapter ready");
+    expect(complete.quotes).toEqual([]);
+    expect(
+      complete.quotes.some(
+        (quote) =>
+          quote.providerTrace?.provider === "carrier_portal_automation" ||
+          quote.carrierReference?.startsWith("QT-")
+      )
+    ).toBe(false);
   });
 
   it("attaches runner traces to commercial carrier portal submissions", async () => {

@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   buildVerifiedQuoteResult,
+  buildVerifiedQuoteResultFromSubmission,
   isAllowedRunnerUrl,
   jobReadinessIssue,
   supportsJob,
-  validateQuoteExtractionRecipe
+  validateQuoteExtractionRecipe,
+  validateQuoteSubmissionRecipe
 } from "../src/shared/runner";
 import type { CarrierRecipe, ConnectBridgeJob } from "../src/shared/types";
 import { MOCK_CARRIER_RECIPE } from "./fixtures/mockCarrier";
@@ -44,6 +46,30 @@ describe("runner capability contract", () => {
     expect(
       isAllowedRunnerUrl(MOCK_CARRIER_RECIPE, "https://lookalike.example/?state=quote")
     ).toBe(false);
+  });
+
+  it("accepts a bounded carrier submission adapter without login selectors", () => {
+    const recipe = submissionRecipe();
+
+    expect(jobReadinessIssue(recipe, job("retrieve_quote"))).toBeNull();
+    expect(validateQuoteSubmissionRecipe(recipe.automation!.submission!)).toBeNull();
+  });
+
+  it("rejects unsafe carrier submission endpoints", () => {
+    const recipe = submissionRecipe().automation!.submission!;
+
+    expect(
+      validateQuoteSubmissionRecipe({
+        ...recipe,
+        createEndpoint: "https://evil.example/api/quotes"
+      })
+    ).toBe("quote_create_endpoint_invalid");
+    expect(
+      validateQuoteSubmissionRecipe({
+        ...recipe,
+        detailEndpointTemplate: "/api/quotes"
+      })
+    ).toBe("quote_detail_endpoint_invalid");
   });
 });
 
@@ -90,6 +116,58 @@ describe("verified quote result", () => {
       )
     ).toThrow("quote_premium_invalid");
   });
+
+  it("verifies a quote returned by the approved carrier submission adapter", () => {
+    const recipe = submissionRecipe().automation!.submission!;
+    const result = buildVerifiedQuoteResultFromSubmission(
+      {
+        quoteNumber: "HUB-Q-1001",
+        status: "quoted",
+        premium: {
+          annualPremium: 4850,
+          monthlyPremium: 404.17
+        }
+      },
+      "https://insurance-agent-hub.replit.app/quotes/quote_1001",
+      recipe,
+      "2026-07-28T12:00:00.000Z"
+    );
+
+    expect(result.quote).toEqual({
+      annualPremium: 4850,
+      carrierReference: "HUB-Q-1001",
+      status: "quoted"
+    });
+    expect(result.verification).toMatchObject({
+      verified: true,
+      source: "carrier_portal"
+    });
+    expect(result.evidence).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ field: "annualPremium", value: "4850" }),
+        expect.objectContaining({ field: "carrierReference", value: "HUB-Q-1001" })
+      ])
+    );
+  });
+
+  it("refuses to rank a submission result without a real premium and reference", () => {
+    const recipe = submissionRecipe().automation!.submission!;
+
+    expect(() =>
+      buildVerifiedQuoteResultFromSubmission(
+        { quoteNumber: "HUB-Q-1001", premium: { annualPremium: 0 } },
+        "https://insurance-agent-hub.replit.app/quotes/quote_1001",
+        recipe
+      )
+    ).toThrow("quote_premium_invalid");
+    expect(() =>
+      buildVerifiedQuoteResultFromSubmission(
+        { premium: { annualPremium: 4850 } },
+        "https://insurance-agent-hub.replit.app/quotes/quote_1001",
+        recipe
+      )
+    ).toThrow("quote_reference_missing");
+  });
 });
 
 function verifiedRecipe(): CarrierRecipe {
@@ -118,6 +196,34 @@ function verifiedRecipe(): CarrierRecipe {
           carrierReference: "[data-quote-reference]",
           effectiveDate: "[data-effective-date]"
         }
+      }
+    }
+  };
+}
+
+function submissionRecipe(): CarrierRecipe {
+  return {
+    id: "carrier_insurance_agent_hub",
+    name: "Insurance Agent Hub",
+    logoUrl: "",
+    loginUrl: "https://insurance-agent-hub.replit.app/sign-in",
+    domainMatch: "https://insurance-agent-hub.replit.app/*",
+    selectors: {
+      username: "",
+      password: "",
+      submit: ""
+    },
+    preSteps: [],
+    postLoginSelector: "",
+    notes: "Approved API-backed test carrier.",
+    automation: {
+      capabilities: ["retrieve_quote"],
+      allowedOrigins: ["https://insurance-agent-hub.replit.app"],
+      maxRunMs: 120_000,
+      submission: {
+        adapter: "insurance_agent_hub_v1",
+        createEndpoint: "/api/quotes",
+        detailEndpointTemplate: "/api/quotes/{id}"
       }
     }
   };

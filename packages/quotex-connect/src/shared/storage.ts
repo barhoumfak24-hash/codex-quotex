@@ -155,7 +155,8 @@ function mergeDefaultRecipes(existingRecipes: CarrierRecipe[]): CarrierRecipe[] 
         ...defaultRecipe.selectors,
         ...existing.selectors
       },
-      preSteps: Array.isArray(existing.preSteps) ? existing.preSteps : defaultRecipe.preSteps
+      preSteps: Array.isArray(existing.preSteps) ? existing.preSteps : defaultRecipe.preSteps,
+      automation: defaultRecipe.automation ?? existing.automation
     };
   });
   const customRecipes = existingRecipes.filter((recipe) => recipe.id && !defaultIds.has(recipe.id));

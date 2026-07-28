@@ -1,4 +1,4 @@
-import type { CarrierRecipe } from "./types";
+import type { CarrierAutomationRecipe, CarrierRecipe } from "./types";
 
 type RecipeSeed = {
   id: string;
@@ -6,6 +6,7 @@ type RecipeSeed = {
   loginUrl: string;
   domainMatch: string;
   notes?: string;
+  automation?: CarrierAutomationRecipe;
 };
 
 const NEEDS_SELECTORS =
@@ -25,7 +26,8 @@ function recipe(seed: RecipeSeed): CarrierRecipe {
     },
     preSteps: [],
     postLoginSelector: "",
-    notes: seed.notes ?? NEEDS_SELECTORS
+    notes: seed.notes ?? NEEDS_SELECTORS,
+    ...(seed.automation ? { automation: seed.automation } : {})
   };
 }
 
@@ -291,7 +293,17 @@ export const DEFAULT_RECIPES: CarrierRecipe[] = [
     loginUrl: "https://insurance-agent-hub.replit.app/sign-in",
     domainMatch: "*://*.insurance-agent-hub.replit.app/*",
     notes:
-      "Agency-configured carrier portal. Save the authorized login locally in Quotex Connect before use."
+      "Agency-configured carrier portal. Save the authorized login locally in Quotex Connect before use.",
+    automation: {
+      capabilities: ["retrieve_quote"],
+      allowedOrigins: ["https://insurance-agent-hub.replit.app"],
+      submission: {
+        adapter: "insurance_agent_hub_v1",
+        createEndpoint: "/api/quotes",
+        detailEndpointTemplate: "/api/quotes/{id}"
+      },
+      maxRunMs: 120_000
+    }
   })
 ];
 

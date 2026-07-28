@@ -32,10 +32,17 @@ export type QuoteExtractionRecipe = {
   };
 };
 
+export type CarrierQuoteSubmissionRecipe = {
+  adapter: "insurance_agent_hub_v1";
+  createEndpoint: string;
+  detailEndpointTemplate: string;
+};
+
 export type CarrierAutomationRecipe = {
   capabilities: ConnectJobType[];
   allowedOrigins: string[];
   quote?: QuoteExtractionRecipe;
+  submission?: CarrierQuoteSubmissionRecipe;
   maxRunMs?: number;
 };
 

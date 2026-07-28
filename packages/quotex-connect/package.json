@@ -1,7 +1,7 @@
 {
   "name": "@quotex/connect-extension",
   "private": true,
-  "version": "0.4.3",
+  "version": "0.4.4",
   "type": "module",
   "description": "Quotex Connect Manifest V3 carrier portal launcher extension.",
   "scripts": {

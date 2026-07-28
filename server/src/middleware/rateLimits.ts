@@ -87,6 +87,18 @@ export const mailboxApiLimiter = limiter(
     return tenantId && userId ? `${tenantId}:${userId}` : "unauthenticated";
   }
 );
+export const connectApiLimiter = limiter(
+  "connect-api",
+  envLimit("RATE_LIMIT_CONNECT_API_PER_MINUTE", 120),
+  60_000,
+  authenticatedIdentity
+);
+export const connectExtensionLimiter = limiter(
+  "connect-extension",
+  envLimit("RATE_LIMIT_CONNECT_EXTENSION_PER_MINUTE", 240),
+  60_000,
+  extensionIdentity
+);
 export const webhookLimiter = limiter("webhook", envLimit("RATE_LIMIT_WEBHOOK_PER_MINUTE", 120));
 export const diagnosticsLimiter = limiter("diagnostics", envLimit("RATE_LIMIT_DIAGNOSTICS_PER_MINUTE", 20));
 
@@ -203,6 +215,19 @@ function authIdentifier(req: Request): string {
     if (typeof value === "string" && value.trim()) return value;
   }
   return "anonymous";
+}
+
+function authenticatedIdentity(req: Request): string {
+  const tenantId = req.auth?.tenantId?.trim();
+  const userId = req.auth?.userId?.trim();
+  return tenantId && userId ? `${tenantId}:${userId}` : "unauthenticated";
+}
+
+function extensionIdentity(req: Request): string {
+  const authorization = headerValue(req, "authorization").trim();
+  return authorization.toLowerCase().startsWith("bearer ")
+    ? authorization.slice(7).trim()
+    : "unauthenticated";
 }
 
 export function resetRateLimitStateForTests() {
