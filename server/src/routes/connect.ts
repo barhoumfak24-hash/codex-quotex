@@ -232,6 +232,14 @@ connectRoutes.post("/jobs", async (req, res, next) => {
         status: "queued",
       },
     });
+    await recordConnectAudit({
+      tenantId: auth.tenantId,
+      actorId: auth.userId,
+      action: "connect.job.created",
+      entityType: "carrier_automation_job",
+      entityId: job.id,
+      metadata: connectJobAuditMetadata(job),
+    });
     res.status(201).json({ ok: true, job: publicJob(job), reused: false });
   } catch (error) {
     next(error);
@@ -317,6 +325,17 @@ connectExtensionRoutes.post("/pairings/claim", async (req, res, next) => {
       });
       if (claimed.count !== 1) throw new Error("pairing_already_claimed");
     });
+    await recordConnectAudit({
+      tenantId: pairing.tenantId,
+      actorId: pairing.userId,
+      action: "connect.device.paired",
+      entityType: "connect_device",
+      entityId: deviceId,
+      metadata: {
+        deviceLabel: parsed.data.deviceLabel,
+        browser: parsed.data.browser ?? null,
+      },
+    });
 
     res.status(201).json({
       ok: true,
@@ -361,6 +380,14 @@ connectExtensionRoutes.post("/disconnect", async (_req, res, next) => {
         },
       }),
     ]);
+    await recordConnectAudit({
+      tenantId: device.tenantId,
+      actorId: device.userId,
+      action: "connect.device.disconnected",
+      entityType: "connect_device",
+      entityId: device.id,
+      metadata: { source: "extension" },
+    });
     res.json({ ok: true });
   } catch (error) {
     next(error);
@@ -426,6 +453,16 @@ connectExtensionRoutes.get("/jobs/next", async (_req, res, next) => {
     });
 
     await prisma.connectDevice.update({ where: { id: device.id }, data: { lastSeenAt: now } });
+    if (job) {
+      await recordConnectAudit({
+        tenantId: device.tenantId,
+        actorId: device.userId,
+        action: "connect.job.claimed",
+        entityType: "carrier_automation_job",
+        entityId: job.id,
+        metadata: connectJobAuditMetadata(job),
+      });
+    }
     res.json({ ok: true, job: job ? extensionJob(job) : null });
   } catch (error) {
     next(error);
@@ -522,6 +559,19 @@ connectExtensionRoutes.post("/jobs/:jobId/status", async (req, res, next) => {
         completedAt: terminal ? new Date() : null,
       },
     });
+    await recordConnectAudit({
+      tenantId: device.tenantId,
+      actorId: device.userId,
+      action: "connect.job.status_changed",
+      entityType: "carrier_automation_job",
+      entityId: job.id,
+      metadata: {
+        ...connectJobAuditMetadata(updated),
+        previousStatus: currentStatus,
+        nextStatus,
+        errorCode: parsed.data.errorCode ?? null,
+      },
+    });
     await prisma.connectDevice.update({ where: { id: device.id }, data: { lastSeenAt: new Date() } });
     res.json({ ok: true, job: extensionJob(updated) });
   } catch (error) {
@@ -571,6 +621,48 @@ function secureHash(value: string): string {
   const pepper = process.env.CONNECT_PAIRING_SECRET?.trim() || process.env.JWT_SECRET?.trim();
   if (!pepper) throw new Error("connect_pairing_secret_not_configured");
   return createHash("sha256").update(`${pepper}:${value}`).digest("hex");
+}
+
+async function recordConnectAudit(input: {
+  tenantId: string;
+  actorId: string;
+  action: string;
+  entityType: string;
+  entityId: string;
+  metadata: Record<string, unknown>;
+}) {
+  if (containsSensitiveValue(input.metadata)) {
+    throw new Error("sensitive_connect_audit_metadata_rejected");
+  }
+  await prisma.auditLog.create({
+    data: {
+      id: `audit_${randomUUID()}`,
+      tenantId: input.tenantId,
+      actorId: input.actorId,
+      action: input.action,
+      entityType: input.entityType,
+      entityId: input.entityId,
+      metadata: input.metadata as Prisma.InputJsonValue,
+    },
+  });
+}
+
+function connectJobAuditMetadata(job: {
+  quoteSessionId: string | null;
+  carrierId: string;
+  carrierName: string;
+  jobType: string;
+  status: string;
+  deviceId?: string | null;
+}) {
+  return {
+    quoteSessionId: job.quoteSessionId,
+    carrierId: job.carrierId,
+    carrierName: job.carrierName,
+    jobType: job.jobType,
+    status: job.status,
+    deviceId: job.deviceId ?? null,
+  };
 }
 
 function containsSensitiveValue(value: unknown, seen = new Set<object>()): boolean {

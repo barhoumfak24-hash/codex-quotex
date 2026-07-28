@@ -1,6 +1,8 @@
 import { DEFAULT_RECIPES } from "./defaultRecipes";
 import type {
   CarrierRecipe,
+  ConnectBridgeConfig,
+  ConnectBridgeRuntime,
   ExtensionConfig,
   LauncherActivity,
   StatusRecord,
@@ -10,6 +12,8 @@ import type {
 const CONFIG_KEY = "quotexConnectConfig";
 const STATUS_KEY = "quotexConnectStatuses";
 const ACTIVITY_KEY = "quotexConnectLauncherActivity";
+const BRIDGE_CONFIG_KEY = "quotexConnectBridgeConfig";
+const BRIDGE_RUNTIME_KEY = "quotexConnectBridgeRuntime";
 const RECENT_LIMIT = 8;
 
 export const DEFAULT_LAUNCHER_ACTIVITY: LauncherActivity = {
@@ -20,11 +24,24 @@ export const DEFAULT_LAUNCHER_ACTIVITY: LauncherActivity = {
 
 export const DEFAULT_CONFIG: ExtensionConfig = {
   idleLockMinutes: 15,
+  emailCodeAutofillEnabled: false,
   kdf: null,
   verifier: "",
   verifierIv: "",
   recipes: DEFAULT_RECIPES,
   vault: []
+};
+
+export const DEFAULT_BRIDGE_RUNTIME: ConnectBridgeRuntime = {
+  activeJob: null,
+  activeTabId: null,
+  lastPollAt: 0,
+  lastHeartbeatAt: 0,
+  lastError: "",
+  emailCodeJobId: "",
+  emailCodeMessageKey: "",
+  emailCodeLastCheckedAt: 0,
+  emailCodeState: "idle"
 };
 
 export async function loadConfig(): Promise<ExtensionConfig> {
@@ -44,6 +61,36 @@ export async function loadConfig(): Promise<ExtensionConfig> {
 
 export async function saveConfig(config: ExtensionConfig): Promise<void> {
   await chrome.storage.local.set({ [CONFIG_KEY]: config });
+}
+
+export async function loadBridgeConfig(): Promise<ConnectBridgeConfig | null> {
+  const data = await chrome.storage.local.get(BRIDGE_CONFIG_KEY);
+  const existing = data?.[BRIDGE_CONFIG_KEY] as ConnectBridgeConfig | undefined;
+  if (!existing?.token || !existing.deviceId || !existing.apiBaseUrl) return null;
+  return existing;
+}
+
+export async function saveBridgeConfig(config: ConnectBridgeConfig): Promise<void> {
+  await chrome.storage.local.set({ [BRIDGE_CONFIG_KEY]: config });
+}
+
+export async function clearBridgeConfig(): Promise<void> {
+  await chrome.storage.local.remove([BRIDGE_CONFIG_KEY, BRIDGE_RUNTIME_KEY]);
+}
+
+export async function loadBridgeRuntime(): Promise<ConnectBridgeRuntime> {
+  const data = await chrome.storage.local.get(BRIDGE_RUNTIME_KEY);
+  const existing = data?.[BRIDGE_RUNTIME_KEY] as Partial<ConnectBridgeRuntime> | undefined;
+  return {
+    ...DEFAULT_BRIDGE_RUNTIME,
+    ...existing,
+    activeJob: existing?.activeJob ?? null,
+    activeTabId: typeof existing?.activeTabId === "number" ? existing.activeTabId : null
+  };
+}
+
+export async function saveBridgeRuntime(runtime: ConnectBridgeRuntime): Promise<void> {
+  await chrome.storage.local.set({ [BRIDGE_RUNTIME_KEY]: runtime });
 }
 
 export async function loadStatuses(): Promise<Record<string, StatusRecord>> {

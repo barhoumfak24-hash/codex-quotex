@@ -17,6 +17,10 @@ The starter package includes the carrier portal set used by Quotex's carrier lib
 - Opens carrier portals in normal browser tabs.
 - Injects a content script on allowed carrier domains and fills only the configured username/password/submit selectors.
 - Stops after submitting username/password. It does not automate MFA, 2FA, push approvals, or one-time codes.
+- Claims only jobs assigned to the paired tenant, user, and device.
+- Requires a saved credential for the exact carrier before opening a portal for an automated job.
+- Runs only declared capabilities on approved HTTPS origins.
+- Extracts quote fields only from configured selectors and fails closed when evidence is incomplete.
 - Presents one complete carrier list and one simple credential form for the selected carrier.
 - Keeps all 42 carrier links available before setup and while the credential vault is locked.
 - Supports carrier search, status filters, favorites, recent launches, and a last-used marker.
@@ -27,6 +31,9 @@ The starter package includes the carrier portal set used by Quotex's carrier lib
 - It does not store plaintext credentials.
 - It does not send carrier credentials over the network.
 - It does not scrape or invent real carrier login selectors.
+- It does not treat a URL-only carrier as automated or rankable.
+- It does not send credentials, cookies, MFA codes, or session tokens to Quotex or an AI model.
+- It does not execute arbitrary model-generated JavaScript.
 - It does not retry blindly. Each launch resolves to an honest status such as `filled`, `launch-only`, `needs-login`, `login-page-not-detected`, or `error`.
 
 ## Build
@@ -74,11 +81,26 @@ pnpm --dir packages/quotex-connect run test
 
 Blank selectors produce `launch-only`: the portal opens and the agent signs in manually. Verified selectors with no usable saved login produce `needs-login`: the portal still opens and the agent can sign in manually. Selectors control autofill only; they never control navigation.
 
+Automated jobs are stricter than manual launches. An automated job does not open the portal unless the exact carrier has a usable local credential, the vault is unlocked, the requested capability is declared, and the adapter is complete. A quote is completed only after strict evidence validation.
+
+## Runner Architecture
+
+See `../../docs/quotex-connect-runner-architecture.md` for:
+
+- server/extension trust boundaries
+- tenant and user isolation
+- job and runner lifecycle
+- adapter and result contracts
+- local credential and MFA rules
+- mock portal usage
+- carrier onboarding
+- limitations and production-readiness criteria
+
 ## Maintaining A Carrier Recipe
 
 Carrier recipes are maintained by developers in `src/shared/defaultRecipes.ts`; agents do not edit selectors in the extension interface. This keeps the setup experience limited to carrier selection, username, and password.
 
-`src/shared/defaultRecipes.ts` is the carrier directory source. `tests/directory.test.ts` enforces the 42-carrier count and verifies that manifest host permissions and content-script matches stay synchronized with every unique directory domain.
+`src/shared/defaultRecipes.ts` is the carrier directory source. `tests/directory.test.ts` derives the expected count from the directory and verifies that manifest host permissions and content-script matches stay synchronized with every unique directory domain.
 
 For each carrier:
 

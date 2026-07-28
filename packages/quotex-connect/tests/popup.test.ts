@@ -16,7 +16,7 @@ describe("popup carrier directory", () => {
   it.each([
     { label: "before vault setup", isSetup: false, locked: true },
     { label: "while the vault is locked", isSetup: true, locked: true }
-  ])("shows all 42 carrier launch controls $label", async ({ isSetup, locked }) => {
+  ])("shows every carrier launch control $label", async ({ isSetup, locked }) => {
     const sendMessage = vi.fn(async (message: { type: string }) => {
       if (message.type === "quotex-connect.get-popup-state") {
         return {
@@ -42,8 +42,48 @@ describe("popup carrier directory", () => {
     await import("../src/popup/main");
 
     await vi.waitFor(() => {
-      expect(document.querySelectorAll<HTMLButtonElement>("[data-launch]")).toHaveLength(42);
+      expect(document.querySelectorAll<HTMLButtonElement>("[data-launch]")).toHaveLength(
+        DEFAULT_RECIPES.length
+      );
     });
-    expect(document.body.textContent).toContain("42 of 42 carriers");
+    expect(document.body.textContent).toContain(
+      `${DEFAULT_RECIPES.length} of ${DEFAULT_RECIPES.length} carriers`
+    );
+  });
+
+  it("opens Quotex Connect in a full browser tab", async () => {
+    const createTab = vi.fn(async () => undefined);
+    vi.stubGlobal("chrome", {
+      runtime: {
+        sendMessage: vi.fn(async () => ({
+          ok: true,
+          state: {
+            isSetup: true,
+            locked: false,
+            recipes: structuredClone(DEFAULT_RECIPES),
+            statuses: {},
+            activity: { favorites: [], recent: [], lastUsedCarrierId: "" }
+          }
+        })),
+        getURL: vi.fn((path: string) => `chrome-extension://quotex/${path}`),
+        openOptionsPage: vi.fn()
+      },
+      tabs: {
+        create: createTab
+      }
+    });
+
+    await import("../src/popup/main");
+
+    const button = await vi.waitFor(() => {
+      const element = document.querySelector<HTMLButtonElement>("#open-full-page");
+      expect(element).not.toBeNull();
+      return element!;
+    });
+    button.click();
+
+    expect(createTab).toHaveBeenCalledWith({
+      url: "chrome-extension://quotex/options.html"
+    });
   });
 });

@@ -247,6 +247,149 @@ label {
   gap: 8px;
 }
 
+.connect-panel {
+  max-width: 1080px;
+  margin: 18px auto 0;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.popup-connect-panel {
+  margin: 0 0 12px;
+  padding: 10px;
+}
+
+.connect-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.connect-heading > div {
+  min-width: 0;
+}
+
+.connect-heading h2 {
+  margin: 2px 0;
+  overflow: hidden;
+  font-family: "Cormorant Garamond", Garamond, Georgia, serif;
+  font-size: 20px;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connect-heading p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.eyebrow {
+  color: var(--gold-light) !important;
+  font-size: 10px !important;
+  font-weight: 850;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.connect-status {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.connect-status.connected {
+  border-color: rgba(134, 239, 172, 0.35);
+  background: rgba(134, 239, 172, 0.14);
+  color: var(--success);
+}
+
+.connect-pairing-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.8fr) minmax(150px, 0.55fr) auto;
+  align-items: end;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.connect-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.connect-job {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.connect-job span,
+.connect-muted {
+  color: var(--muted);
+}
+
+.connect-muted {
+  margin: 10px 0 0;
+  font-size: 12px;
+}
+
+.connect-preference {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.connect-preference input {
+  width: auto;
+  margin: 2px 0 0;
+  accent-color: var(--gold-light);
+}
+
+.connect-preference span {
+  display: grid;
+  gap: 3px;
+}
+
+.connect-preference strong {
+  font-size: 13px;
+}
+
+.connect-preference small,
+.connect-code-state {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 550;
+  line-height: 1.4;
+}
+
+.connect-code-state {
+  margin: 8px 0 0;
+}
+
 .vault-control {
   display: flex;
   align-items: center;
@@ -492,6 +635,54 @@ label {
   gap: 14px;
 }
 
+.carrier-panel-heading,
+.credential-actions,
+.add-carrier-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.compact-button {
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
+.add-carrier-form {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--gold-light);
+  border-radius: 8px;
+  background: rgba(216, 194, 122, 0.08);
+}
+
+.button-link {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  padding: 8px 13px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--ink);
+  background: var(--paper);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.button-link:hover {
+  border-color: var(--gold-light);
+}
+
+.danger-button {
+  color: #8f2e25;
+  border-color: #d9a59f;
+  background: #fff8f7;
+}
+
 .credentials-panel {
   display: grid;
   gap: 18px;
@@ -598,7 +789,8 @@ label {
 
 @media (max-width: 860px) {
   .options-layout,
-  .form-grid {
+  .form-grid,
+  .connect-pairing-form {
     grid-template-columns: 1fr;
   }
 

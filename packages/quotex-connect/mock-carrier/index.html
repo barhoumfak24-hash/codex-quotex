@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Quotex Connect Mock Carrier</title>
+    <style>
+      body { font: 16px/1.5 system-ui, sans-serif; margin: 0; background: #f4f4f1; color: #171713; }
+      main { width: min(760px, calc(100% - 32px)); margin: 48px auto; padding: 28px; background: white; border: 1px solid #d8d6cd; }
+      label { display: grid; gap: 6px; margin: 14px 0; }
+      input, button { box-sizing: border-box; min-height: 44px; padding: 10px 12px; font: inherit; }
+      .quote-result { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+      .quote-result div { padding: 14px; background: #f7f6f1; }
+      .muted { color: #67645b; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Mock Carrier Agent Portal</h1>
+      <p class="muted">For local Quotex Connect validation only. It contains synthetic data.</p>
+      <form id="login-form">
+        <label>Username <input id="username" autocomplete="username" /></label>
+        <label>Password <input id="password" type="password" autocomplete="current-password" /></label>
+        <button id="login-submit" type="button">Sign in</button>
+      </form>
+      <section id="mfa-panel" hidden>
+        <h2>Email verification</h2>
+        <label>Verification code <input id="mfa-code" autocomplete="one-time-code" /></label>
+        <button id="mfa-submit" type="button">Verify</button>
+      </section>
+      <section id="quote-panel" hidden>
+        <h2>Quote result</h2>
+        <div class="quote-result" id="quote-ready">
+          <div>Annual premium <strong id="annual-premium">$4,850.00</strong></div>
+          <div>Quote reference <strong id="quote-reference">MOCK-BOP-004850</strong></div>
+          <div>Effective date <strong id="effective-date">2026-08-01</strong></div>
+          <div>Status <strong id="quote-status">Quoted</strong></div>
+        </div>
+      </section>
+      <section id="error-panel" hidden><h2 id="error-title"></h2></section>
+    </main>
+    <script>
+      const state = new URLSearchParams(location.search).get("state") || "quote";
+      const login = document.querySelector("#login-form");
+      const mfa = document.querySelector("#mfa-panel");
+      const quote = document.querySelector("#quote-panel");
+      const error = document.querySelector("#error-panel");
+      const title = document.querySelector("#error-title");
+      login.hidden = state !== "login" && state !== "mfa";
+      mfa.hidden = state !== "mfa";
+      quote.hidden = state !== "quote" && state !== "changed-layout";
+      if (state === "changed-layout") document.querySelector("#quote-ready").id = "carrier-redesigned-quote";
+      const errors = {
+        expired: "Session expired",
+        maintenance: "Scheduled maintenance",
+        "rate-limit": "Too many requests",
+        captcha: "Human verification required",
+        ambiguous: "Multiple matching accounts",
+        error: "Carrier service error"
+      };
+      if (errors[state]) {
+        error.hidden = false;
+        title.textContent = errors[state];
+      }
+    </script>
+  </body>
+</html>

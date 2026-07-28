@@ -32,7 +32,11 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
   return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
-export async function deriveKey(passphrase: string, kdf: KdfConfig): Promise<CryptoKey> {
+export async function deriveKey(
+  passphrase: string,
+  kdf: KdfConfig,
+  extractable = false
+): Promise<CryptoKey> {
   const baseKey = await crypto.subtle.importKey(
     "raw",
     enc.encode(passphrase),
@@ -49,6 +53,21 @@ export async function deriveKey(passphrase: string, kdf: KdfConfig): Promise<Cry
     },
     baseKey,
     { name: "AES-GCM", length: 256 },
+    extractable,
+    ["encrypt", "decrypt"]
+  );
+}
+
+export async function exportAesKey(key: CryptoKey): Promise<string> {
+  const rawKey = await crypto.subtle.exportKey("raw", key);
+  return bytesToBase64(new Uint8Array(rawKey));
+}
+
+export async function importAesKey(rawKey: string): Promise<CryptoKey> {
+  return crypto.subtle.importKey(
+    "raw",
+    toArrayBuffer(base64ToBytes(rawKey)),
+    { name: "AES-GCM" },
     false,
     ["encrypt", "decrypt"]
   );

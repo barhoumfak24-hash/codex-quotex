@@ -38,7 +38,13 @@ describe("carrier directory", () => {
     const hostPermissions = [...manifest.host_permissions].sort();
     const contentScriptMatches = [...(manifest.content_scripts[0]?.matches ?? [])].sort();
 
-    expect(hostPermissions).toEqual(directoryDomains);
+    expect(hostPermissions).toEqual(expect.arrayContaining(directoryDomains));
+    expect(hostPermissions).toEqual(
+      expect.arrayContaining([
+        "https://quotexinsurance.com/*",
+        "https://www.quotexinsurance.com/*",
+      ])
+    );
     expect(contentScriptMatches).toEqual(directoryDomains);
   });
 });

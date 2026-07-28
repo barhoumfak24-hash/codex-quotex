@@ -37,8 +37,12 @@ function renderLauncher(): void {
     <section>
       <div class="popup-header">
         ${brandHeader()}
-        <button id="open-options" title="Manage carrier logins">Logins</button>
+        <div class="popup-actions">
+          <button id="open-full-page" title="Open Quotex Connect in a full browser tab">Open</button>
+          <button id="open-options" title="Manage carrier logins">Logins</button>
+        </div>
       </div>
+      ${bridgePanelHtml()}
       ${vaultControlHtml()}
       <div class="launcher-tools">
         <input class="search-input" id="search" type="search" aria-label="Search carriers" placeholder="Search carriers..." value="${escapeHtml(query)}" />
@@ -77,7 +81,11 @@ function wireLauncherHandlers(): void {
     filter = (event.target as HTMLSelectElement).value as LauncherFilter;
     renderLauncher();
   });
+  app.querySelector("#open-full-page")?.addEventListener("click", openFullPage);
   app.querySelector("#open-options")?.addEventListener("click", () => chrome.runtime.openOptionsPage());
+  app.querySelector("#bridge-open-options")?.addEventListener("click", () => chrome.runtime.openOptionsPage());
+  app.querySelector("#bridge-poll")?.addEventListener("click", pollBridge);
+  app.querySelector("#bridge-resume")?.addEventListener("click", resumeBridgeJob);
   app.querySelector("#setup-logins")?.addEventListener("click", () => chrome.runtime.openOptionsPage());
   app.querySelector("#lock")?.addEventListener("click", async () => {
     await send("quotex-connect.lock");
@@ -94,6 +102,108 @@ function wireLauncherHandlers(): void {
   app.querySelectorAll<HTMLButtonElement>("[data-favorite]").forEach((button) => {
     button.addEventListener("click", () => toggleCarrierFavorite(button.dataset.favorite ?? ""));
   });
+}
+
+function bridgePanelHtml(): string {
+  if (!state) return "";
+  const bridge = state.bridge;
+  if (!bridge?.paired || !bridge.config) {
+    return `
+      <div class="connect-panel popup-connect-panel">
+        <div class="connect-heading">
+          <div>
+            <p class="eyebrow">Quotex account</p>
+            <h2>Browser not paired</h2>
+            <p>Pair this browser before running carrier work.</p>
+          </div>
+          <span class="connect-status">Not paired</span>
+        </div>
+        <div class="connect-actions">
+          <button class="primary" id="bridge-open-options">Pair browser</button>
+        </div>
+      </div>
+    `;
+  }
+
+  const job = bridge.runtime.activeJob;
+  const canResume = Boolean(
+    job && ["waiting_for_login", "waiting_for_mfa", "manual_required"].includes(job.status)
+  );
+  return `
+    <div class="connect-panel popup-connect-panel">
+      <div class="connect-heading">
+        <div>
+          <p class="eyebrow">Paired Quotex account</p>
+          <h2>${escapeHtml(bridge.config.userEmail || bridge.config.deviceLabel)}</h2>
+          <p>${escapeHtml(bridge.config.agencyName || "Agency")}</p>
+        </div>
+        <span class="connect-status connected">Connected</span>
+      </div>
+      ${
+        job
+          ? `<div class="connect-job">
+              <strong>${escapeHtml(job.carrierName)}</strong>
+              <span>${escapeHtml(connectJobStatusLabel(job.status))}</span>
+            </div>`
+          : '<p class="connect-muted">Ready for work assigned to this exact user.</p>'
+      }
+      ${
+        bridge.runtime.lastError
+          ? `<div class="message error">${escapeHtml(bridge.runtime.lastError)}</div>`
+          : ""
+      }
+      <div class="connect-actions">
+        <button id="bridge-poll">Check now</button>
+        ${canResume ? '<button class="primary" id="bridge-resume">Resume after sign-in / 2FA</button>' : ""}
+      </div>
+    </div>
+  `;
+}
+
+function connectJobStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    queued: "Queued",
+    claimed: "Starting",
+    opening_portal: "Opening carrier portal",
+    waiting_for_login: "Sign in on the carrier page",
+    waiting_for_mfa: "Complete 2FA on the carrier page",
+    running: "Running",
+    completed: "Completed",
+    manual_required: "Manual carrier step required",
+    failed: "Needs attention",
+    cancelled: "Cancelled"
+  };
+  return labels[status] ?? status;
+}
+
+async function pollBridge(): Promise<void> {
+  transientMessage = "Checking for assigned carrier work...";
+  renderLauncher();
+  const response = await send("quotex-connect.poll");
+  if (!response.ok) {
+    transientMessage = response.error ?? "Could not check for carrier work.";
+    renderLauncher();
+    return;
+  }
+  state = response.state;
+  transientMessage = state?.bridge.runtime.activeJob
+    ? "Carrier work updated."
+    : "No assigned carrier work is waiting.";
+  renderLauncher();
+}
+
+async function resumeBridgeJob(): Promise<void> {
+  transientMessage = "Checking the carrier sign-in...";
+  renderLauncher();
+  const response = await send("quotex-connect.resume-job");
+  if (!response.ok) {
+    transientMessage = response.error ?? "Carrier work could not resume.";
+    renderLauncher();
+    return;
+  }
+  state = response.state;
+  transientMessage = response.result?.message ?? "Carrier work updated.";
+  renderLauncher();
 }
 
 function filteredRecipes(): CarrierRecipe[] {
@@ -204,15 +314,41 @@ function vaultControlHtml(): string {
 }
 
 async function unlock(): Promise<void> {
-  const response = await send("quotex-connect.unlock", { passphrase: valueOf("#unlock-passphrase") });
-  if (!response.ok) {
-    transientMessage = response.error ?? "Unlock failed.";
+  const passphrase = valueOf("#unlock-passphrase");
+  if (!passphrase) {
+    transientMessage = "Enter your master passphrase.";
     renderLauncher();
+    app.querySelector<HTMLInputElement>("#unlock-passphrase")?.focus();
     return;
   }
-  state = response.state;
-  transientMessage = "Vault unlocked.";
-  renderLauncher();
+  const button = app.querySelector<HTMLButtonElement>("#unlock");
+  if (button) {
+    button.disabled = true;
+    button.textContent = "Unlocking...";
+  }
+  try {
+    const response = await send("quotex-connect.unlock", {
+      passphrase
+    });
+    if (!response.ok) {
+      transientMessage = response.error ?? "Unlock failed.";
+      renderLauncher();
+      return;
+    }
+    state = response.state;
+    transientMessage = "Vault unlocked.";
+    renderLauncher();
+  } catch (error) {
+    transientMessage =
+      error instanceof Error
+        ? error.message
+        : "Quotex Connect could not reach its secure credential vault. Reload the extension and try again.";
+    renderLauncher();
+  }
+}
+
+function openFullPage(): void {
+  void chrome.tabs.create({ url: chrome.runtime.getURL("options.html") });
 }
 
 async function launchCarrier(carrierId: string): Promise<void> {
@@ -292,7 +428,32 @@ function valueOf(selector: string): string {
 }
 
 async function send(type: string, payload: Record<string, unknown> = {}): Promise<any> {
-  return chrome.runtime.sendMessage({ type, ...payload });
+  let timer: ReturnType<typeof globalThis.setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      chrome.runtime.sendMessage({ type, ...payload }),
+      new Promise<never>((_, reject) => {
+        timer = globalThis.setTimeout(() => {
+          reject(
+            new Error(
+              "Quotex Connect did not receive a response from its secure vault. Reload the extension and try again."
+            )
+          );
+        }, 15_000);
+      })
+    ]);
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Quotex Connect")) {
+      throw error;
+    }
+    throw new Error(
+      "Quotex Connect could not reach its secure credential vault. Reload the extension and try again."
+    );
+  } finally {
+    if (timer !== undefined) {
+      globalThis.clearTimeout(timer);
+    }
+  }
 }
 
 function renderError(message: string): void {
