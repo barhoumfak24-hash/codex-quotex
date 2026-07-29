@@ -411,25 +411,26 @@ connectExtensionRoutes.get("/jobs/next", async (_req, res, next) => {
   try {
     const device = connectDevice(res);
     const now = new Date();
-    const job = await prisma.$transaction(async (tx) => {
-      await tx.carrierAutomationJob.updateMany({
-        where: {
-          tenantId: device.tenantId,
-          userId: device.userId,
-          deviceId: device.id,
-          leaseExpiresAt: { lt: now },
-          status: { in: ["claimed", "opening_portal", "waiting_for_login", "waiting_for_mfa", "running"] },
-        },
-        data: {
-          status: "queued",
-          claimedAt: null,
-          leaseExpiresAt: null,
-          errorCode: null,
-          errorMessage: null,
-        },
-      });
+    await prisma.carrierAutomationJob.updateMany({
+      where: {
+        tenantId: device.tenantId,
+        userId: device.userId,
+        deviceId: device.id,
+        leaseExpiresAt: { lt: now },
+        status: { in: ["claimed", "opening_portal", "waiting_for_login", "waiting_for_mfa", "running"] },
+      },
+      data: {
+        status: "queued",
+        claimedAt: null,
+        leaseExpiresAt: null,
+        errorCode: null,
+        errorMessage: null,
+      },
+    });
 
-      const queued = await tx.carrierAutomationJob.findFirst({
+    let job = null;
+    for (let attempt = 0; attempt < 2 && !job; attempt += 1) {
+      const queued = await prisma.carrierAutomationJob.findFirst({
         where: {
           tenantId: device.tenantId,
           userId: device.userId,
@@ -438,21 +439,42 @@ connectExtensionRoutes.get("/jobs/next", async (_req, res, next) => {
         },
         orderBy: { createdAt: "asc" },
       });
-      if (!queued) return null;
+      if (!queued) break;
 
-      const claimed = await tx.carrierAutomationJob.updateMany({
-        where: { id: queued.id, status: "queued", deviceId: device.id },
+      const claimed = await prisma.carrierAutomationJob.updateMany({
+        where: {
+          id: queued.id,
+          tenantId: device.tenantId,
+          userId: device.userId,
+          deviceId: device.id,
+          status: "queued",
+        },
         data: {
           status: "claimed",
           claimedAt: now,
           leaseExpiresAt: new Date(now.getTime() + JOB_LEASE_MS),
         },
       });
-      if (claimed.count !== 1) return null;
-      return tx.carrierAutomationJob.findUnique({ where: { id: queued.id } });
-    });
+      if (claimed.count !== 1) continue;
+      job = await prisma.carrierAutomationJob.findFirst({
+        where: {
+          id: queued.id,
+          tenantId: device.tenantId,
+          userId: device.userId,
+          deviceId: device.id,
+        },
+      });
+    }
 
-    await prisma.connectDevice.update({ where: { id: device.id }, data: { lastSeenAt: now } });
+    await prisma.connectDevice.updateMany({
+      where: {
+        id: device.id,
+        tenantId: device.tenantId,
+        userId: device.userId,
+        active: true,
+      },
+      data: { lastSeenAt: now },
+    });
     if (job) {
       await recordConnectAudit({
         tenantId: device.tenantId,

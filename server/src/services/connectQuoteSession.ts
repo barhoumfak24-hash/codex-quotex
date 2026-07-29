@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import type { Prisma } from "@prisma/client";
 import type { AuthContext } from "../middleware/auth.js";
 import { prisma } from "./prisma.js";
 import { readRemoteState } from "./supabaseState.js";
@@ -46,7 +46,10 @@ export async function ensureConnectQuoteSession(
     });
     return true;
   } catch (error) {
-    if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") {
+    // Prisma errors can cross a bundled/serverless module boundary where
+    // `instanceof PrismaClientKnownRequestError` is false. The stable error
+    // code is the reliable signal that another request created this row first.
+    if (prismaErrorCode(error) !== "P2002") {
       throw error;
     }
     const raced = await prisma.quotingSession.findUnique({
@@ -55,6 +58,11 @@ export async function ensureConnectQuoteSession(
     });
     return raced?.tenantId === tenantId;
   }
+}
+
+function prismaErrorCode(error: unknown): string {
+  const record = asObject(error);
+  return stringValue(record?.code);
 }
 
 function appStateId(): string {

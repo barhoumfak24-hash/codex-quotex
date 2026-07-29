@@ -2024,6 +2024,92 @@ function parseAcordMappings(record: Record<string, unknown>): {
   };
 }
 
+function acceptedQuestionnaireMappings(
+  record: Record<string, unknown>,
+  fields: AcordMapField[]
+): AcordMapping[] {
+  return normalizeQuestionnaireMappingsFromRecord(record, fields)
+    .map((row): AcordMapping | null => {
+      const matchedField =
+        exactAcordAiField(asString(row.targetId), fields) ||
+        exactAcordAiField(asString(row.targetField), fields);
+      if (!matchedField) return null;
+      const targetField = matchedField.label;
+      const value = canonicalQuestionnaireFieldAnswer(matchedField, row.value);
+      if (!value) return null;
+      const confidence = confidenceFromAcordAiValue(row.confidence, 0.72);
+      const sourceKind = asAcordMapSourceKind(row.sourceKind);
+      const sourceUrl = asString(row.sourceUrl);
+      const verified = row.verified === true;
+      const publicResearch = acordMapRequiresCitation(sourceKind);
+      if (publicResearch && !isUsableSourceUrl(sourceUrl)) return null;
+      if (publicResearch && !questionnairePublicResearchAllowed(targetField)) return null;
+      const documentReady =
+        verified &&
+        confidence >= 0.84 &&
+        (!acordMapRequiresCitation(sourceKind) || isUsableSourceUrl(sourceUrl)) &&
+        acordMapSourceAllowedForDocument(sourceKind) &&
+        sourceKind !== "public_web" &&
+        sourceKind !== "model_estimate" &&
+        sourceKind !== "unknown";
+      const reviewReady =
+        confidence >= (publicResearch ? 0.75 : 0.7) &&
+        sourceKind !== "unknown" &&
+        sourceKind !== "model_estimate" &&
+        ((sourceKind === "web_search" && isUsableSourceUrl(sourceUrl)) ||
+          (sourceKind === "public_web" && isUsableSourceUrl(sourceUrl)) ||
+          (sourceKind === "public_geocoder" && verified) ||
+          (sourceKind === "commercial_provider" && isUsableSourceUrl(sourceUrl)) ||
+          (sourceKind === "government_api" && isUsableSourceUrl(sourceUrl)) ||
+          (sourceKind === "imagery_vision" && isUsableSourceUrl(sourceUrl) && confidence >= 0.8) ||
+          sourceKind === "agent_seed" ||
+          sourceKind === "client_intake" ||
+          sourceKind === "validated_address" ||
+          sourceKind === "carrier_api" ||
+          verified) &&
+        isSafeQuestionnairePrefillTarget(targetField);
+      if (!acordMappedValueFitsTarget(targetField, value, { questionnairePrefill: true })) return null;
+      if (!documentReady && !reviewReady) return null;
+      if (!documentReady && !isSafeQuestionnairePrefillTarget(targetField)) return null;
+      return {
+        targetId: matchedField.id,
+        targetField,
+        value,
+        sourceLabel: asString(row.sourceLabel, "Source-backed Quotex AI questionnaire prefill"),
+        sourceUrl: sourceUrl || undefined,
+        sourceKind,
+        confidence,
+        verified,
+        rationale: asString(row.rationale),
+      };
+    })
+    .filter((item): item is AcordMapping => item !== null);
+}
+
+function mappedQuestionnaireFieldKeys(mappings: AcordMapping[]): Set<string> {
+  return new Set(
+    mappings.flatMap((mapping) => [
+      normalizeQuestionnaireFieldKey(mapping.targetId),
+      normalizeQuestionnaireFieldKey(mapping.targetField),
+    ])
+  );
+}
+
+function mergeQuestionnaireMappings(primary: AcordMapping[], additions: AcordMapping[]): AcordMapping[] {
+  const merged = [...primary];
+  const mapped = mappedQuestionnaireFieldKeys(primary);
+  for (const mapping of additions) {
+    const keys = [
+      normalizeQuestionnaireFieldKey(mapping.targetId),
+      normalizeQuestionnaireFieldKey(mapping.targetField),
+    ].filter(Boolean);
+    if (keys.some((key) => mapped.has(key))) continue;
+    merged.push(mapping);
+    keys.forEach((key) => mapped.add(key));
+  }
+  return merged;
+}
+
 export async function aiMapAcordFields(input: {
   template?: { documentName?: string; fileName?: string; formNumber?: string };
   fields: AcordMapField[];
@@ -2147,21 +2233,26 @@ export async function aiMapAcordFields(input: {
       }),
     },
   });
-  const complete = async (withWebSearch: boolean) =>
+  const complete = async (
+    withWebSearch: boolean,
+    requestUser = user,
+    schemaNameSuffix = "",
+    timeoutMsOverride?: number
+  ) =>
     codexAgentCompleteJson({
       task: intent === "questionnaire_prefill" ? "public_data_sweep" : "document_autofill",
       agent: intent === "questionnaire_prefill" ? "questionnaire_public_sweep" : "acord_document_autofill",
       system,
-      user,
+      user: requestUser,
       schemaName:
         intent === "questionnaire_prefill"
-          ? "acord_field_mapping_with_questionnaire_prefill_full_public_sweep"
+          ? `acord_field_mapping_with_questionnaire_prefill_full_public_sweep${schemaNameSuffix}`
           : "acord_field_mapping",
       schema,
       quality: "maximum",
       reasoningEffort: "xhigh",
       maxOutputTokens: intent === "questionnaire_prefill" ? 10_000 : 4_000,
-      timeoutMs: intent === "questionnaire_prefill" ? 180_000 : 120_000,
+      timeoutMs: timeoutMsOverride ?? (intent === "questionnaire_prefill" ? 180_000 : 120_000),
       allowWebSearch: withWebSearch,
     });
   let raw: unknown;
@@ -2179,73 +2270,53 @@ export async function aiMapAcordFields(input: {
   }
   const record = isRecord(raw) ? raw : {};
   if (intent !== "questionnaire_prefill") return parseAcordMappings(record);
-  const relaxedMappings = normalizeQuestionnaireMappingsFromRecord(record, safeFields)
-    .map((row): AcordMapping | null => {
-      const matchedField =
-        exactAcordAiField(asString(row.targetId), safeFields) ||
-        exactAcordAiField(asString(row.targetField), safeFields);
-      if (!matchedField) return null;
-      const targetField = matchedField.label;
-      const value = canonicalQuestionnaireFieldAnswer(matchedField, row.value);
-      if (!value) return null;
-      const confidence = confidenceFromAcordAiValue(row.confidence, 0.72);
-      const sourceKind = asAcordMapSourceKind(row.sourceKind);
-      const sourceUrl = asString(row.sourceUrl);
-      const verified = row.verified === true;
-      const publicResearch = acordMapRequiresCitation(sourceKind);
-      if (publicResearch && !isUsableSourceUrl(sourceUrl)) return null;
-      if (publicResearch && !questionnairePublicResearchAllowed(targetField)) return null;
-      const documentReady =
-        verified &&
-        confidence >= 0.84 &&
-        (!acordMapRequiresCitation(sourceKind) || isUsableSourceUrl(sourceUrl)) &&
-        acordMapSourceAllowedForDocument(sourceKind) &&
-        sourceKind !== "public_web" &&
-        sourceKind !== "model_estimate" &&
-        sourceKind !== "unknown";
-      const reviewReady =
-        confidence >= (publicResearch ? 0.75 : 0.7) &&
-        sourceKind !== "unknown" &&
-        sourceKind !== "model_estimate" &&
-        ((sourceKind === "web_search" && isUsableSourceUrl(sourceUrl)) ||
-          (sourceKind === "public_web" && isUsableSourceUrl(sourceUrl)) ||
-          (sourceKind === "public_geocoder" && verified) ||
-          (sourceKind === "commercial_provider" && isUsableSourceUrl(sourceUrl)) ||
-          (sourceKind === "government_api" && isUsableSourceUrl(sourceUrl)) ||
-          (sourceKind === "imagery_vision" && isUsableSourceUrl(sourceUrl) && confidence >= 0.8) ||
-          sourceKind === "agent_seed" ||
-          sourceKind === "client_intake" ||
-          sourceKind === "validated_address" ||
-          sourceKind === "carrier_api" ||
-          verified) &&
-        isSafeQuestionnairePrefillTarget(targetField);
-      if (!targetField || !value) return null;
-      if (!acordMappedValueFitsTarget(targetField, value, { questionnairePrefill: true })) return null;
-      if (!documentReady && !reviewReady) return null;
-      if (!documentReady && !isSafeQuestionnairePrefillTarget(targetField)) return null;
-      return {
-        targetId: matchedField.id,
-        targetField,
-        value,
-        sourceLabel: asString(row.sourceLabel, "Source-backed Quotex AI questionnaire prefill"),
-        sourceUrl: sourceUrl || undefined,
-        sourceKind,
-        confidence,
-        verified,
-        rationale: asString(row.rationale),
-      };
-    })
-    .filter((item): item is AcordMapping => item !== null);
-  const completedMappings =
-    input.intent === "questionnaire_prefill"
-      ? addQuestionnaireFallbackMappings(relaxedMappings, safeFields, input.dossier)
-      : relaxedMappings;
-  const mappedQuestionnaireKeys = new Set(
-    completedMappings.flatMap((mapping) => [
-      normalizeQuestionnaireFieldKey(mapping.targetId),
-      normalizeQuestionnaireFieldKey(mapping.targetField),
-    ])
-  );
+  const relaxedMappings = acceptedQuestionnaireMappings(record, safeFields);
+  let completedMappings = addQuestionnaireFallbackMappings(relaxedMappings, safeFields, input.dossier);
+  let mappedQuestionnaireKeys = mappedQuestionnaireFieldKeys(completedMappings);
+  const unresolvedFields = safeFields.filter((field) => {
+    const idKey = normalizeQuestionnaireFieldKey(field.id);
+    const labelKey = normalizeQuestionnaireFieldKey(field.label);
+    return !mappedQuestionnaireKeys.has(idKey) && !mappedQuestionnaireKeys.has(labelKey);
+  });
+  let completenessRecord: Record<string, unknown> = {};
+  const acceptedCoverage = completedMappings.length / Math.max(1, safeFields.length);
+  if (safeFields.length >= 12 && unresolvedFields.length >= 4 && acceptedCoverage < 0.7) {
+    const completenessUser = [
+      `Template: ${templateLabel}`,
+      "This is a mandatory completeness audit of a prior questionnaire research pass.",
+      `Already accepted answers (do not repeat or contradict these):\n${JSON.stringify(
+        completedMappings.map((mapping) => ({
+          targetId: mapping.targetId,
+          targetField: mapping.targetField,
+          value: mapping.value,
+        }))
+      )}`,
+      `Still unresolved questionnaire questions:\n${JSON.stringify(unresolvedFields)}`,
+      `Quotex dossier:\n${JSON.stringify(input.dossier)}`,
+      "Search every unresolved public-safe question using the exact address, VIN, asset identifiers, and applicant/business identifiers in the dossier. Return only newly answerable mappings with exact question ids and direct source URLs. Leave private, uncertain, inferred, or unsupported answers missing. Do not stop after the first source or first few answers.",
+    ].join("\n\n");
+    try {
+      const completenessRaw = await complete(
+        true,
+        completenessUser,
+        "_completeness_audit",
+        90_000
+      );
+      completenessRecord = isRecord(completenessRaw) ? completenessRaw : {};
+      const completenessMappings = acceptedQuestionnaireMappings(
+        completenessRecord,
+        unresolvedFields
+      );
+      completedMappings = addQuestionnaireFallbackMappings(
+        mergeQuestionnaireMappings(completedMappings, completenessMappings),
+        safeFields,
+        input.dossier
+      );
+      mappedQuestionnaireKeys = mappedQuestionnaireFieldKeys(completedMappings);
+    } catch {
+      // The first source-backed pass remains usable when the bounded completeness audit times out.
+    }
+  }
   const inferredMissingFields = safeFields
     .filter((field) => {
       const idKey = normalizeQuestionnaireFieldKey(field.id);
@@ -2271,21 +2342,32 @@ export async function aiMapAcordFields(input: {
   return {
     mappings: completedMappings,
     missingFields: Array.from(missingFieldsByKey.values()),
-    webSources: asObjectArray(record.webSources)
+    webSources: [...asObjectArray(record.webSources), ...asObjectArray(completenessRecord.webSources)]
       .map((row) => ({
         title: asString(row.title),
         url: asString(row.url),
         field: asString(row.field),
       }))
       .filter((row) => row.title || isUsableSourceUrl(row.url) || row.field)
-      .slice(0, 12),
+      .filter((row, index, rows) => {
+        const key = `${row.url}|${row.field}`.toLowerCase();
+        return rows.findIndex((candidate) => `${candidate.url}|${candidate.field}`.toLowerCase() === key) === index;
+      })
+      .slice(0, 24),
     summary: asString(
-      record.summary,
+      completenessRecord.summary || record.summary,
       `Mapped ${completedMappings.length} source-backed questionnaire field${
         completedMappings.length === 1 ? "" : "s"
       }.`
     ),
-    confidence: clamp(asNumber(record.confidence, completedMappings.length > 0 ? 0.72 : 0.4), 0, 1),
+    confidence: clamp(
+      Math.max(
+        asNumber(record.confidence, completedMappings.length > 0 ? 0.72 : 0.4),
+        asNumber(completenessRecord.confidence, 0)
+      ),
+      0,
+      1
+    ),
   };
 }
 

@@ -307,6 +307,123 @@ describe("Codex ACORD mapping guardrails", () => {
     );
   });
 
+  it("runs a bounded completeness audit when the first research pass leaves most questions unresolved", async () => {
+    let requestNumber = 0;
+    const fetchMock = vi.fn(async () => {
+      requestNumber += 1;
+      const response =
+        requestNumber === 1
+          ? {
+              summary: "Initial public sweep.",
+              confidence: 0.78,
+              mappings: [
+                {
+                  targetId: "square-footage",
+                  targetField: "Square footage",
+                  value: "2,148",
+                  sourceLabel: "County assessor",
+                  sourceUrl: "https://example.com/assessor",
+                  sourceKind: "public_web",
+                  confidence: 0.82,
+                  verified: false,
+                  rationale: "Assessor living area.",
+                },
+              ],
+              missingFields: ["Year built"],
+              webSources: [
+                {
+                  title: "County assessor",
+                  url: "https://example.com/assessor",
+                  field: "Square footage",
+                },
+              ],
+            }
+          : {
+              summary: "Completed unresolved public research.",
+              confidence: 0.86,
+              mappings: [
+                {
+                  targetId: "year-built",
+                  targetField: "Year built",
+                  value: "2007",
+                  sourceLabel: "County property record",
+                  sourceUrl: "https://example.com/property-record",
+                  sourceKind: "public_web",
+                  confidence: 0.84,
+                  verified: false,
+                  rationale: "Exact property record.",
+                },
+              ],
+              missingFields: [],
+              webSources: [
+                {
+                  title: "County property record",
+                  url: "https://example.com/property-record",
+                  field: "Year built",
+                },
+              ],
+            };
+      return new Response(JSON.stringify({ output_text: JSON.stringify(response) }), {
+        status: 200,
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { aiMapAcordFields } = await import("../services/ai/index.js");
+    const result = await aiMapAcordFields({
+      template: { documentName: "Personal questionnaire", fileName: "personal-questionnaire" },
+      fields: [
+        { id: "property-address", label: "Property address", required: true },
+        { id: "square-footage", label: "Square footage", required: true },
+        { id: "year-built", label: "Year built", required: true },
+        { id: "roof-material", label: "Roof material", required: true },
+        { id: "roof-year", label: "Roof year", required: true },
+        { id: "construction-type", label: "Construction type", required: true },
+        { id: "lot-size", label: "Lot size", required: true },
+        { id: "flood-zone", label: "Flood zone", required: true },
+        { id: "number-stories", label: "Number of stories", required: true },
+        { id: "bedrooms", label: "Bedrooms", required: true },
+        { id: "bathrooms", label: "Bathrooms", required: true },
+        { id: "distance-coast", label: "Distance to coast", required: true },
+      ],
+      dossier: {
+        asset: { address: "901 McDonald Dr, Northville, MI 48167" },
+      },
+      intent: "questionnaire_prefill",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [, secondRequestInit] = fetchMock.mock.calls[1] as unknown as [unknown, RequestInit];
+    const secondRequestBody = JSON.parse(String(secondRequestInit?.body)) as {
+      input?: Array<{ content?: string }>;
+      tools?: unknown;
+      tool_choice?: unknown;
+    };
+    const secondUserContent = String(secondRequestBody.input?.[1]?.content ?? "");
+    expect(secondRequestBody.tools).toEqual([{ type: "web_search" }]);
+    expect(secondRequestBody.tool_choice).toBe("required");
+    expect(secondUserContent).toContain("mandatory completeness audit");
+    expect(secondUserContent).toContain("Still unresolved questionnaire questions");
+    expect(secondUserContent).toContain("year-built");
+    expect(secondUserContent).toContain("Already accepted answers");
+    expect(result.mappings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ targetId: "square-footage", value: "2,148" }),
+        expect.objectContaining({ targetId: "year-built", value: "2007" }),
+        expect.objectContaining({
+          targetId: "property-address",
+          value: "901 McDonald Dr, Northville, MI 48167",
+        }),
+      ])
+    );
+    expect(result.webSources).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ url: "https://example.com/assessor" }),
+        expect.objectContaining({ url: "https://example.com/property-record" }),
+      ])
+    );
+  });
+
   it("keeps pure not-public questionnaire notes blank and required", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(

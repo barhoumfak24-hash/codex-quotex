@@ -131,4 +131,34 @@ describe("Connect quote-session recovery", () => {
     await expect(ensureConnectQuoteSession(auth, "quote_other")).resolves.toBe(false);
     expect(mocks.create).not.toHaveBeenCalled();
   });
+
+  it("treats a bundled Prisma P2002 race as an idempotent success", async () => {
+    mocks.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ tenantId: "tenant_1" });
+    mocks.readRemoteState.mockResolvedValue({
+      id: "app_state:default",
+      revision: 9,
+      snapshot: {
+        agencies: [{ id: "tenant_1", name: "Agency One" }],
+        users: [{ id: "user_1", tenantId: "tenant_1" }],
+        quotingSessions: [
+          {
+            id: "quote_1",
+            tenantId: "tenant_1",
+            assetType: "luxury_vehicle",
+            status: "quoting",
+          },
+        ],
+      },
+    });
+    mocks.create.mockRejectedValue({
+      name: "PrismaClientKnownRequestError",
+      code: "P2002",
+      meta: { target: ["id"] },
+    });
+
+    await expect(ensureConnectQuoteSession(auth, "quote_1")).resolves.toBe(true);
+    expect(mocks.findUnique).toHaveBeenCalledTimes(2);
+  });
 });
