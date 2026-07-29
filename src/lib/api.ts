@@ -7790,7 +7790,12 @@ function personalCategoryAnswerHints(_category?: InsuranceCategory): Record<stri
   return {};
 }
 
-const PERSONAL_AUTO_PUBLIC_RESEARCH_KEYS = new Set([
+const PERSONAL_AUTO_OBJECTIVE_PUBLIC_RESEARCH_KEYS = new Set([
+  "currentStreetAddress",
+  "currentCity",
+  "currentState",
+  "currentZipCode",
+  "ratingState",
   "ratingCounty",
   "uspsValidated",
   "vehicleYear",
@@ -7944,7 +7949,8 @@ async function applyServerQuestionnaireMappingToSession(
         strictPersonalAuto &&
         (!evidence ||
           (PERSONAL_AUTO_PUBLIC_RESEARCH_SOURCE_KINDS.has(evidence.sourceKind) &&
-            (!strictQuestionKey || !PERSONAL_AUTO_PUBLIC_RESEARCH_KEYS.has(strictQuestionKey))))
+            (!strictQuestionKey ||
+              !PERSONAL_AUTO_OBJECTIVE_PUBLIC_RESEARCH_KEYS.has(strictQuestionKey))))
       ) {
         return false;
       }

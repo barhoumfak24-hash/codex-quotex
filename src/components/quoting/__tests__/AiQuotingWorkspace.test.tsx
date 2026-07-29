@@ -219,6 +219,8 @@ describe("AiQuotingWorkspace component", () => {
         { id: "make", section: "Vehicle", label: "Make", kind: "text", required: true },
         { id: "model", section: "Vehicle", label: "Model", kind: "text", required: true },
         { id: "usage", section: "Vehicle", label: "Vehicle use", kind: "text", required: true },
+        { id: "msrp", section: "Vehicle", label: "Original MSRP", kind: "text", required: false },
+        { id: "estimate", section: "Vehicle", label: "Estimated value", kind: "text", required: false },
         { id: "losses", section: "History", label: "Prior losses", kind: "text", required: true },
       ],
       questionnaireResponses: {
@@ -226,6 +228,8 @@ describe("AiQuotingWorkspace component", () => {
         make: "Dodge",
         model: "Charger",
         usage: "Pleasure",
+        msrp: "$36,745 estimated original MSRP",
+        estimate: "$42,000 estimated market value",
         losses: "Not publicly available; requires client",
       },
       questionnaireResponseMeta: {
@@ -233,6 +237,8 @@ describe("AiQuotingWorkspace component", () => {
         make: { updatedByRole: "ai" },
         model: { updatedByRole: "ai" },
         usage: { updatedByRole: "ai" },
+        msrp: { updatedByRole: "ai", sourceKind: "government_api" },
+        estimate: { updatedByRole: "ai", sourceKind: "model_estimate" },
         losses: { updatedByRole: "ai" },
       },
     } as unknown as QuotingSession;
@@ -249,6 +255,10 @@ describe("AiQuotingWorkspace component", () => {
     expect(host.textContent).toContain("Charger");
     expect(host.textContent).toContain("Vehicle use");
     expect(host.textContent).toContain("Pleasure");
+    expect(host.textContent).toContain("Original MSRP");
+    expect(host.textContent).toContain("$36,745 estimated original MSRP");
+    expect(host.textContent).not.toContain("Estimated value");
+    expect(host.textContent).not.toContain("$42,000 estimated market value");
     expect(host.textContent).not.toContain("Prior losses");
     expect(host.textContent).not.toContain("Year / make / model");
 

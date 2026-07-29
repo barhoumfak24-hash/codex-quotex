@@ -750,6 +750,99 @@ describe("api.quoting workspace", () => {
     );
   });
 
+  it("accepts cited objective public auto facts while rejecting public guesses about private facts", async () => {
+    vi.resetModules();
+    const ai = await import("../ai");
+    vi.spyOn(ai, "aiMapAcordFields").mockImplementation(async (input) => {
+      const ratingCounty = input.fields.find((field) => field.acordFieldKey === "ratingCounty");
+      const applicantOccupation = input.fields.find(
+        (field) => field.acordFieldKey === "primaryOccupation"
+      );
+      expect(ratingCounty).toBeTruthy();
+      expect(applicantOccupation).toBeTruthy();
+      return {
+        fields: {},
+        publicFieldEvidence: {},
+        mappings: [
+          {
+            targetId: ratingCounty!.id,
+            targetField: "ratingCounty",
+            value: "Oakland",
+            sourceLabel: "Validated address record",
+            sourceKind: "public_geocoder",
+            sourceUrl: "https://example.com/address",
+            confidence: 0.96,
+            verified: true,
+            rationale: "County returned for the exact validated risk address.",
+          },
+          {
+            targetId: applicantOccupation!.id,
+            targetField: "primaryOccupation",
+            value: "Architect",
+            sourceLabel: "Public profile",
+            sourceKind: "public_web",
+            sourceUrl: "https://example.com/profile",
+            confidence: 0.91,
+            verified: false,
+            rationale: "A public profile appears to match the applicant.",
+          },
+        ],
+        missingFields: [],
+        webSources: [
+          {
+            title: "Validated address record",
+            url: "https://example.com/address",
+            field: "ratingCounty",
+          },
+          {
+            title: "Public profile",
+            url: "https://example.com/profile",
+            field: "primaryOccupation",
+          },
+        ],
+        summary: "Mapped only supported objective public facts.",
+        confidence: 0.91,
+      };
+    });
+    const { api } = await import("../api");
+    const { db } = await import("../db");
+    db.reset();
+    const agency = api.agencies.list()[0];
+    const agent = api.users.list(agency.id).find((user) => user.role === "agent")!;
+    const customer = api.customers.list(agency.id)[0];
+    const category = api.categories.get("cat_standard_auto")!;
+
+    const session = await api.quoting.startSession({
+      tenantId: agency.id,
+      customerId: customer.id,
+      createdById: agent.id,
+      assetType: "luxury_vehicle",
+      categoryId: category.id,
+      categoryLabel: category.label,
+      contactName: "Avery Stone",
+      address: "901 McDonald Dr, Northville, MI 48167",
+      assetDetails: {
+        vin: "1HGCM82633A004352",
+      },
+      lineOfBusiness: "personal",
+      forceNew: true,
+    });
+
+    const countyQuestion = session.questionnaireQuestions?.find(
+      (question) => question.acordFieldKey === "ratingCounty"
+    );
+    const occupationQuestion = session.questionnaireQuestions?.find(
+      (question) => question.acordFieldKey === "primaryOccupation"
+    );
+    expect(countyQuestion).toBeTruthy();
+    expect(occupationQuestion).toBeTruthy();
+    expect(session.questionnaireResponses?.[countyQuestion!.id]).toBe("Oakland");
+    expect(session.questionnaireResponseMeta?.[countyQuestion!.id]?.sourceKind).toBe(
+      "public_geocoder"
+    );
+    expect(session.questionnaireResponses?.[occupationQuestion!.id]).toBeUndefined();
+  });
+
   it("does not prefill low-confidence estimate-only sweep answers into editable questionnaire responses", async () => {
     const { api, agency, agent } = await seed();
     const customer = api.customers.list(agency.id)[0];

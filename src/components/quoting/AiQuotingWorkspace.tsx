@@ -2477,11 +2477,15 @@ function isUsableAiMappedQuestionAnswer(
   question: QuotingQuestion
 ): boolean {
   const meta = session.questionnaireResponseMeta ?? {};
-  if (meta[question.id]?.updatedByRole !== "ai") return false;
+  const answerMeta = meta[question.id];
+  if (answerMeta?.updatedByRole !== "ai") return false;
+  if (answerMeta.sourceKind === "model_estimate" || answerMeta.sourceKind === "unknown") {
+    return false;
+  }
   const value = (session.questionnaireResponses?.[question.id] ?? "").trim();
   if (!value) return false;
   return !/^(unknown|n\/a|none|not found|not public|not available|requires)\b/i.test(value) &&
-    !/\b(not found|not public|not publicly|no public|requires applicant|requires client|requires insured|unable to confirm|unable to determine|clue|loss runs?|likely|possibly|probably|appears|seems|may be|might be|could be|assumed|inferred|estimated|approximately|approx|unverified|verify|confirmation)\b/i.test(value);
+    !/\b(not found|not public|not publicly|no public|requires applicant|requires client|requires insured|unable to confirm|unable to determine|clue|loss runs?)\b/i.test(value);
 }
 
 function aiMappedQuestionEntries(
