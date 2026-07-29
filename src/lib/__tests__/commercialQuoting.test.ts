@@ -92,8 +92,9 @@ describe("commercial quoting session", () => {
     ).toHaveLength(1);
   });
 
-  it("creates a separate open session when the user explicitly starts another quote flow", async () => {
+  it("voids the prior session when the user explicitly starts a clean quote flow", async () => {
     const { api } = await import("../api");
+    const { isQuotingWorkflowOpen } = await import("../quotingWorkflows");
     const agency = api.agencies.list()[0];
     const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
     const customer = api.customers.list(agency.id)[0];
@@ -114,12 +115,20 @@ describe("commercial quoting session", () => {
     });
 
     expect(second.id).not.toBe(first.id);
+    expect(api.quoting.get(first.id)).toMatchObject({
+      status: "voided",
+      supersededBySessionId: second.id,
+    });
+    expect(api.quoting.get(second.id)?.status).not.toBe("voided");
     expect(
       api.quoting
         .listByTenant(agency.id)
-        .filter((session) => session.customerId === customer.id)
-        .map((session) => session.id)
-    ).toEqual(expect.arrayContaining([first.id, second.id]));
+        .filter(
+          (session) =>
+            session.customerId === customer.id &&
+            isQuotingWorkflowOpen(session)
+        )
+    ).toHaveLength(1);
   });
 
   it("prepares the structured commercial questionnaire after the ACORD fill audit", async () => {
@@ -909,6 +918,7 @@ describe("commercial quoting session", () => {
     const agency = api.agencies.list()[0];
     const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
     const customer = api.customers.list(agency.id)[0];
+    const linkedCarrier = api.carriers.listForTenant(agency.id)[0];
     const session = await api.quoting.startSession({
       tenantId: agency.id,
       customerId: customer.id,
@@ -916,6 +926,7 @@ describe("commercial quoting session", () => {
       assetType: "other",
       contactName: "Acme LLC",
       estimatedValue: 1_500_000,
+      selectedCarrierIds: [linkedCarrier.id],
     });
     const updated = api.quoting.sendPortalLink(
       session.id,
@@ -1503,11 +1514,20 @@ describe("commercial quoting session", () => {
       contactName: "Acme LLC",
       estimatedValue: 1_500_000,
     });
+    const selectedCarrierId = api.carriers
+      .listForTenant(agency.id)[0]?.id;
+    expect(selectedCarrierId).toBeTruthy();
+    api.quoting.updateSelectedCarriers(session.id, [selectedCarrierId!]);
     api.quoting.sendPortalLink(session.id, "https://example/link");
-    const submitted = api.quoting.submitQuestionnaireResponses(session.id, {
-      "base-legal-business-name-as-registered": "Acme Logistics LLC",
-      "base-federal-ein": "12-3456789",
-    });
+    const submitted = api.quoting.submitQuestionnaireResponses(
+      session.id,
+      {
+        "base-legal-business-name-as-registered": "Acme Logistics LLC",
+        "base-federal-ein": "12-3456789",
+      },
+      undefined,
+      { selectedCommercialCarrierIds: [selectedCarrierId!] }
+    );
     expect(submitted?.status).toBe("quoting");
     expect(submitted?.commercialApplicationSentAt).toBeTruthy();
     expect(submitted?.commercialSecondRoundSentAt).toBeFalsy();

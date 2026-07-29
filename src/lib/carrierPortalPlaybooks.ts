@@ -182,6 +182,10 @@ export const CARRIER_PORTAL_PLAYBOOKS: Record<string, CarrierPortalPlaybook> = {
   carrier_grange: verificationNeeded("https://www.grangeinsurance.com/agents"),
   carrier_west_bend: verificationNeeded("https://www.thesilverlining.com"),
   carrier_meemic: verificationNeeded("https://www.meemic.com"),
+  carrier_insurance_agent_hub: verificationNeeded(
+    "https://insurance-agent-hub.replit.app/sign-in",
+    "The test carrier portal is available, but its quote, policy, claim, and document workflows must be verified before runner automation is enabled."
+  ),
 };
 
 export function applyCarrierPortalPlaybook(carrier: Carrier): Carrier {

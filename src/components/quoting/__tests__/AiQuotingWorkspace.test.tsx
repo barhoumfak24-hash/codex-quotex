@@ -58,6 +58,18 @@ async function openAiWorkspace(host: HTMLElement) {
   expect(host.querySelector('[role="dialog"]')?.textContent).toContain("AI Quoting Workspace");
 }
 
+async function selectFirstQuoteCarrier(container: HTMLElement) {
+  const section = Array.from(container.querySelectorAll("section")).find((candidate) =>
+    candidate.textContent?.includes("Select quote carriers")
+  );
+  const checkbox = section?.querySelector<HTMLInputElement>('input[type="checkbox"]');
+  expect(checkbox).toBeTruthy();
+  await act(async () => {
+    checkbox!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await Promise.resolve();
+  });
+}
+
 describe("carrier response check notices", () => {
   it("does not claim there was no reply when the provider check did not complete", () => {
     const notice = carrierResponseCheckNotice({
@@ -298,7 +310,7 @@ describe("AiQuotingWorkspace component", () => {
       host.querySelector(
         `a[href="/employee/clients/${customer.id}/quote-flow?new=1"][aria-label="Start another quote flow"]`
       )
-    ).toBeTruthy();
+    ).toBeNull();
 
     await act(async () => {
       root.unmount();
@@ -426,6 +438,7 @@ describe("AiQuotingWorkspace component", () => {
     );
     expect(acordButton?.textContent).toMatch(/ACORD/i);
     await click(acordButton as HTMLButtonElement);
+    await selectFirstQuoteCarrier(host);
 
     const startButton = buttonByText(host, /Start quote flow/i);
     expect(startButton.disabled).toBe(false);
@@ -532,6 +545,7 @@ describe("AiQuotingWorkspace component", () => {
       /^ACORD\s+\d+/i.test((button.textContent ?? "").trim())
     );
     await click(acordButton as HTMLButtonElement);
+    await selectFirstQuoteCarrier(host);
     await click(buttonByText(host, /Start quote flow/i));
 
     const dialogText = host.querySelector('[role="dialog"]')?.textContent ?? "";
@@ -586,6 +600,7 @@ describe("AiQuotingWorkspace component", () => {
       /^ACORD\s+\d+/i.test((button.textContent ?? "").trim())
     );
     await click(acordButton as HTMLButtonElement);
+    await selectFirstQuoteCarrier(host);
     await click(buttonByText(host, /Start quote flow/i));
 
     const remapSpy = vi.spyOn(api.quoting, "runAcordAiMapping");
@@ -749,6 +764,7 @@ describe("AiQuotingWorkspace component", () => {
       /^ACORD\s+\d+/i.test((button.textContent ?? "").trim())
     );
     await click(acordButton as HTMLButtonElement);
+    await selectFirstQuoteCarrier(host);
     await click(buttonByText(host, /Start quote flow/i));
     await click(buttonByText(host, /^Next$/i));
     await click(buttonByText(host, /^Next$/i));
@@ -831,6 +847,7 @@ describe("AiQuotingWorkspace component", () => {
       /^ACORD\s+\d+/i.test((button.textContent ?? "").trim())
     );
     await click(acordButton as HTMLButtonElement);
+    await selectFirstQuoteCarrier(host);
     await click(buttonByText(host, /Start quote flow/i));
     await click(buttonByText(host, /^Next$/i));
     await click(buttonByText(host, /^Next$/i));

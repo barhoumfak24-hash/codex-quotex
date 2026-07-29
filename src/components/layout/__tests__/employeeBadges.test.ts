@@ -172,8 +172,7 @@ describe("Tasks badge — AI auto-reply notifications", () => {
     ({ api } = await import("../../../lib/api"));
     const agency = api.agencies.list()[0];
     const customer = api.customers.list(agency.id)[0];
-    const before = tasksBadge(agency.id);
-    api.communications.create({
+    const communication = api.communications.create({
       tenantId: agency.id,
       customerId: customer.id,
       channel: "email",
@@ -186,7 +185,15 @@ describe("Tasks badge — AI auto-reply notifications", () => {
         .listUnacked(agency.id)
         .some((n) => n.kind === "inbound_notice")
     ).toBe(true);
-    expect(tasksBadge(agency.id)).toBe(before);
+    expect(
+      api.tasks
+        .listByTenant(agency.id)
+        .some(
+          (task) =>
+            task.messageId === communication.id ||
+            task.originalMessageId === communication.id
+        )
+    ).toBe(false);
   });
 });
 

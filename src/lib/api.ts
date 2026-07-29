@@ -170,6 +170,7 @@ import type {
   CarrierRunnerJobStatus,
   CarrierRunnerJobTrigger,
   CarrierQuote,
+  CarrierQuoteAttempt,
   Claim,
   Communication,
   ConnectedMailbox,
@@ -3566,10 +3567,18 @@ function ensureAiNotification(
         ? existing
         : db.update("aiNotifications", existing.id, { eventKey: input.eventKey }) ??
           existing;
+    const {
+      acknowledgedAt: _acknowledgedAt,
+      acknowledgedById: _acknowledgedById,
+      taskId: _taskId,
+      ...currentEvent
+    } = input;
+    const refreshed =
+      db.update("aiNotifications", migrated.id, currentEvent) ?? migrated;
     eventMatches
-      .filter((notification) => notification.id !== migrated.id)
+      .filter((notification) => notification.id !== refreshed.id)
       .forEach((notification) => db.remove("aiNotifications", notification.id));
-    return { notification: migrated, created: false };
+    return { notification: refreshed, created: false };
   }
 
   const notification: AiNotification = {
@@ -3997,7 +4006,10 @@ function quoteSessionContact(session: Pick<QuotingSession, "customerId" | "prosp
 }
 
 function quoteSessionAssignedStaffIds(
-  session: Pick<QuotingSession, "tenantId" | "createdById" | "customerId" | "prospectId">
+  session: Pick<
+    QuotingSession,
+    "tenantId" | "createdById" | "customerId" | "prospectId" | "quoteRequestId"
+  >
 ): string[] {
   const accountOwners = linkedContactOwners({
     tenantId: session.tenantId,
@@ -4005,12 +4017,42 @@ function quoteSessionAssignedStaffIds(
     prospectId: session.prospectId,
   });
   if (accountOwners.length > 0) return accountOwners;
+  const quoteRequestOwnerId = session.quoteRequestId
+    ? db
+        .list("quoteRequests")
+        .find(
+          (quoteRequest) =>
+            quoteRequest.id === session.quoteRequestId &&
+            quoteRequest.tenantId === session.tenantId
+        )?.assignedAgentId
+    : undefined;
+  if (quoteRequestOwnerId) {
+    const quoteRequestOwner = db
+      .list("users")
+      .find(
+        (user) =>
+          user.id === quoteRequestOwnerId &&
+          user.tenantId === session.tenantId
+      );
+    if (
+      quoteRequestOwner &&
+      quoteRequestOwner.active !== false &&
+      quoteRequestOwner.staffAccessStatus !== "banned" &&
+      quoteRequestOwner.staffAccessStatus !== "deleted" &&
+      isRoutableStaffRole(quoteRequestOwner.role)
+    ) {
+      return [quoteRequestOwner.id];
+    }
+  }
   const creator = db.list("users").find((u) => u.id === session.createdById);
   return creator && isStaffRole(creator.role) ? [creator.id] : [];
 }
 
 function quoteSessionAssignedStaff(
-  session: Pick<QuotingSession, "tenantId" | "createdById" | "customerId" | "prospectId">
+  session: Pick<
+    QuotingSession,
+    "tenantId" | "createdById" | "customerId" | "prospectId" | "quoteRequestId"
+  >
 ): string | undefined {
   return quoteSessionAssignedStaffIds(session)[0];
 }
@@ -6309,6 +6351,35 @@ function quotingSessionStartKey(input: {
   if (input.customerId) return `${input.tenantId}:customer:${input.customerId}`;
   if (input.prospectId) return `${input.tenantId}:prospect:${input.prospectId}`;
   return null;
+}
+
+function voidSupersededQuotingSessions(input: {
+  tenantId: string;
+  customerId?: string;
+  prospectId?: string;
+  supersededBySessionId: string;
+  voidedAt: string;
+}): void {
+  db.list("quotingSessions")
+    .filter(
+      (session) =>
+        session.tenantId === input.tenantId &&
+        session.id !== input.supersededBySessionId &&
+        !isDocumentOnlyAcordSession(session) &&
+        (input.customerId
+          ? session.customerId === input.customerId
+          : session.prospectId === input.prospectId) &&
+        isQuotingWorkflowOpen(session)
+    )
+    .forEach((session) => {
+      db.update("quotingSessions", session.id, {
+        status: "voided",
+        voidedAt: input.voidedAt,
+        voidedReason: "Superseded by a newly started quote flow.",
+        supersededBySessionId: input.supersededBySessionId,
+        updatedAt: input.voidedAt,
+      });
+    });
 }
 
 function communicationHasKnownMailboxContact(row: Communication): boolean {
@@ -9392,6 +9463,75 @@ async function stageCarrierRequestedSupplementals(input: {
   };
 }
 
+function carrierEmailReplyQuotes(
+  session: QuotingSession,
+  submissions: CommercialCarrierSubmission[]
+): CarrierQuote[] {
+  const selectedCarrierIds = new Set(session.selectedCarrierIds ?? []);
+  const hasExplicitSelection = selectedCarrierIds.size > 0;
+  const quotes = submissions.flatMap((submission): CarrierQuote[] => {
+    if (
+      submission.status !== "accepted" ||
+      (hasExplicitSelection && !selectedCarrierIds.has(submission.carrierId))
+    ) {
+      return [];
+    }
+    const premium = Number(submission.finalPremium ?? submission.premiumEstimate ?? 0);
+    if (!Number.isFinite(premium) || premium <= 0) return [];
+    const confidence = Math.max(
+      0,
+      Math.min(1, Number(submission.quote?.confidence ?? submission.parseConfidence ?? 0))
+    );
+    const rawScore = Number(submission.score);
+    const score = Number.isFinite(rawScore)
+      ? rawScore <= 1
+        ? Math.round(rawScore * 100)
+        : Math.round(rawScore)
+      : Math.round(confidence * 100);
+    return [
+      {
+        carrierId: submission.carrierId,
+        premium,
+        confidence,
+        score,
+        fitReason:
+          submission.fitReason ||
+          submission.aiRationale ||
+          "Quoted in a verified carrier email reply.",
+        apiStatus: "connected",
+        source: "carrier_email_reply",
+        carrierReference:
+          submission.submissionId ??
+          commercialSubmissionStableId(session, submission.carrierId),
+      },
+    ];
+  });
+  return quotes.sort(
+    (left, right) => right.score - left.score || left.premium - right.premium
+  );
+}
+
+function commercialCarrierResponsesFinished(
+  session: QuotingSession,
+  submissions: CommercialCarrierSubmission[]
+): boolean {
+  const selectedCarrierIds = new Set(session.selectedCarrierIds ?? []);
+  const relevantSubmissions =
+    selectedCarrierIds.size > 0
+      ? submissions.filter((submission) => selectedCarrierIds.has(submission.carrierId))
+      : submissions;
+  return (
+    relevantSubmissions.length > 0 &&
+    relevantSubmissions.every((submission) =>
+      new Set<CommercialCarrierSubmission["status"]>([
+        "accepted",
+        "declined",
+        "send_failed",
+      ]).has(submission.status)
+    )
+  );
+}
+
 async function applyInboundCarrierReply(input: {
   tenantId: string;
   sessionId: string;
@@ -9492,19 +9632,35 @@ async function applyInboundCarrierReply(input: {
       candidate.status === "accepted" &&
       Boolean(candidate.finalPremium ?? candidate.premiumEstimate)
   ).length;
+  const emailQuotes = carrierEmailReplyQuotes(session, nextSubmissions);
+  const allCarrierResponsesFinished = commercialCarrierResponsesFinished(
+    session,
+    nextSubmissions
+  );
   const updated = db.update("quotingSessions", session.id, {
     commercialCarrierSubmissions: nextSubmissions,
     questionnaireQuestions: questions,
     missingFields: Array.from(missingFields),
-    status: hasMissingInfo ? "awaiting_reply" : quotedCarrierCount > 0 ? "quoting" : session.status,
+    quotes: emailQuotes,
+    status: hasMissingInfo
+      ? "awaiting_reply"
+      : allCarrierResponsesFinished
+      ? "complete"
+      : quotedCarrierCount > 0
+      ? "quoting"
+      : session.status,
     aiSummary: hasAgentReview
       ? "One or more carrier replies need agent review before Quotex advances the workflow."
       : hasMissingInfo
       ? "Carrier replies were parsed and supplemental missing fields are ready for agent review."
+      : allCarrierResponsesFinished && quotedCarrierCount > 0
+      ? `${quotedCarrierCount} verified carrier email quote${
+          quotedCarrierCount === 1 ? " is" : "s are"
+        } ready for ranking.`
       : quotedCarrierCount > 0
       ? `Carrier replies were parsed with ${quotedCarrierCount} quoted market${
           quotedCarrierCount === 1 ? "" : "s"
-        } ready for ranking.`
+        } captured while Quotex waits for the remaining selected carriers.`
       : "Carrier replies were parsed and the workflow is waiting for more explicit carrier outcomes.",
     updatedAt: processedAt,
   });
@@ -9546,8 +9702,30 @@ async function applyInboundCarrierReply(input: {
     parseConfidence: parsed.quote.confidence,
     processedAt,
   });
-  if (!hasMissingInfo && !hasAgentReview && quotedCarrierCount > 0) {
-    return api.quoting.runQuotes(session.id);
+  if (
+    !hasMissingInfo &&
+    !hasAgentReview &&
+    allCarrierResponsesFinished &&
+    emailQuotes.length > 0 &&
+    session.status !== "complete"
+  ) {
+    const contact = quoteSessionContact(updated);
+    resolveQuoteMilestoneTasks(updated, ["supplemental_pending", "quote_ready"]);
+    createQuoteReadyNotification(updated, {
+      title: `${contact.name} quote options ready`,
+      summary: `${emailQuotes.length} verified carrier email quote${
+        emailQuotes.length === 1 ? " is" : "s are"
+      } ready for review.`,
+      severity: "warning",
+      severityReason: "Verified carrier email results are ready for agent review.",
+    });
+    logQuotingWorkflowProgress(updated, {
+      message: `${emailQuotes.length} verified carrier email quote${
+        emailQuotes.length === 1 ? "" : "s"
+      } ready for ranking.`,
+      detail: updated.aiSummary,
+      createdAt: processedAt,
+    });
   }
   return updated;
 }
@@ -16911,69 +17089,44 @@ export const api = {
             }
           }
 
-          const latestSession = api.quoting.getForCustomer(customer.id);
-          const openSession =
-            latestSession && isQuotingWorkflowOpen(latestSession) ? latestSession : undefined;
-          if (openSession?.lineOfBusiness === "commercial") {
-            finish(
-              "manual",
-              "A commercial quote flow is already open for this client. Staff must finish or restart that flow before Quotex can begin this personal-lines request.",
-              openSession.id,
-              asset.id
-            );
-            continue;
-          }
-
-          const session =
-            openSession && !quoteAutomationSessionContainsAsset(openSession, asset.id)
-              ? await appendAssetToOpenPersonalQuoteSession({
-                  session: openSession,
-                  asset,
-                  category,
-                  contactName: customer.name,
-                  address:
-                    intake.identifierKind === "address"
-                      ? intake.identifier
-                      : customer.mailingAddress,
-                  assetDetails: details,
-                })
-              : openSession ??
-                (await api.quoting.startSession({
-                  tenantId,
-                  customerId: customer.id,
-                  assetId: asset.id,
-                  assets: [
-                    {
-                      assetId: asset.id,
-                      label: asset.label,
-                      assetType: asset.type,
-                      categoryId: category?.id,
-                      categoryLabel: category?.label,
-                      address:
-                        intake.identifierKind === "address"
-                          ? intake.identifier
-                          : customer.mailingAddress,
-                      estimatedValue: asset.estimatedValue,
-                      assetDetails: details,
-                    },
-                  ],
-                  createdById: operatorId,
-                  assetType: asset.type,
-                  contactName: customer.name,
-                  address:
-                    intake.identifierKind === "address"
-                      ? intake.identifier
-                      : customer.mailingAddress,
-                  estimatedValue: asset.estimatedValue,
-                  assetDetails: details,
-                  categoryId: category?.id,
-                  categoryLabel: category?.label,
-                  categoryIds: category ? [category.id] : undefined,
-                  categoryLabels: category ? [category.label] : undefined,
-                  lineOfBusiness: "personal",
-                  activityTaskIds: [task.id],
-                  activityActorId: "ai",
-                }));
+          const session = await api.quoting.startSession({
+            tenantId,
+            customerId: customer.id,
+            assetId: asset.id,
+            assets: [
+              {
+                assetId: asset.id,
+                label: asset.label,
+                assetType: asset.type,
+                categoryId: category?.id,
+                categoryLabel: category?.label,
+                address:
+                  intake.identifierKind === "address"
+                    ? intake.identifier
+                    : customer.mailingAddress,
+                estimatedValue: asset.estimatedValue,
+                assetDetails: details,
+              },
+            ],
+            createdById: operatorId,
+            assetType: asset.type,
+            contactName: customer.name,
+            address:
+              intake.identifierKind === "address"
+                ? intake.identifier
+                : customer.mailingAddress,
+            estimatedValue: asset.estimatedValue,
+            assetDetails: details,
+            categoryId: category?.id,
+            categoryLabel: category?.label,
+            categoryIds: category ? [category.id] : undefined,
+            categoryLabels: category ? [category.label] : undefined,
+            lineOfBusiness: "personal",
+            selectedCarrierIds: [],
+            activityTaskIds: [task.id],
+            activityActorId: "ai",
+            forceNew: true,
+          });
           syncQuoteActivityStatus(session, {
             taskIds: [task.id],
             actorId: "ai",
@@ -19784,12 +19937,13 @@ export const api = {
       categoryLabels?: string[];
       lineOfBusiness?: QuotingLineOfBusiness;
       selectedAcordTemplateIds?: string[];
+      selectedCarrierIds?: string[];
       activityTaskIds?: string[];
       activityActorId?: string;
       forceNew?: boolean;
     }): Promise<QuotingSession> {
-      const startKey = input.forceNew ? null : quotingSessionStartKey(input);
-      const existingOpenSession = startKey
+      const startKey = quotingSessionStartKey(input);
+      const existingOpenSession = !input.forceNew && startKey
         ? db
             .list("quotingSessions")
             .filter(
@@ -20094,6 +20248,17 @@ export const api = {
         state,
         lineOfBusiness,
         commercialAcordTemplates,
+        selectedCarrierIds: Array.from(new Set(input.selectedCarrierIds ?? [])),
+        carrierQuoteAttempts: (input.selectedCarrierIds ?? []).map((carrierId) => {
+          const carrier = db.list("carriers").find((candidate) => candidate.id === carrierId);
+          return {
+            carrierId,
+            carrierName: carrier?.name ?? "Selected carrier",
+            status: "pending" as const,
+            message: "Waiting for quote retrieval to begin.",
+            updatedAt: createdAt,
+          };
+        }),
         createdById: input.createdById,
         status: lineOfBusiness === "commercial" || needsClient ? "gathering_info" : "quoting",
         publicFields,
@@ -20112,6 +20277,13 @@ export const api = {
         createdAt,
         updatedAt: createdAt,
       };
+      voidSupersededQuotingSessions({
+        tenantId: input.tenantId,
+        customerId: input.customerId,
+        prospectId: input.prospectId,
+        supersededBySessionId: sessionId,
+        voidedAt: createdAt,
+      });
       db.insert("quotingSessions", row);
       const mappedRow =
         lineOfBusiness === "commercial"
@@ -21005,6 +21177,18 @@ export const api = {
           forceUnderwriterEmailForSelected
         );
         if (!applicationSentAt) {
+          const carrierQuoteAttempts = selectedCommercialCarrierIds?.map((carrierId) => {
+            const carrier = db
+              .list("carriers")
+              .find((candidate) => candidate.id === carrierId);
+            return {
+              carrierId,
+              carrierName: carrier?.name ?? "Selected carrier",
+              status: "pending" as const,
+              message: "Application sent; awaiting a verified carrier response.",
+              updatedAt,
+            };
+          });
           const awaitingSubmissions = options?.awaitLiveMailboxDelivery
             ? pipeline.submissions.map((submission) => ({
                 ...submission,
@@ -21065,6 +21249,10 @@ export const api = {
             commercialAcordTemplates:
               syncedAcordTemplates ?? session.commercialAcordTemplates,
             commercialCarrierSubmissions: carrierSubmissions,
+            selectedCarrierIds:
+              selectedCommercialCarrierIds ?? session.selectedCarrierIds,
+            carrierQuoteAttempts:
+              carrierQuoteAttempts ?? session.carrierQuoteAttempts,
             commercialApplicationSentAt: options?.awaitLiveMailboxDelivery
               ? undefined
               : updatedAt,
@@ -21412,6 +21600,39 @@ export const api = {
       });
       return this.runQuotes(sessionId);
     },
+    updateSelectedCarriers(sessionId: string, carrierIds: string[]): QuotingSession {
+      const session = this.get(sessionId);
+      if (!session) throw new Error("Quoting session not found.");
+      if (session.status === "voided") {
+        throw new Error("This quote flow was replaced by a newer quote flow.");
+      }
+      const linkedCarriers = api.carriers.listForTenant(session.tenantId);
+      const linkedIds = new Set(linkedCarriers.map((carrier) => carrier.id));
+      const selectedCarrierIds = [
+        ...new Set(carrierIds.filter((carrierId) => linkedIds.has(carrierId))),
+      ];
+      const carrierById = new Map(linkedCarriers.map((carrier) => [carrier.id, carrier]));
+      const updatedAt = nowIso();
+      const carrierQuoteAttempts: CarrierQuoteAttempt[] = selectedCarrierIds.map(
+        (carrierId) => ({
+          carrierId,
+          carrierName: carrierById.get(carrierId)?.name ?? "Carrier",
+          status: "pending",
+          message: "Selected for this quote flow.",
+          updatedAt,
+        })
+      );
+      const selectedSet = new Set(selectedCarrierIds);
+      const updated = db.update("quotingSessions", sessionId, {
+        selectedCarrierIds,
+        carrierQuoteAttempts,
+        quotes: (session.quotes ?? []).filter((quote) => selectedSet.has(quote.carrierId)),
+        status: session.status === "complete" ? "quoting" : session.status,
+        updatedAt,
+      })!;
+      syncQuoteActivityStatus(updated, { actorId: "ai" });
+      return updated;
+    },
     // Phase 4: clear stale estimates and wait for verified carrier-portal
     // results from Quotex Connect. Eligibility never creates a quote.
     runQuotes(
@@ -21420,12 +21641,55 @@ export const api = {
     ): QuotingSession {
       const session = this.get(sessionId);
       if (!session) throw new Error("Quoting session not found.");
-      const links = db
-        .list("carrierLinks")
-        .filter((l) => l.tenantId === session.tenantId && l.active);
-      const linkedCarrierIds = new Set(links.map((l) => l.carrierId));
+      if (session.status === "voided") {
+        throw new Error("This quote flow was replaced by a newer quote flow.");
+      }
+      const linkedCarriers = api.carriers.listForTenant(session.tenantId);
+      const linkedCarrierIds = new Set(linkedCarriers.map((carrier) => carrier.id));
+      const carrierById = new Map(linkedCarriers.map((carrier) => [carrier.id, carrier]));
+      const selectedCarrierIds = [...new Set(session.selectedCarrierIds ?? [])];
+      const selectedCarrierSet = new Set(selectedCarrierIds);
+      const rankedAt = nowIso();
+      const carrierQuoteAttempts: CarrierQuoteAttempt[] = selectedCarrierIds.map(
+        (carrierId) => {
+          const carrier = carrierById.get(carrierId);
+          if (!carrier || !linkedCarrierIds.has(carrierId)) {
+            return {
+              carrierId,
+              carrierName: carrier?.name ?? "Carrier",
+              status: "failed",
+              errorCode: "CARRIER_NOT_LINKED",
+              message: "This carrier is not linked to the agency.",
+              updatedAt: rankedAt,
+            };
+          }
+          const portalUrl =
+            carrier.quotingAutomation?.agentPortalUrl ??
+            carrier.agentPortalUrl ??
+            carrier.billingPortalUrl ??
+            carrier.claimsUrl;
+          if (!portalUrl) {
+            return {
+              carrierId,
+              carrierName: carrier.name,
+              status: "failed",
+              errorCode: "CONNECT_PORTAL_UNAVAILABLE",
+              message: "This carrier does not have a configured Quotex Connect portal.",
+              updatedAt: rankedAt,
+            };
+          }
+          return {
+            carrierId,
+            carrierName: carrier.name,
+            status: "queued",
+            message: "Waiting for Quotex Connect.",
+            updatedAt: rankedAt,
+          };
+        }
+      );
       const verifiedQuotes = (session.quotes ?? []).filter(
         (quote) =>
+          selectedCarrierSet.has(quote.carrierId) &&
           linkedCarrierIds.has(quote.carrierId) &&
           quote.source === "quotex_connect" &&
           quote.apiStatus === "connected" &&
@@ -21433,15 +21697,29 @@ export const api = {
           quote.premium > 0 &&
           Boolean(quote.carrierReference?.trim())
       );
-      const rankedAt = nowIso();
+      const hasRunnableCarrier = carrierQuoteAttempts.some(
+        (attempt) => attempt.status === "queued"
+      );
+      const allSelectedCarriersFailed =
+        selectedCarrierIds.length > 0 && !hasRunnableCarrier && verifiedQuotes.length === 0;
       const waitingSummary =
-        linkedCarrierIds.size === 0
-          ? "No carriers are linked to Quotex Connect. Link a carrier before retrieving quotes."
-          : "Waiting for verified carrier portal results from Quotex Connect.";
+        selectedCarrierIds.length === 0
+          ? "Select at least one carrier before retrieving quotes."
+          : !hasRunnableCarrier
+          ? "None of the selected carriers can be started. Review each carrier result."
+          : `Waiting for verified results from ${carrierQuoteAttempts.length} selected carrier${
+              carrierQuoteAttempts.length === 1 ? "" : "s"
+            } through Quotex Connect.`;
       const updated = db.update("quotingSessions", sessionId, {
         quotes: verifiedQuotes,
+        carrierQuoteAttempts,
         aiSummary: waitingSummary,
-        status: options?.status === "awaiting_reply" ? "awaiting_reply" : "quoting",
+        status:
+          options?.status === "awaiting_reply"
+            ? "awaiting_reply"
+            : allSelectedCarriersFailed
+            ? "complete"
+            : "quoting",
         updatedAt: rankedAt,
       })!;
       syncQuoteActivityStatus(updated, { actorId: "ai" });
@@ -21465,19 +21743,22 @@ export const api = {
     syncVerifiedConnectQuotes(
       sessionId: string,
       incomingQuotes: CarrierQuote[],
-      options?: { allFinished?: boolean }
+      options?: { allFinished?: boolean; attempts?: CarrierQuoteAttempt[] }
     ): QuotingSession {
       const session = this.get(sessionId);
       if (!session) throw new Error("Quoting session not found.");
+      if (session.status === "voided") return session;
       const linkedCarrierIds = new Set(
         db
           .list("carrierLinks")
           .filter((link) => link.tenantId === session.tenantId && link.active)
           .map((link) => link.carrierId)
       );
+      const selectedCarrierIds = new Set(session.selectedCarrierIds ?? []);
       const byCarrier = new Map<string, CarrierQuote>();
       for (const quote of incomingQuotes) {
         if (
+          !selectedCarrierIds.has(quote.carrierId) ||
           !linkedCarrierIds.has(quote.carrierId) ||
           quote.source !== "quotex_connect" ||
           quote.apiStatus !== "connected" ||
@@ -21492,7 +21773,7 @@ export const api = {
       const quotes = [...byCarrier.values()].sort(
         (left, right) => right.score - left.score || left.premium - right.premium
       );
-      const shouldComplete = options?.allFinished === true && quotes.length > 0;
+      const shouldComplete = options?.allFinished === true;
       const nextStatus: QuotingSessionStatus =
         session.status === "awaiting_reply" && !shouldComplete
           ? "awaiting_reply"
@@ -21504,22 +21785,27 @@ export const api = {
           ? `${quotes.length} verified carrier portal quote${
               quotes.length === 1 ? "" : "s"
             } received through Quotex Connect.`
+          : shouldComplete
+          ? "Quote retrieval finished without a verified carrier quote. Review each selected carrier result."
           : "Waiting for verified carrier portal results from Quotex Connect.";
       const unchanged =
         session.status === nextStatus &&
         session.aiSummary === summary &&
-        JSON.stringify(session.quotes ?? []) === JSON.stringify(quotes);
+        JSON.stringify(session.quotes ?? []) === JSON.stringify(quotes) &&
+        JSON.stringify(session.carrierQuoteAttempts ?? []) ===
+          JSON.stringify(options?.attempts ?? session.carrierQuoteAttempts ?? []);
       if (unchanged) return session;
 
       const updatedAt = nowIso();
       const updated = db.update("quotingSessions", sessionId, {
         quotes,
+        carrierQuoteAttempts: options?.attempts ?? session.carrierQuoteAttempts,
         aiSummary: summary,
         status: nextStatus,
         updatedAt,
       })!;
       syncQuoteActivityStatus(updated, { actorId: "ai" });
-      if (shouldComplete && session.status !== "complete") {
+      if (shouldComplete && quotes.length > 0 && session.status !== "complete") {
         const contact = quoteSessionContact(updated);
         resolveQuoteMilestoneTasks(updated, ["supplemental_pending", "quote_ready"]);
         createQuoteReadyNotification(updated, {

@@ -121,7 +121,7 @@ describe("quote-flow activity synchronization", () => {
     expect(api.tasks.get(older.id)?.quoteSessionId).toBeUndefined();
   });
 
-  it("keeps explicitly started quote flows linked to their own activities", async () => {
+  it("voids the prior quote flow when a clean replacement is explicitly started", async () => {
     const { api } = await import("../api");
     const agency = api.agencies.list()[0];
     const agent = api.users.list(agency.id).find((user) => user.role === "agent")!;
@@ -164,10 +164,11 @@ describe("quote-flow activity synchronization", () => {
     });
 
     expect(firstSession.id).not.toBe(secondSession.id);
-    expect(api.tasks.get(firstActivity.id)).toMatchObject({
-      status: "in_progress",
-      quoteSessionId: firstSession.id,
+    expect(api.quoting.get(firstSession.id)).toMatchObject({
+      status: "voided",
+      supersededBySessionId: secondSession.id,
     });
+    expect(api.quoting.get(secondSession.id)?.status).not.toBe("voided");
     expect(api.tasks.get(secondActivity.id)).toMatchObject({
       status: "in_progress",
       quoteSessionId: secondSession.id,

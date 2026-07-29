@@ -1006,6 +1006,7 @@ describe("api.quoting workspace", () => {
 
   it("waits for verified Quotex Connect results before showing carrier quotes", async () => {
     const { api, agency, agent, prospect } = await seed();
+    const linkedCarrier = api.carriers.listForTenant(agency.id)[0];
     const s1 = await api.quoting.startSession({
       tenantId: agency.id,
       prospectId: prospect.id,
@@ -1013,13 +1014,14 @@ describe("api.quoting workspace", () => {
       assetType: prospect.assetType,
       contactName: prospect.name,
       estimatedValue: prospect.estimatedValue,
+      selectedCarrierIds: [linkedCarrier.id],
     });
     await api.quoting.draftQuestionnaire(s1.id);
     api.quoting.sendQuestionnaire(s1.id);
     const s2 = api.quoting.markReplyReceivedAndQuote(s1.id)!;
     expect(s2.status).toBe("quoting");
     expect(s2.quotes).toEqual([]);
-    expect(s2.aiSummary).toMatch(/Quotex Connect/i);
+    expect(s2.aiSummary).toMatch(/waiting for verified/i);
     expect(
       api.aiNotifications
         .listUnacked(agency.id)
@@ -1030,7 +1032,6 @@ describe("api.quoting workspace", () => {
         )
     ).toBe(false);
 
-    const linkedCarrier = api.carriers.listForTenant(agency.id)[0];
     const complete = api.quoting.syncVerifiedConnectQuotes(
       s1.id,
       [
@@ -1125,7 +1126,7 @@ describe("api.quoting workspace", () => {
     const s2 = api.quoting.markReplyReceivedAndQuote(s1.id)!;
     expect(s2.status).toBe("quoting");
     expect(s2.quotes).toEqual([]);
-    expect(s2.aiSummary).toMatch(/Quotex Connect/i);
+    expect(s2.aiSummary).toMatch(/select at least one carrier/i);
   });
 
   it("does not synthesize quotes from configured carrier portal metadata", async () => {
@@ -1142,6 +1143,7 @@ describe("api.quoting workspace", () => {
       estimatedValue: prospect.estimatedValue,
       address: "210 Ocean Blvd, Palm Beach, FL 33480",
       lineOfBusiness: "personal",
+      selectedCarrierIds: [chubb.id],
     });
     const pending =
       s1.status === "complete"
@@ -1228,6 +1230,7 @@ describe("api.quoting workspace", () => {
       estimatedValue: asset?.estimatedValue ?? 4_250_000,
       address: customer.mailingAddress,
       lineOfBusiness: "personal",
+      selectedCarrierIds: linkedCarriers.map((carrier) => carrier.id),
     });
     const responses = Object.fromEntries(
       (initial.questionnaireQuestions ?? []).map((question) => [
@@ -1388,6 +1391,7 @@ describe("api.quoting workspace", () => {
       );
     expect(acordTemplate).toBeTruthy();
 
+    const linkedCarrier = api.carriers.listForTenant(agency.id)[0];
     const initial = await api.quoting.startSession({
       tenantId: agency.id,
       customerId: customer.id,
@@ -1467,6 +1471,7 @@ describe("api.quoting workspace", () => {
     const agent = api.users.list(agency.id).find((u) => u.role === "agent")!;
     const customer = api.customers.list(agency.id)[0];
     const asset = api.assets.listByCustomer(customer.id).find((a) => a.type === "coastal_home")!;
+    const linkedCarrier = api.carriers.listForTenant(agency.id)[0];
     const initial = await api.quoting.startSession({
       tenantId: agency.id,
       customerId: customer.id,
@@ -1477,6 +1482,7 @@ describe("api.quoting workspace", () => {
       estimatedValue: asset.estimatedValue,
       address: customer.mailingAddress,
       lineOfBusiness: "personal",
+      selectedCarrierIds: [linkedCarrier.id],
     });
     const pending =
       initial.status === "complete"
@@ -1491,7 +1497,6 @@ describe("api.quoting workspace", () => {
             ),
             { id: agent.id, name: agent.name, role: "agent" }
           )!;
-    const linkedCarrier = api.carriers.listForTenant(agency.id)[0];
     const complete = api.quoting.syncVerifiedConnectQuotes(
       pending.id,
       [

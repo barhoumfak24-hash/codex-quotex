@@ -216,6 +216,8 @@ describe("activity trigger plumbing", () => {
       createdById: customerUser.id,
       status: "submitted_to_agent",
     });
+    const linkedCarrier = api.carriers.listForTenant(agency.id)[0];
+    api.quoting.updateSelectedCarriers(session.id, [linkedCarrier.id]);
     const responses = Object.fromEntries(
       (session.questionnaireQuestions ?? []).map((question) => [
         question.id,
@@ -228,6 +230,22 @@ describe("activity trigger plumbing", () => {
       name: customerUser.name,
       role: "customer",
     });
+    api.quoting.syncVerifiedConnectQuotes(
+      session.id,
+      [
+        {
+          carrierId: linkedCarrier.id,
+          premium: 4_825,
+          confidence: 0.98,
+          score: 91,
+          fitReason: "Verified carrier portal response.",
+          apiStatus: "connected",
+          source: "quotex_connect",
+          carrierReference: "ASSIGNMENT-TEST-QUOTE",
+        },
+      ],
+      { allFinished: true }
+    );
 
     const readyNotification = api.aiNotifications
       .listUnacked(agency.id)

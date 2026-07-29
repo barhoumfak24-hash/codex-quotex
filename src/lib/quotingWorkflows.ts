@@ -67,6 +67,7 @@ export function quotingWorkflowContactKey(
 }
 
 export function isQuotingWorkflowOpen(session: QuotingSession): boolean {
+  if (session.status === "voided") return false;
   return !session.quotes.some((quote) => !!quote.implementation?.policyId);
 }
 

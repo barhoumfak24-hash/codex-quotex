@@ -110,6 +110,30 @@ describe("createQuotexConnectJob", () => {
 });
 
 describe("quotexConnectQuoteCarrierIds", () => {
+  it("uses the carriers explicitly checked for this quote instead of legacy fallbacks", async () => {
+    const { quotexConnectQuoteCarrierIds } = await import("../quotexConnect");
+
+    expect(
+      quotexConnectQuoteCarrierIds({
+        lineOfBusiness: "personal",
+        selectedCarrierIds: ["carrier-selected", "carrier-selected"],
+        linkedCarrierIds: ["carrier-legacy"],
+      })
+    ).toEqual(["carrier-selected"]);
+  });
+
+  it("does not route any carrier when the user explicitly selected none", async () => {
+    const { quotexConnectQuoteCarrierIds } = await import("../quotexConnect");
+
+    expect(
+      quotexConnectQuoteCarrierIds({
+        lineOfBusiness: "personal",
+        selectedCarrierIds: [],
+        linkedCarrierIds: ["carrier-legacy"],
+      })
+    ).toEqual([]);
+  });
+
   it("routes every linked personal carrier once", async () => {
     const { quotexConnectQuoteCarrierIds } = await import("../quotexConnect");
 

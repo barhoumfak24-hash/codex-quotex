@@ -2217,9 +2217,32 @@ export type QuotingSessionStatus =
   | "gathering_info"
   | "awaiting_reply"
   | "quoting"
-  | "complete";
+  | "complete"
+  | "voided";
 
 export type QuotingLineOfBusiness = "personal" | "commercial";
+
+export type CarrierQuoteAttemptStatus =
+  | "pending"
+  | "queued"
+  | "waiting_for_login"
+  | "waiting_for_mfa"
+  | "running"
+  | "completed"
+  | "credentials_missing"
+  | "manual_required"
+  | "failed"
+  | "cancelled";
+
+export interface CarrierQuoteAttempt {
+  carrierId: string;
+  carrierName: string;
+  status: CarrierQuoteAttemptStatus;
+  message?: string;
+  errorCode?: string;
+  connectJobId?: string;
+  updatedAt: string;
+}
 
 export interface QuotingSessionAssetMapping {
   assetId?: string;
@@ -2574,6 +2597,12 @@ export interface QuotingSession {
   // Per-question edit context for the current saved answer.
   questionnaireResponseMeta?: Record<string, QuestionnaireResponseMeta>;
   commercialCarrierSubmissions?: CommercialCarrierSubmission[];
+  // The carriers explicitly selected for this individual quote flow.
+  // An empty array means no carriers have been selected yet.
+  selectedCarrierIds?: string[];
+  // Per-carrier retrieval state surfaced to the user. These outcomes
+  // are quote-scoped and never imply that a quote exists.
+  carrierQuoteAttempts?: CarrierQuoteAttempt[];
   commercialApplicationSentAt?: string;
   commercialSecondRoundSentAt?: string;
   commercialSupplementalsCompletedAt?: string;
@@ -2606,6 +2635,9 @@ export interface QuotingSession {
   aiSummary?: string;
   aiProviderError?: string;
   aiProviderErrorCode?: string;
+  voidedAt?: string;
+  voidedReason?: string;
+  supersededBySessionId?: string;
   createdAt: string;
   updatedAt: string;
 }

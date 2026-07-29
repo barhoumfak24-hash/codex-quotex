@@ -46,12 +46,17 @@ export class QuotexConnectError extends Error {
 
 export function quotexConnectQuoteCarrierIds(session: {
   lineOfBusiness?: "personal" | "commercial";
+  selectedCarrierIds?: string[];
   linkedCarrierIds?: string[];
   commercialCarrierSubmissions?: Array<{
     carrierId: string;
     status: string;
   }>;
 }): string[] {
+  if (session.selectedCarrierIds !== undefined) {
+    return [...new Set(session.selectedCarrierIds.filter(Boolean))];
+  }
+
   const carrierIds =
     session.lineOfBusiness === "commercial"
       ? (session.commercialCarrierSubmissions ?? [])

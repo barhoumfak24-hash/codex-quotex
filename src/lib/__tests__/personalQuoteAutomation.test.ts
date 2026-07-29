@@ -4,6 +4,7 @@ import {
   extractQuoteReplyIntake,
   normalizedQuoteIdentifier,
 } from "../personalQuoteAutomation";
+import { isQuotingWorkflowOpen } from "../quotingWorkflows";
 
 beforeEach(async () => {
   if (typeof window !== "undefined" && window.localStorage) window.localStorage.clear();
@@ -353,10 +354,15 @@ describe("communications.automatePersonalQuoteReplies", () => {
       expect.objectContaining({
         communicationId: reply.id,
         status: "completed",
-        sessionId: existingSession.id,
       }),
     ]);
+    expect(result[0].sessionId).toBeTruthy();
+    expect(result[0].sessionId).not.toBe(existingSession.id);
     const session = api.quoting.get(result[0].sessionId!)!;
+    expect(api.quoting.get(existingSession.id)).toMatchObject({
+      status: "voided",
+      supersededBySessionId: session.id,
+    });
     expect(session.selectedAssetMappings).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -389,7 +395,10 @@ describe("communications.automatePersonalQuoteReplies", () => {
     expect(
       db
         .list("quotingSessions")
-        .filter((candidate) => candidate.customerId === customer.id)
+        .filter(
+          (candidate) =>
+            candidate.customerId === customer.id && isQuotingWorkflowOpen(candidate)
+        )
     ).toHaveLength(1);
     expect(
       db
@@ -397,7 +406,7 @@ describe("communications.automatePersonalQuoteReplies", () => {
         .filter(
           (notification) =>
             notification.customerId === customer.id &&
-            notification.quoteSessionId === existingSession.id &&
+            notification.quoteSessionId === session.id &&
             notification.assetId === result[0].assetId &&
             notification.title === `Quote flow started - ${customer.name}`
         )
@@ -533,9 +542,15 @@ describe("communications.automatePersonalQuoteReplies", () => {
     expect(importedReply).toMatchObject({
       aiQuoteAutomationStatus: "completed",
       aiActivityTaskId: originalTaskId,
-      aiQuoteAutomationSessionId: existingSession.id,
     });
-    expect(api.quoting.get(existingSession.id)?.selectedAssetMappings).toEqual(
+    const automationSessionId = importedReply.aiQuoteAutomationSessionId!;
+    expect(automationSessionId).toBeTruthy();
+    expect(automationSessionId).not.toBe(existingSession.id);
+    expect(api.quoting.get(existingSession.id)).toMatchObject({
+      status: "voided",
+      supersededBySessionId: automationSessionId,
+    });
+    expect(api.quoting.get(automationSessionId)?.selectedAssetMappings).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           assetId: importedReply.aiQuoteAutomationAssetId,
@@ -545,7 +560,7 @@ describe("communications.automatePersonalQuoteReplies", () => {
     );
     expect(db.list("tasks").find((task) => task.id === originalTaskId)).toMatchObject({
       status: "in_progress",
-      quoteSessionId: existingSession.id,
+      quoteSessionId: automationSessionId,
       assignedToId: owner.id,
       startedById: "ai",
     });
@@ -563,7 +578,10 @@ describe("communications.automatePersonalQuoteReplies", () => {
     expect(
       db
         .list("quotingSessions")
-        .filter((session) => session.customerId === customer.id)
+        .filter(
+          (candidate) =>
+            candidate.customerId === customer.id && isQuotingWorkflowOpen(candidate)
+        )
     ).toHaveLength(1);
     expect(
       db
@@ -571,7 +589,7 @@ describe("communications.automatePersonalQuoteReplies", () => {
         .filter(
           (notification) =>
             notification.customerId === customer.id &&
-            notification.quoteSessionId === existingSession.id &&
+            notification.quoteSessionId === automationSessionId &&
             notification.assetId === importedReply.aiQuoteAutomationAssetId &&
             notification.title === `Quote flow started - ${customer.name}`
         )
@@ -846,7 +864,8 @@ describe("communications.automatePersonalQuoteReplies", () => {
       responses,
       { id: customer.id, name: customer.name, role: "customer" }
     )!;
-    expect(completedSession.status).toBe("complete");
+    expect(completedSession.status).toBe("quoting");
+    expect(completedSession.selectedCarrierIds).toEqual([]);
     expect(db.list("tasks").find((task) => task.id === linkedActivity.id)).toMatchObject({
       quoteSessionId: session.id,
       status: "in_progress",

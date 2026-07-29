@@ -66,6 +66,7 @@ import {
   listQuotexConnectJobs,
   quotexConnectQuoteCarrierIds,
   QuotexConnectError,
+  type QuotexConnectJob,
   verifiedCarrierQuoteFromConnectJob,
 } from "@/lib/quotexConnect";
 import { buildQuotexConnectCarrierApplication } from "@/lib/quotexConnectApplications";
@@ -74,6 +75,7 @@ import { isVinInputField, normalizeVinFieldValue } from "@/lib/vinInput";
 import type {
   AssetType,
   CarrierQuote,
+  CarrierQuoteAttempt,
   CommunicationAttachment,
   CommercialCarrierRecommendation,
   Document,
@@ -84,6 +86,183 @@ import type {
   QuotingSession,
   User as QuotexUser,
 } from "@/types";
+
+function carrierAttemptFromConnectJob(job: QuotexConnectJob): CarrierQuoteAttempt {
+  const updatedAt = job.updatedAt || new Date().toISOString();
+  if (job.status === "waiting_for_login") {
+    return {
+      carrierId: job.carrierId,
+      carrierName: job.carrierName,
+      status: "credentials_missing",
+      errorCode: "CONNECT_LOGIN_REQUIRED",
+      message:
+        "This carrier was selected, but this user has not provided and unlocked its login in Quotex Connect.",
+      connectJobId: job.id,
+      updatedAt,
+    };
+  }
+  if (job.status === "waiting_for_mfa") {
+    return {
+      carrierId: job.carrierId,
+      carrierName: job.carrierName,
+      status: "waiting_for_mfa",
+      errorCode: "CONNECT_MFA_REQUIRED",
+      message: "Quotex Connect is waiting for this carrier's verification step.",
+      connectJobId: job.id,
+      updatedAt,
+    };
+  }
+  if (job.status === "completed") {
+    return {
+      carrierId: job.carrierId,
+      carrierName: job.carrierName,
+      status: "completed",
+      message: "A verified carrier result was returned.",
+      connectJobId: job.id,
+      updatedAt,
+    };
+  }
+  if (job.status === "manual_required") {
+    return {
+      carrierId: job.carrierId,
+      carrierName: job.carrierName,
+      status: "manual_required",
+      errorCode: job.errorCode ?? "CONNECT_MANUAL_ACTION_REQUIRED",
+      message: job.errorMessage ?? "This carrier requires a manual step in Quotex Connect.",
+      connectJobId: job.id,
+      updatedAt,
+    };
+  }
+  if (job.status === "failed" || job.status === "cancelled") {
+    return {
+      carrierId: job.carrierId,
+      carrierName: job.carrierName,
+      status: job.status,
+      errorCode:
+        job.errorCode ?? (job.status === "cancelled" ? "CONNECT_JOB_CANCELLED" : "CONNECT_JOB_FAILED"),
+      message:
+        job.errorMessage ??
+        (job.status === "cancelled"
+          ? "Quote retrieval was cancelled."
+          : "Quotex Connect could not retrieve a verified quote."),
+      connectJobId: job.id,
+      updatedAt,
+    };
+  }
+  return {
+    carrierId: job.carrierId,
+    carrierName: job.carrierName,
+    status: job.status === "running" ? "running" : "queued",
+    message:
+      job.status === "running"
+        ? "Quotex Connect is retrieving this quote."
+        : "This quote is queued in Quotex Connect.",
+    connectJobId: job.id,
+    updatedAt,
+  };
+}
+
+function QuoteCarrierSelector({
+  carriers,
+  selectedIds,
+  onToggle,
+  disabled = false,
+}: {
+  carriers: Array<{ id: string; name: string }>;
+  selectedIds: string[];
+  onToggle: (carrierId: string) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <section className="rounded-md border border-ink-200 bg-white p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <div className="text-sm font-semibold text-ink-900">Select quote carriers</div>
+          <div className="mt-0.5 text-xs text-ink-500">
+            Only selected carriers will be sent to Quotex Connect for this quote.
+          </div>
+        </div>
+        <Badge tone={selectedIds.length > 0 ? "success" : "warn"}>
+          {selectedIds.length} selected
+        </Badge>
+      </div>
+      {carriers.length === 0 ? (
+        <div className="mt-3 rounded-md border border-dashed border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          No carriers are linked to this agency. Link carriers in the Carrier library first.
+        </div>
+      ) : (
+        <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          {carriers.map((carrier) => {
+            const checked = selectedIds.includes(carrier.id);
+            return (
+              <label
+                key={carrier.id}
+                className={`flex min-h-11 cursor-pointer items-center gap-3 rounded-md border px-3 py-2 text-sm transition ${
+                  checked
+                    ? "border-gold-400 bg-gold-50 text-ink-950"
+                    : "border-ink-200 bg-white text-ink-700 hover:border-gold-300"
+                } ${disabled ? "cursor-not-allowed opacity-60" : ""}`}
+              >
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 accent-gold-700"
+                  checked={checked}
+                  disabled={disabled}
+                  onChange={() => onToggle(carrier.id)}
+                />
+                <span className="font-medium">{carrier.name}</span>
+              </label>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function CarrierQuoteAttemptPanel({ attempts }: { attempts: CarrierQuoteAttempt[] }) {
+  if (attempts.length === 0) return null;
+  return (
+    <section className="rounded-md border border-ink-200 bg-white p-3">
+      <div className="text-sm font-semibold text-ink-900">Carrier quote retrieval</div>
+      <div className="mt-3 grid gap-2 lg:grid-cols-2">
+        {attempts.map((attempt) => {
+          const hasError = ["credentials_missing", "manual_required", "failed", "cancelled"].includes(
+            attempt.status
+          );
+          const isComplete = attempt.status === "completed";
+          return (
+            <div
+              key={attempt.carrierId}
+              className={`rounded-md border px-3 py-2 ${
+                hasError
+                  ? "border-red-200 bg-red-50"
+                  : isComplete
+                  ? "border-emerald-200 bg-emerald-50"
+                  : "border-blue-100 bg-blue-50"
+              }`}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="text-sm font-semibold text-ink-900">{attempt.carrierName}</div>
+                <Badge tone={hasError ? "error" : isComplete ? "success" : "info"}>
+                  {attempt.status.replaceAll("_", " ")}
+                </Badge>
+              </div>
+              {attempt.message && (
+                <div className="mt-1 text-xs leading-5 text-ink-700">{attempt.message}</div>
+              )}
+              {attempt.errorCode && (
+                <div className="mt-1 text-[11px] font-semibold text-red-800">
+                  Code: {attempt.errorCode}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
 
 function scrollParentFor(element: HTMLElement | null): HTMLElement | null {
   let parent = element?.parentElement ?? null;
@@ -364,13 +543,14 @@ export function AiQuotingWorkspace({
   const location = useLocation();
   const navigate = useNavigate();
   const [busy, setBusy] = useState<null | string>(null);
-  const [, setDbRev] = useState(0);
+  const [dbRev, setDbRev] = useState(0);
   const [connectQuoteJobRetryTick, setConnectQuoteJobRetryTick] = useState(0);
   const lockedLineOfBusiness = contact.lineOfBusiness;
   const [lineOfBusiness, setLineOfBusiness] = useState<QuotingLineSelection>(
     lockedLineOfBusiness ?? "none"
   );
   const [selectedAcordTemplateIds, setSelectedAcordTemplateIds] = useState<string[]>([]);
+  const [selectedQuoteCarrierIds, setSelectedQuoteCarrierIds] = useState<string[]>([]);
   const [highlightedCommercialMissingQuestions, setHighlightedCommercialMissingQuestions] =
     useState<QuotingQuestion[]>([]);
   const [workspaceOpen, setWorkspaceOpen] = useState(deepLinkExpanded);
@@ -449,11 +629,24 @@ export function AiQuotingWorkspace({
     : contact.kind === "prospect"
     ? api.quoting.getForProspect(contact.id)
     : api.quoting.getForCustomer(contact.id);
+  const quoteCarrierOptions = useMemo(
+    () =>
+      api.carriers
+        .listForTenant(tenantId)
+        .filter((carrier) => carrier.status === "active")
+        .sort((left, right) => left.name.localeCompare(right.name)),
+    [tenantId, dbRev]
+  );
+  useEffect(() => {
+    if (!session) return;
+    setSelectedQuoteCarrierIds(session.selectedCarrierIds ?? []);
+  }, [session?.id, JSON.stringify(session?.selectedCarrierIds ?? [])]);
   const connectQuoteTargets = useMemo(() => {
     if (!session?.id) return [];
     const carrierIds = quotexConnectQuoteCarrierIds({
       lineOfBusiness: session.lineOfBusiness,
-      linkedCarrierIds: api.carriers.listForTenant(tenantId).map((carrier) => carrier.id),
+      selectedCarrierIds: session.selectedCarrierIds,
+      linkedCarrierIds: quoteCarrierOptions.map((carrier) => carrier.id),
       commercialCarrierSubmissions: session.commercialCarrierSubmissions,
     });
     return carrierIds.flatMap((carrierId) => {
@@ -473,7 +666,13 @@ export function AiQuotingWorkspace({
         },
       ];
     });
-  }, [session?.id, session?.lineOfBusiness, session?.updatedAt, tenantId]);
+  }, [
+    session?.id,
+    session?.lineOfBusiness,
+    session?.updatedAt,
+    JSON.stringify(session?.selectedCarrierIds ?? []),
+    quoteCarrierOptions,
+  ]);
   const connectQuoteTargetSignature = connectQuoteTargets
     .map((target) => `${target.carrierId}:${target.portalUrl}`)
     .join("|");
@@ -519,6 +718,25 @@ export function AiQuotingWorkspace({
           connectQuoteJobRetryTimersRef.current.delete(attemptKey);
         })
         .catch((error) => {
+          const failedAt = new Date().toISOString();
+          const errorCode =
+            error instanceof QuotexConnectError ? error.code.toUpperCase() : "CONNECT_UNAVAILABLE";
+          const attempts = (session.carrierQuoteAttempts ?? []).map((attempt) =>
+            attempt.carrierId === target.carrierId
+              ? {
+                  ...attempt,
+                  status: "failed" as const,
+                  errorCode,
+                  message:
+                    error instanceof Error
+                      ? error.message
+                      : "Quotex Connect could not start this carrier quote.",
+                  updatedAt: failedAt,
+                }
+              : attempt
+          );
+          api.quoting.syncVerifiedConnectQuotes(session.id, session.quotes ?? [], { attempts });
+          onChanged?.();
           const retryCount = (connectQuoteJobRetryCountsRef.current.get(attemptKey) ?? 0) + 1;
           connectQuoteJobRetryCountsRef.current.set(attemptKey, retryCount);
           const retryDelayMs = Math.min(30_000 * 2 ** (retryCount - 1), 300_000);
@@ -585,6 +803,10 @@ export function AiQuotingWorkspace({
           const quote = verifiedCarrierQuoteFromConnectJob(job);
           return quote ? [quote] : [];
         });
+        const attempts = (session.carrierQuoteAttempts ?? []).map((attempt) => {
+          const job = latestByCarrier.get(attempt.carrierId);
+          return job ? carrierAttemptFromConnectJob(job) : attempt;
+        });
         const allFinished = connectQuoteTargets.every((target) => {
           const job = latestByCarrier.get(target.carrierId);
           return Boolean(job && terminalStatuses.has(job.status));
@@ -594,7 +816,7 @@ export function AiQuotingWorkspace({
         const updated = api.quoting.syncVerifiedConnectQuotes(
           session.id,
           verifiedQuotes,
-          { allFinished }
+          { allFinished, attempts }
         );
         if (
           before?.status !== updated.status ||
@@ -620,6 +842,7 @@ export function AiQuotingWorkspace({
     onChanged,
     session?.id,
     session?.status,
+    session?.updatedAt,
   ]);
   useEffect(() => {
     if (!session?.id) return;
@@ -676,6 +899,7 @@ export function AiQuotingWorkspace({
     lineOfBusiness === "personal" &&
     contact.personalLinesAssetRequired &&
     !contact.personalLinesAssetSelected;
+  const needsCarrierSelection = selectedQuoteCarrierIds.length === 0;
   const selectedCommercialTemplates = commercialAcordTemplates.filter((template) =>
     selectedAcordTemplateIds.includes(template.id)
   );
@@ -735,7 +959,8 @@ export function AiQuotingWorkspace({
       needsPolicyLineSelection ||
       needsPersonalAssetSelection ||
       intakeWarnings.length > 0 ||
-      needsCommercialAcordSelection
+      needsCommercialAcordSelection ||
+      needsCarrierSelection
     ) return;
     const selectedLine = lineOfBusiness as QuotingLineOfBusiness;
     const progressId = beginMappingProgress(startMappingLabels, "start");
@@ -759,6 +984,7 @@ export function AiQuotingWorkspace({
         categoryIds: contact.categoryIds,
         categoryLabels: contact.categoryLabels,
         lineOfBusiness: selectedLine,
+        selectedCarrierIds: selectedQuoteCarrierIds,
         selectedAcordTemplateIds:
           selectedLine === "commercial" ? selectedAcordTemplateIds : undefined,
         assets: contact.assets,
@@ -858,6 +1084,17 @@ export function AiQuotingWorkspace({
             Selected: {selectedCommercialTemplateNames.join(", ")}.
           </div>
         )}
+        <QuoteCarrierSelector
+          carriers={quoteCarrierOptions}
+          selectedIds={selectedQuoteCarrierIds}
+          onToggle={(carrierId) =>
+            setSelectedQuoteCarrierIds((current) =>
+              current.includes(carrierId)
+                ? current.filter((id) => id !== carrierId)
+                : [...current, carrierId]
+            )
+          }
+        />
         {intakeWarnings.length > 0 && (
           <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
             <div className="font-semibold">Required asset details</div>
@@ -885,7 +1122,8 @@ export function AiQuotingWorkspace({
               needsPolicyLineSelection ||
               needsPersonalAssetSelection ||
               intakeWarnings.length > 0 ||
-              needsCommercialAcordSelection
+              needsCommercialAcordSelection ||
+              needsCarrierSelection
             }
           >
           <Sparkles className="h-3.5 w-3.5" />
@@ -897,6 +1135,8 @@ export function AiQuotingWorkspace({
             ? "Complete asset details first"
             : needsCommercialAcordSelection
             ? "Select ACORD document first"
+            : needsCarrierSelection
+            ? "Select carrier first"
             : "Start quote flow"}
           </button>
         </div>
@@ -996,6 +1236,39 @@ export function AiQuotingWorkspace({
       : personalFlowPage(session);
   const activeWorkspaceBody = (
     <div className="space-y-4">
+      {(session.selectedCarrierIds ?? []).length === 0 && (
+        <section className="space-y-3 rounded-md border border-amber-200 bg-amber-50 p-3">
+          <QuoteCarrierSelector
+            carriers={quoteCarrierOptions}
+            selectedIds={selectedQuoteCarrierIds}
+            onToggle={(carrierId) =>
+              setSelectedQuoteCarrierIds((current) =>
+                current.includes(carrierId)
+                  ? current.filter((id) => id !== carrierId)
+                  : [...current, carrierId]
+              )
+            }
+          />
+          <div className="flex justify-end">
+            <button
+              type="button"
+              className="btn-primary text-xs"
+              disabled={selectedQuoteCarrierIds.length === 0}
+              onClick={() => {
+                preserveWindowScroll(() => {
+                  api.quoting.updateSelectedCarriers(session.id, selectedQuoteCarrierIds);
+                  setDbRev((revision) => revision + 1);
+                  onChanged?.();
+                });
+              }}
+            >
+              <Save className="h-3.5 w-3.5" />
+              Save quote carriers
+            </button>
+          </div>
+        </section>
+      )}
+      <CarrierQuoteAttemptPanel attempts={session.carrierQuoteAttempts ?? []} />
       {session.lineOfBusiness === "commercial" ? (
         <CommercialFlowPanel
           session={session}

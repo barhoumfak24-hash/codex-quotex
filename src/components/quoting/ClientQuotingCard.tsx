@@ -456,7 +456,6 @@ function ContactQuotingCard({
     const quoteFlowPath = existing
       ? `${quoteFlowBasePath}?session=${encodeURIComponent(existing.id)}`
       : quoteFlowBasePath;
-    const newQuoteFlowPath = `${quoteFlowBasePath}?new=1`;
     const lineLabel =
       existing?.lineOfBusiness === "commercial"
         ? "Commercial lines"
@@ -467,7 +466,7 @@ function ContactQuotingCard({
     return (
       <Card
         id="ai-quoting-workspace"
-        className={`relative ${existing ? "pb-8" : ""}`}
+        className="relative"
       >
         <div
           className={
@@ -502,16 +501,6 @@ function ContactQuotingCard({
             <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
           </Link>
         </div>
-        {existing ? (
-          <Link
-            to={newQuoteFlowPath}
-            className="btn-outline absolute bottom-2 left-1/2 flex h-8 w-8 -translate-x-1/2 items-center justify-center !p-0"
-            aria-label="Start another quote flow"
-            title="Start another quote flow"
-          >
-            <Plus className="h-4 w-4" aria-hidden="true" />
-          </Link>
-        ) : null}
       </Card>
     );
   }
