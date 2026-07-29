@@ -864,7 +864,9 @@ describe("communications.automatePersonalQuoteReplies", () => {
       responses,
       { id: customer.id, name: customer.name, role: "customer" }
     )!;
-    expect(completedSession.status).toBe("quoting");
+    expect(completedSession.status).toBe("gathering_info");
+    expect(completedSession.carrierSelectionReadyAt).toBeTruthy();
+    expect(completedSession.carrierSelectionConfirmedAt).toBeUndefined();
     expect(completedSession.selectedCarrierIds).toEqual([]);
     expect(db.list("tasks").find((task) => task.id === linkedActivity.id)).toMatchObject({
       quoteSessionId: session.id,

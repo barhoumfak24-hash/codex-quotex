@@ -1019,9 +1019,10 @@ describe("api.quoting workspace", () => {
     await api.quoting.draftQuestionnaire(s1.id);
     api.quoting.sendQuestionnaire(s1.id);
     const s2 = api.quoting.markReplyReceivedAndQuote(s1.id)!;
-    expect(s2.status).toBe("quoting");
+    expect(s2.status).toBe("gathering_info");
+    expect(s2.carrierSelectionReadyAt).toBeTruthy();
+    expect(s2.selectedCarrierIds).toEqual([]);
     expect(s2.quotes).toEqual([]);
-    expect(s2.aiSummary).toMatch(/waiting for verified/i);
     expect(
       api.aiNotifications
         .listUnacked(agency.id)
@@ -1031,6 +1032,12 @@ describe("api.quoting workspace", () => {
             notification.quoteSessionId === s1.id
         )
     ).toBe(false);
+
+    api.quoting.updateSelectedCarriers(s1.id, [linkedCarrier.id]);
+    const retrieving = api.quoting.runQuotes(s1.id)!;
+    expect(retrieving.status).toBe("quoting");
+    expect(retrieving.selectedCarrierIds).toEqual([linkedCarrier.id]);
+    expect(retrieving.quotes).toEqual([]);
 
     const complete = api.quoting.syncVerifiedConnectQuotes(
       s1.id,
@@ -1097,7 +1104,7 @@ describe("api.quoting workspace", () => {
 
     expect(events.some((event) => event.message.includes("AI quoting workflow started"))).toBe(true);
     expect(events.some((event) => event.message.includes("questionnaire sent"))).toBe(true);
-    expect(events.some((event) => event.message.includes("quote retrieval"))).toBe(true);
+    expect(events.some((event) => event.message.includes("carrier selection"))).toBe(true);
     expect(notes.filter((note) => note.body.startsWith("AI quoting workflow:")).length).toBeGreaterThanOrEqual(4);
   });
 
@@ -1124,9 +1131,9 @@ describe("api.quoting workspace", () => {
     await api.quoting.draftQuestionnaire(s1.id);
     api.quoting.sendQuestionnaire(s1.id);
     const s2 = api.quoting.markReplyReceivedAndQuote(s1.id)!;
-    expect(s2.status).toBe("quoting");
+    expect(s2.status).toBe("gathering_info");
+    expect(s2.carrierSelectionReadyAt).toBeTruthy();
     expect(s2.quotes).toEqual([]);
-    expect(s2.aiSummary).toMatch(/select at least one carrier/i);
   });
 
   it("does not synthesize quotes from configured carrier portal metadata", async () => {
@@ -1159,9 +1166,15 @@ describe("api.quoting workspace", () => {
             { id: agent.id, name: agent.name, role: "agent" }
           )!;
 
-    expect(pending.status).toBe("quoting");
+    expect(pending.status).toBe("gathering_info");
+    expect(pending.selectedCarrierIds).toEqual([]);
     expect(pending.quotes).toEqual([]);
-    expect(pending.aiSummary).toMatch(/Quotex Connect/i);
+
+    api.quoting.updateSelectedCarriers(pending.id, [chubb.id]);
+    const retrieving = api.quoting.runQuotes(pending.id)!;
+    expect(retrieving.status).toBe("quoting");
+    expect(retrieving.quotes).toEqual([]);
+    expect(retrieving.aiSummary).toMatch(/Quotex Connect/i);
   });
 
   it("diagnoses personal-lines carrier runner readiness for linked carriers", async () => {
@@ -1247,11 +1260,20 @@ describe("api.quoting workspace", () => {
             role: "agent",
           })!;
 
-    expect(pending.status).toBe("quoting");
+    expect(pending.status).toBe("gathering_info");
+    expect(pending.selectedCarrierIds).toEqual([]);
     expect(pending.quotes).toEqual([]);
 
-    const complete = api.quoting.syncVerifiedConnectQuotes(
+    api.quoting.updateSelectedCarriers(
       pending.id,
+      linkedCarriers.map((carrier) => carrier.id)
+    );
+    const retrieving = api.quoting.runQuotes(pending.id)!;
+    expect(retrieving.status).toBe("quoting");
+    expect(retrieving.quotes).toEqual([]);
+
+    const complete = api.quoting.syncVerifiedConnectQuotes(
+      retrieving.id,
       linkedCarriers.map((carrier, index) => ({
         carrierId: carrier.id,
         premium: 4_000 + index * 100,
@@ -1497,8 +1519,10 @@ describe("api.quoting workspace", () => {
             ),
             { id: agent.id, name: agent.name, role: "agent" }
           )!;
+    api.quoting.updateSelectedCarriers(pending.id, [linkedCarrier.id]);
+    const retrieving = api.quoting.runQuotes(pending.id)!;
     const complete = api.quoting.syncVerifiedConnectQuotes(
-      pending.id,
+      retrieving.id,
       [
         {
           carrierId: linkedCarrier.id,

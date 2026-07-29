@@ -17164,16 +17164,14 @@ export const api = {
               asset.id
             );
           } else {
-            const completedSession =
-              freshSession.status === "complete"
+            const selectionReadySession =
+              freshSession.carrierSelectionReadyAt
                 ? freshSession
-                : api.quoting.runQuotes(freshSession.id);
+                : api.quoting.markReplyReceivedAndQuote(freshSession.id) ?? freshSession;
             finish(
               "completed",
-              `Quotex started the personal-lines quote flow and automatically completed carrier ranking with ${completedSession.quotes.length} quote option${
-                completedSession.quotes.length === 1 ? "" : "s"
-              }.`,
-              completedSession.id,
+              "Quotex started the personal-lines quote flow and completed AI mapping. Carrier selection is ready for the agent.",
+              selectionReadySession.id,
               asset.id
             );
           }
@@ -20228,7 +20226,6 @@ export const api = {
         questionnaireResponseMeta = Object.keys(combinedResponseMeta).length > 0 ? combinedResponseMeta : undefined;
         missingFields = combinedMissingFields;
       }
-      const needsClient = (questionnaireQuestions?.length ?? 0) > 0;
       const row: QuotingSession = {
         id: sessionId,
         tenantId: input.tenantId,
@@ -20260,7 +20257,7 @@ export const api = {
           };
         }),
         createdById: input.createdById,
-        status: lineOfBusiness === "commercial" || needsClient ? "gathering_info" : "quoting",
+        status: "gathering_info",
         publicFields,
         publicFieldEvidence,
         missingFields,
@@ -20325,15 +20322,13 @@ export const api = {
         createdAt: activeRow.createdAt,
         createdById: input.createdById,
       });
-      // No missing fields + not commercial → run quotes immediately.
+      // Starting a workflow only synchronizes its activity. Quote retrieval waits
+      // for the user to select carriers explicitly in the workspace.
       syncQuoteActivityStatus(activeRow, {
         taskIds: input.activityTaskIds,
         actorId: input.activityActorId ?? input.createdById,
         allowFallback: !input.forceNew || Boolean(input.activityTaskIds?.length),
       });
-      if (activeRow.status === "quoting" && !aiProviderErrorBlocksWorkflow(activeRow)) {
-        return this.runQuotes(activeRow.id);
-      }
       return activeRow;
       })();
 
@@ -21482,15 +21477,20 @@ export const api = {
         });
         return supplementalSession;
       }
-      const quotingSession = db.update("quotingSessions", sessionId, {
-        questionnaireResponses: { ...(session.questionnaireResponses ?? {}), ...responses },
+      const carrierSelectionSession = db.update("quotingSessions", sessionId, {
+        questionnaireResponses: mergedResponses,
         questionnaireResponseMeta: responseMeta,
         replyReceivedAt: updatedAt,
-        status: "quoting",
+        carrierSelectionReadyAt: updatedAt,
+        carrierSelectionConfirmedAt: undefined,
+        selectedCarrierIds: [],
+        carrierQuoteAttempts: [],
+        quotes: [],
+        status: "gathering_info",
         updatedAt,
       });
-      if (quotingSession) {
-        syncQuoteActivityStatus(quotingSession, { actorId: "ai" });
+      if (carrierSelectionSession) {
+        syncQuoteActivityStatus(carrierSelectionSession, { actorId: "ai" });
       }
       const contact = session.prospectId
         ? db.list("prospects").find((p) => p.id === session.prospectId)
@@ -21500,13 +21500,12 @@ export const api = {
       logQuotingWorkflowProgress(session, {
         message: `${contact?.name ?? "Client"} submitted ${Object.keys(responses).length} questionnaire response${
           Object.keys(responses).length === 1 ? "" : "s"
-        }; AI ranking ready to run.`,
-        detail: "The workflow moved from client questionnaire collection into carrier ranking.",
+        }; carrier selection is ready.`,
+        detail: "The workflow moved from questionnaire collection into agent carrier selection.",
         createdAt: updatedAt,
         createdById: actor?.id ?? "ai",
       });
-      // Auto-run the carrier ranking now that the client side is done.
-      return this.runQuotes(sessionId);
+      return carrierSelectionSession;
     },
     // Phase 2 draft step: AI drafts the questionnaire body. The
     // agent reviews + sends; sending creates a Communication row.
@@ -21585,6 +21584,27 @@ export const api = {
       const session = this.get(sessionId);
       if (!session) return null;
       const receivedAt = nowIso();
+      if (session.lineOfBusiness !== "commercial") {
+        const selectionReadySession = db.update("quotingSessions", sessionId, {
+          replyReceivedAt: receivedAt,
+          carrierSelectionReadyAt: receivedAt,
+          carrierSelectionConfirmedAt: undefined,
+          selectedCarrierIds: [],
+          carrierQuoteAttempts: [],
+          quotes: [],
+          status: "gathering_info",
+          updatedAt: receivedAt,
+        });
+        if (selectionReadySession) {
+          syncQuoteActivityStatus(selectionReadySession, { actorId: "ai" });
+        }
+        logQuotingWorkflowProgress(selectionReadySession ?? session, {
+          message: "Client information is ready; carrier selection is required.",
+          detail: "No carrier retrieval will begin until the agent chooses carriers for this quote.",
+          createdAt: receivedAt,
+        });
+        return selectionReadySession;
+      }
       const quotingSession = db.update("quotingSessions", sessionId, {
         replyReceivedAt: receivedAt,
         status: "quoting",
@@ -21622,12 +21642,14 @@ export const api = {
           updatedAt,
         })
       );
-      const selectedSet = new Set(selectedCarrierIds);
       const updated = db.update("quotingSessions", sessionId, {
         selectedCarrierIds,
         carrierQuoteAttempts,
-        quotes: (session.quotes ?? []).filter((quote) => selectedSet.has(quote.carrierId)),
-        status: session.status === "complete" ? "quoting" : session.status,
+        quotes: [],
+        carrierSelectionReadyAt: session.carrierSelectionReadyAt ?? updatedAt,
+        carrierSelectionConfirmedAt:
+          selectedCarrierIds.length > 0 ? updatedAt : undefined,
+        status: "gathering_info",
         updatedAt,
       })!;
       syncQuoteActivityStatus(updated, { actorId: "ai" });
@@ -21700,8 +21722,6 @@ export const api = {
       const hasRunnableCarrier = carrierQuoteAttempts.some(
         (attempt) => attempt.status === "queued"
       );
-      const allSelectedCarriersFailed =
-        selectedCarrierIds.length > 0 && !hasRunnableCarrier && verifiedQuotes.length === 0;
       const waitingSummary =
         selectedCarrierIds.length === 0
           ? "Select at least one carrier before retrieving quotes."
@@ -21717,8 +21737,8 @@ export const api = {
         status:
           options?.status === "awaiting_reply"
             ? "awaiting_reply"
-            : allSelectedCarriersFailed
-            ? "complete"
+            : selectedCarrierIds.length === 0 || !hasRunnableCarrier
+            ? "gathering_info"
             : "quoting",
         updatedAt: rankedAt,
       })!;
@@ -21773,19 +21793,23 @@ export const api = {
       const quotes = [...byCarrier.values()].sort(
         (left, right) => right.score - left.score || left.premium - right.premium
       );
-      const shouldComplete = options?.allFinished === true;
+      const shouldComplete = options?.allFinished === true && quotes.length > 0;
+      const allFinishedWithoutQuote =
+        options?.allFinished === true && quotes.length === 0;
       const nextStatus: QuotingSessionStatus =
         session.status === "awaiting_reply" && !shouldComplete
           ? "awaiting_reply"
           : shouldComplete
           ? "complete"
+          : allFinishedWithoutQuote && session.lineOfBusiness !== "commercial"
+          ? "gathering_info"
           : "quoting";
       const summary =
         quotes.length > 0
           ? `${quotes.length} verified carrier portal quote${
               quotes.length === 1 ? "" : "s"
             } received through Quotex Connect.`
-          : shouldComplete
+          : allFinishedWithoutQuote
           ? "Quote retrieval finished without a verified carrier quote. Review each selected carrier result."
           : "Waiting for verified carrier portal results from Quotex Connect.";
       const unchanged =

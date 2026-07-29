@@ -150,6 +150,21 @@ describe("AiQuotingWorkspace component", () => {
     const root = createRoot(host);
     const session = {
       publicFields: {},
+      questionnaireQuestions: [
+        {
+          id: "year_built__asset_asset_home",
+          section: "Primary Home - Property",
+          label: "Primary Home: Year built",
+          kind: "text",
+          required: true,
+        },
+      ],
+      questionnaireResponses: {
+        year_built__asset_asset_home: "2005",
+      },
+      questionnaireResponseMeta: {
+        year_built__asset_asset_home: { updatedByRole: "ai" },
+      },
       selectedAssetMappings: [
         {
           assetId: "asset_home",
@@ -178,6 +193,8 @@ describe("AiQuotingWorkspace component", () => {
 
     expect(host.querySelectorAll("section")).toHaveLength(2);
     expect(host.textContent).toContain("AI-sourced values for Primary Home");
+    expect(host.textContent).toContain("Year built");
+    expect(host.textContent).toContain("2005");
     expect(host.textContent).toContain("AI-sourced values for 2023 Test Vehicle");
     expect(host.textContent).toContain("No reliable public values were found.");
 
@@ -287,7 +304,8 @@ describe("AiQuotingWorkspace component", () => {
     expect(host.textContent).toContain("AI mapping");
     expect(host.textContent).toContain("Questionnaire");
     expect(host.textContent).toContain("Carrier ranking");
-    expect(host.textContent).toContain("Step 3 of 4");
+    expect(host.textContent).toContain("Select carriers");
+    expect(host.textContent).toContain("Step 3 of 5");
     expect(host.textContent).toContain("Personal lines - In progress");
     expect(host.textContent).not.toContain("Quote flow in progress");
     expect(host.querySelector('[aria-label="Questionnaire: current"]')).toBeTruthy();
@@ -322,7 +340,7 @@ describe("AiQuotingWorkspace component", () => {
     const { host, root } = await renderClientQuotingCard(undefined, { standalone: true });
 
     expect(host.querySelector('[role="dialog"]')).toBeNull();
-    expect(host.querySelector('aside[aria-label*="step 1 of 4"]')).toBeTruthy();
+    expect(host.querySelector('aside[aria-label*="step 1 of 5"]')).toBeTruthy();
     expect(host.textContent).toContain("Carrier ranking");
 
     await click(buttonByText(host, /Commercial lines/i));
@@ -610,9 +628,9 @@ describe("AiQuotingWorkspace component", () => {
     expect(api.quoting.getForCustomer(customer.id)?.commercialQuestionnairePreparedAt).toBeTruthy();
     expect(host.textContent).toContain("Review the ACORD and handle the remaining fields");
     expect(host.querySelector('[role="dialog"]')?.textContent).toContain("Workflow");
-    expect(
-      host.querySelector<HTMLIFrameElement>("#commercial-acord-workspace iframe")?.src
-    ).toContain("/acord/");
+    expect(host.textContent).toContain("Embedded selected ACORD");
+    expect(host.textContent).not.toContain("The detected field overlay is unavailable");
+    expect(host.querySelector("#commercial-acord-workspace")).toBeTruthy();
     expect(host.querySelector("#commercial-acord-workspace object")).toBeNull();
 
     await act(async () => {

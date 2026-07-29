@@ -2591,6 +2591,10 @@ export interface QuotingSession {
   // mapping, but the agent should still review the mapping step
   // before the questionnaire becomes the active workflow page.
   personalQuestionnairePreparedAt?: string;
+  // Personal quote flows pause here after the questionnaire is ready
+  // or complete so the agent can explicitly choose this flow's carriers.
+  carrierSelectionReadyAt?: string;
+  carrierSelectionConfirmedAt?: string;
   // Answers keyed by question id. Agent and customer screens both
   // edit this same shared draft.
   questionnaireResponses?: Record<string, string>;

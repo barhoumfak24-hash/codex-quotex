@@ -251,11 +251,6 @@ function CarrierQuoteAttemptPanel({ attempts }: { attempts: CarrierQuoteAttempt[
               {attempt.message && (
                 <div className="mt-1 text-xs leading-5 text-ink-700">{attempt.message}</div>
               )}
-              {attempt.errorCode && (
-                <div className="mt-1 text-[11px] font-semibold text-red-800">
-                  Code: {attempt.errorCode}
-                </div>
-              )}
             </div>
           );
         })}
@@ -899,7 +894,8 @@ export function AiQuotingWorkspace({
     lineOfBusiness === "personal" &&
     contact.personalLinesAssetRequired &&
     !contact.personalLinesAssetSelected;
-  const needsCarrierSelection = selectedQuoteCarrierIds.length === 0;
+  const needsCarrierSelection =
+    lineOfBusiness === "commercial" && selectedQuoteCarrierIds.length === 0;
   const selectedCommercialTemplates = commercialAcordTemplates.filter((template) =>
     selectedAcordTemplateIds.includes(template.id)
   );
@@ -984,7 +980,8 @@ export function AiQuotingWorkspace({
         categoryIds: contact.categoryIds,
         categoryLabels: contact.categoryLabels,
         lineOfBusiness: selectedLine,
-        selectedCarrierIds: selectedQuoteCarrierIds,
+        selectedCarrierIds:
+          selectedLine === "commercial" ? selectedQuoteCarrierIds : [],
         selectedAcordTemplateIds:
           selectedLine === "commercial" ? selectedAcordTemplateIds : undefined,
         assets: contact.assets,
@@ -1084,17 +1081,19 @@ export function AiQuotingWorkspace({
             Selected: {selectedCommercialTemplateNames.join(", ")}.
           </div>
         )}
-        <QuoteCarrierSelector
-          carriers={quoteCarrierOptions}
-          selectedIds={selectedQuoteCarrierIds}
-          onToggle={(carrierId) =>
-            setSelectedQuoteCarrierIds((current) =>
-              current.includes(carrierId)
-                ? current.filter((id) => id !== carrierId)
-                : [...current, carrierId]
-            )
-          }
-        />
+        {lineOfBusiness === "commercial" && (
+          <QuoteCarrierSelector
+            carriers={quoteCarrierOptions}
+            selectedIds={selectedQuoteCarrierIds}
+            onToggle={(carrierId) =>
+              setSelectedQuoteCarrierIds((current) =>
+                current.includes(carrierId)
+                  ? current.filter((id) => id !== carrierId)
+                  : [...current, carrierId]
+              )
+            }
+          />
+        )}
         {intakeWarnings.length > 0 && (
           <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-900">
             <div className="font-semibold">Required asset details</div>
@@ -1236,7 +1235,8 @@ export function AiQuotingWorkspace({
       : personalFlowPage(session);
   const activeWorkspaceBody = (
     <div className="space-y-4">
-      {(session.selectedCarrierIds ?? []).length === 0 && (
+      {session.lineOfBusiness === "commercial" &&
+        (session.selectedCarrierIds ?? []).length === 0 && (
         <section className="space-y-3 rounded-md border border-amber-200 bg-amber-50 p-3">
           <QuoteCarrierSelector
             carriers={quoteCarrierOptions}
@@ -1268,7 +1268,9 @@ export function AiQuotingWorkspace({
           </div>
         </section>
       )}
-      <CarrierQuoteAttemptPanel attempts={session.carrierQuoteAttempts ?? []} />
+      {session.lineOfBusiness === "commercial" && (
+        <CarrierQuoteAttemptPanel attempts={session.carrierQuoteAttempts ?? []} />
+      )}
       {session.lineOfBusiness === "commercial" ? (
         <CommercialFlowPanel
           session={session}
@@ -1288,6 +1290,11 @@ export function AiQuotingWorkspace({
           showQuoteRanking={showQuoteRanking}
           mappingProgress={mappingProgress}
           steps={flowSteps}
+          quoteCarriers={quoteCarrierOptions}
+          selectedQuoteCarrierIds={selectedQuoteCarrierIds}
+          setSelectedQuoteCarrierIds={setSelectedQuoteCarrierIds}
+          busy={busy}
+          setBusy={setBusy}
         />
       )}
       <div className="pt-3 border-t border-ink-100 flex items-center justify-between gap-3">
@@ -1902,7 +1909,8 @@ const PERSONAL_WORKFLOW_STEPS: WorkflowStepDefinition[] = [
   { number: 1, label: "Setup", icon: ClipboardList },
   { number: 2, label: "AI mapping", icon: WandSparkles },
   { number: 3, label: "Questionnaire", icon: FileQuestion },
-  { number: 4, label: "Carrier ranking", icon: Trophy },
+  { number: 4, label: "Select carriers", icon: Building2 },
+  { number: 5, label: "Carrier ranking", icon: Trophy },
 ];
 
 function workflowStepsForLine(
@@ -2138,7 +2146,30 @@ function workflowCompletedStepNumbers(session: QuotingSession): number[] {
     if (allCommercialCarrierSubmissionsHaveReplies(session)) completed.add(6);
     return Array.from(completed);
   }
-  return session.status === "complete" || session.quotes.length > 0 ? [4] : [];
+  const completed = new Set<number>([1]);
+  if (
+    session.personalQuestionnairePreparedAt ||
+    session.questionnaireSentAt ||
+    session.carrierSelectionReadyAt ||
+    session.carrierSelectionConfirmedAt ||
+    session.status === "quoting" ||
+    session.quotes.length > 0
+  ) {
+    completed.add(2);
+  }
+  if (
+    session.carrierSelectionReadyAt ||
+    session.carrierSelectionConfirmedAt ||
+    session.status === "quoting" ||
+    session.quotes.length > 0
+  ) {
+    completed.add(3);
+  }
+  if (session.carrierSelectionConfirmedAt || session.status === "quoting" || session.quotes.length > 0) {
+    completed.add(4);
+  }
+  if (session.status === "complete" && session.quotes.length > 0) completed.add(5);
+  return Array.from(completed);
 }
 
 export function QuoteWorkflowProgress({ session }: { session: QuotingSession }) {
@@ -2483,22 +2514,13 @@ export function PublicFields({ session }: { session: QuotingSession }) {
                 entry.label.startsWith(`${asset.label}: `)
             );
       scopedMappedEntries.forEach((entry) => scopedEntryIds.add(entry.id));
-      const entries =
-        scopedMappedEntries.length > 0
-          ? scopedMappedEntries.map((entry) => ({
-              id: entry.id,
-              label: entry.label.startsWith(`${asset.label}: `)
-                ? entry.label.slice(asset.label.length + 2)
-                : entry.label,
-              value: entry.value,
-            }))
-          : Object.entries(asset.publicFields)
-              .filter(([, value]) => String(value).trim())
-              .map(([label, value]) => ({
-                id: label,
-                label,
-                value: String(value),
-              }));
+      const entries = scopedMappedEntries.map((entry) => ({
+        id: entry.id,
+        label: entry.label.startsWith(`${asset.label}: `)
+          ? entry.label.slice(asset.label.length + 2)
+          : entry.label,
+        value: entry.value,
+      }));
       return { asset, index, entries };
     });
     const sharedEntries =
@@ -2547,18 +2569,11 @@ export function PublicFields({ session }: { session: QuotingSession }) {
       </div>
     );
   }
-  const entries =
-    mappedQuestionEntries.length > 0
-      ? mappedQuestionEntries.map((entry) => ({
-          id: entry.id,
-          label: entry.label,
-          value: entry.value,
-        }))
-      : Object.entries(session.publicFields).map(([label, value]) => ({
-          id: label,
-          label,
-          value: String(value),
-        }));
+  const entries = mappedQuestionEntries.map((entry) => ({
+    id: entry.id,
+    label: entry.label,
+    value: entry.value,
+  }));
   if (entries.length === 0) return null;
   return (
     <div className="rounded-md border border-blue-100 bg-blue-50/40 p-3">
@@ -3350,6 +3365,12 @@ function QuoteNextAction({
     session.status === "complete" ||
     (session.lineOfBusiness === "commercial" &&
       commercialFlowPage(session).key === "accepted_ranking")
+  ) {
+    return null;
+  }
+  if (
+    session.lineOfBusiness !== "commercial" &&
+    ["carrier_selection", "carrier_ranking"].includes(personalFlowPage(session).key)
   ) {
     return null;
   }
@@ -5113,17 +5134,17 @@ export function carrierResponseCheckNotice(input: {
 }
 
 function personalFlowPage(session: QuotingSession): {
-  key: "ai_mapping" | "questionnaire" | "carrier_ranking";
+  key: "ai_mapping" | "questionnaire" | "carrier_selection" | "carrier_ranking";
   step: number;
   total: number;
   eyebrow: string;
   title: string;
 } {
   const total = PERSONAL_WORKFLOW_STEPS.length;
-  if (session.status === "complete") {
+  if (session.status === "complete" && session.quotes.length > 0) {
     return {
       key: "carrier_ranking",
-      step: 4,
+      step: 5,
       total,
       eyebrow: "Carrier ranking",
       title: "Ranked quote options are ready",
@@ -5132,10 +5153,19 @@ function personalFlowPage(session: QuotingSession): {
   if (session.status === "quoting" || session.quotes.length > 0) {
     return {
       key: "carrier_ranking",
-      step: 4,
+      step: 5,
       total,
       eyebrow: "Carrier ranking",
-      title: "Run carrier ranking for the selected asset",
+      title: "Retrieve verified quotes from the selected carriers",
+    };
+  }
+  if (session.carrierSelectionReadyAt || session.carrierSelectionConfirmedAt) {
+    return {
+      key: "carrier_selection",
+      step: 4,
+      total,
+      eyebrow: "Carrier selection",
+      title: "Choose the carriers for this quote",
     };
   }
   if (
@@ -5168,6 +5198,11 @@ function PersonalFlowPanel({
   showQuoteRanking,
   mappingProgress,
   steps,
+  quoteCarriers,
+  selectedQuoteCarrierIds,
+  setSelectedQuoteCarrierIds,
+  busy,
+  setBusy,
 }: {
   session: QuotingSession;
   questionnaireCard?: ReactNode;
@@ -5176,8 +5211,30 @@ function PersonalFlowPanel({
   showQuoteRanking: boolean;
   mappingProgress?: AiMappingProgress | null;
   steps: WorkflowStepDefinition[];
+  quoteCarriers: Array<{ id: string; name: string }>;
+  selectedQuoteCarrierIds: string[];
+  setSelectedQuoteCarrierIds: (
+    next: string[] | ((current: string[]) => string[])
+  ) => void;
+  busy: null | string;
+  setBusy: (value: null | string) => void;
 }) {
   const page = personalFlowPage(session);
+
+  async function retrieveSelectedQuotes() {
+    if (selectedQuoteCarrierIds.length === 0 || busy) return;
+    setBusy("personal-carriers");
+    try {
+      const selectedSession = api.quoting.updateSelectedCarriers(
+        session.id,
+        selectedQuoteCarrierIds
+      );
+      api.quoting.runQuotes(selectedSession.id);
+      onChanged?.();
+    } finally {
+      setBusy(null);
+    }
+  }
 
   return (
     <div className="rounded-md border border-violet-100 bg-violet-50/40 p-3 space-y-4">
@@ -5210,6 +5267,41 @@ function PersonalFlowPanel({
         <PersonalAiMappingSummary session={session} />
       )}
       {page.key === "questionnaire" && questionnaireCard}
+      {page.key === "carrier_selection" && (
+        <section className="space-y-3">
+          <QuoteCarrierSelector
+            carriers={quoteCarriers}
+            selectedIds={selectedQuoteCarrierIds}
+            disabled={!!busy}
+            onToggle={(carrierId) =>
+              setSelectedQuoteCarrierIds((current) =>
+                current.includes(carrierId)
+                  ? current.filter((id) => id !== carrierId)
+                  : [...current, carrierId]
+              )
+            }
+          />
+          <CarrierQuoteAttemptPanel attempts={session.carrierQuoteAttempts ?? []} />
+          <div className="flex justify-end">
+            <button
+              type="button"
+              className="btn-primary text-sm"
+              disabled={!!busy || selectedQuoteCarrierIds.length === 0}
+              onClick={() => void retrieveSelectedQuotes()}
+            >
+              {busy === "personal-carriers" ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Sparkles className="h-4 w-4" />
+              )}
+              Retrieve selected quotes
+            </button>
+          </div>
+        </section>
+      )}
+      {page.key === "carrier_ranking" && (
+        <CarrierQuoteAttemptPanel attempts={session.carrierQuoteAttempts ?? []} />
+      )}
       {page.key === "carrier_ranking" && showQuoteRanking && (
         <QuotesTable session={session} userId={userId} onChanged={onChanged} />
       )}
