@@ -48,11 +48,24 @@ describe("runner capability contract", () => {
     ).toBe(false);
   });
 
-  it("accepts a bounded carrier submission adapter without login selectors", () => {
+  it("requires a verified login recipe even for a bounded submission adapter", () => {
     const recipe = submissionRecipe();
 
-    expect(jobReadinessIssue(recipe, job("retrieve_quote"))).toBeNull();
+    expect(jobReadinessIssue(recipe, job("retrieve_quote"))).toBe(
+      "carrier_login_recipe_missing"
+    );
     expect(validateQuoteSubmissionRecipe(recipe.automation!.submission!)).toBeNull();
+  });
+
+  it("accepts a bounded carrier submission adapter with stable login selectors", () => {
+    const recipe = submissionRecipe();
+    recipe.selectors = {
+      username: "#username",
+      password: "#password",
+      submit: "[data-testid='button-signin']"
+    };
+
+    expect(jobReadinessIssue(recipe, job("retrieve_quote"))).toBeNull();
   });
 
   it("rejects unsafe carrier submission endpoints", () => {

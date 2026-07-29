@@ -5,6 +5,8 @@ type RecipeSeed = {
   name: string;
   loginUrl: string;
   domainMatch: string;
+  selectors?: CarrierRecipe["selectors"];
+  postLoginSelector?: string;
   notes?: string;
   automation?: CarrierAutomationRecipe;
 };
@@ -19,13 +21,13 @@ function recipe(seed: RecipeSeed): CarrierRecipe {
     logoUrl: "",
     loginUrl: seed.loginUrl,
     domainMatch: seed.domainMatch,
-    selectors: {
+    selectors: seed.selectors ?? {
       username: "",
       password: "",
       submit: ""
     },
     preSteps: [],
-    postLoginSelector: "",
+    postLoginSelector: seed.postLoginSelector ?? "",
     notes: seed.notes ?? NEEDS_SELECTORS,
     ...(seed.automation ? { automation: seed.automation } : {})
   };
@@ -292,6 +294,11 @@ export const DEFAULT_RECIPES: CarrierRecipe[] = [
     name: "Insurance Agent Hub",
     loginUrl: "https://insurance-agent-hub.replit.app/sign-in",
     domainMatch: "*://*.insurance-agent-hub.replit.app/*",
+    selectors: {
+      username: "#username",
+      password: "#password",
+      submit: "[data-testid='button-signin']"
+    },
     notes:
       "Agency-configured carrier portal. Save the authorized login locally in Quotex Connect before use.",
     automation: {

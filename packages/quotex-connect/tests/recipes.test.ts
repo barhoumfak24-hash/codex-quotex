@@ -1,9 +1,22 @@
 import { describe, expect, it } from "vitest";
+import { DEFAULT_RECIPES } from "../src/shared/defaultRecipes";
 import { normalizeCarrierRecipe } from "../src/shared/recipes";
 import type { CarrierRecipe } from "../src/shared/types";
 import { MOCK_CARRIER_RECIPE } from "./fixtures/mockCarrier";
 
 describe("normalizeCarrierRecipe", () => {
+  it("ships the test carrier with a usable sign-in recipe", () => {
+    const recipe = DEFAULT_RECIPES.find(
+      (item) => item.id === "carrier_insurance_agent_hub"
+    );
+
+    expect(recipe?.selectors).toEqual({
+      username: "#username",
+      password: "#password",
+      submit: "[data-testid='button-signin']"
+    });
+  });
+
   it("preserves a valid bounded quote automation recipe", () => {
     const normalized = normalizeCarrierRecipe(structuredClone(MOCK_CARRIER_RECIPE));
 

@@ -380,8 +380,12 @@ async function startConnectJob(
     await saveBridgeRuntime(runtime);
     await waitForTabComplete(tab.id, 15_000);
 
-    if (job.jobType === "retrieve_quote" && recipe.automation?.submission) {
-      await saveBridgeRuntime(runtime);
+    if (
+      job.jobType === "retrieve_quote" &&
+      recipe.automation?.submission &&
+      (await probeCarrierSubmissionSession(tab.id, recipe.automation.submission)) ===
+        "authenticated"
+    ) {
       await resumeConnectJob();
       return;
     }
@@ -410,6 +414,18 @@ async function startConnectJob(
       password = "";
       if (!fillResult || ["error", "login-page-not-detected"].includes(fillResult.state)) {
         runtime.activeJob = await reportJobStatus(config, runtime.activeJob, "waiting_for_login");
+      } else if (
+        job.jobType === "retrieve_quote" &&
+        recipe.automation?.submission &&
+        (await waitForAuthenticatedSubmissionSession(
+          tab.id,
+          recipe.automation.submission,
+          20_000
+        ))
+      ) {
+        await saveBridgeRuntime(runtime);
+        await resumeConnectJob();
+        return;
       } else {
         runtime.activeJob = await reportJobStatus(config, runtime.activeJob, "waiting_for_mfa");
       }
@@ -602,6 +618,46 @@ type CarrierQuoteSubmissionExecution =
       errorCode: string;
       errorMessage: string;
     };
+
+async function waitForAuthenticatedSubmissionSession(
+  tabId: number,
+  recipe: CarrierQuoteSubmissionRecipe,
+  timeoutMs: number
+): Promise<boolean> {
+  const deadline = Date.now() + Math.max(1_000, timeoutMs);
+  while (Date.now() < deadline) {
+    await waitForTabComplete(tabId, 3_000);
+    const state = await probeCarrierSubmissionSession(tabId, recipe);
+    if (state === "authenticated") return true;
+    await delay(750);
+  }
+  return false;
+}
+
+async function probeCarrierSubmissionSession(
+  tabId: number,
+  recipe: CarrierQuoteSubmissionRecipe
+): Promise<"authenticated" | "login_required" | "unavailable"> {
+  const results = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: async (createEndpoint: string) => {
+      try {
+        const response = await fetch(createEndpoint, {
+          credentials: "include",
+          headers: { accept: "application/json" }
+        });
+        if (response.status === 401 || response.status === 403) return "login_required";
+        return response.ok ? "authenticated" : "unavailable";
+      } catch {
+        return "unavailable";
+      }
+    },
+    args: [recipe.createEndpoint]
+  }).catch(() => []);
+  const result = results.find((item: any) => item?.result)?.result;
+  return result === "authenticated" || result === "login_required" ? result : "unavailable";
+}
 
 async function executeCarrierQuoteSubmission(
   tabId: number,

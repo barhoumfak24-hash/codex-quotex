@@ -57,8 +57,7 @@ export function jobReadinessIssue(
   }
   if (
     job.jobType !== "open_portal" &&
-    !recipeHasUsableLogin(recipe) &&
-    !recipe.automation?.submission
+    !recipeHasUsableLogin(recipe)
   ) {
     return "carrier_login_recipe_missing";
   }

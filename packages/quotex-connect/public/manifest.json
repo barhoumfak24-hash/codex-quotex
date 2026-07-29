@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Quotex Connect",
-  "version": "0.4.4",
+  "version": "0.4.5",
   "description": "Secure per-user carrier portal launcher for Quotex with local-only encrypted credentials.",
   "action": {
     "default_title": "Quotex Connect",

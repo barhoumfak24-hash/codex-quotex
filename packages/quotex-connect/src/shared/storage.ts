@@ -152,8 +152,12 @@ function mergeDefaultRecipes(existingRecipes: CarrierRecipe[]): CarrierRecipe[] 
       ...defaultRecipe,
       ...existing,
       selectors: {
-        ...defaultRecipe.selectors,
-        ...existing.selectors
+        username:
+          existing.selectors?.username?.trim() || defaultRecipe.selectors.username,
+        password:
+          existing.selectors?.password?.trim() || defaultRecipe.selectors.password,
+        submit:
+          existing.selectors?.submit?.trim() || defaultRecipe.selectors.submit
       },
       preSteps: Array.isArray(existing.preSteps) ? existing.preSteps : defaultRecipe.preSteps,
       automation: defaultRecipe.automation ?? existing.automation
